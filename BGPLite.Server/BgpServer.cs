@@ -138,7 +138,30 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
                     _onPeerIdentified,
                     _peerStore, _prefixService, _config, _prefixAggregator);
 
-                _sessions[peerAddress] = session;
+                // TryAdd first so a racing replacement from the same peer doesn't get clobbered
+                // (an older session's finally still owns the key). If an existing session is present
+                // it is the older one — ask it to gracefully terminate via NOTIFICATION/Cease so the
+                // peer sees a clean close instead of a bare TCP RST, then swap. max-active is not
+                // enforced at accept in this codebase, so the simple swap is safe.
+                if (!_sessions.TryAdd(peerAddress, session))
+                {
+                    if (_sessions.TryGetValue(peerAddress, out var existing))
+                    {
+                        _logger.LogInformation("Replacing existing session for {Peer}", peerAddress);
+                        // Fire-and-forget: send Cease so the peer sees a clean close. NotifyCeaseAsync
+                        // latches _ceaseSentOnTeardown so the old session's RunAsync finally-block
+                        // does not emit a second Cease (RFC 4271 §8.1). The old session still
+                        // exits when the peer closes the socket or its hold timer fires; we do
+                        // not cancel its CTS here to keep P1 scope minimal.
+                        _ = existing.NotifyCeaseAsync();
+                        _sessions[peerAddress] = session;
+                    }
+                    else
+                    {
+                        // Existing was concurrently removed — just install ours.
+                        _sessions[peerAddress] = session;
+                    }
+                }
 
                 _ = RunSessionAsync(peerAddress, session, cancellationToken);
             }
@@ -158,7 +181,13 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
         }
         finally
         {
-            _sessions.TryRemove(peerAddress, out _);
+            // Only remove if we are still the registered session. Without this guard, a racing
+            // re-accept for the same peer would install a new session, and our finally would
+            // then erase it from the dictionary.
+            if (_sessions.TryGetValue(peerAddress, out var current) && ReferenceEquals(current, session))
+            {
+                _sessions.TryRemove(peerAddress, out _);
+            }
             session.Dispose();
         }
     }

@@ -25,7 +25,15 @@ public sealed class BgpSession : IDisposable
     private readonly AppConfig? _appConfig;
     private readonly IPrefixAggregator _prefixAggregator;
 
-    private BgpFsmState _state = BgpFsmState.Idle;
+    // volatile: read by external threads (BgpServer.RefreshPeerAsync/StopAsync). Guarantees
+    // acquire/release so IsEstablished reflects the most recent TransitionTo without JIT caching.
+    private volatile BgpFsmState _state = BgpFsmState.Idle;
+    // Latched once a Cease NOTIFICATION has been emitted so the finally-block best-effort
+    // Cease (RFC 4271 §8.1) doesn't double-send after catch (Exception) already sent one.
+    // int + Interlocked.Exchange: written by RunAsync AND by external callers
+    // (NotifyCeaseAsync from BgpServer.StopAsync / session-replace path), read by the
+    // RunAsync finally-block on a different thread.
+    private int _ceaseSentOnTeardown;
     private uint _remoteAsn;
     private bool _remoteFourByteAsn;
     private bool _localFourByteAsn = true;
@@ -42,7 +50,12 @@ public sealed class BgpSession : IDisposable
     {
         if (!IsEstablished) return;
 
-        await _sendLock.WaitAsync();
+        // _sendLock is acquired inside SendMessageAsync, so each individual UPDATE is atomic on the
+        // wire. _advertisedPrefixesLock serializes the (withdraw + re-announce) pair against the
+        // initial-send, which mutates the same list concurrently. We do NOT hold _sendLock across
+        // the whole pair: a HoldTimer expiry or peer NOTIFICATION that arrives between them would
+        // otherwise deadlock waiting for the refresh to finish before it can send Cease/HoldTimerExpired.
+        await _advertisedPrefixesLock.WaitAsync();
         try
         {
             _logger.LogInformation("Refreshing routes for {Peer}", _peerConfig.Address);
@@ -55,7 +68,7 @@ public sealed class BgpSession : IDisposable
         }
         finally
         {
-            _sendLock.Release();
+            _advertisedPrefixesLock.Release();
         }
     }
 
@@ -74,7 +87,7 @@ public sealed class BgpSession : IDisposable
                 PathAttributes = [],
                 Nlri = []
             };
-            await WriteMessageAsync(update); // caller (initial send / refresh) already holds _sendLock
+            await SendMessageAsync(update);
             _metrics.UpdateSent();
         }
 
@@ -177,9 +190,10 @@ public sealed class BgpSession : IDisposable
             _metrics.SessionEstablished();
             _logger.LogInformation("SessionEstablished with {Peer} ASN={Asn}", _peerConfig.Address, _remoteAsn);
 
-            // Send initial routes. Hold the send lock so _advertisedPrefixes stays consistent
-            // w.r.t. a RefreshRoutesAsync fired from the API the instant IsEstablished became true.
-            await _sendLock.WaitAsync(linkedCts.Token);
+            // Send initial routes. _sendLock is acquired inside SendMessageAsync for byte-level
+            // ordering; _advertisedPrefixesLock guards the list across the initial-send vs. a
+            // RefreshRoutesAsync fired from the API the instant IsEstablished became true.
+            await _advertisedPrefixesLock.WaitAsync(linkedCts.Token);
             try
             {
                 await SendAllRoutesAsync();
@@ -188,7 +202,7 @@ public sealed class BgpSession : IDisposable
                 if (_bgpConfig.GracefulRestart)
                     await SendEndOfRibAsync();
             }
-            finally { _sendLock.Release(); }
+            finally { _advertisedPrefixesLock.Release(); }
 
             // Run main loop: read messages + send keepalives
             await RunEstablishedAsync(linkedCts.Token);
@@ -200,22 +214,58 @@ public sealed class BgpSession : IDisposable
         catch (BgpNotificationException ex)
         {
             _logger.LogWarning(ex, "BGP error from {Peer}: {Error}/{SubError}", _peerConfig.Address, ex.ErrorCode, ex.SubErrorCode);
-            await SendNotificationAsync(ex.ErrorCode, ex.SubErrorCode);
+            try
+            {
+                await SendNotificationAsync(ex.ErrorCode, ex.SubErrorCode);
+            }
+            catch { /* best-effort */ }
+            finally
+            {
+                // Latch regardless of success: even a partial write means the peer saw bytes,
+                // and a second NOTIFICATION would violate RFC 4271 §8.1.
+                Interlocked.Exchange(ref _ceaseSentOnTeardown, 1);
+            }
         }
         catch (BgpParseException ex)
         {
             _logger.LogError(ex, "Parse error from {Peer}", _peerConfig.Address);
-            await SendNotificationAsync(BgpConstants.Error.MessageHeaderError, BgpConstants.SubError.Unspecific);
+            try
+            {
+                await SendNotificationAsync(BgpConstants.Error.MessageHeaderError, BgpConstants.SubError.Unspecific);
+            }
+            catch { /* best-effort */ }
+            finally
+            {
+                Interlocked.Exchange(ref _ceaseSentOnTeardown, 1);
+            }
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Session error with {Peer}", _peerConfig.Address);
             // Best-effort Cease so the peer sees a clean close instead of a bare TCP RST.
-            try { await SendNotificationAsync(BgpConstants.Error.Cease, BgpConstants.SubError.Unspecific); } catch { }
+            // Latch _ceaseSentOnTeardown so the finally-block doesn't double-send Cease.
+            try
+            {
+                await SendNotificationAsync(BgpConstants.Error.Cease, BgpConstants.SubError.Unspecific);
+            }
+            catch { /* best-effort */ }
+            finally
+            {
+                Interlocked.Exchange(ref _ceaseSentOnTeardown, 1);
+            }
         }
         finally
         {
             var wasEstablished = _state == BgpFsmState.Established;
+            // RFC 4271 §8.1: graceful termination from Established MUST send Cease before close.
+            // Idempotent guard prevents a double Cease if catch (Exception) above already sent one
+            // or if an external caller (BgpServer.NotifyCeaseAsync on shutdown) already sent Cease.
+            if (wasEstablished && Interlocked.CompareExchange(ref _ceaseSentOnTeardown, 0, 0) == 0)
+            {
+                try { await SendNotificationAsync(BgpConstants.Error.Cease, BgpConstants.SubError.Unspecific); }
+                catch { /* best-effort */ }
+                Interlocked.Exchange(ref _ceaseSentOnTeardown, 1);
+            }
             TransitionTo(BgpFsmState.Idle);
             if (wasEstablished)
             {
@@ -228,6 +278,9 @@ public sealed class BgpSession : IDisposable
     }
 
     private readonly SemaphoreSlim _sendLock = new(1, 1);
+    // Guards mutations of _advertisedPrefixes so initial-send and RefreshRoutesAsync can't interleave.
+    // SemaphoreSlim instead of lock{} so it composes correctly with await.
+    private readonly SemaphoreSlim _advertisedPrefixesLock = new(1, 1);
 
     private async Task RunEstablishedAsync(CancellationToken cancellationToken)
     {
@@ -288,11 +341,15 @@ public sealed class BgpSession : IDisposable
         var holdTime = TimeSpan.FromSeconds(_negotiatedHoldTime);
         while (await timer.WaitForNextTickAsync(cancellationToken))
         {
-            // Hold timer: tear down if no message was received within the negotiated hold time (RFC 4271 §6.6).
+            // Hold timer: tear down if no message was received within the negotiated hold time
+            // (RFC 4271 §6.6). After NOTIFICATION(Hold Timer Expired) the FSM moves to Idle and the
+            // session is closed; we mark the teardown guard so the RunAsync finally-block does not
+            // double-emit Cease (RFC 4271 §8.1 mandates exactly one NOTIFICATION per teardown).
             if (DateTime.UtcNow.Ticks - Interlocked.Read(ref _lastReceivedTicks) >= holdTime.Ticks)
             {
                 _logger.LogWarning("Hold timer expired for {Peer} (no message for {Hold}s)",
                     _peerConfig.Address, _negotiatedHoldTime);
+                Interlocked.Exchange(ref _ceaseSentOnTeardown, 1);
                 await SendNotificationAsync(BgpConstants.Error.HoldTimerExpired, BgpConstants.SubError.Unspecific);
                 return;
             }
@@ -716,7 +773,7 @@ public sealed class BgpSession : IDisposable
             Nlri = nlri
         };
 
-        await WriteMessageAsync(update); // caller (initial send / refresh) already holds _sendLock
+        await SendMessageAsync(update);
         _metrics.UpdateSent();
     }
 
@@ -724,11 +781,11 @@ public sealed class BgpSession : IDisposable
     /// End-of-RIB marker for IPv4 unicast (RFC 4724 §2): a minimum-length UPDATE (no withdrawn
     /// routes, no path attributes, no NLRI). Signals completion of the initial routing update so
     /// GR-capable peers finalize — replacing stale routes with what we re-advertised and purging
-    /// the rest. Caller already holds _sendLock.
+    /// the rest. Lock is acquired inside SendMessageAsync.
     /// </summary>
     private async Task SendEndOfRibAsync()
     {
-        await WriteMessageAsync(new BgpUpdateMessage());
+        await SendMessageAsync(new BgpUpdateMessage());
         _metrics.UpdateSent();
         _logger.LogDebug("End-of-RIB sent to {Peer}", _peerConfig.Address);
     }
@@ -768,26 +825,29 @@ public sealed class BgpSession : IDisposable
         }
     }
 
+    // Single synchronized entry point for ALL outbound BGP bytes (RFC 4271 framing requires a
+    // continuous message stream; NetworkStream is not thread-safe). Callers do NOT need to
+    // acquire _sendLock themselves — every send path goes through here.
     private async Task SendMessageAsync(BgpMessage message)
     {
         await _sendLock.WaitAsync();
-        try { await WriteMessageAsync(message); }
-        finally { _sendLock.Release(); }
-    }
-
-    // Writes one message without acquiring the lock — caller MUST already hold _sendLock.
-    private async Task WriteMessageAsync(BgpMessage message)
-    {
-        var bufferSize = BgpMessageWriter.GetBufferSize(message);
-        var buffer = ArrayPool<byte>.Shared.Rent(bufferSize);
         try
         {
-            var written = BgpMessageWriter.WriteMessage(message, buffer);
-            await _stream.WriteAsync(buffer.AsMemory(0, written));
+            var bufferSize = BgpMessageWriter.GetBufferSize(message);
+            var buffer = ArrayPool<byte>.Shared.Rent(bufferSize);
+            try
+            {
+                var written = BgpMessageWriter.WriteMessage(message, buffer);
+                await _stream.WriteAsync(buffer.AsMemory(0, written));
+            }
+            finally
+            {
+                ArrayPool<byte>.Shared.Return(buffer);
+            }
         }
         finally
         {
-            ArrayPool<byte>.Shared.Return(buffer);
+            _sendLock.Release();
         }
     }
 
@@ -895,6 +955,10 @@ public sealed class BgpSession : IDisposable
         {
             _logger.LogDebug(ex, "Failed to send Cease to {Peer} on shutdown", _peerConfig.Address);
         }
+        // Latch BEFORE returning so the session's RunAsync finally-block (which runs on
+        // a different thread once the cancellation we triggered fires) does not emit a
+        // second Cease (RFC 4271 §8.1: exactly one NOTIFICATION per teardown).
+        Interlocked.Exchange(ref _ceaseSentOnTeardown, 1);
     }
 
     #endregion
@@ -953,5 +1017,7 @@ public sealed class BgpSession : IDisposable
         _stream.Dispose();
         _socket.Dispose();
         _cts.Dispose();
+        _sendLock.Dispose();
+        _advertisedPrefixesLock.Dispose();
     }
 }
