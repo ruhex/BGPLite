@@ -122,4 +122,38 @@ public class PrefixCodecTests
         Assert.Equal(0xAA, buffer[6]);
         Assert.Equal(0xAA, buffer[7]);
     }
+
+    [Fact]
+    public void Encode_EmptyBuffer_Throws()
+    {
+        var prefix = new IpPrefix(0xC0A80000, 24);
+        var buffer = Array.Empty<byte>();
+
+        Assert.Throws<ArgumentOutOfRangeException>(() =>
+        {
+            var span = new Span<byte>(buffer);
+            PrefixCodec.Encode(prefix, span);
+        });
+    }
+
+    [Fact]
+    public void Encode_BufferTooSmallForPrefix_Throws()
+    {
+        // /24 needs 4 bytes total (1 length + 3 data). 3-byte buffer cannot hold it.
+        var prefix = new IpPrefix(0xC0A80000, 24);
+        var buffer = new byte[3];
+
+        Assert.Throws<ArgumentOutOfRangeException>(() => PrefixCodec.Encode(prefix, buffer));
+    }
+
+    [Fact]
+    public void Decode_EmptyBuffer_Throws()
+    {
+        var buffer = Array.Empty<byte>();
+        Assert.Throws<ArgumentOutOfRangeException>(() =>
+        {
+            var span = new ReadOnlySpan<byte>(buffer);
+            PrefixCodec.Decode(span);
+        });
+    }
 }

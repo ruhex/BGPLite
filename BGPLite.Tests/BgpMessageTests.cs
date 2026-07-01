@@ -247,8 +247,9 @@ public class BgpMessageTests
     public void Open_TotalCapabilityDataExceedingByte_Throws()
     {
         // Regression: total optional-params (capabilities block) must fit in a single
-        // byte per RFC 4271 §4.2. Sum of cap.Data.Length headers + 2 type/length bytes
-        // pushed the value past 255; writer must fail loud instead of silently truncating.
+        // byte per RFC 4271 §4.2. 40 capabilities × (2-byte header + 5-byte data) = 280
+        // bytes of capability TLVs + 2-byte optional-params type/length = 282 total,
+        // exceeding 255; writer must fail loud instead of silently truncating.
         var caps = new List<BgpCapabilityInfo>();
         // 40 capabilities * (2 header + 5 data) = 280 bytes of capability TLVs.
         for (var i = 0; i < 40; i++)

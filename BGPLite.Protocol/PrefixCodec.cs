@@ -10,6 +10,9 @@ public static class PrefixCodec
         if (length > 32)
             throw new ArgumentOutOfRangeException(nameof(prefix), length, "IPv4 prefix length must be in 0..32.");
 
+        if (buffer.Length < 1)
+            throw new ArgumentOutOfRangeException(nameof(buffer), buffer.Length, "Buffer must hold at least the prefix length byte.");
+
         if (length == 0)
         {
             buffer[0] = 0;
@@ -17,6 +20,8 @@ public static class PrefixCodec
         }
 
         var byteCount = (length + 7) / 8;
+        if (buffer.Length < 1 + byteCount)
+            throw new ArgumentOutOfRangeException(nameof(buffer), buffer.Length, $"Buffer too small: need {1 + byteCount} bytes for prefix length {length}.");
         buffer[0] = length;
 
         var addr = prefix.Address;
@@ -28,6 +33,9 @@ public static class PrefixCodec
 
     public static (IpPrefix prefix, int bytesConsumed) Decode(ReadOnlySpan<byte> buffer)
     {
+        if (buffer.IsEmpty)
+            throw new ArgumentOutOfRangeException(nameof(buffer), 0, "Buffer too small to contain a prefix length byte.");
+
         var length = buffer[0];
         if (length > 32)
             throw new ArgumentOutOfRangeException(nameof(buffer), length, "IPv4 prefix length must be in 0..32.");
