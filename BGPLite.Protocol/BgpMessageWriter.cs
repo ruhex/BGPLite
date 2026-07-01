@@ -54,6 +54,9 @@ public static class BgpMessageWriter
         p += 4;
 
         var optParamsLen = GetOptParamsLength(msg.Capabilities);
+        // RFC 4271 §4.2: optional-parameters length is a single byte.
+        // Silently truncating > 255 yields a malformed frame; reject up front.
+        RequireFitsByte(optParamsLen, nameof(BgpOpenMessage.Capabilities), "optional-parameters");
         buffer[p++] = (byte)optParamsLen;
 
         WriteCapabilities(msg.Capabilities, buffer[p..]);
@@ -85,15 +88,25 @@ public static class BgpMessageWriter
 
         var p = 0;
         buffer[p++] = 2; // Type: Capabilities
+        // RFC 4271 §6.2: capability data length is a single byte.
+        RequireFitsByte(capDataLen, nameof(BgpCapabilityInfo.Data), "capability data");
         buffer[p++] = (byte)capDataLen;
 
         foreach (var cap in capabilities)
         {
             buffer[p++] = cap.Code;
+            // RFC 4271 §6.2: per-capability length is a single byte.
+            RequireFitsByte(cap.Data.Length, nameof(BgpCapabilityInfo.Data), "capability length");
             buffer[p++] = (byte)cap.Data.Length;
             cap.Data.AsSpan().CopyTo(buffer[p..]);
             p += cap.Data.Length;
         }
+    }
+
+    private static void RequireFitsByte(int value, string paramName, string field)
+    {
+        if (value < 0 || value > byte.MaxValue)
+            throw new ArgumentOutOfRangeException(paramName, value, $"{field} length must fit in a single byte (0..{byte.MaxValue}).");
     }
 
     #endregion
