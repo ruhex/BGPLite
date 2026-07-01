@@ -13,7 +13,7 @@ reviews:
     enabled: true
     drafts: false
     base_branches:
-      - main
+      - "^main$"
   path_instructions:
     - path: "**/*.cs"
       instructions: |
