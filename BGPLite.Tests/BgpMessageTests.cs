@@ -226,8 +226,9 @@ public class BgpMessageTests
     [Fact]
     public void Open_SingleCapabilityExceedingByte_Throws()
     {
-        // Regression: a capability whose data length > 255 would silently truncate
-        // the on-wire length byte (RFC 4271 §6.2). Writer must fail loud instead.
+        // Regression: a capability whose data length > 255 also makes the total
+        // optional-params exceed 255, so the optParams-length guard in WriteOpen
+        // fires first. Writer must fail loud instead of silently truncating.
         var bigData = new byte[300];
         var open = new BgpOpenMessage
         {
@@ -249,7 +250,7 @@ public class BgpMessageTests
         // byte per RFC 4271 §4.2. Sum of cap.Data.Length headers + 2 type/length bytes
         // pushed the value past 255; writer must fail loud instead of silently truncating.
         var caps = new List<BgpCapabilityInfo>();
-        // 40 capabilities * 7 bytes each = 280 bytes of capability data.
+        // 40 capabilities * (2 header + 5 data) = 280 bytes of capability TLVs.
         for (var i = 0; i < 40; i++)
             caps.Add(new BgpCapabilityInfo { Code = (byte)(0x10 + i), Data = new byte[5] });
 
