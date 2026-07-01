@@ -95,12 +95,51 @@
 
 ---
 
+## Приоритет 7 — Соответствие RFC (compliance gaps)
+
+> Найдены отдельным RFC compliance-аудитом (2026-07-02). Не входят в базовый счёт 40 пунктов P1–P6. Полный §-by-§ разбор 11 relevant RFC — в [`RFC_COMPLIANCE.md`](RFC_COMPLIANCE.md).
+
+| # | RFC | Описание | Статус | Действие | Уровень |
+|---|-----|----------|--------|----------|---------|
+| 7.1 | 2918 | Route Refresh message type 5 не реализован, но capability рекламируется → приём рвёт сессию | **Отсутствует (🔴 critical)** | Реализовать `BgpMessageType.RouteRefresh=5` + handler, либо убрать рекламу capability (`BgpSession.cs:912-913`). | Локальный |
+| 7.2 | 6793 | Outbound AS_PATH всегда 4-byte (`BgpSession.cs:50,741`) → ломает 2-byte-only peers | **Отсутствует (🔴 critical)** | 2-byte fallback с AS_TRANS(23456) + AS4_PATH(17) для ASN>65535. | Архитектурный |
+| 7.3 | 6793 | AS4_PATH(17)/AS4_AGGREGATOR(18) inbound reconstruction + AGGREGATOR(7) | **Отсутствует (🟠 major)** | Парсинг attr 17/18, реконструкция при AS_TRANS, AGGREGATOR read/write. | Архитектурный |
+| 7.4 | 4271 | Нет валидации mandatory attributes в UPDATE (§5/§6.3) | **Отсутствует (🟠 major)** | Проверка наличия ORIGIN/AS_PATH/NEXT_HOP перед приёмом NLRI → NOTIFICATION Update Message Error. | Локальный |
+| 7.5 | 5492 | Нет NOTIFICATION Unsupported Capability (Open subcode 7) | **Отсутствует (🟠 major)** | Шлёт subcode 7 + data при неприемлемой capability. | Локальный |
+| 7.6 | 1997 | Well-known communities (NO_EXPORT/NO_ADVERTISE/NO_EXPORT_SUBCONFED) не обрабатываются | **Отсутствует (🟠 major)** | Семантика well-known при фильтрации/анонсировании. | Локальный |
+| 7.7 | 8092 | Large Communities codec отсутствует (только константа type 32) | **Отсутствует (🟠 major)** | 12-byte (global:local:local) codec, `Route.LargeCommunities`. | Локальный |
+| 7.8 | 2385 | TCP-MD5 session auth отсутствует | **Отсутствует (🟠 major)** | `TCP_MD5SIG` socket option + per-peer key в `PeerConfig`. | Архитектурный |
+| 7.9 | 4360 | Extended Communities (type 16) отсутствует | **Отсутствует (🟡 useful)** | 8-byte codec, transitivity high-byte, well-known types (RT). | Локальный |
+
+---
+
+## RFC Compliance (сводная)
+
+| RFC | Relevance | Готовность | Ключевой пробел |
+|-----|-----------|-----------|-----------------|
+| [4271](https://www.rfc-editor.org/rfc/rfc4271) BGP-4 | 🔴 required | ядро готово, ~17 none | нет валидации UPDATE (7.4), MRAI, route-selection §9 |
+| [4893](https://www.rfc-editor.org/rfc/rfc4893) 4-octet AS | 🔴 required | ядро готово, ~7 none | 2-byte-peer fallback |
+| [6793](https://www.rfc-editor.org/rfc/rfc6793) 4-byte+Aggr | 🔴 required | ~14 none | AS4_PATH/AS4_AGGREGATOR (7.2, 7.3) |
+| [5492](https://www.rfc-editor.org/rfc/rfc5492) Capabilities | 🔴 required | ~15 done | subcode 7 (7.5) |
+| [1997](https://www.rfc-editor.org/rfc/rfc1997) Communities | 🟡 useful | codec готов | well-known semantics (7.6) |
+| [2918](https://www.rfc-editor.org/rfc/rfc2918) Route Refresh | 🟡 useful | cap ready, msg none | type 5 message (7.1) 🔴 |
+| [4360](https://www.rfc-editor.org/rfc/rfc4360) Ext. Communities | 🟡 useful | none | codec (7.9) |
+| [8092](https://www.rfc-editor.org/rfc/rfc8092) Large Comm. | 🟡 useful | none | codec (7.7) |
+| [2385](https://www.rfc-editor.org/rfc/rfc2385) TCP-MD5 | 🟡 useful | none | session auth (7.8) |
+| [4760](https://www.rfc-editor.org/rfc/rfc4760) MP-BGP | ⚪ optional | IPv4-only | MP_REACH/UNREACH (roadmap #14) |
+| [2545](https://www.rfc-editor.org/rfc/rfc2545) IPv6 MP | ⚪ optional | none | IPv6 full stack (roadmap #14/#15) |
+
+Не нужны для route-server: RFC 4456 (route reflection), 5065 (confederations), 4364 (MPLS VPN), 4761 (VPLS), 6286 (single speaker), 4273 (SNMP).
+
+---
+
 ## План действий
 1. ~~Срочно реализовать пункты P1~~ (закрыто в PR #5 / #18-#21, кроме hold-timer DI — P6.1).
 2. Затем выполнить все проверки протокольных условий (P2). Начать с P2.4 — уже закрыт (`9709c69`).
 3. Параллельно исправить критические проблемы маршрутизации (P3) и добавить валидацию конфигурации (P4).
 4. После исправления кода написать недостающие тесты (P5; P5.1 и P5.7 уже закрыты).
 5. По завершении внедрить архитектурные улучшения из P6.
+6. **RFC compliance (P7):** сначала critical — 7.1 Route Refresh (capability/message mismatch рвёт сессию) и 7.2 AS_PATH 2-byte fallback; затем major (7.3–7.8).
 
 ---
 
