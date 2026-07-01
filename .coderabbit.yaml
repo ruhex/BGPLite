@@ -1,0 +1,35 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+# CodeRabbit configuration for BGPLite.
+language: "en-US"
+early_access: false
+
+reviews:
+  # Keep the lighter profile; project-specific strictness comes from path_instructions below.
+  profile: "chill"
+  high_level_summary: true
+  poem: false              # no AI poem in the review
+  collapse_walkthrough: true   # keep the walkthrough collapsed by default
+  auto_review:
+    enabled: true
+    drafts: false
+    base_branches:
+      - main
+  path_instructions:
+    - path: "**/*.cs"
+      instructions: |
+        BGPLite is a hand-rolled BGP route server implementing RFC 4271 on raw TCP sockets
+        (.NET 10, no BIRD/FRR/GoBGP). Prioritize, in this order:
+        - Protocol correctness vs RFC 4271: message framing/lengths, FSM transitions, path
+          attribute ordering and flag bits (reserved bit 0x08 MUST be 0), OPEN/UPDATE/NOTIFICATION
+          validation, Hold Time rules (0 or >= 3), AS numbering (4-byte ASN, AS_TRANS 23456).
+        - Memory/bounds safety in BGPLite.Protocol codecs (PrefixCodec, BgpMessageReader/Writer):
+          reject prefix length > 32, capability/optional-params length must not overflow a byte,
+          no silent truncation of IPv6 or over-long values.
+        - Concurrency in BGPLite.Server (ConcurrentDictionary TryAdd/TryUpdate CAS, Interlocked,
+          volatile state, send locks, hold-timer expiry).
+        - Backward-compatibility of config DTOs (YAML aliases in BGPLite.Configuration).
+        Don't bikeshed naming/style; the codebase follows its existing conventions.
+    - path: "**/*.md"
+      instructions: |
+        Documentation (README, FIXPLAN, AGENTS, articles). Review only for factual accuracy,
+        broken links/references, and clarity. Treat as LOW effort — do not nitpick prose or style.
