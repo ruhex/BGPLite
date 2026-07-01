@@ -7,6 +7,9 @@ public static class PrefixCodec
     public static int Encode(IpPrefix prefix, Span<byte> buffer)
     {
         var length = prefix.Length;
+        if (length > 32)
+            throw new ArgumentOutOfRangeException(nameof(prefix), length, "IPv4 prefix length must be in 0..32.");
+
         if (length == 0)
         {
             buffer[0] = 0;
@@ -26,6 +29,9 @@ public static class PrefixCodec
     public static (IpPrefix prefix, int bytesConsumed) Decode(ReadOnlySpan<byte> buffer)
     {
         var length = buffer[0];
+        if (length > 32)
+            throw new ArgumentOutOfRangeException(nameof(buffer), length, "IPv4 prefix length must be in 0..32.");
+
         if (length == 0)
             return (new IpPrefix(0, 0), 1);
 

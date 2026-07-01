@@ -81,4 +81,45 @@ public class PrefixCodecTests
             Assert.Equal(prefixes[i].Length, decoded[i].Length);
         }
     }
+
+    [Theory]
+    [InlineData(33)]
+    [InlineData(64)]
+    [InlineData(128)]
+    [InlineData(255)]
+    public void Encode_LengthAbove32_Throws(int badLength)
+    {
+        var prefix = new IpPrefix(0xC0A80000, (byte)badLength);
+        var buffer = new byte[8];
+
+        Assert.Throws<ArgumentOutOfRangeException>(() => PrefixCodec.Encode(prefix, buffer));
+    }
+
+    [Theory]
+    [InlineData(33)]
+    [InlineData(64)]
+    [InlineData(255)]
+    public void Decode_LengthAbove32_Throws(int badLength)
+    {
+        var buffer = new byte[8] { (byte)badLength, 0xC0, 0xA8, 0x00, 0x00, 0, 0, 0 };
+
+        Assert.Throws<ArgumentOutOfRangeException>(() => PrefixCodec.Decode(buffer));
+    }
+
+    [Fact]
+    public void Encode_DoesNotWriteBeyondBuffer_ForValidPrefix()
+    {
+        // Regression: PrefixCodec previously performed OOB writes for length > 32
+        // and even for valid lengths it must not touch bytes past the encoded span.
+        var buffer = new byte[] { 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA };
+        var prefix = new IpPrefix(0xC0A80000, 24);
+
+        var written = PrefixCodec.Encode(prefix, buffer);
+
+        Assert.Equal(4, written);
+        Assert.Equal(0xAA, buffer[4]);
+        Assert.Equal(0xAA, buffer[5]);
+        Assert.Equal(0xAA, buffer[6]);
+        Assert.Equal(0xAA, buffer[7]);
+    }
 }
