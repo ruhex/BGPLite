@@ -271,7 +271,7 @@ public sealed class BgpSession : IDisposable
             if (wasEstablished)
             {
                 _metrics.SessionClosed();
-                _peerStore?.UpdateSessionStatus(_peerConfig.Address, false);
+                _peerStore?.UpdateSessionStatus(_peerConfig.Address, _remoteAsn, false);
             }
             _metrics.PeerDisconnected();
             _logger.LogInformation("SessionClosed with {Peer}", _peerConfig.Address);
@@ -443,10 +443,10 @@ public sealed class BgpSession : IDisposable
 
         if (_peerStore is not null && _prefixService is not null && _appConfig is not null)
         {
-            var peer = _peerStore.GetPeerByIp(_peerConfig.Address);
+            var peer = _peerStore.GetPeer(_peerConfig.Address, _remoteAsn);
             if (peer is not null)
             {
-                _peerStore.UpdateSessionStatus(_peerConfig.Address, true);
+                _peerStore.UpdateSessionStatus(_peerConfig.Address, _remoteAsn, true);
 
                 var subscriptionIds = _peerStore.GetSubscriptions(peer.Id);
                 var customPrefixes = _peerStore.GetCustomPrefixes(peer.Id);

@@ -17,6 +17,16 @@ public class BgpDbContext : DbContext
             "PeerId TEXT NOT NULL, Asn INTEGER NOT NULL, " +
             "PRIMARY KEY (PeerId, Asn), " +
             "FOREIGN KEY (PeerId) REFERENCES Peers(Id) ON DELETE CASCADE)");
+
+        // Peer identity is (Ip, Asn), not Ip alone, so several peers behind one source IP (distinct
+        // AS) can coexist as separate rows (issue #19). EnsureCreated does not evolve an existing
+        // schema, so migrate the index idempotently: drop the legacy Ip-only unique index and create
+        // the composite one if it is missing. Existing data is already unique by Ip (the old index
+        // enforced it), so (Ip, Asn) is unique on it as well — the CREATE cannot fail.
+        db.Database.ExecuteSqlRaw("DROP INDEX IF EXISTS IX_Peers_Ip;");
+        db.Database.ExecuteSqlRaw(
+            "CREATE UNIQUE INDEX IF NOT EXISTS UX_Peers_Ip_Asn ON Peers (Ip, Asn);");
+
         db.Peers.Where(p => p.Status == "active").ExecuteUpdate(
             s => s.SetProperty(p => p.Status, "inactive"));
     }
@@ -26,7 +36,10 @@ public class BgpDbContext : DbContext
         model.Entity<Peer>(e =>
         {
             e.HasKey(p => p.Id);
-            e.HasIndex(p => p.Ip).IsUnique();
+            // Composite identity (Ip, Asn): distinct peers behind one source IP with different AS
+            // must be separate rows (issue #19). Named so the idempotent migration in Initialize
+            // can recreate it deterministically across fresh and existing databases.
+            e.HasIndex(p => new { p.Ip, p.Asn }).IsUnique().HasDatabaseName("UX_Peers_Ip_Asn");
             e.Property(p => p.Status).HasDefaultValue("inactive");
         });
 

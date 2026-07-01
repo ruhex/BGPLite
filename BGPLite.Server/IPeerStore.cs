@@ -4,9 +4,10 @@ public interface IPeerStore
 {
     string CreatePeer(string ip, uint asn, string? description);
     void UpsertPeer(string ip, uint asn);
-    void UpdateSessionStatus(string ip, bool active);
+    void UpdateSessionStatus(string ip, uint asn, bool active);
     void DeletePeer(string id);
     PeerInfo? GetPeerByIp(string ip);
+    PeerInfo? GetPeer(string ip, uint asn);
     PeerInfo? GetPeerById(string id);
     List<string> GetSubscriptions(string peerId);
     List<string> GetCustomPrefixes(string peerId);

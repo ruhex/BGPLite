@@ -13,10 +13,9 @@ public sealed class PeerStore : IPeerStore
     public string CreatePeer(string ip, uint asn, string? description)
     {
         using var db = _dbFactory.CreateDbContext();
-        var existing = db.Peers.FirstOrDefault(p => p.Ip == ip);
+        var existing = db.Peers.FirstOrDefault(p => p.Ip == ip && p.Asn == asn);
         if (existing is not null)
         {
-            existing.Asn = asn;
             existing.Description = description;
             db.SaveChanges();
             return existing.Id;
@@ -31,24 +30,23 @@ public sealed class PeerStore : IPeerStore
     public void UpsertPeer(string ip, uint asn)
     {
         using var db = _dbFactory.CreateDbContext();
-        var peer = db.Peers.FirstOrDefault(p => p.Ip == ip);
+        var peer = db.Peers.FirstOrDefault(p => p.Ip == ip && p.Asn == asn);
         if (peer is null)
         {
             db.Peers.Add(new Peer { Ip = ip, Asn = asn, Status = "active", LastSessionAt = DateTime.UtcNow });
         }
         else
         {
-            peer.Asn = asn;
             peer.Status = "active";
             peer.LastSessionAt = DateTime.UtcNow;
         }
         db.SaveChanges();
     }
 
-    public void UpdateSessionStatus(string ip, bool active)
+    public void UpdateSessionStatus(string ip, uint asn, bool active)
     {
         using var db = _dbFactory.CreateDbContext();
-        var peer = db.Peers.FirstOrDefault(p => p.Ip == ip);
+        var peer = db.Peers.FirstOrDefault(p => p.Ip == ip && p.Asn == asn);
         if (peer is null) return;
 
         peer.Status = active ? "active" : "inactive";
@@ -85,6 +83,18 @@ public sealed class PeerStore : IPeerStore
     {
         using var db = _dbFactory.CreateDbContext();
         var peer = db.Peers.Include(p => p.Communities).FirstOrDefault(p => p.Ip == ip);
+        return peer is null ? null : MapToInfo(peer);
+    }
+
+    /// <summary>
+    /// Resolves a peer by its durable identity <c>(Ip, Asn)</c> — the form a BGP session knows once
+    /// it has parsed the peer's OPEN (issue #19). Several peers may share a source IP with distinct
+    /// AS; this returns the specific one, unlike the Ip-only <see cref="GetPeerByIp"/>.
+    /// </summary>
+    public PeerInfo? GetPeer(string ip, uint asn)
+    {
+        using var db = _dbFactory.CreateDbContext();
+        var peer = db.Peers.Include(p => p.Communities).FirstOrDefault(p => p.Ip == ip && p.Asn == asn);
         return peer is null ? null : MapToInfo(peer);
     }
 
