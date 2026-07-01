@@ -21,7 +21,11 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
     private readonly IPeerStore? _peerStore;
     private readonly IPrefixService? _prefixService;
     private readonly IPrefixAggregator _prefixAggregator;
-    private readonly ConcurrentDictionary<string, BgpSession> _sessions = new();
+    // Keyed by the accepted TCP connection (remote IP + remote source port), NOT by remote IP
+    // alone: per RFC 4271 §8.2.1 there is one session per TCP connection, so several distinct peers
+    // arriving from the same source IP (different ephemeral source ports) must coexist as separate
+    // entries. Keying by IP only made them clobber each other (issue #18).
+    private readonly ConcurrentDictionary<SessionKey, BgpSession> _sessions = new();
     private readonly CancellationTokenSource _cts = new();
     private int _acceptingConnections = 1;
     private Socket? _listener;
@@ -140,9 +144,14 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
             {
                 var socket = await _listener!.AcceptAsync(cancellationToken);
                 var remoteEndpoint = (IPEndPoint)socket.RemoteEndPoint!;
+                // Session identity = the accepted TCP connection (remote IP + remote source port),
+                // so peers sharing a source IP but on different source ports get distinct slots and
+                // coexist (RFC 4271 §8.2.1; issue #18). peerAddress stays the IP-only form for the
+                // PeerStore, which is still keyed by IP.
+                var key = new SessionKey(remoteEndpoint.Address, remoteEndpoint.Port);
                 var peerAddress = remoteEndpoint.Address.ToString();
 
-                _logger.LogInformation("Incoming connection from {Address}", peerAddress);
+                _logger.LogInformation("Incoming connection from {Peer} ({Key})", peerAddress, key);
 
                 var peerConfig = new PeerConfig { Address = peerAddress };
 
@@ -158,39 +167,34 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
                     break;
                 }
 
-                // TryAdd first so a racing replacement from the same peer doesn't get clobbered
-                // (an older session's finally still owns the key). If an existing session is present
-                // it is the older one — silently close it and swap. max-active is not enforced at
-                // accept in this codebase, so the simple swap is safe.
+                // Register under the connection key. Two distinct peers from the same source IP
+                // have distinct (IP, port) keys, so they coexist instead of replacing each other
+                // (issue #18). A key collision now only happens for a genuine duplicate of the SAME
+                // connection — e.g. the OS reusing a source port on reconnect while the old entry
+                // has not been cleaned up — which is exactly the "silently close the stale one and
+                // swap" case the CAS below handles. max-active is not enforced at accept here, so
+                // the simple swap is safe.
                 //
                 // Replacement policy: the old session must actually stop, not just be told to Cease.
-                // The previous fire-and-forget NotifyCeaseAsync only latched the Cease and wrote bytes;
-                // it never cancelled the old session's CTS, so the read/keepalive loops kept running
-                // until the peer closed the socket or the hold timer fired. MarkSilentClose latches
-                // SilentClose (so the old RunAsync finally emits no NOTIFICATION — RFC 4724 §4 / §8.1)
-                // AND cancels the old CTS so the loops unwind promptly. We do NOT send a Cease on
-                // replacement: the peer is reconnecting right now and a Cease to the old socket is
-                // noise (and, with GR enabled, would bypass GR). The peer sees a TCP close instead.
+                // MarkSilentClose latches SilentClose (so the old RunAsync finally emits no
+                // NOTIFICATION — RFC 4724 §4 / §8.1) AND cancels the old CTS so the loops unwind
+                // promptly. No Cease is sent on replacement: a Cease to the old socket is noise
+                // (and, with GR enabled, would bypass GR). The peer sees a TCP close instead.
                 //
-                // Use TryUpdate (atomic CAS) for the replacement so two concurrent accept threads
-                // for the same peer cannot both pass TryGetValue and both install their session.
-                // If the CAS fails, another thread already swapped the entry — retry from the top.
-                var sessionRegistered = _sessions.TryAdd(peerAddress, session);
+                // Use TryUpdate (atomic CAS) so two concurrent accept threads for the same key
+                // cannot both pass TryGetValue and both install their session. If the CAS fails,
+                // another thread already swapped the entry — retry from the top.
+                var sessionRegistered = _sessions.TryAdd(key, session);
                 if (!sessionRegistered)
                 {
                     while (!cancellationToken.IsCancellationRequested && Volatile.Read(ref _acceptingConnections) != 0)
                     {
-                        if (_sessions.TryGetValue(peerAddress, out var existing))
+                        if (_sessions.TryGetValue(key, out var existing))
                         {
                             // Atomic CAS: only swap if the registered value is still 'existing'.
-                            // If another accept thread already swapped it, TryUpdate returns false
-                            // and we retry (the losing session is already started via RunSessionAsync
-                            // and must be disposed — but since TryAdd failed, we know a session for
-                            // this peer is registered; the retry loop ensures we eventually replace
-                            // whatever is there).
-                            if (_sessions.TryUpdate(peerAddress, session, existing))
+                            if (_sessions.TryUpdate(key, session, existing))
                             {
-                                _logger.LogInformation("Replacing existing session for {Peer}", peerAddress);
+                                _logger.LogInformation("Replacing existing session for {Key}", key);
                                 existing.MarkSilentClose();
                                 sessionRegistered = true;
                                 break;
@@ -200,12 +204,12 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
                         else
                         {
                             // Existing was concurrently removed — try to add ours.
-                            if (_sessions.TryAdd(peerAddress, session))
+                            if (_sessions.TryAdd(key, session))
                             {
                                 sessionRegistered = true;
                                 break;
                             }
-                            // TryAdd failed — another thread re-added for this peer; loop and retry.
+                            // TryAdd failed — another thread re-added for this key; loop and retry.
                         }
                     }
 
@@ -217,7 +221,7 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
                 }
 
                 if (sessionRegistered)
-                    _ = RunSessionAsync(peerAddress, session, cancellationToken);
+                    _ = RunSessionAsync(key, session, cancellationToken);
             }
             catch (OperationCanceledException) { break; }
             catch (Exception ex)
@@ -229,7 +233,7 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
         }
     }
 
-    private async Task RunSessionAsync(string peerAddress, BgpSession session, CancellationToken cancellationToken)
+    private async Task RunSessionAsync(SessionKey key, BgpSession session, CancellationToken cancellationToken)
     {
         try
         {
@@ -238,32 +242,32 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
         finally
         {
             // Atomically remove our registration ONLY if we are still the current session for this
-            // peer. The previous TryGetValue + TryRemove was not atomic: a racing re-accept could
-            // install a newer session between those two calls, and our TryRemove would then erase
-            // the newer session from the dictionary. ConcurrentDictionary has no public
+            // connection key. The previous TryGetValue + TryRemove was not atomic: a racing re-accept
+            // could install a newer session between those two calls, and our TryRemove would then
+            // erase the newer session from the dictionary. ConcurrentDictionary has no public
             // TryRemove(key, expectedValue), but its explicit ICollection<KeyValuePair<TKey,TValue>>
             // implementation removes the pair only when both key AND value match — an atomic
             // compare-and-remove. So a newer session installed after our exit is left untouched.
-            RemoveSessionIfOwner(peerAddress, session);
+            RemoveSessionIfOwner(key, session);
             session.Dispose();
         }
     }
 
     /// <summary>
     /// Atomically removes <paramref name="session"/> from <see cref="_sessions"/> only if it is
-    /// still the registered session for <paramref name="peerAddress"/>. Uses the explicit
+    /// still the registered session for <paramref name="key"/>. Uses the explicit
     /// <see cref="ICollection{T}"/>.Remove on ConcurrentDictionary, which is documented to remove
     /// the pair only when both key and value match — a compare-and-remove that closes the race the
     /// earlier TryGetValue+TryRemove had (a newer re-accepted session would otherwise be erased).
     /// </summary>
-    private void RemoveSessionIfOwner(string peerAddress, BgpSession session)
+    private void RemoveSessionIfOwner(SessionKey key, BgpSession session)
     {
-        var removed = ((ICollection<KeyValuePair<string, BgpSession>>)_sessions)
-            .Remove(new KeyValuePair<string, BgpSession>(peerAddress, session));
+        var removed = ((ICollection<KeyValuePair<SessionKey, BgpSession>>)_sessions)
+            .Remove(new KeyValuePair<SessionKey, BgpSession>(key, session));
         if (removed)
-            _logger.LogDebug("Removed session for {Peer} (we owned it)", peerAddress);
+            _logger.LogDebug("Removed session for {Key} (we owned it)", key);
         else
-            _logger.LogDebug("Did not remove session for {Peer} (replaced by a newer session)", peerAddress);
+            _logger.LogDebug("Did not remove session for {Key} (replaced by a newer session)", key);
     }
 
     private async Task LogStatusLoopAsync(CancellationToken cancellationToken)
@@ -277,24 +281,43 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
 
     public async Task RefreshPeerAsync(string peerIp)
     {
-        if (!_sessions.TryGetValue(peerIp, out var session))
+        // Several peers may share one source IP (distinct source ports — keyed by SessionKey, see
+        // issue #18), so refresh every established session for that IP rather than a single slot.
+        if (!IPAddress.TryParse(peerIp, out var ip))
+        {
+            _logger.LogWarning("RefreshPeer: invalid IP {Ip}", peerIp);
+            return;
+        }
+
+        var sessions = _sessions
+            .Where(kvp => kvp.Key.Address.Equals(ip))
+            .Select(kvp => kvp.Value)
+            .ToList();
+
+        if (sessions.Count == 0)
         {
             _logger.LogWarning("RefreshPeer: no session for {Ip} (active: [{Peers}])",
                 peerIp, string.Join(", ", _sessions.Keys));
             return;
         }
 
-        if (!session.IsEstablished)
+        var established = sessions.Where(s => s.IsEstablished).ToList();
+        if (established.Count == 0)
         {
-            _logger.LogWarning("RefreshPeer: session for {Ip} not established (state={State})", peerIp, session.State);
+            _logger.LogWarning("RefreshPeer: session(s) for {Ip} not established (states=[{States}])",
+                peerIp, string.Join(", ", sessions.Select(s => s.State)));
             return;
         }
 
-        await session.RefreshRoutesAsync();
+        foreach (var session in established)
+            await session.RefreshRoutesAsync();
     }
 
     public List<string> GetActivePeerIps() =>
-        _sessions.Where(kvp => kvp.Value.IsEstablished).Select(kvp => kvp.Key).ToList();
+        _sessions.Where(kvp => kvp.Value.IsEstablished)
+                 .Select(kvp => kvp.Key.Address.ToString())
+                 .Distinct()
+                 .ToList();
 
     public void Dispose()
     {
