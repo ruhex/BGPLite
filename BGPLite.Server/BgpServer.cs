@@ -153,7 +153,7 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
 
                 _logger.LogInformation("Incoming connection from {Peer} ({Key})", peerAddress, key);
 
-                var peerConfig = new PeerConfig { Address = peerAddress };
+                var peerConfig = new PeerConfig { Address = peerAddress, Port = remoteEndpoint.Port };
 
                 var session = new BgpSession(
                     socket, peerConfig, _config.Bgp, _routeTable,

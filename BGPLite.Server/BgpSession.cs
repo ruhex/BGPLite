@@ -13,6 +13,10 @@ public sealed class BgpSession : IDisposable
     private readonly Socket _socket;
     private readonly NetworkStream _stream;
     private readonly PeerConfig _peerConfig;
+    // "ip:port" label for session logs so the several peers that may share one source IP (behind a
+    // NAT/VPN) can be told apart (issue #18). Peer-store lookups use _peerConfig.Address (IP only);
+    // this label is for human-facing log lines only.
+    private readonly string _peer;
     private readonly BgpConfig _bgpConfig;
     private readonly RouteTable _routeTable;
     private readonly IRouteFilter _routeFilter;
@@ -65,13 +69,13 @@ public sealed class BgpSession : IDisposable
         await _advertisedPrefixesLock.WaitAsync();
         try
         {
-            _logger.LogInformation("Refreshing routes for {Peer}", _peerConfig.Address);
+            _logger.LogInformation("Refreshing routes for {Peer}", _peer);
             await WithdrawAllAsync();
             await SendAllRoutesAsync();
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Failed to refresh routes for {Peer}", _peerConfig.Address);
+            _logger.LogError(ex, "Failed to refresh routes for {Peer}", _peer);
         }
         finally
         {
@@ -98,7 +102,7 @@ public sealed class BgpSession : IDisposable
             _metrics.UpdateSent();
         }
 
-        _logger.LogInformation("Withdrawn {Count} routes from {Peer}", count, _peerConfig.Address);
+        _logger.LogInformation("Withdrawn {Count} routes from {Peer}", count, _peer);
         _advertisedPrefixes.Clear();
     }
 
@@ -119,6 +123,7 @@ public sealed class BgpSession : IDisposable
         _socket = socket;
         _stream = new NetworkStream(socket, ownsSocket: true);
         _peerConfig = peerConfig;
+        _peer = peerConfig.ToString();
         _bgpConfig = bgpConfig;
         _routeTable = routeTable;
         _routeFilter = routeFilter;
@@ -139,7 +144,7 @@ public sealed class BgpSession : IDisposable
         {
             TransitionTo(BgpFsmState.Connect);
             _metrics.PeerConnected();
-            _logger.LogInformation("PeerConnected {Peer}", _peerConfig.Address);
+            _logger.LogInformation("PeerConnected {Peer}", _peer);
 
             // Receive OPEN
             var openMessage = await ReceiveMessageAsync(linkedCts.Token);
@@ -150,7 +155,7 @@ public sealed class BgpSession : IDisposable
             }
 
             _logger.LogInformation("OpenReceived from {Peer} ASN={Asn} Capabilities=[{Caps}]",
-                _peerConfig.Address, remoteOpen.Asn,
+                _peer, remoteOpen.Asn,
                 string.Join(", ", remoteOpen.Capabilities.Select(c => c.Data.Length > 0
                     ? $"{c.Code}[{Convert.ToHexString(c.Data)}]"
                     : $"{c.Code}")));
@@ -161,17 +166,17 @@ public sealed class BgpSession : IDisposable
 
             // Send our OPEN — adapt capabilities to peer
             await SendOpenAsync(remoteOpen);
-            _logger.LogInformation("OpenSent to {Peer}", _peerConfig.Address);
+            _logger.LogInformation("OpenSent to {Peer}", _peer);
 
             // Send KEEPALIVE (acknowledge OPEN)
             await SendKeepaliveAsync();
-            _logger.LogDebug("KeepAliveSent to {Peer} (OPEN confirm)", _peerConfig.Address);
+            _logger.LogDebug("KeepAliveSent to {Peer} (OPEN confirm)", _peer);
 
             TransitionTo(BgpFsmState.OpenConfirm);
 
             // Receive KEEPALIVE
             var response = await ReceiveMessageAsync(linkedCts.Token);
-            _logger.LogInformation("Received {Type} from {Peer} in OpenConfirm", response.Type, _peerConfig.Address);
+            _logger.LogInformation("Received {Type} from {Peer} in OpenConfirm", response.Type, _peer);
 
             switch (response)
             {
@@ -183,19 +188,19 @@ public sealed class BgpSession : IDisposable
                         : "(no data)";
                     _logger.LogWarning(
                         "Peer {Peer} sent NOTIFICATION Error={Error} SubError={SubError} Data={Data}",
-                        _peerConfig.Address, notif.ErrorCode, notif.SubErrorCode, dataHex);
+                        _peer, notif.ErrorCode, notif.SubErrorCode, dataHex);
                     return;
                 default:
-                    _logger.LogError("Unexpected message {Type} from {Peer} in OpenConfirm", response.Type, _peerConfig.Address);
+                    _logger.LogError("Unexpected message {Type} from {Peer} in OpenConfirm", response.Type, _peer);
                     await SendNotificationAsync(BgpConstants.Error.FiniteStateMachineError, BgpConstants.SubError.Unspecific);
                     return;
             }
 
-            _logger.LogDebug("KeepAliveReceived from {Peer}", _peerConfig.Address);
+            _logger.LogDebug("KeepAliveReceived from {Peer}", _peer);
 
             TransitionTo(BgpFsmState.Established);
             _metrics.SessionEstablished();
-            _logger.LogInformation("SessionEstablished with {Peer} ASN={Asn}", _peerConfig.Address, _remoteAsn);
+            _logger.LogInformation("SessionEstablished with {Peer} ASN={Asn}", _peer, _remoteAsn);
 
             // Send initial routes. _sendLock is acquired inside SendMessageAsync for byte-level
             // ordering; _advertisedPrefixesLock guards the list across the initial-send vs. a
@@ -216,11 +221,11 @@ public sealed class BgpSession : IDisposable
         }
         catch (OperationCanceledException)
         {
-            _logger.LogInformation("SessionClosed (cancelled) with {Peer}", _peerConfig.Address);
+            _logger.LogInformation("SessionClosed (cancelled) with {Peer}", _peer);
         }
         catch (BgpNotificationException ex)
         {
-            _logger.LogWarning(ex, "BGP error from {Peer}: {Error}/{SubError}", _peerConfig.Address, ex.ErrorCode, ex.SubErrorCode);
+            _logger.LogWarning(ex, "BGP error from {Peer}: {Error}/{SubError}", _peer, ex.ErrorCode, ex.SubErrorCode);
             // Atomically claim the teardown as LocalCease BEFORE sending. If a concurrent
             // MarkSilentClose (GR-aware shutdown / session replacement) or a peer NOTIFICATION
             // already latched a reason, the CAS fails and we send nothing — preserving the silent
@@ -233,7 +238,7 @@ public sealed class BgpSession : IDisposable
         }
         catch (BgpParseException ex)
         {
-            _logger.LogError(ex, "Parse error from {Peer}", _peerConfig.Address);
+            _logger.LogError(ex, "Parse error from {Peer}", _peer);
             if (Interlocked.CompareExchange(ref _teardownReason, (int)TeardownReason.LocalCease, (int)TeardownReason.None) == (int)TeardownReason.None)
             {
                 try { await SendNotificationAsync(BgpConstants.Error.MessageHeaderError, BgpConstants.SubError.Unspecific); }
@@ -242,7 +247,7 @@ public sealed class BgpSession : IDisposable
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Session error with {Peer}", _peerConfig.Address);
+            _logger.LogError(ex, "Session error with {Peer}", _peer);
             // Best-effort Cease so the peer sees a clean close instead of a bare TCP RST.
             // CAS from None: if a concurrent silent close / peer NOTIFICATION already claimed the
             // teardown, do NOT emit a NOTIFICATION (RFC 4724 §4 / RFC 4271 §6.3 / §8.1).
@@ -274,7 +279,7 @@ public sealed class BgpSession : IDisposable
                 _peerStore?.UpdateSessionStatus(_peerConfig.Address, _remoteAsn, false);
             }
             _metrics.PeerDisconnected();
-            _logger.LogInformation("SessionClosed with {Peer}", _peerConfig.Address);
+            _logger.LogInformation("SessionClosed with {Peer}", _peer);
         }
     }
 
@@ -310,7 +315,7 @@ public sealed class BgpSession : IDisposable
     {
         try { await task; }
         catch (OperationCanceledException) { }
-        catch (Exception ex) { _logger.LogWarning(ex, "{Label} loop faulted for {Peer}", label, _peerConfig.Address); }
+        catch (Exception ex) { _logger.LogWarning(ex, "{Label} loop faulted for {Peer}", label, _peer); }
     }
 
     private async Task ReadLoopAsync(CancellationToken cancellationToken)
@@ -327,11 +332,11 @@ public sealed class BgpSession : IDisposable
                     await HandleUpdateAsync(update);
                     break;
                 case BgpKeepaliveMessage:
-                    _logger.LogDebug("KeepAliveReceived from {Peer}", _peerConfig.Address);
+                    _logger.LogDebug("KeepAliveReceived from {Peer}", _peer);
                     break;
                 case BgpNotificationMessage notif:
                     _logger.LogWarning("NotificationReceived from {Peer}: {Error}/{SubError}",
-                        _peerConfig.Address, notif.ErrorCode, notif.SubErrorCode);
+                        _peer, notif.ErrorCode, notif.SubErrorCode);
                     // RFC 4271 §6.3/§8.1: on receiving a NOTIFICATION, release resources, drop the
                     // TCP connection and move to Idle. Do NOT send a NOTIFICATION back. Latch the
                     // teardown reason (CAS from None — a concurrent silent close/hold-expiry wins
@@ -357,7 +362,7 @@ public sealed class BgpSession : IDisposable
             if (DateTime.UtcNow.Ticks - Interlocked.Read(ref _lastReceivedTicks) >= holdTime.Ticks)
             {
                 _logger.LogWarning("Hold timer expired for {Peer} (no message for {Hold}s)",
-                    _peerConfig.Address, _negotiatedHoldTime);
+                    _peer, _negotiatedHoldTime);
                 if (Interlocked.CompareExchange(ref _teardownReason, (int)TeardownReason.HoldTimerExpired, (int)TeardownReason.None) == (int)TeardownReason.None)
                 {
                     try { await SendNotificationAsync(BgpConstants.Error.HoldTimerExpired, BgpConstants.SubError.Unspecific); }
@@ -367,14 +372,14 @@ public sealed class BgpSession : IDisposable
             }
 
             await SendKeepaliveAsync();
-            _logger.LogDebug("KeepAliveSent to {Peer}", _peerConfig.Address);
+            _logger.LogDebug("KeepAliveSent to {Peer}", _peer);
         }
     }
 
     private async Task HandleUpdateAsync(BgpUpdateMessage update)
     {
         _logger.LogInformation("UpdateReceived from {Peer}: {Withdrawn} withdrawn, {Nlri} announced",
-            _peerConfig.Address, update.WithdrawnRoutes.Count, update.Nlri.Count);
+            _peer, update.WithdrawnRoutes.Count, update.Nlri.Count);
 
         // Process withdrawals
         foreach (var w in update.WithdrawnRoutes)
@@ -455,7 +460,7 @@ public sealed class BgpSession : IDisposable
                 // Unconfigured peer — send RU defaults
                 if (subscriptionIds.Count == 0 && customPrefixes.Count == 0 && customAsns.Count == 0)
                 {
-                    _logger.LogInformation("Unconfigured peer {Peer}, sending RU defaults", _peerConfig.Address);
+                    _logger.LogInformation("Unconfigured peer {Peer}, sending RU defaults", _peer);
                     try
                     {
                         var ruPrefixes = await _prefixService.GetRuPrefixesAsync();
@@ -469,18 +474,18 @@ public sealed class BgpSession : IDisposable
                             });
                         }
                         _logger.LogInformation("Sent {Count} RU prefixes to unconfigured peer {Peer}",
-                            ruPrefixes.Count, _peerConfig.Address);
+                            ruPrefixes.Count, _peer);
                     }
                     catch (Exception ex)
                     {
-                        _logger.LogError(ex, "Failed to fetch RU prefixes for {Peer}", _peerConfig.Address);
+                        _logger.LogError(ex, "Failed to fetch RU prefixes for {Peer}", _peer);
                     }
 
                     await SendRoutesAsync(nextHop, routes);
                     return;
                 }
 
-                _logger.LogInformation("Peer {Peer} subscriptions: [{Subs}]", _peerConfig.Address, string.Join(", ", subscriptionIds));
+                _logger.LogInformation("Peer {Peer} subscriptions: [{Subs}]", _peer, string.Join(", ", subscriptionIds));
 
                 var subscribedLists = _appConfig?.RipeStat?.AsnLists
                     .Where(l => subscriptionIds.Contains(l.Name))
@@ -492,7 +497,7 @@ public sealed class BgpSession : IDisposable
                     .SelectMany(l => l.Asns)
                     .ToList();
 
-                _logger.LogInformation("Peer {Peer} resolved {Count} ASNs from subscriptions", _peerConfig.Address, asns.Count);
+                _logger.LogInformation("Peer {Peer} resolved {Count} ASNs from subscriptions", _peer, asns.Count);
 
                 if (asns.Count > 0)
                 {
@@ -510,11 +515,11 @@ public sealed class BgpSession : IDisposable
                             });
                         }
                         _logger.LogInformation("Fetched {Count} prefixes for {Peer} from ASN subscriptions",
-                            routes.Count, _peerConfig.Address);
+                            routes.Count, _peer);
                     }
                     catch (Exception ex)
                     {
-                        _logger.LogError(ex, "Failed to fetch prefixes for {Peer}", _peerConfig.Address);
+                        _logger.LogError(ex, "Failed to fetch prefixes for {Peer}", _peer);
                     }
                 }
 
@@ -533,11 +538,11 @@ public sealed class BgpSession : IDisposable
                                 NextHop = nextHop
                             });
                         }
-                        _logger.LogInformation("Fetched {Count} RU prefixes for {Peer}", ruPrefixes.Count, _peerConfig.Address);
+                        _logger.LogInformation("Fetched {Count} RU prefixes for {Peer}", ruPrefixes.Count, _peer);
                     }
                     catch (Exception ex)
                     {
-                        _logger.LogError(ex, "Failed to fetch RU prefixes for {Peer}", _peerConfig.Address);
+                        _logger.LogError(ex, "Failed to fetch RU prefixes for {Peer}", _peer);
                     }
                 }
 
@@ -563,17 +568,17 @@ public sealed class BgpSession : IDisposable
                             });
                         }
                         _logger.LogInformation("Fetched {Count} prefixes from source '{Source}' for {Peer}",
-                            srcPrefixes.Count, name, _peerConfig.Address);
+                            srcPrefixes.Count, name, _peer);
                     }
                     catch (Exception ex)
                     {
-                        _logger.LogError(ex, "Failed to fetch source '{Source}' for {Peer}", name, _peerConfig.Address);
+                        _logger.LogError(ex, "Failed to fetch source '{Source}' for {Peer}", name, _peer);
                     }
                 }
 
                 // Add custom prefixes (already loaded above)
                 _logger.LogInformation("Peer {Peer} has {SubRoutes} subscription routes + {CustomCount} custom prefixes",
-                    _peerConfig.Address, routes.Count, customPrefixes.Count);
+                    _peer, routes.Count, customPrefixes.Count);
 
                 foreach (var cidr in customPrefixes)
                 {
@@ -606,20 +611,20 @@ public sealed class BgpSession : IDisposable
                             });
                         }
                         _logger.LogInformation("Peer {Peer} custom AS: {Asns} -> {Count} prefixes",
-                            _peerConfig.Address, string.Join(",", customAsns), asnPrefixes.Count);
+                            _peer, string.Join(",", customAsns), asnPrefixes.Count);
                     }
                     catch (Exception ex)
                     {
-                        _logger.LogError(ex, "Failed to fetch custom AS prefixes for {Peer}", _peerConfig.Address);
+                        _logger.LogError(ex, "Failed to fetch custom AS prefixes for {Peer}", _peer);
                     }
                 }
 
-                _logger.LogInformation("Sending {Count} total routes to {Peer}", routes.Count, _peerConfig.Address);
+                _logger.LogInformation("Sending {Count} total routes to {Peer}", routes.Count, _peer);
 
                 // Configured peer resolved 0 prefixes — fall back to RU
                 if (routes.Count == 0)
                 {
-                    _logger.LogInformation("Peer {Peer} resolved 0 prefixes, falling back to RU defaults", _peerConfig.Address);
+                    _logger.LogInformation("Peer {Peer} resolved 0 prefixes, falling back to RU defaults", _peer);
                     try
                     {
                         var ruPrefixes = await _prefixService.GetRuPrefixesAsync();
@@ -635,7 +640,7 @@ public sealed class BgpSession : IDisposable
                     }
                     catch (Exception ex)
                     {
-                        _logger.LogError(ex, "Failed to fetch RU fallback for {Peer}", _peerConfig.Address);
+                        _logger.LogError(ex, "Failed to fetch RU fallback for {Peer}", _peer);
                     }
                 }
 
@@ -645,7 +650,7 @@ public sealed class BgpSession : IDisposable
             else
             {
                 // Unknown peer — auto-register and send default RU list
-                _logger.LogInformation("Unknown peer {Ip}, auto-registering with RU defaults", _peerConfig.Address);
+                _logger.LogInformation("Unknown peer {Ip}, auto-registering with RU defaults", _peer);
 
                 _peerStore.CreatePeer(_peerConfig.Address, _remoteAsn, null);
 
@@ -662,11 +667,11 @@ public sealed class BgpSession : IDisposable
                         });
                     }
                     _logger.LogInformation("Fetched {Count} RU prefixes for unknown peer {Peer}",
-                        ruPrefixes.Count, _peerConfig.Address);
+                        ruPrefixes.Count, _peer);
                 }
                 catch (Exception ex)
                 {
-                    _logger.LogError(ex, "Failed to fetch RU prefixes for {Peer}", _peerConfig.Address);
+                    _logger.LogError(ex, "Failed to fetch RU prefixes for {Peer}", _peer);
                 }
 
                 await SendRoutesAsync(nextHop, routes);
@@ -694,7 +699,7 @@ public sealed class BgpSession : IDisposable
         var aggregated = _prefixAggregator.Aggregate(routes);
         if (_logger.IsEnabled(LogLevel.Information) && aggregated.Count != routes.Count)
             _logger.LogInformation("Aggregated {Before} -> {After} prefixes for {Peer}",
-                routes.Count, aggregated.Count, _peerConfig.Address);
+                routes.Count, aggregated.Count, _peer);
         routes = aggregated as List<Route> ?? aggregated.ToList();
 
         const int maxNlriPerUpdate = 100;
@@ -720,7 +725,7 @@ public sealed class BgpSession : IDisposable
             sent += batch.Count;
         }
 
-        _logger.LogInformation("UpdateSent {Count} routes to {Peer}", sent, _peerConfig.Address);
+        _logger.LogInformation("UpdateSent {Count} routes to {Peer}", sent, _peer);
     }
 
     private async Task SendRouteBatchAsync(uint nextHop, List<Route> routes)
@@ -799,7 +804,7 @@ public sealed class BgpSession : IDisposable
     {
         await SendMessageAsync(new BgpUpdateMessage());
         _metrics.UpdateSent();
-        _logger.LogDebug("End-of-RIB sent to {Peer}", _peerConfig.Address);
+        _logger.LogDebug("End-of-RIB sent to {Peer}", _peer);
     }
 
     #region Message I/O
@@ -960,7 +965,7 @@ public sealed class BgpSession : IDisposable
     {
         var notification = new BgpNotificationMessage { ErrorCode = errorCode, SubErrorCode = subErrorCode };
         await SendMessageAsync(notification);
-        _logger.LogInformation("NotificationSent to {Peer}: {Error}/{SubError}", _peerConfig.Address, errorCode, subErrorCode);
+        _logger.LogInformation("NotificationSent to {Peer}: {Error}/{SubError}", _peer, errorCode, subErrorCode);
     }
 
     /// <summary>
@@ -982,11 +987,11 @@ public sealed class BgpSession : IDisposable
         try
         {
             await SendNotificationAsync(BgpConstants.Error.Cease, BgpConstants.SubError.Unspecific);
-            _logger.LogInformation("Cease sent to {Peer} on shutdown", _peerConfig.Address);
+            _logger.LogInformation("Cease sent to {Peer} on shutdown", _peer);
         }
         catch (Exception ex)
         {
-            _logger.LogDebug(ex, "Failed to send Cease to {Peer} on shutdown", _peerConfig.Address);
+            _logger.LogDebug(ex, "Failed to send Cease to {Peer} on shutdown", _peer);
         }
     }
 
@@ -1008,7 +1013,7 @@ public sealed class BgpSession : IDisposable
         Interlocked.CompareExchange(ref _teardownReason, (int)TeardownReason.SilentClose, (int)TeardownReason.None);
         try { _cts.Cancel(); }
         catch (ObjectDisposedException) { /* already disposed — fine */ }
-        _logger.LogInformation("Session {Peer} marked for silent close", _peerConfig.Address);
+        _logger.LogInformation("Session {Peer} marked for silent close", _peer);
     }
 
     #endregion
@@ -1042,7 +1047,7 @@ public sealed class BgpSession : IDisposable
 
         var peerGr = CapabilityHelper.GetGracefulRestart(open);
         _logger.LogInformation("Peer {Peer} Graceful Restart: {State}",
-            _peerConfig.Address,
+            _peer,
             peerGr.HasValue
                 ? $"supported (restartState={peerGr.Value.RestartState}, restartTime={peerGr.Value.RestartTime}s, IPv4/Unicast forwarding={peerGr.Value.Ipv4UnicastForwarding})"
                 : "not supported");
@@ -1057,7 +1062,7 @@ public sealed class BgpSession : IDisposable
 
     private void TransitionTo(BgpFsmState newState)
     {
-        _logger.LogDebug("FSM: {Old} → {New} for {Peer}", _state, newState, _peerConfig.Address);
+        _logger.LogDebug("FSM: {Old} → {New} for {Peer}", _state, newState, _peer);
         _state = newState;
     }
 

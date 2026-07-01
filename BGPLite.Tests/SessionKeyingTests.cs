@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Net;
+using BGPLite.Configuration;
 using BGPLite.Server;
 using Xunit;
 
@@ -73,5 +74,17 @@ public class SessionKeyingTests
         Assert.False(dict.ContainsKey(peerA));
         Assert.True(dict.ContainsKey(peerB), "peerB (different source port) must be untouched");
         Assert.Equal("B", dict[peerB]);
+    }
+
+    /// <summary>
+    /// The session-log peer label is <c>Address</c> alone when no port is known (configured/test
+    /// peers), and <c>Address:Port</c> for an accepted connection — so peers behind one source IP
+    /// are distinguishable in logs (issue #18). Peer-store lookups keep using Address directly.
+    /// </summary>
+    [Fact]
+    public void PeerConfig_ToString_Labels_Address_Port()
+    {
+        Assert.Equal("203.0.113.10", new PeerConfig { Address = "203.0.113.10" }.ToString());
+        Assert.Equal("203.0.113.10:50001", new PeerConfig { Address = "203.0.113.10", Port = 50001 }.ToString());
     }
 }
