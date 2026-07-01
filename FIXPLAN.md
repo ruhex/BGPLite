@@ -3,25 +3,25 @@
 ## Общий обзор
 
 - **Всего пунктов:** 40
-- **Полностью реализовано:** 4 (10 %)
-- **Частично реализовано:** 2 (5 %)
-- **Не реализовано:** 34 (85 %)
+- **Полностью реализовано:** 7 (18 %)
+- **Частично реализовано:** 1 (2 %)
+- **Не реализовано:** 32 (80 %)
 
-Этот план переупорядочивает задачи в соответствии с проведённым аудитом и приоритизирует их для дальнейшей разработки.
+Этот план переупорядочивает задачи в соответствии с проведённым аудитом и приоритизирует их для дальнейшей разработки. Статусы и file:line сверены с актуальным `main` (аудит 2026-07-02).
 
 ---
 
 ## Приоритет 1 – Критические ошибки сессий и потокобезопасность
 
-> **Актуализировано** под состояние `main` (после PR #5, #18–#21): 4 из 5 пунктов закрыты, hold‑timer остаётся частичным.
+> **Актуализировано** под состояние `main` (после PR #5, #18–#21): 4 из 5 пунктов закрыты, hold-timer остаётся частичным.
 
 | # | Описание | Статус | Файл / Строки | Действие | Уровень исправления |
 |---|-----------|--------|---------------|----------|---------------------|
-| 1.1 | Гонка при замене сессий | **Реализовано** | `BGPLite.Server/BgpServer.cs` – `:184‑212` (TryAdd + TryUpdate CAS), `:257‑265` (atomic remove) | Закрыто: `c58dc8b` (PR #5); ключ сессии `SessionKey` (IP+порт) — PR #20 / #18. | – |
-| 1.2 | Параллельная запись в `_stream` | **Реализовано** | `BGPLite.Server/BgpSession.cs` (send lock) | Закрыто: `bd924df` (PR #5). | – |
-| 1.3 | Hold Timer | **Частично реализовано** | `BGPLite.Server/BgpSession.cs` – `:301, 326, 362` (HoldTimer на `Interlocked` `_lastReceivedTicks`) | Таймер работает; перенос логики в класс `BgpTimers` через DI не выполнен (см. P6.1 / issue #10). | Архитектурный |
-| 1.4 | NOTIFICATION при штатном завершении | **Реализовано** | `BGPLite.Server/BgpSession.cs` – `:233‑270, 984` (Cease), `:345, 366, 1013` (teardown CAS) | Закрыто: Cease feat `037096e` + teardown races `7ba07c7`, `968f2e4`, `5387dd3` (PR #5). | – |
-| 1.5 | `_state` без барьеров памяти | **Реализовано** | `BGPLite.Server/BgpSession.cs` – `:34` (`volatile BgpFsmState _state`) | Закрыто: `bd924df` (PR #5); дополнительно `Interlocked` для `_teardownReason`, `_lastReceivedTicks`, `_disposed`. | – |
+| 1.1 | Гонка при замене сессий | **Реализовано** | `BGPLite.Server/BgpServer.cs` – `:187-221` (TryAdd + TryUpdate CAS), `:263-271` (atomic remove) | Закрыто: `c58dc8b` (PR #5); ключ сессии `SessionKey` (IP+порт) — PR #20 / #18. | – |
+| 1.2 | Параллельная запись в `_stream` | **Реализовано** | `BGPLite.Server/BgpSession.cs` – `:286` (`_sendLock`), `:848-882` (`SendMessageAsync`) | Закрыто: `bd924df` (PR #5). | – |
+| 1.3 | Hold Timer | **Частично реализовано** | `BGPLite.Server/BgpSession.cs` – `:301, 326, 351-377, 362-369` (HoldTimer на `Interlocked` `_lastReceivedTicks`) | Таймер работает; перенос логики в класс `BgpTimers` через DI не выполнен (см. P6.1 / issue #10). | Архитектурный |
+| 1.4 | NOTIFICATION при штатном завершении | **Реализовано** | `BGPLite.Server/BgpSession.cs` – `:254-258, 270-274` (Cease CAS), `:977-996` (`NotifyCeaseAsync`), `:345, 366, 1013` (teardown CAS) | Закрыто: Cease feat `037096e` + teardown races `7ba07c7`, `968f2e4`, `5387dd3` (PR #5). | – |
+| 1.5 | `_state` без барьеров памяти | **Реализовано** | `BGPLite.Server/BgpSession.cs` – `:34` (`volatile BgpFsmState _state`), `:58` (`IsEstablished`) | Закрыто: `bd924df` (PR #5); дополнительно `Interlocked` для `_teardownReason`, `_lastReceivedTicks`, `_disposed`. | – |
 
 ---
 
@@ -29,15 +29,15 @@
 
 | # | Описание | Статус | Файл / Строки | Действие | Уровень |
 |---|-----------|--------|---------------|----------|----------|
-| 2.1 | Порядок path attributes | **Отсутствует** | `BGPLite.Protocol/BgpMessageWriter.cs` – строки 129‑134 | Добавить сортировку атрибутов согласно RFC 4271. | Общий |
-| 2.2 | Валидация `PrefixCodec` на `length > 32` | **Отсутствует** | `BGPLite.Protocol/PrefixCodec.cs` – строки 7‑24 | Вставить проверку и бросить `ArgumentOutOfRangeException`. | Локальный |
-| 2.3 | Усечение в OPEN‑кодировании | **Отсутствует** | `BGPLite.Protocol/BgpMessageWriter.cs` – строки 40‑61 | Проверять, что длина `optParamsLen` и `capDataLen` ≤ 255, либо использовать 2‑байтовое поле. | Локальный |
-| 2.4 | `ReadAsPath` смешивает ASN размеры | **Отсутствует** | `BGPLite.Protocol/AttributeHelper.cs` – строки 22‑50 | При недостаточном количестве байтов бросать `BgpParseException`. | Локальный |
-| 2.5 | Валидация атрибутов при чтении | **Отсутствует** | `BGPLite.Protocol/AttributeHelper.cs` – строки 7‑10, 82‑86, 99‑106 | Добавить проверки длины данных. | Локальный |
-| 2.6 | Валидация reserved attribute flag bits | **Отсутствует** | `BGPLite.Protocol/BgpMessageReader.cs` – строки 174‑196 | Проверять, что бит 0x08 = 0. | Локальный |
-| 2.7 | Hold time high byte | **Отсутствует** | `BGPLite.Protocol/BgpMessageReader.cs` – строки 63‑66 | Проверять, что старший байт = 0. | Локальный |
-| 2.8 | Валидация OPEN payload length | **Отсутствует** | `BGPLite.Protocol/BgpMessageReader.cs` – строки 55‑69 | Убедиться, что длина exactly matches `optParamsLen`. | Локальный |
-| 2.9 | `BgpConstants.IPAddressToUint` без IPv4 guard | **Отсутствует** | `BGPLite.Protocol/BgpConstants.cs` – строки 94‑98 | Проверять `AddressFamily.InterNetwork`. | Локальный |
+| 2.1 | Порядок path attributes | **Отсутствует** | `BGPLite.Protocol/BgpMessageWriter.cs` – `:130-134` | Добавить сортировку атрибутов согласно RFC 4271. | Общий |
+| 2.2 | Валидация `PrefixCodec` на `length > 32` | **Отсутствует** | `BGPLite.Protocol/PrefixCodec.cs` – `:21` (Encode), `:35, 37` (Decode) | Вставить проверку и бросить `ArgumentOutOfRangeException` (также в `EncodeList`/`DecodeList`). | Локальный |
+| 2.3 | Усечение в OPEN-кодировании | **Отсутствует** | `BGPLite.Protocol/BgpMessageWriter.cs` – `:57, 88, 93` | Проверять, что длина `optParamsLen` и `capDataLen` ≤ 255, либо использовать 2-байтовое поле. | Локальный |
+| 2.4 | `ReadAsPath` смешивает ASN размеры | **Реализовано** | `BGPLite.Protocol/AttributeHelper.cs` – `:22-50` (guard `:35-36`) | Закрыто: `9709c69` (guard `if (offset + segBytes > attr.Data.Length) break;`). | – |
+| 2.5 | Валидация атрибутов при чтении | **Отсутствует** | `BGPLite.Protocol/AttributeHelper.cs` – `:7-10` (`ReadOrigin`), `:82-85` (`ReadNextHop`), `:99-106` (`ReadCommunities`); `BgpMessageReader.cs:192-193` | Добавить проверки длины данных и бросать `BgpParseException`. | Локальный |
+| 2.6 | Валидация reserved attribute flag bits | **Отсутствует** | `BGPLite.Protocol/BgpMessageReader.cs` – `:174-196` (`ParseAttribute`) | Проверять, что бит 0x08 = 0 (в reader, не в `PathAttribute.cs`). | Локальный |
+| 2.7 | Hold time high byte | **Отсутствует** | `BGPLite.Protocol/BgpMessageReader.cs` – `:63` | Проверять, что старший байт = 0; иначе NOTIFICATION (UnacceptableHoldTime, `BgpConstants.cs:39`). | Локальный |
+| 2.8 | Валидация OPEN payload length | **Отсутствует** | `BGPLite.Protocol/BgpMessageReader.cs` – `:55-69` | Проверять `payload.Length == 10 + optParamsLen` (сейчас только `>=`, нет точного `!=`). | Локальный |
+| 2.9 | `BgpConstants.IPAddressToUint` без IPv4 guard | **Отсутствует** | `BGPLite.Protocol/BgpConstants.cs` – `:94-98` | Проверять `AddressFamily.InterNetwork`. | Локальный |
 
 ---
 
@@ -45,11 +45,11 @@
 
 | # | Описание | Статус | Файл / Строки | Действие | Уровень |
 |---|-----------|--------|---------------|----------|----------|
-| 3.1 | Утечка маршрутов через community‑фильтр | **Отсутствует** | `BGPLite.Routing/PeerCommunityFilter.cs` – строки 18‑23 | Возвратить `false` когда фильтр включён и маршрут без community. | Локальный |
-| 3.2 | Мутабельные массивы в `Route` | **Отсутствует** | `BGPLite.Routing/Route.cs` – строки 8‑9 | Перейти на `IReadOnlyList<uint>` или копировать массивы в конструкторе. | Общий |
-| 3.3 | `RouteTable.AddOrUpdate` ненадёжен | **Отсутствует** | `BGPLite.Routing/RouteTable.cs` – строки 11‑18 | Заменить на `TryAdd` + lock или `GetOrAdd` с проверкой. | Локальный |
-| 3.4 | Валидация prefix length и masking | **Отсутствует** | `BGPLite.Routing/Route.cs` – строки 5‑6 (маскирование отсутствует) | Применить маскирование и проверку диапазона. | Локальный |
-| 3.5 | Longest‑prefix‑match | **Отсутствует** | — | Добавить метод `Lookup(uint address)` в `RouteTable`. Может быть реализовано через линейный поиск или Patricia‑три. | Архитектурный |
+| 3.1 | Утечка маршрутов через community-фильтр | **Отсутствует** | `BGPLite.Routing/PeerCommunityFilter.cs` – `:22-23` | Возвратить `false` когда фильтр включён и маршрут без community. | Локальный |
+| 3.2 | Мутабельные массивы в `Route` | **Отсутствует** | `BGPLite.Routing/Route.cs` – `:8-9` | Перейти на `IReadOnlyList<uint>` или копировать массивы в конструкторе. | Общий |
+| 3.3 | `RouteTable.AddOrUpdate` ненадёжен | **Отсутствует** | `BGPLite.Routing/RouteTable.cs` – `:11-18` | Заменить на `TryAdd` + lock или `GetOrAdd` с проверкой. | Локальный |
+| 3.4 | Валидация prefix length и masking | **Отсутствует** | `BGPLite.Routing/Route.cs` – `:5-6`, `RouteTable.cs:14` | Применять маскирование (есть только в `ExactUnionPrefixAggregator`, нет в `Route`) и проверку диапазона. | Локальный |
+| 3.5 | Longest-prefix-match | **Отсутствует** | `BGPLite.Routing/RouteTable.cs` (класс) | Добавить метод `Lookup(uint address)` в `RouteTable` (может переиспользовать `Enumerate()`). | Архитектурный |
 
 ---
 
@@ -57,14 +57,14 @@
 
 | # | Описание | Статус | Файл / Строки | Действие | Уровень |
 |---|-----------|--------|---------------|----------|----------|
-| 4.1 | Валидация RouterId | **Отсутствует** | `BgpConfig.cs` – строка 12 (default `0.0.0.0`) | Сделать поле обязательным и проверять ≠ `0.0.0.0` при загрузке. | Локальный |
-| 4.2 | Валидация HoldTime/KeepAlive | **Отсутствует** | `BgpConfig.cs` – строки 14‑18 | Проверять `HoldTime` ≥ 3 (если ≠ 0) и `KeepAlive` ≥ 1, а также `KeepAlive ≤ HoldTime/3`. | Локальный |
-| 4.3 | Валидация ApiPort | **Отсутствует** | `AppConfig.cs` – строка 13 (default 5001) | Сменить default на 5000 и проверять диапазон 1‑65535. | Локальный |
-| 4.4 | Валидация `PeerConfig.Address` | **Отсутствует** | `PeerConfig.cs` – строка 9 (default `0.0.0.0`) | Требовать корректный IPv4‑адрес и отклонять `0.0.0.0`. | Локальный |
-| 4.5 | Post‑deserialization валидация | **Отсутствует** | `ConfigLoader.cs` – строки 11‑19 | После десериализации вызвать `AppConfig.Validate()`. | Архитектурный |
-| 4.6 | Strict YAML parsing | **Отсутствует** | `ConfigLoader.cs` – строка 8 (`IgnoreUnmatchedProperties()`) | Удалить игнорирование или добавить логирование неизвестных полей. | Локальный |
-| 4.7 | Атомарное сохранение конфига | **Отсутствует** | `ConfigLoader.cs` – строки 23‑25 (возврат строки) | При записи в файл использовать `temp`‑файл и `File.Replace`. | Локальный |
-| 4.8 | `global.json` rollback policy | **Отсутствует** | `global.json` – строки 3‑5 | Изменить `rollForward` на `latestFeature` и `allowPrerelease` на `false`. | Локальный |
+| 4.1 | Валидация RouterId | **Отсутствует** | `BgpConfig.cs` – строка 12 (default `0.0.0.0`) | Сделать поле обязательным и проверять ≠ `0.0.0.0` при загрузке. | Локальный |
+| 4.2 | Валидация HoldTime/KeepAlive | **Отсутствует** | `BgpConfig.cs` – `:14-18` | Проверять `HoldTime` ≥ 3 (если ≠ 0) и `KeepAlive` ≥ 1, а также `KeepAlive ≤ HoldTime/3`. | Локальный |
+| 4.3 | Валидация ApiPort | **Отсутствует** | `AppConfig.cs` – `:13-14` (default 5001) | Сменить default на 5000 и проверять диапазон 1-65535. | Локальный |
+| 4.4 | Валидация `PeerConfig.Address` | **Отсутствует** | `PeerConfig.cs` – `:9` (default `0.0.0.0`) | Требовать корректный IPv4-адрес и отклонять `0.0.0.0`. | Локальный |
+| 4.5 | Post-deserialization валидация | **Отсутствует** | `ConfigLoader.cs` – `:11-18` | После десериализации вызывать `AppConfig.Validate()`. | Архитектурный |
+| 4.6 | Strict YAML parsing | **Отсутствует** | `ConfigLoader.cs` – `:8` (`IgnoreUnmatchedProperties()`) | Удалить игнорирование или добавить логирование неизвестных полей. | Локальный |
+| 4.7 | Атомарное сохранение конфига | **Отсутствует** | `ConfigLoader.cs` – `:23-24` (`Save` возвращает string, файла не пишет) | При записи в файл использовать `temp`-файл и `File.Replace`. | Локальный |
+| 4.8 | `global.json` rollback policy | **Отсутствует** | `global.json` – `:4-5` | Изменить `rollForward` на `latestFeature` и `allowPrerelease` на `false`. | Локальный |
 
 ---
 
@@ -72,13 +72,13 @@
 
 | # | Описание | Статус | Действие | Уровень |
 |---|-----------|--------|----------|----------|
-| 5.1 | Добавить ссылки на недостающие проекты | **Отсутствует** | Добавить `<ProjectReference>` к `BGPLite` в `BGPLite.Tests.csproj`. | Архитектурный |
-| 5.2 | Негативные тесты парсера | **Отсутствует** | Реализовать 8 тестов, перечисленных в оригинальном планe. | Тестовый |
-| 5.3 | Тесты `PeerCommunityFilter` | **Отсутствует** | Добавить покрытие всех вариантов списка и флага. | Тестовый |
-| 5.4 | Граничные значения `PrefixCodec` | **Отсутствует** | Добавить параметризованные тесты для длин 1,7,9,23,25,31,>32, пустой буфер. | Тестовый |
-| 5.5 | Расширение тестов `BgpMessageTests` | **Отсутствует** | Добавить сценарии с 2‑byte ASN, расширенными атрибутами, пустыми capabilities и т.д. | Тестовый |
-| 5.6 | Тесты `ConfigLoader.Save` | **Отсутствует** | Проверить round‑trip, ошибочный YAML, отсутствие файла, пустые секции. | Тестовый |
-| 5.7 | Тесты `BgpServer` и `BgpSession` | **Отсутствует** | Интеграционные тесты: hold‑timer expiry, NOTIFICATION перед закрытием, конкурентная отправка. | Тестовый |
+| 5.1 | Добавить ссылки на недостающие проекты | **Реализовано** | Закрыто: `BGPLite.Tests.csproj:12-17` уже ссылается на `BGPLite.Api` и `BGPLite.Providers`. | – |
+| 5.2 | Негативные тесты парсера | **Отсутствует** | Реализовать 8 тестов; reader уже бросает `BgpParseException` — тестам нужно лишь собрать битые буферы. | Тестовый |
+| 5.3 | Тесты `PeerCommunityFilter` | **Отсутствует** | Добавить покрытие; учтите, что `DeniedWhenFilterActive` для без-community расходится с текущим поведением (см. P3.1). | Тестовый |
+| 5.4 | Граничные значения `PrefixCodec` | **Отсутствует** | Длины 1, 7, 9, 23, 25, 31, >32, пустой буфер; тест `>32` требует сначала guard из P2.2. | Тестовый |
+| 5.5 | Расширение тестов `BgpMessageTests` | **Отсутствует** | 2-byte ASN, extended-length атрибуты, пустые capabilities, порядок атрибутов. | Тестовый |
+| 5.6 | Тесты `ConfigLoader.Save` | **Отсутствует** | Round-trip, ошибочный YAML, отсутствие файла, пустые секции (сейчас нулевое покрытие `Save`). | Тестовый |
+| 5.7 | Тесты `BgpServer` и `BgpSession` | **Реализовано** | Закрыто: `BgpSessionShutdownTests.cs` — hold-timer expiry, NOTIFICATION перед закрытием, mock-TCP, конкурентная отправка. | – |
 
 ---
 
@@ -86,135 +86,103 @@
 
 | # | Описание | Статус | Действие | Уровень |
 |---|-----------|--------|----------|----------|
-| 6.1 | Реализовать `BgpTimers` | **Отсутствует** | Инжектировать класс в `BgpServer`/`BgpSession`, использовать его для keep‑alive, hold‑timer и connect‑retry. | Архитектурный |
-| 6.2 | FSM: добавить состояние `Active` | **Отсутствует** | Добавить в `BgpFsmState` и реализовать переходы согласно RFC 4271. | Архитектурный |
-| 6.3 | Async `PeerStore` | **Отсутствует** | Создать `IPeerStoreAsync` с `Task`‑методами, адаптировать вызовы. | Архитектурный |
-| 6.4 | Кэширование community‑запросов | **Отсутствует** | Ввести in‑memory кэш с TTL в `PeerCommunityFilter`. | Архитектурный |
+| 6.1 | Реализовать `BgpTimers` | **Отсутствует** | Вынести таймеры (сейчас инлайн в `BgpSession`) в инжектируемый `BgpTimers` для keep-alive, hold-timer и connect-retry. | Архитектурный |
+| 6.2 | FSM: добавить состояние `Active` | **Отсутствует** | Добавить в `BgpFsmState` и реализовать переходы согласно RFC 4271 (актуально только после outbound-connect; связано с 6.1). | Архитектурный |
+| 6.3 | Async `PeerStore` | **Отсутствует** | Создать `IPeerStoreAsync` с `Task`-методами, адаптировать вызовы. | Архитектурный |
+| 6.4 | Кэширование community-запросов | **Отсутствует** | Ввести in-memory кэш с TTL в `PeerCommunityFilter`. | Архитектурный |
 | 6.5 | Добавить iBGP/eBGP различение | **Отсутствует** | Расширить `PeerConfig` полем `PeerType` и учитывать его в маршрутизации. | Архитектурный |
 | 6.6 | MaxPrefix limit | **Отсутствует** | Добавить поле `MaxPrefix` в `PeerConfig`, проверять при добавлении префиксов. | Архитектурный |
 
 ---
 
 ## План действий
-1. **Срочно** реализовать пункты Приоритета 1 (гонка сессий, атомарность `_state`).
-2. Затем выполнить все проверки протокольных условий (Приоритет 2).
-3. Параллельно исправить критические проблемы маршрутизации (Приоритет 3) и добавить валидацию конфигурации (Приоритет 4).
-4. После исправления кода написать недостающие тесты (Приоритет 5).
-5. По завершении внедрить архитектурные улучшения из Приоритета 6.
+1. ~~Срочно реализовать пункты P1~~ (закрыто в PR #5 / #18-#21, кроме hold-timer DI — P6.1).
+2. Затем выполнить все проверки протокольных условий (P2). Начать с P2.4 — уже закрыт (`9709c69`).
+3. Параллельно исправить критические проблемы маршрутизации (P3) и добавить валидацию конфигурации (P4).
+4. После исправления кода написать недостающие тесты (P5; P5.1 и P5.7 уже закрыты).
+5. По завершении внедрить архитектурные улучшения из P6.
 
 ---
 
-*Этот документ будет поддерживаться в актуальном состоянии. При необходимости добавляйте новые пункты или меняйте приоритеты.*
+*Этот документ поддерживается в актуальном состоянии. При необходимости добавляйте новые пункты или меняйте приоритеты.*
 
-## Приоритет 1: Критические ошибки сессий и потокобезопасность
+## Приоритет 1: Критические ошибки сессий и потокобезопасности
 
-### 1.1 Гонка при замене сессий
-**Файл:** `BgpServer.cs:122,142`
-**Проблема:** `_sessions[peerAddress] = session` безусловно перезаписывает запись. Finally-блок старой сессии удалит новую.
-**Исправление:**
-- Использовать `TryAdd` + атомарную замену через generation counter
-- При обнаружении существующей сессии — отправить NOTIFICATION/Cease старой, дождаться завершения, затем создать новую
-- Или: в `RunSessionAsync` проверять `_sessions[peerAddress] == this` перед `TryRemove`
+> **Все пункты закрыты** в PR #5 (`bd924df`, `c58dc8b`, `7ba07c7`, `968f2e4`, `5387dd3`, `037096e`) + PR #18/#20 (`SessionKey`). P1.3 (Hold Timer) — частично: таймер работает, рефакторинг в `BgpTimers` через DI отложен (P6.1).
 
-### 1.2 Параллельная запись в `_stream`
-**Файл:** `BgpSession.cs:208`
-**Проблема:** `_sendLock` берётся только в `RefreshRoutesAsync`. Keepalive, initial routes, NOTIFICATION пишут без блокировки. `NetworkStream` не потокобезопасен.
-**Исправление:**
-- Перенести `_sendLock` внутрь `SendMessageAsync` (брать/освобождать там)
-- Или: ввести `Channel<BgpMessage>` + единственный writer-loop
-- Все пути отправки должны проходить через одну точку синхронизации
+### 1.1 Гонка при замене сессий — ✅ Закрыто
+**Файл:** `BgpServer.cs:187-221` (TryAdd + TryUpdate CAS с retry-циклом), `:263-271` (atomic remove через `ICollection<KeyValuePair>.Remove`)
+**Решение:** атомарная замена сессии по ключу `SessionKey` (IP+порт, `SessionKey.cs:21`) — `TryAdd` с retry и CAS, атомарное удаление только если запись принадлежит закрываемой сессии (`RemoveSessionIfOwner`).
+**Коммиты:** `c58dc8b` (PR #5); ключ `SessionKey` — PR #20 / #18.
 
-### 1.3 Отсутствует Hold Timer
-**Файл:** `BgpSession.cs`, `BgpTimers.cs` (мёртвый код)
-**Проблема:** RFC 4271 требует NOTIFICATION (Hold Timer Expired, subcode 4) + Idle при истечении hold-таймера. `_negotiatedHoldTime` не используется.
-**Исправление:**
-- Реализовать `BgpTimers` с `HoldTimer` и `ConnectRetryTimer`
-- При каждом полученном сообщении сбрасывать hold-таймер
-- По истечении: `SendNotificationAsync(4, 0)` → `_cts.Cancel()` → FSM → Idle
-- Удалить мёртвый код `BgpTimers.cs`, реализовать логику
+### 1.2 Параллельная запись в `_stream` — ✅ Закрыто
+**Файл:** `BgpSession.cs:286` (`_sendLock`), `:848-882` (`SendMessageAsync`)
+**Решение:** `SemaphoreSlim _sendLock` берётся внутри `SendMessageAsync` — единственной точки отправки; все пути (keepalive, initial routes, NOTIFICATION, refresh) проходят через неё.
+**Коммит:** `bd924df` (PR #5).
 
-### 1.4 NOTIFICATION при штатном завершении
-**Файл:** `BgpSession.cs:190-193`
-**Проблема:** Внешний `catch (Exception)` не отправляет NOTIFICATION (Cease). RFC 4271 §8.1.
-**Исправление:**
-- В `catch (Exception)` и в `finally`: попытаться `SendNotificationAsync(6, 0)`, поглотить IO-ошибки
-- Гарантировать NOTIFICATION перед `socket.Close()`
+### 1.3 Hold Timer — ⚠️ Частично
+**Файл:** `BgpSession.cs:301` (init `Interlocked.Exchange`), `:326` (reset на receive), `:351-377` (`HoldTimerLoopAsync`), `:362-369` (compare + NOTIFICATION CAS)
+**Что сделано:** hold-таймер реализован инлайн на `Interlocked _lastReceivedTicks`; по истечении — NOTIFICATION (HoldTimerExpired) + Cease CAS. `_negotiatedHoldTime` используется (`:294`, `:353`, `:365`).
+**Что осталось:** вынести логику таймеров в инжектируемый класс `BgpTimers` через DI (P6.1, issue #10). Примечание: класс `BgpTimers` никогда не существовал в кодовой базе — прежняя формулировка плана про «мёртвый код `BgpTimers.cs`» была неверной.
 
-### 1.5 `_state` без барьеров памяти
-**Файл:** `BgpSession.cs:37,752`
-**Проблема:** `IsEstablished` читает `_state` из другого потока без `Volatile.Read`. JIT может кешировать.
-**Исправление:**
-- Заменить `_state` на `volatile` поле или использовать `Volatile.Read(ref _state)`
-- Или: ввести `Interlocked.Exchange`/`Interlocked.CompareExchange` для транзакций состояния
+### 1.4 NOTIFICATION при штатном завершении — ✅ Закрыто
+**Файл:** `BgpSession.cs:254-258`, `:270-274` (Cease CAS в `catch`/`finally`), `:977-996` (`NotifyCeaseAsync`)
+**Решение:** best-effort Cease NOTIFICATION через `Interlocked.CompareExchange` в `catch(Exception)` и `finally`; также CAS для `RemoteNotification` (`:345`), `HoldTimerExpired` (`:366`), `SilentClose` (`:1013`).
+**Коммиты:** feat `037096e` (Cease) + teardown races `7ba07c7`, `968f2e4`, `5387dd3` (PR #5).
+
+### 1.5 `_state` без барьеров памяти — ✅ Закрыто
+**Файл:** `BgpSession.cs:34` (`volatile BgpFsmState _state`), `:58` (`IsEstablished`)
+**Решение:** поле объявлено `volatile`; дополнительно `Interlocked` для `_teardownReason` (`:46`), `_lastReceivedTicks` (`:54`), `_disposed` (`:47`).
+**Коммит:** `bd924df` (PR #5).
 
 ---
 
 ## Приоритет 2: Протокольные ошибки
 
 ### 2.1 Порядок path attributes
-**Файл:** `BgpMessageWriter.cs:113-141`
+**Файл:** `BgpMessageWriter.cs:130-134` (цикл `foreach` в `WriteUpdate` 113-141)
 **Проблема:** Writer не сортирует атрибуты. RFC 4271 §5: ORIGIN → AS_PATH → NEXT_HOP → MED → LOCAL_PREF.
-**Исправление:**
-- Добавить константный порядок атрибутов (enum или массив)
-- В `WriteUpdate` сортировать `PathAttributes` перед записью
-- В `ParseUpdate` валидировать порядок входящих атрибутов
+**Исправление:** сортировать `PathAttributes` перед записью; в `ParseUpdate` валидировать порядок входящих атрибутов.
 
 ### 2.2 Валидация `PrefixCodec` на `length > 32`
-**Файл:** `PrefixCodec.cs:16-22, 32-38`
-**Проблема:** `length > 32` вызывает OOB-запись (сдвиг `24 - i*8` при `i>=4`) и неверную маску.
-**Исправление:**
-- Добавить `if (length > 32) throw new ArgumentOutOfRangeException(...)` в `Encode` и `Decode`
-- Добавить guard в `EncodeList`/`DecodeList`
+**Файл:** `PrefixCodec.cs:21` (Encode, negative shift `24 - i*8` при `i >= 4`), `:35, 37` (Decode shift+mask)
+**Проблема:** `length > 32` вызывает OOB-запись и неверную маску.
+**Исправление:** `if (length > 32) throw new ArgumentOutOfRangeException(...)` в `Encode`/`Decode` и в `EncodeList`/`DecodeList` (`:41-60`).
 
 ### 2.3 Усечение в OPEN-кодировании
-**Файл:** `BgpMessageWriter.cs:57,88,93`
-**Проблема:** `optParamsLen` и `capDataLen` приводятся к `byte`. Если >255 — declared length ≠ реальные байты.
-**Исправление:**
-- Использовать 2-байтное поле для длины (или валидировать что ≤255)
-- Или: разделить на multiple optional parameters (RFC 5492)
+**Файл:** `BgpMessageWriter.cs:57, 88, 93` (три места приведения к `byte`)
+**Проблема:** `optParamsLen`/`capDataLen` приводятся к `byte`. Если >255 — declared length ≠ реальные байты → malformed frame.
+**Исправление:** валидировать ≤ 255 (или 2-байтовое поле / разделение optional parameters, RFC 5492).
 
-### 2.4 `ReadAsPath` смешивает ASN размеры
-**Файл:** `AttributeHelper.cs:32-44`
-**Проблема:** При `fourByteAsn && offset + 4 > attr.Data.Length` inner loop падает в ветку 16-bit.
-**Исправление:**
-- Если `fourByteAsn` и данных недостаточно для 4-byte ASN — бросить `BgpParseException`
-- Не смешивать размеры в одном сегменте
+### 2.4 `ReadAsPath` смешивает ASN размеры — ✅ Закрыто
+**Файл:** `AttributeHelper.cs:22-50` (guard `:35-36`)
+**Решение:** добавлен guard `if (offset + segBytes > attr.Data.Length) break;` — предотвращает OOB-чтение при 4-byte ASN с недостатком данных.
+**Коммит:** `9709c69` (в `main`).
 
 ### 2.5 Валидация атрибутов при чтении
-**Файл:** `AttributeHelper.cs:8-11, 79-82, 96-103`
-**Проблема:**
-- `ReadOrigin`: нет проверки `attr.Data.Length >= 1`
-- `ReadNextHop`: нет проверки `attr.Data.Length >= 4`
-- `ReadCommunities`: нет проверки `attr.Data.Length % 4 == 0`
-**Исправление:**
-- Добавить валидацию длины в каждом методе
-- Бросать `BgpParseException` (UPDATE 3/1) при нарушении
+**Файл:** `AttributeHelper.cs:7-10` (`ReadOrigin`), `:82-85` (`ReadNextHop`), `:99-106` (`ReadCommunities`); `BgpMessageReader.cs:192-193` (`ParseAttribute` без bounds-check перед `Slice`)
+**Проблема:** нет проверок `attr.Data.Length` (Origin ≥1, NextHop ≥4, Communities %4 == 0).
+**Исправление:** валидация длины в каждом методе; `BgpParseException` (UPDATE 3/1) при нарушении.
 
 ### 2.6 Валидация reserved attribute flag bits
-**Файл:** `PathAttribute.cs`
+**Файл:** `BgpMessageReader.cs:174-196` (`ParseAttribute`); флаги — `BgpConstants.cs:57-60`
 **Проблема:** Бит 0x08 в флагах не проверяется. RFC 4271 требует его = 0.
-**Исправление:**
-- В `ParseAttribute`: проверять `(flags & 0x08) == 0`, иначе `BgpParseException`
-- В `WriteAttribute`: всегда сбрасывать бит 0x08
+**Исправление:** в `ParseAttribute` (reader): `if ((flags & 0x08) != 0) throw BgpParseException`; в writer всегда сбрасывать 0x08. (`PathAttribute.cs` — только data-holder, проверки там нет.)
 
 ### 2.7 Hold time high byte
 **Файл:** `BgpMessageReader.cs:63`
 **Проблема:** Высокий октет hold time не проверяется (RFC: MUST be zero).
-**Исправление:**
-- Проверять `payload[3] == 0` при чтении hold time
-- Иначе NOTIFICATION (OPEN Message Error / Unacceptable Hold Time)
+**Исправление:** проверять `payload[3] == 0`; иначе NOTIFICATION (OPEN Message Error / `UnacceptableHoldTime`, `BgpConstants.cs:39` — сейчас не используется).
 
 ### 2.8 Валидация OPEN payload length
-**Файл:** `BgpMessageReader.cs:68-69`
-**Проблема:** Трейлинговые байты игнорируются. RFC 4271 §6.2: length должен точно соответствовать.
-**Исправление:**
-- Проверять `payload.Length == 10 + optParamsLen`, иначе NOTIFICATION
+**Файл:** `BgpMessageReader.cs:55-69` (точнее после `:68`)
+**Проблема:** Трейлинговые байты игнорируются (есть только `>=` guard, нет точного `!=`). RFC 4271 §6.2: length должен точно соответствовать.
+**Исправление:** `if (payload.Length != 10 + optParamsLen) → NOTIFICATION`.
 
 ### 2.9 `BgpConstants.IPAddressToUint` без IPv4 guard
-**Файл:** `BgpConstants.cs:86-90`
-**Проблема:** IPv6 адрес → 16 байт, молча обрезается до 4.
-**Исправление:**
-- `if (address.AddressFamily != AddressFamily.InterNetwork) throw`
+**Файл:** `BgpConstants.cs:94-98`
+**Проблема:** IPv6 адрес (16 байт) молча обрезается до 4.
+**Исправление:** `if (address.AddressFamily != AddressFamily.InterNetwork) throw`.
 
 ---
 
@@ -223,38 +191,27 @@
 ### 3.1 Утечка маршрутов через community-фильтр
 **Файл:** `PeerCommunityFilter.cs:22-23`
 **Проблема:** Маршруты без community обходят фильтр (`return true`).
-**Исправление:**
-- Если `allowed.Count > 0` и `route.Communities.Length == 0` → `return false`
-- Только если фильтр не настроен (allowed пуст) → `return true`
+**Исправление:** Если `allowed.Count > 0` и `route.Communities.Length == 0` → `return false`; только при пустом фильтре → `return true`.
 
 ### 3.2 Мутабельные массивы в `Route`
 **Файл:** `Route.cs:8-9`
-**Проблема:** `AsPath` и `Communities` — `uint[]` с `init`. Мутируемое содержимое.
-**Исправление:**
-- Заменить на `ImmutableArray<uint>` или `IReadOnlyList<uint>`
-- При создании `Route` — клонировать входные массивы
+**Проблема:** `AsPath` и `Communities` — `uint[]` с `init`. Мутируемое содержимое (init защищает только ссылку).
+**Исправление:** `ImmutableArray<uint>` или `IReadOnlyList<uint>`; клонировать входные массивы в конструкторе.
 
 ### 3.3 `RouteTable.AddOrUpdate` ненадёжен
 **Файл:** `RouteTable.cs:11-18`
-**Проблема:** `ConcurrentDictionary.AddOrUpdate` вызывает add-factory несколько раз. `added` невалиден.
-**Исправление:**
-- Использовать `TryAdd` + `_routes[key] = value` через lock
-- Или: `GetOrAdd` + проверку `ContainsKey` до/после
+**Проблема:** `ConcurrentDictionary.AddOrUpdate` вызывает add-factory несколько раз. `added` невалиден; возможна лишняя аллокация `Route`.
+**Исправление:** `TryAdd` + `_routes[key] = value` через lock, либо `GetOrAdd` + проверку.
 
 ### 3.4 Валидация prefix length и masking
 **Файл:** `Route.cs:5-6`, `RouteTable.cs:14`
-**Проблема:** Префиксы не маскируются. Дубликаты ключей.
-**Исправление:**
-- В `Route` конструкторе: `Prefix = Prefix & (0xFFFFFFFF << (32 - PrefixLength))`
-- Валидировать `0 <= PrefixLength <= 32`
-- В `RouteTable.AddOrUpdate`: аналогичная валидация
+**Проблема:** Префиксы не маскируются в `Route` (маскирование есть только в `ExactUnionPrefixAggregator`). Дубликаты ключей при host bits.
+**Исправление:** В конструкторе `Route`: `Prefix = Prefix & (0xFFFFFFFF << (32 - PrefixLength))`; валидировать `0 <= Length <= 32`.
 
 ### 3.5 Longest-prefix-match
-**Файл:** `RouteTable.cs`
-**Проблема:** Нет метода `Lookup(uint address)`. Только exact match.
-**Исправление:**
-- Добавить `Route? Lookup(uint address)` — перебор всех маршрутов, выбор наиболее специфичного
-- Опционально: Patricia trie для производительности (но для начала линейный поиск)
+**Файл:** `RouteTable.cs` (класс)
+**Проблема:** Нет метода `Lookup(uint address)`. Только exact match `Get`.
+**Исправление:** `Route? Lookup(uint address)` — можно через `Enumerate()` (линейный поиск) или Patricia-trie.
 
 ---
 
@@ -263,161 +220,101 @@
 ### 4.1 Валидация RouterId
 **Файл:** `BgpConfig.cs:11-12`
 **Проблема:** Default `"0.0.0.0"` нарушает RFC 4271 §6.8.
-**Исправление:**
-- Сделать `RouterId` `required` (в YAML)
-- В `GetRouterIdAddress()` валидировать ≠ `0.0.0.0` и ≠ IPv6
-- Бросать `InvalidOperationException` при невалидном значении
+**Исправление:** `RouterId` required; в `GetRouterIdAddress()` валидировать ≠ `0.0.0.0` и ≠ IPv6.
 
 ### 4.2 Валидация HoldTime/KeepAlive
 **Файл:** `BgpConfig.cs:14-18`
 **Проблема:** Любой int принимается. RFC: 0 или ≥3.
-**Исправление:**
-- `if (HoldTime != 0 && HoldTime < 3) throw`
-- `if (KeepAlive != 0 && KeepAlive < 1) throw`
-- Cross-check: `KeepAlive <= HoldTime / 3`
+**Исправление:** `HoldTime != 0 && HoldTime < 3` → throw; `KeepAlive != 0 && KeepAlive < 1` → throw; `KeepAlive <= HoldTime/3`.
 
 ### 4.3 Валидация ApiPort
 **Файл:** `AppConfig.cs:13-14`
 **Проблема:** Default `5001`, документация говорит `5000`. Нет range-валидации.
-**Исправление:**
-- Изменить default на `5000` (согласовать с документацией)
-- Валидировать `1 <= ApiPort <= 65535`
+**Исправление:** Default `5000`; валидировать `1 <= ApiPort <= 65535`.
 
 ### 4.4 Валидация PeerConfig.Address
 **Файл:** `PeerConfig.cs:9`
 **Проблема:** Default `"0.0.0.0"` невалиден как peer address.
-**Исправление:**
-- Сделать `Address` `required` (в YAML)
-- Валидировать `IPAddress.TryParse` при загрузке конфига
+**Исправление:** `Address` required; `IPAddress.TryParse` при загрузке.
 
 ### 4.5 Post-deserialization валидация
-**Файл:** `ConfigLoader.cs:14,18`
+**Файл:** `ConfigLoader.cs:11-18`
 **Проблема:** После десериализации нет проверок.
-**Исправление:**
-- Добавить `AppConfig.Validate()` метод
-- Вызывать из `Load`/`LoadFromText` после десериализации
-- Бросать `InvalidOperationException` с описанием поля и файла
+**Исправление:** `AppConfig.Validate()`; вызывать из `Load`/`LoadFromText`.
 
 ### 4.6 Strict YAML parsing
 **Файл:** `ConfigLoader.cs:8`
 **Проблема:** `IgnoreUnmatchedProperties` тихо глотает опечатки.
-**Исправление:**
-- Убрать `IgnoreUnmatchedProperties()` или добавить опцию strict mode
-- Минимум: логировать предупреждения при обнаружении неизвестных свойств
+**Исправление:** убрать или strict mode; минимум — логировать неизвестные свойства.
 
 ### 4.7 Атомарное сохранение конфига
 **Файл:** `ConfigLoader.cs:23-24`
-**Проблема:** `File.WriteAllText` — неатомарно. Краш при записи = повреждённый файл.
-**Исправление:**
-- Запись в `.tmp` → `File.Move` (с заменой)
-- Или: `File.WriteAllText(path + ".tmp", ...)` + `File.Replace(...)`
+**Проблема:** `Save` сейчас возвращает строку и не пишет на диск (прежняя формулировка про `File.WriteAllText` устарела). Атомарной записи в файл нет.
+**Исправление:** при записи в файл — `path + ".tmp"` → `File.Replace`/`File.Move`.
 
 ### 4.8 `global.json` rollback policy
 **Файл:** `global.json:4-5`
-**Проблема:** `rollForward: latestMajor` + `allowPrerelease: true` — пиннинг бессмысленен.
-**Исправление:**
-- `rollForward: latestFeature` (или пиннинг feature band `"10.0.*"`)
-- `allowPrerelease: false`
+**Проблема:** `rollForward: latestMajor` + `allowPrerelease: true` — пиннинг SDK (10.0.0) бессмысленен.
+**Исправление:** `rollForward: latestFeature`, `allowPrerelease: false`.
 
 ---
 
 ## Приоритет 5: Тесты
 
-### 5.1 Добавить ссылки на недостающие проекты
-**Файл:** `BGPLite.Tests.csproj`
-**Проблема:** Нет ссылок на `BGPLite.Api`, `BGPLite.Providers`, `BGPLite`.
-**Исправление:**
-- Добавить `ProjectReference` на все проекты решения
+### 5.1 Ссылки на проекты — ✅ Закрыто
+**Файл:** `BGPLite.Tests/BGPLite.Tests.csproj:12-17`
+**Решение:** `BGPLite.Tests` уже ссылается на `BGPLite.Api` и `BGPLite.Providers` (прежнее утверждение «нет ссылок на Api/Providers» устарело). Корневой `BGPLite` (Exe) отдельной ссылки не требует.
 
 ### 5.2 Негативные тесты парсера
-**Проблема:** 8 критических путей без тестов.
-**Исправление — добавить:**
-- `ReadMessage_UnknownType_Throws`
-- `ReadMessage_InvalidLength_Throws`
-- `ReadMessage_Incomplete_Throws`
-- `ReadMessage_OpenTooShort_Throws`
-- `ReadMessage_UnsupportedVersion_Throws`
-- `ReadMessage_UpdateTooShort_Throws`
-- `ReadMessage_NotificationTooShort_Throws`
-- `ReadMessage_UpdateMissingAttributes_Throws`
+**Проблема:** 8 критических путей без тестов (`BgpMessageTests.cs:212, 220` — единственные негативные).
+**Добавить:** `ReadMessage_UnknownType_Throws`, `ReadMessage_InvalidLength_Throws`, `ReadMessage_Incomplete_Throws`, `ReadMessage_OpenTooShort_Throws`, `ReadMessage_UnsupportedVersion_Throws`, `ReadMessage_UpdateTooShort_Throws`, `ReadMessage_NotificationTooShort_Throws`, `ReadMessage_UpdateMissingAttributes_Throws`. Reader уже бросает `BgpParseException` — тестам лишь собрать битые буферы.
 
 ### 5.3 Тесты `PeerCommunityFilter`
-**Проблема:** Нулевое покрытие непростой логики.
-**Исправление — добавить:**
-- `AcceptOutgoing_RouteWithAllowedCommunity_ReturnsTrue`
-- `AcceptOutgoing_RouteWithoutCommunity_DeniedWhenFilterActive`
-- `AcceptOutgoing_RouteWithNoOverlap_ReturnsFalse`
-- `AcceptOutgoing_EmptyAllowedSet_AllRoutesPass`
+**Проблема:** нулевое покрытие (`PeerCommunityFilter.cs:16-32`).
+**Добавить:** `RouteWithAllowedCommunity_ReturnsTrue`, `RouteWithoutCommunity_DeniedWhenFilterActive` (⚠️ расходится с текущим поведением P3.1), `RouteWithNoOverlap_ReturnsFalse`, `EmptyAllowedSet_AllRoutesPass`.
 
 ### 5.4 Граничные значения `PrefixCodec`
-**Проблема:** Только byte-aligned длины.
-**Исправление — добавить:**
-- Длины 1, 7, 9, 23, 25, 31
-- Тест с host bits set (проверка masking)
-- Тест `length > 32` → exception
-- Тест с пустым буфером
+**Проблема:** только byte-aligned длины (`PrefixCodecTests.cs`).
+**Добавить:** длины 1, 7, 9, 23, 25, 31; host bits set (masking); `length > 32` → exception (требует guard из P2.2); пустой буфер.
 
 ### 5.5 Расширение тестов `BgpMessageTests`
-**Исправление — добавить:**
-- Roundtrip для 2-byte ASN paths
-- Extended length attribute (>255 bytes)
-- OPEN с пустым capabilities list
-- Проверка порядка attributes в UPDATE
-- Проверка capability data content (не только count)
+**Добавить:** roundtrip 2-byte ASN paths; extended-length атрибут (>255 байт); OPEN с пустыми capabilities; порядок атрибутов; содержимое capability data (частично покрыто в `GracefulRestartTests.cs`).
 
 ### 5.6 Тесты `ConfigLoader.Save`
-**Исправление — добавить:**
-- `SaveLoad_Roundtrip_PreservesAllFields`
-- `Load_InvalidYaml_Throws`
-- `Load_MissingFile_Throws`
-- `LoadFromText_EmptyBgpSection_UsesDefaults`
+**Проблема:** только позитивные `LoadFromText` (`ConfigurationTests.cs`); `Save` — нулевое покрытие.
+**Добавить:** `SaveLoad_Roundtrip_PreservesAllFields`, `Load_InvalidYaml_Throws`, `Load_MissingFile_Throws`, `LoadFromText_EmptyBgpSection_UsesDefaults`.
 
-### 5.7 Тесты `BgpServer` и `BgpSession`
-**Исправление — добавить:**
-- Интеграционные тесты с mock TCP (minimal session lifecycle)
-- Тест Hold Timer expiry → NOTIFICATION
-- Тест NOTIFICATION перед socket close
-- Тест concurrent send safety (если возможно)
+### 5.7 Тесты `BgpServer` и `BgpSession` — ✅ Закрыто
+**Файл:** `BGPLite.Tests/BgpSessionShutdownTests.cs`
+**Решение:** реализованы все четыре под-пункта — hold-timer expiry (`:136`), NOTIFICATION перед закрытием (`:56`), mock-TCP интеграция, конкурентная отправка (`:438`, через `ConcurrentDictionary` race + `_sendLock`).
 
 ---
 
 ## Приоритет 6: Архитектурные улучшения
 
 ### 6.1 Реализовать `BgpTimers`
-**Проблема:** Класс существует, но мёртвый.
-**Исправление:**
-- Hold Timer, ConnectRetry Timer, Keepalive Timer
-- Интеграция в `BgpSession.RunEstablishedAsync`
+**Проблема:** таймеры (keep-alive, hold, connect-retry) реализованы инлайн в `BgpSession` (`BgpSession.cs:51-54`, `:291`, `:303`, `:351`), а не вынесены в инжектируемый компонент.
+**Исправление:** класс `BgpTimers` через DI; используется в `BgpSession`. (Прежняя формулировка «класс существует, но мёртвый» неверна — `BgpTimers` никогда не создавался.)
 
 ### 6.2 FSM: добавить состояние `Active`
-**Проблема:** RFC 4271 §8 требует 6 состояний.
-**Исправление:**
-- Добавить `BgpFsmState.Active`
-- Реализовать транзитивы: Connect → Active (при connect failure), Active → Connect (connect retry)
+**Проблема:** RFC 4271 §8 требует 6 состояний (`BgpFsmState.cs:3-10`).
+**Исправление:** `BgpFsmState.Active`; переходы Connect → Active (connect failure), Active → Connect (ConnectRetry). Актуально только после реализации outbound-connect; связано с 6.1.
 
 ### 6.3 Async PeerStore
-**Проблема:** `IPeerStore` полностью синхронный, блокирует session thread.
-**Исправление:**
-- Добавить async версии методов (`GetPeerByIpAsync`, etc.)
-- Или: `ValueTask` возвраты
+**Проблема:** `IPeerStore` (`IPeerStore.cs:3-19`) полностью синхронный, блокирует session thread.
+**Исправление:** async-версии (`GetPeerByIpAsync` и т.д.) или `ValueTask`.
 
 ### 6.4 Кэширование community-запросов
-**Проблема:** `PeerCommunityFilter` делает DB-запрос на каждый (route, peer).
-**Исправление:**
-- In-memory кэш с TTL на уровне сессии
-- Инвалидация при обновлении subscriptions
+**Проблема:** `PeerCommunityFilter` (`:19-31`) делает DB-запрос на каждый (route, peer).
+**Исправление:** in-memory кэш с TTL на уровне сессии; инвалидация при обновлении subscriptions.
 
 ### 6.5 Добавить iBGP/eBGP различение
-**Проблема:** Нет типа пира в конфигурации.
-**Исправление:**
-- `PeerConfig.PeerType: IBGP | EBGP`
-- Влияет на next-hop handling и AS_PATH prepend
+**Проблема:** нет типа пира (`PeerConfig.cs`).
+**Исправление:** `PeerConfig.PeerType: IBGP | EBGP`; влияет на next-hop handling и AS_PATH prepend.
 
 ### 6.6 MaxPrefix limit
-**Проблема:** Нет ограничения количества префиксов на пира.
-**Исправление:**
-- `PeerConfig.MaxPrefix: uint?`
-- При превышении → NOTIFICATION (Cease / Max Prefixes Exceeded)
+**Проблема:** нет ограничения префиксов на пира (`PeerConfig.cs`).
+**Исправление:** `PeerConfig.MaxPrefix: uint?`; при превышении → NOTIFICATION (Cease / Max Prefixes Exceeded).
 
 ---
 
@@ -425,11 +322,11 @@
 
 | Этап | Приоритет | Описание |
 |------|-----------|----------|
-| 1 | P1 | Гонки сессий, send lock, hold timer, NOTIFICATION, volatile state |
-| 2 | P2 | Протокольная валидация (attributes, prefix, OPEN, AS_PATH) |
+| 1 | P1 | ✅ Гонки сессий, send lock, NOTIFICATION, volatile state (hold-timer DI → P6.1) |
+| 2 | P2 | Протокольная валидация (2.4 ✅; остальное: attributes, prefix, OPEN) |
 | 3 | P3 | Community filter, Route immutability, prefix masking, LPM |
 | 4 | P4 | Конфигурация (validation, strict YAML, atomic save, global.json) |
-| 5 | P5 | Тесты (negative paths, PeerCommunityFilter, PrefixCodec, integration) |
+| 5 | P5 | Тесты (5.1 ✅, 5.7 ✅; остальное: negative paths, codec, integration) |
 | 6 | P6 | Архитектура (BgpTimers, FSM Active, async PeerStore, cache) |
 
 ---
@@ -439,14 +336,13 @@
 ```
 1.1 (гонка сессий) ──┐
 1.2 (send lock)    ──┤── 2.1 (порядок attributes)
-1.3 (hold timer)   ──┤── 5.7 (интеграционные тесты)
+1.3 (hold timer)   ──┤── 5.7 ✅ (интеграционные тесты)
 1.4 (NOTIFICATION) ──┤
 1.5 (volatile)     ──┘
 
 2.2 (PrefixCodec)  ──┐
 2.3 (OPEN encoding) ─┤── 5.4 (граничные тесты)
-2.4 (ReadAsPath)    ─┤── 5.2 (негативные тесты)
-2.5 (attribute len) ─┘
+2.5 (attribute len) ─┘── 5.2 (негативные тесты)
 
 3.1 (community filter) ──┐
 3.2 (Route immutable)  ──┤── 5.3 (тесты фильтра)
