@@ -1,4 +1,5 @@
 using System.Buffers.Binary;
+using System.Linq;
 using BGPLite.Protocol;
 
 namespace BGPLite.Tests;
@@ -343,6 +344,31 @@ public class BgpMessageTests
         Array.Fill(buffer, (byte)sentinel);
 
         Assert.Throws<ArgumentOutOfRangeException>(() => BgpMessageWriter.WriteMessage(open, buffer));
+        Assert.All(buffer, b => Assert.Equal(sentinel, b));
+    }
+
+    [Fact]
+    public void WriteHeader_ExceedsMaxMessageSize_Throws()
+    {
+        // Writer and reader must agree on the message size envelope
+        // (BgpConstants.MaxMessageSize = 4096). Build an UPDATE whose total
+        // length exceeds the cap: 1019 withdrawn /24 routes = 4076 bytes of
+        // NLRI, plus 2 (withdrawn-len) + 2 (path-attrs-len) = 4080 bytes of
+        // payload, plus 19 (header) = 4099 bytes — three over the cap.
+        var tooManyPrefixes = Enumerable.Range(0, 1019)
+            .Select(_ => new IpPrefix(0xC0A80000, 24))
+            .ToList();
+        var update = new BgpUpdateMessage
+        {
+            WithdrawnRoutes = tooManyPrefixes
+        };
+        var buffer = new byte[8192];
+        var sentinel = 0x77;
+        Array.Fill(buffer, (byte)sentinel);
+
+        // GetBufferSize does NOT cap; only WriteHeader enforces MaxMessageSize.
+        // Assert the writer rejects it without mutating buffer.
+        Assert.Throws<ArgumentOutOfRangeException>(() => BgpMessageWriter.WriteMessage(update, buffer));
         Assert.All(buffer, b => Assert.Equal(sentinel, b));
     }
 }

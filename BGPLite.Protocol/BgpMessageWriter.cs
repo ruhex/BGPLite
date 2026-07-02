@@ -30,11 +30,12 @@ public static class BgpMessageWriter
 
     private static void WriteHeader(BgpMessageType type, int totalLength, Span<byte> buffer)
     {
-        // RFC 4271 §4.1: BGP message length is a 16-bit field, min 19 (header only).
-        // Reject any length outside the representable range up front to avoid a
-        // silent (ushort) truncation that would emit a malformed frame.
-        if (totalLength < 19 || totalLength > ushort.MaxValue)
-            throw new ArgumentOutOfRangeException(nameof(totalLength), totalLength, $"BGP message length must be in 19..{ushort.MaxValue}.");
+        // RFC 4271 §4.1: BGP message length is a 16-bit field. BgpMessageReader
+        // rejects anything outside [MinMessageSize, MaxMessageSize], so we must
+        // reject the same range up front to keep writer and reader aligned
+        // (otherwise the writer could emit a frame the reader would discard).
+        if (totalLength < BgpConstants.MinMessageSize || totalLength > BgpConstants.MaxMessageSize)
+            throw new ArgumentOutOfRangeException(nameof(totalLength), totalLength, $"BGP message length must be in {BgpConstants.MinMessageSize}..{BgpConstants.MaxMessageSize}.");
 
         BgpConstants.Marker.CopyTo(buffer);
         BinaryPrimitives.WriteUInt16BigEndian(buffer[16..], (ushort)totalLength);
@@ -45,15 +46,14 @@ public static class BgpMessageWriter
 
     private static int WriteOpen(BgpOpenMessage msg, Span<byte> buffer)
     {
-        // Validate every length that could overflow a single byte BEFORE writing
-        // anything to the caller's buffer, so a rejected write leaves the span
-        // untouched (RFC 4271 §4.2 / §6.2).
-        var optParamsLen = GetOptParamsLength(msg.Capabilities);
+        // optParamsLen = 2 (type+length) + capDataLen. If optParamsLen fits in
+        // a byte, then capDataLen and every individual cap.Data.Length fit too,
+        // so one guard covers all three (RFC 4271 §4.2 / §6.2). Run the check
+        // BEFORE writing to the caller's buffer so a rejected write leaves the
+        // span untouched.
+        var capDataLen = GetCapabilitiesDataLength(msg.Capabilities);
+        var optParamsLen = msg.Capabilities.Count == 0 ? 0 : 2 + capDataLen;
         RequireFitsByte(optParamsLen, nameof(BgpOpenMessage.Capabilities), "optional-parameters");
-        if (msg.Capabilities.Count > 0)
-            RequireFitsByte(GetCapabilitiesDataLength(msg.Capabilities), nameof(BgpCapabilityInfo.Data), "capability data");
-        foreach (var cap in msg.Capabilities)
-            RequireFitsByte(cap.Data.Length, nameof(BgpCapabilityInfo.Data), "capability length");
 
         var payloadSize = 9 + 1 + optParamsLen;
         var totalLength = BgpConstants.MessageHeaderSize + payloadSize;
@@ -71,18 +71,16 @@ public static class BgpMessageWriter
 
         buffer[p++] = (byte)optParamsLen;
 
-        WriteCapabilities(msg.Capabilities, buffer[p..]);
+        WriteCapabilities(msg.Capabilities, capDataLen, buffer[p..]);
 
         return totalLength;
     }
 
-    private static int GetOpenPayloadSize(BgpOpenMessage msg) =>
-        9 + 1 + GetOptParamsLength(msg.Capabilities);
-
-    private static int GetOptParamsLength(List<BgpCapabilityInfo> capabilities)
+    private static int GetOpenPayloadSize(BgpOpenMessage msg)
     {
-        if (capabilities.Count == 0) return 0;
-        return 2 + GetCapabilitiesDataLength(capabilities);
+        if (msg.Capabilities.Count == 0) return 10; // 9 (fixed) + 1 (optParams length byte)
+        // Capabilities present: 9 (fixed) + 1 (optParams length byte) + 2 (Capabilities TLV header) + capDataLen
+        return 12 + GetCapabilitiesDataLength(msg.Capabilities);
     }
 
     private static int GetCapabilitiesDataLength(List<BgpCapabilityInfo> capabilities)
@@ -93,14 +91,9 @@ public static class BgpMessageWriter
         return capDataLen;
     }
 
-    private static void WriteCapabilities(List<BgpCapabilityInfo> capabilities, Span<byte> buffer)
+    private static void WriteCapabilities(List<BgpCapabilityInfo> capabilities, int capDataLen, Span<byte> buffer)
     {
         if (capabilities.Count == 0) return;
-
-        var capDataLen = GetCapabilitiesDataLength(capabilities);
-        // Pre-validated in WriteOpen; the second guard is here for the (currently
-        // unreachable via Encode) direct call path.
-        RequireFitsByte(capDataLen, nameof(BgpCapabilityInfo.Data), "capability data");
 
         var p = 0;
         buffer[p++] = 2; // Type: Capabilities
@@ -108,9 +101,6 @@ public static class BgpMessageWriter
 
         foreach (var cap in capabilities)
         {
-            // Pre-validated in WriteOpen; the second guard is here for the
-            // direct call path.
-            RequireFitsByte(cap.Data.Length, nameof(BgpCapabilityInfo.Data), "capability length");
             buffer[p++] = cap.Code;
             buffer[p++] = (byte)cap.Data.Length;
             cap.Data.AsSpan().CopyTo(buffer[p..]);
