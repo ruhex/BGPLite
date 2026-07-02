@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.2.0](https://github.com/ruhex/BGPLite/compare/v1.1.0...v1.2.0) (2026-07-02)
+
+
+### Features
+
+* **providers:** AsnPrefixProvider — support Kind: asn in PrefixSources ([#68](https://github.com/ruhex/BGPLite/issues/68)) ([530ab70](https://github.com/ruhex/BGPLite/commit/530ab703b70c2a9d2dadee8d3dbc2aa6de90bdec))
+
 ## [1.1.0](https://github.com/ruhex/BGPLite/compare/v1.0.1...v1.1.0) (2026-07-02)
 
 
