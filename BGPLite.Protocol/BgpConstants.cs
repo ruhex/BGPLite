@@ -1,4 +1,5 @@
 using System.Net;
+using System.Net.Sockets;
 
 namespace BGPLite.Protocol;
 
@@ -97,8 +98,21 @@ public static class BgpConstants
         public const byte Unicast = 1;
     }
 
+    /// <summary>RFC 1997 well-known communities.</summary>
+    public static class Community
+    {
+        public const uint NoExport = 0xFFFFFF01u;
+        public const uint NoAdvertise = 0xFFFFFF02u;
+        public const uint NoExportSubconfed = 0xFFFFFF03u;
+    }
+
     public static uint IPAddressToUint(IPAddress address)
     {
+        ArgumentNullException.ThrowIfNull(address);
+
+        if (address.AddressFamily != AddressFamily.InterNetwork)
+            throw new ArgumentException("IPv4 address required", nameof(address));
+
         var bytes = address.GetAddressBytes();
         return (uint)(bytes[0] << 24 | bytes[1] << 16 | bytes[2] << 8 | bytes[3]);
     }

@@ -1,4 +1,5 @@
 using System.Buffers.Binary;
+using System.Net;
 using System.Linq;
 using BGPLite.Protocol;
 
@@ -189,6 +190,19 @@ public class BgpMessageTests
     {
         for (var i = 0; i < 16; i++)
             Assert.Equal(0xFF, BgpConstants.Marker[i]);
+    }
+
+    [Fact]
+    public void IpAddressToUint_Ipv6_Throws()
+    {
+        Assert.Throws<ArgumentException>(() =>
+            BgpConstants.IPAddressToUint(IPAddress.Parse("2001:db8::1")));
+    }
+
+    [Fact]
+    public void IpAddressToUint_Null_Throws()
+    {
+        Assert.Throws<ArgumentNullException>(() => BgpConstants.IPAddressToUint(null!));
     }
 
     [Fact]

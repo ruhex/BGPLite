@@ -38,7 +38,7 @@ builder.Services.AddSingleton<PeerStore>();
 builder.Services.AddSingleton<IRouteFilter>(sp =>
 {
     var store = sp.GetRequiredService<PeerStore>();
-    return new PeerCommunityFilter(ip => store.GetCommunitiesByIp(ip));
+    return new PeerCommunityFilter(config.Bgp.Asn, ip => store.GetCommunitiesByIp(ip));
 });
 // Per-list community resolver: stamps a configured BGP community on prefixes by source
 // (AsnList / Country / PrefixSource). ConfigCommunityResolver reads static config; Phase 2 will
