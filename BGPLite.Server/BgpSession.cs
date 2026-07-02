@@ -680,7 +680,8 @@ public sealed class BgpSession : IDisposable
                 }
 
                 // Apply the per-peer outgoing community filter (same rule as the shared-table path).
-                routes = routes.Where(r => _routeFilter.AcceptOutgoing(r, _peerConfig)).ToList();
+                var filterPeerConfig = GetFilterPeerConfig();
+                routes = routes.Where(r => _routeFilter.AcceptOutgoing(r, filterPeerConfig)).ToList();
                 await SendRoutesAsync(nextHop, routes);
                 return;
             }
@@ -710,10 +711,11 @@ public sealed class BgpSession : IDisposable
         }
 
         // Final fallback: send from shared route table (single pass — one allocation, not two)
+        var sharedFilterPeerConfig = GetFilterPeerConfig();
         var filtered = new List<Route>();
         foreach (var r in _routeTable.Enumerate())
         {
-            if (_routeFilter.AcceptOutgoing(r, _peerConfig))
+            if (_routeFilter.AcceptOutgoing(r, sharedFilterPeerConfig))
                 filtered.Add(r);
         }
         if (filtered.Count == 0) return;
@@ -916,6 +918,14 @@ public sealed class BgpSession : IDisposable
         await SendMessageAsync(update);
         _metrics.UpdateSent();
     }
+
+    private PeerConfig GetFilterPeerConfig() => new()
+    {
+        Address = _peerConfig.Address,
+        RemoteAsn = _remoteAsn,
+        Description = _peerConfig.Description,
+        Port = _peerConfig.Port
+    };
 
     /// <summary>
     /// End-of-RIB marker for IPv4 unicast (RFC 4724 §2): a minimum-length UPDATE (no withdrawn

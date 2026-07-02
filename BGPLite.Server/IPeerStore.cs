@@ -13,6 +13,7 @@ public interface IPeerStore
     List<string> GetCustomPrefixes(string peerId);
     List<uint> GetCustomAsns(string peerId);
     HashSet<uint> GetCommunities(string peerId);
+    HashSet<uint> GetCommunities(string ip, uint asn);
     void SetCommunities(string peerId, HashSet<uint> communities);
     void ClearCommunities(string peerId);
     void SetDescription(string id, string description);

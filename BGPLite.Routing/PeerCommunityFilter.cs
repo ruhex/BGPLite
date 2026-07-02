@@ -6,9 +6,9 @@ namespace BGPLite.Routing;
 public sealed class PeerCommunityFilter : IRouteFilter
 {
     private readonly uint _localAsn;
-    private readonly Func<string, HashSet<uint>> _getCommunities;
+    private readonly Func<string, uint?, HashSet<uint>> _getCommunities;
 
-    public PeerCommunityFilter(uint localAsn, Func<string, HashSet<uint>> getCommunities)
+    public PeerCommunityFilter(uint localAsn, Func<string, uint?, HashSet<uint>> getCommunities)
     {
         _localAsn = localAsn;
         _getCommunities = getCommunities;
@@ -23,7 +23,7 @@ public sealed class PeerCommunityFilter : IRouteFilter
         if (HasWellKnownSuppressingCommunity(route, isEbgp))
             return false;
 
-        var allowed = _getCommunities(peer.Address);
+        var allowed = _getCommunities(peer.Address, peer.RemoteAsn);
         if (allowed.Count == 0)
             return true; // no filter = all routes
 

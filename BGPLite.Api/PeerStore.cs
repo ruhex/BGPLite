@@ -115,6 +115,16 @@ public sealed class PeerStore : IPeerStore
             .ToHashSet();
     }
 
+    public HashSet<uint> GetCommunities(string ip, uint asn)
+    {
+        using var db = _dbFactory.CreateDbContext();
+        return db.Peers.Include(p => p.Communities)
+            .Where(p => p.Ip == ip && p.Asn == asn)
+            .SelectMany(p => p.Communities)
+            .Select(c => (uint)c.Community)
+            .ToHashSet();
+    }
+
     public HashSet<uint> GetCommunitiesByIp(string ip)
     {
         using var db = _dbFactory.CreateDbContext();
