@@ -57,3 +57,32 @@ jobs:
           gh release upload "${{ github.event.release.tag_name }}" \
             bgplite-${{ github.event.release.tag_name }}-${{ matrix.rid }}.${{ matrix.archive }} \
             --repo "$GITHUB_REPOSITORY" --clobber
+
+  docker:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build & push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          # repository_owner is lowercase (ruhex); image name lowercased explicitly.
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/bgplite:latest
+            ghcr.io/${{ github.repository_owner }}/bgplite:${{ github.event.release.tag_name }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

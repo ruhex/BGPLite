@@ -1,0 +1,19 @@
+# Example deployment for the BGPLite route-server.
+#
+# Config is NOT baked into the image — mount your real appsettings.yml from the host
+# (keeps secrets out of the image). See appsettings.Example.yml for the schema.
+#
+# BGP peers must reach the server's real TCP/179, so on Linux this uses host networking
+# (simplest for peering). If you prefer bridge networking, drop `network_mode: host`,
+# map `ports: ["179:179","5000:5000"]`, and add `cap_add: [NET_BIND_SERVICE]`
+# (port 179 < 1024) or run a reverse-proxy/port-remapper.
+services:
+  bgplite:
+    image: ghcr.io/ruhex/bgplite:latest
+    build: .
+    container_name: bgplite
+    network_mode: host
+    volumes:
+      - ./appsettings.yml:/app/appsettings.yml:ro
+      - ./data:/app/data
+    restart: unless-stopped

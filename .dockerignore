@@ -1,0 +1,10 @@
+**/bin/
+**/obj/
+.git/
+.github/
+.handoff/
+tests/
+*.md
+article-*.md
+appsettings.yml
+.gitignore
