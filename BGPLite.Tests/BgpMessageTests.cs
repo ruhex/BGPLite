@@ -332,6 +332,172 @@ public class BgpMessageTests
         Assert.Equal(255, buffer[28]);
     }
 
+    #region RFC 6793 — AS4_PATH tests
+
+    [Fact]
+    public void As4Path_WriteThenRead_Roundtrip()
+    {
+        // RFC 6793 §6: AS4_PATH (type 17) carries 4-byte ASN sequence for 2-byte-only peers
+        var as4Path = AttributeHelper.WriteAs4Path([200000u, 300000u]);
+
+        Assert.Equal(BgpConstants.Attribute.As4Path, as4Path.TypeCode);
+        // RFC 6793: AS4_PATH is optional transitive (FlagOptional | FlagTransitive)
+        Assert.Equal(BgpConstants.Attribute.FlagOptional | BgpConstants.Attribute.FlagTransitive, as4Path.Flags);
+        // 2 (segment header) + 2 * 4 (two 4-byte ASNs) = 10 bytes
+        Assert.Equal(10, as4Path.Data.Length);
+
+        var readAses = AttributeHelper.ReadAs4Path(as4Path);
+        Assert.Equal([200000u, 300000u], readAses);
+    }
+
+    [Fact]
+    public void As4Path_OverlongSegment_Throws()
+    {
+        var asns = Enumerable.Range(0, 256).Select(i => (uint)i).ToArray();
+
+        Assert.Throws<ArgumentOutOfRangeException>(() => AttributeHelper.WriteAs4Path(asns));
+    }
+
+    [Fact]
+    public void AsPath_OverlongSegment_Throws()
+    {
+        var asns = Enumerable.Range(0, 256).Select(i => (uint)i).ToArray();
+
+        Assert.Throws<ArgumentOutOfRangeException>(() => AttributeHelper.WriteAsPath(asns, fourByteAsn: false));
+    }
+
+    [Fact]
+    public void AsPath_TruncatedSegment_Throws()
+    {
+        var attr = new PathAttribute
+        {
+            Flags = BgpConstants.Attribute.FlagTransitive,
+            TypeCode = BgpConstants.Attribute.AsPath,
+            Data = new byte[] { BgpConstants.AsPath.AsSequence, 2, 0x00, 0x01 }
+        };
+
+        Assert.Throws<BgpParseException>(() => AttributeHelper.ReadAsPath(attr, fourByteAsn: false));
+    }
+
+    [Fact]
+    public void AsPath_InvalidSegmentType_Throws()
+    {
+        var attr = new PathAttribute
+        {
+            Flags = BgpConstants.Attribute.FlagTransitive,
+            TypeCode = BgpConstants.Attribute.AsPath,
+            Data = new byte[] { 0x7F, 1, 0x00, 0x01 }
+        };
+
+        Assert.Throws<BgpParseException>(() => AttributeHelper.ReadAsPath(attr, fourByteAsn: false));
+    }
+
+    [Fact]
+    public void As4Path_TruncatedSegment_Throws()
+    {
+        var attr = new PathAttribute
+        {
+            Flags = BgpConstants.Attribute.FlagOptional | BgpConstants.Attribute.FlagTransitive,
+            TypeCode = BgpConstants.Attribute.As4Path,
+            Data = new byte[] { BgpConstants.AsPath.AsSequence, 2, 0x00, 0x00, 0x00, 0x01 }
+        };
+
+        Assert.Throws<BgpParseException>(() => AttributeHelper.ReadAs4Path(attr));
+    }
+
+    [Fact]
+    public void AsPath_2Byte_WithAsTrans_Roundtrip()
+    {
+        // 2-byte-only peer: AS_PATH with AS_TRANS (23456) for ASN > 65535
+        var asPath = AttributeHelper.WriteAsPath([23456u], fourByteAsn: false);
+
+        Assert.Equal(BgpConstants.Attribute.AsPath, asPath.TypeCode);
+        // 2 (segment header) + 2 (one 2-byte ASN) = 4 bytes
+        Assert.Equal(4, asPath.Data.Length);
+
+        var readAses = AttributeHelper.ReadAsPath(asPath, fourByteAsn: false);
+        Assert.Equal([23456u], readAses);
+    }
+
+    [Fact]
+    public void AsPath_2Byte_RegularAsn_Roundtrip()
+    {
+        // 2-byte-only peer with regular 2-byte ASN
+        var asPath = AttributeHelper.WriteAsPath([65001u], fourByteAsn: false);
+
+        var readAses = AttributeHelper.ReadAsPath(asPath, fourByteAsn: false);
+        Assert.Equal([65001u], readAses);
+    }
+
+    [Fact]
+    public void Update_2BytePeer_WithAs4Path_Roundtrip()
+    {
+        // RFC 6793 §6: 2-byte-only peer receives 2-byte AS_PATH + AS4_PATH
+        var update = new BgpUpdateMessage
+        {
+            PathAttributes =
+            [
+                AttributeHelper.WriteOrigin(BgpOrigin.Igp),
+                AttributeHelper.WriteAsPath([23456u], fourByteAsn: false), // AS_TRANS
+                AttributeHelper.WriteNextHop(0xC0A80101),
+                AttributeHelper.WriteAs4Path([200000u]) // true 4-byte ASN
+            ],
+            Nlri = [new IpPrefix(0xC0A80000, 24)]
+        };
+
+        var buffer = new byte[512];
+        var written = BgpMessageWriter.WriteMessage(update, buffer);
+        var readUpdate = Assert.IsType<BgpUpdateMessage>(BgpMessageReader.ReadMessage(buffer.AsSpan(0, written)));
+
+        // Verify AS_PATH contains AS_TRANS
+        var asPathAttr = readUpdate.PathAttributes.First(a => a.TypeCode == BgpConstants.Attribute.AsPath);
+        var asPathAses = AttributeHelper.ReadAsPath(asPathAttr, fourByteAsn: false);
+        Assert.Equal([23456u], asPathAses);
+
+        // Verify AS4_PATH contains true 4-byte ASN
+        var as4PathAttr = readUpdate.PathAttributes.First(a => a.TypeCode == BgpConstants.Attribute.As4Path);
+        var as4PathAses = AttributeHelper.ReadAs4Path(as4PathAttr);
+        Assert.Single(as4PathAses);
+        Assert.Equal(200000u, as4PathAses[0]);
+    }
+
+    [Fact]
+    public void Update_4BytePeer_NoAs4Path()
+    {
+        // 4-byte peer: only AS_PATH in 4-byte form, no AS4_PATH
+        var update = new BgpUpdateMessage
+        {
+            PathAttributes =
+            [
+                AttributeHelper.WriteOrigin(BgpOrigin.Igp),
+                AttributeHelper.WriteAsPath([200000u], fourByteAsn: true),
+                AttributeHelper.WriteNextHop(0xC0A80101)
+            ],
+            Nlri = [new IpPrefix(0xC0A80000, 24)]
+        };
+
+        var buffer = new byte[512];
+        var written = BgpMessageWriter.WriteMessage(update, buffer);
+        var readUpdate = Assert.IsType<BgpUpdateMessage>(BgpMessageReader.ReadMessage(buffer.AsSpan(0, written)));
+
+        var asPathAttr = readUpdate.PathAttributes.First(a => a.TypeCode == BgpConstants.Attribute.AsPath);
+        var asPathAses = AttributeHelper.ReadAsPath(asPathAttr, fourByteAsn: true);
+        Assert.Equal([200000u], asPathAses);
+
+        // AS4_PATH should not be present
+        var as4PathAttr = readUpdate.PathAttributes.FirstOrDefault(a => a.TypeCode == BgpConstants.Attribute.As4Path);
+        Assert.Null(as4PathAttr);
+    }
+
+    [Fact]
+    public void AsPath_AsTrans_Constant_Is23456()
+    {
+        // RFC 6793: AS_TRANS = 23456
+        Assert.Equal(23456u, BgpConstants.AsPath.AsTrans);
+    }
+
+    #endregion
+
     [Fact]
     public void Open_Overflow_DoesNotMutateBuffer()
     {

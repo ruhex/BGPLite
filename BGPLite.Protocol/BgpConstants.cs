@@ -35,6 +35,7 @@ public static class BgpConstants
         public const byte Unspecific = 0;
         public const byte UnsupportedVersion = 1;
         public const byte BadPeerAs = 2;
+        public const byte MissingWellKnownAttribute = 3;
         public const byte BadBgpIdentifier = 3;
         public const byte UnacceptableHoldTime = 6;
     }
@@ -52,6 +53,8 @@ public static class BgpConstants
         public const byte OriginatorId = 9;
         public const byte ClusterList = 10;
         public const byte ExtendedCommunity = 16;
+        public const byte As4Path = 17;       // RFC 6793 §6 — 4-byte AS path for 2-byte peers
+        public const byte As4PathAggregator = 18; // RFC 6793 — 4-byte aggregator
         public const byte LargeCommunity = 32;
 
         public const byte FlagOptional = 0x80;
@@ -64,6 +67,9 @@ public static class BgpConstants
     {
         public const byte AsSet = 1;
         public const byte AsSequence = 2;
+
+        /// <summary>AS_TRANS (RFC 6793) — placeholder for 2-byte-only peers when local ASN > 65535.</summary>
+        public const uint AsTrans = 23456;
     }
 
     public static class Capability
