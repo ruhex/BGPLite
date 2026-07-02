@@ -47,7 +47,7 @@ public sealed class BgpSession : IDisposable
     private int _disposed;
     private uint _remoteAsn;
     private bool _remoteFourByteAsn;
-    private bool _localFourByteAsn = true;
+    private bool _localFourByteAsn; // определяется из согласованного OPEN (RFC 6793)
     private ushort _negotiatedHoldTime;
     private List<IpPrefix> _advertisedPrefixes = [];
     private TimeSpan _keepAliveInterval;
@@ -738,9 +738,27 @@ public sealed class BgpSession : IDisposable
             var attrs = new List<PathAttribute>
             {
                 AttributeHelper.WriteOrigin(BgpOrigin.Igp),
-                AttributeHelper.WriteAsPath([_bgpConfig.Asn], _localFourByteAsn),
                 AttributeHelper.WriteNextHop(nextHop)
             };
+
+            // RFC 6793 §6: AS_PATH encoding depends on peer capability
+            if (_localFourByteAsn)
+            {
+                // 4-byte peer: send AS_PATH in 4-byte form
+                attrs.Insert(1, AttributeHelper.WriteAsPath([_bgpConfig.Asn], fourByteAsn: true));
+            }
+            else
+            {
+                // 2-byte-only peer: send AS_PATH in 2-byte form with AS_TRANS if needed
+                var asPathAsn = _bgpConfig.Asn > ushort.MaxValue
+                    ? BgpConstants.AsPathAsTrans // 23456
+                    : _bgpConfig.Asn;
+                attrs.Insert(1, AttributeHelper.WriteAsPath([asPathAsn], fourByteAsn: false));
+
+                // If local ASN > 65535, append AS4_PATH (type 17) with true 4-byte ASN
+                if (_bgpConfig.Asn > ushort.MaxValue)
+                    attrs.Add(AttributeHelper.WriteAs4Path([_bgpConfig.Asn]));
+            }
 
             var communities = groupRoutes[0].Communities;
             if (communities.Length > 0)
@@ -1027,6 +1045,8 @@ public sealed class BgpSession : IDisposable
 
         _remoteFourByteAsn = CapabilityHelper.GetRemoteAsn(open).HasValue;
         _remoteAsn = CapabilityHelper.GetEffectiveAsn(open);
+        // RFC 6793 §6: определяем формат AS_PATH из согласованной capability
+        _localFourByteAsn = _remoteFourByteAsn;
 
         _onPeerIdentified?.Invoke(_peerConfig.Address, _remoteAsn);
 

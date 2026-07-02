@@ -79,6 +79,58 @@ public static class AttributeHelper
         };
     }
 
+    /// <summary>
+    /// Writes AS4_PATH attribute (type 17) per RFC 6793 §6.
+    /// Carries the true 4-byte AS sequence when sending to a 2-byte-only peer.
+    /// </summary>
+    public static PathAttribute WriteAs4Path(uint[] ases)
+    {
+        var data = new byte[2 + ases.Length * 4];
+        data[0] = BgpConstants.AsPath.AsSequence;
+        data[1] = (byte)ases.Length;
+
+        var offset = 2;
+        foreach (var asn in ases)
+        {
+            BinaryPrimitives.WriteUInt32BigEndian(data.AsSpan(offset), asn);
+            offset += 4;
+        }
+
+        return new PathAttribute
+        {
+            Flags = BgpConstants.Attribute.FlagTransitive,
+            TypeCode = BgpConstants.Attribute.As4Path,
+            Data = data
+        };
+    }
+
+    /// <summary>
+    /// Reads AS4_PATH attribute (type 17) per RFC 6793 §6.
+    /// Returns the 4-byte AS sequence for reconstruction when receiving from a 2-byte-only peer.
+    /// </summary>
+    public static uint[] ReadAs4Path(PathAttribute attr)
+    {
+        var ases = new List<uint>();
+        var offset = 0;
+
+        while (offset + 2 <= attr.Data.Length)
+        {
+            var segmentType = attr.Data[offset++];
+            var segmentLength = attr.Data[offset++];
+
+            var segBytes = segmentLength * 4;
+            if (offset + segBytes > attr.Data.Length)
+                break; // truncated segment
+
+            for (var i = 0; i < segmentLength; i++)
+            {
+                ases.Add(BinaryPrimitives.ReadUInt32BigEndian(attr.Data.AsSpan(offset)));
+                offset += 4;
+            }
+        }
+        return ases.ToArray();
+    }
+
     public static uint ReadNextHop(PathAttribute attr)
     {
         return BinaryPrimitives.ReadUInt32BigEndian(attr.Data);
