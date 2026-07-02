@@ -22,7 +22,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <None Include="..\appsettings.yml" Link="appsettings.yml" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\appsettings.yml" Link="appsettings.yml" CopyToOutputDirectory="PreserveNewest" Condition="Exists('..\appsettings.yml')" />
   </ItemGroup>
 
 </Project>
