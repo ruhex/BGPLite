@@ -16,8 +16,8 @@ public class BgpSessionRfc6793Tests
         // (static method, no session state needed)
         var routes = new List<Route>
         {
-            new() { Prefix = 0xC0A80000, PrefixLength = 24, Communities = [] },
-            new() { Prefix = 0x0A000000, PrefixLength = 8, Communities = [] }
+            new() { Prefix = 0xC0A80000, PrefixLength = 24, NextHop = 0, Communities = [] },
+            new() { Prefix = 0x0A000000, PrefixLength = 8, NextHop = 0, Communities = [] }
         };
 
         var groups = BgpSession.GroupByCommunitySet(routes);
