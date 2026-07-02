@@ -28,6 +28,7 @@ public sealed class BgpSession : IDisposable
     private readonly IPrefixService? _prefixService;
     private readonly AppConfig? _appConfig;
     private readonly IPrefixAggregator _prefixAggregator;
+    private readonly ICommunityResolver _communityResolver;
 
     // volatile: read by external threads (BgpServer.RefreshPeerAsync/StopAsync). Guarantees
     // acquire/release so IsEstablished reflects the most recent TransitionTo without JIT caching.
@@ -127,7 +128,8 @@ public sealed class BgpSession : IDisposable
         IPeerStore? peerStore = null,
         IPrefixService? prefixService = null,
         AppConfig? appConfig = null,
-        IPrefixAggregator? prefixAggregator = null)
+        IPrefixAggregator? prefixAggregator = null,
+        ICommunityResolver? communityResolver = null)
     {
         _socket = socket;
         _stream = new NetworkStream(socket, ownsSocket: true);
@@ -143,6 +145,7 @@ public sealed class BgpSession : IDisposable
         _prefixService = prefixService;
         _appConfig = appConfig;
         _prefixAggregator = prefixAggregator ?? new ExactUnionPrefixAggregator();
+        _communityResolver = communityResolver ?? NullCommunityResolver.Instance;
     }
 
     public async Task RunAsync(CancellationToken cancellationToken = default)
@@ -504,6 +507,9 @@ public sealed class BgpSession : IDisposable
     {
         var nextHop = BgpConstants.IPAddressToUint(_bgpConfig.GetRouterIdAddress());
         var routes = new List<Route>();
+        // Community for the default (RU) prefix source, if any — stamped on RU-default routes.
+        var defaultComms = _communityResolver.Resolve(
+            new CommunitySource(CommunitySourceKind.PrefixSource, _appConfig?.DefaultPrefixSource));
 
         if (_peerStore is not null && _prefixService is not null && _appConfig is not null)
         {
@@ -525,12 +531,7 @@ public sealed class BgpSession : IDisposable
                         var ruPrefixes = await _prefixService.GetRuPrefixesAsync();
                         foreach (var (prefix, length, _) in ruPrefixes)
                         {
-                            routes.Add(new Route
-                            {
-                                Prefix = prefix,
-                                PrefixLength = length,
-                                NextHop = nextHop
-                            });
+                            routes.Add(MakeRoute(prefix, length, nextHop, null, defaultComms));
                         }
                         _logger.LogInformation("Sent {Count} RU prefixes to unconfigured peer {Peer}",
                             ruPrefixes.Count, _peer);
@@ -550,53 +551,50 @@ public sealed class BgpSession : IDisposable
                     .Where(l => subscriptionIds.Contains(l.Name))
                     .ToList() ?? [];
 
-                // ASN-based lists
-                var asns = subscribedLists
-                    .Where(l => l.Asns.Count > 0)
-                    .SelectMany(l => l.Asns)
-                    .ToList();
+                // ASN-based lists — resolve per list so each list's community is stamped on its prefixes
+                // (PrefixService caches per ASN, so per-list calls don't multiply RIPEstat traffic).
+                // Each list is fetched in its own try/catch: one failing list does not drop the others'
+                // prefixes (intentional resilience vs the old single-batch all-or-nothing path).
+                var asnLists = subscribedLists.Where(l => l.Asns.Count > 0).ToList();
 
-                _logger.LogInformation("Peer {Peer} resolved {Count} ASNs from subscriptions", _peer, asns.Count);
+                _logger.LogInformation("Peer {Peer} resolved {Count} ASNs from subscriptions",
+                    _peer, asnLists.SelectMany(l => l.Asns).Count());
 
-                if (asns.Count > 0)
+                if (asnLists.Count > 0)
                 {
-                    try
+                    var before = routes.Count;
+                    foreach (var list in asnLists)
                     {
-                        var prefixes = await _prefixService.GetPrefixesForAsns(asns);
-                        foreach (var (prefix, length, asn) in prefixes)
+                        try
                         {
-                            routes.Add(new Route
-                            {
-                                Prefix = prefix,
-                                PrefixLength = length,
-                                NextHop = nextHop,
-                                AsPath = [asn]
-                            });
+                            var comms = _communityResolver.Resolve(
+                                new CommunitySource(CommunitySourceKind.AsnList, list.Name));
+                            var prefixes = await _prefixService.GetPrefixesForAsns(list.Asns);
+                            foreach (var (prefix, length, asn) in prefixes)
+                                routes.Add(MakeRoute(prefix, length, nextHop, [asn], comms));
                         }
-                        _logger.LogInformation("Fetched {Count} prefixes for {Peer} from ASN subscriptions",
-                            routes.Count, _peer);
+                        catch (Exception ex)
+                        {
+                            _logger.LogError(ex, "Failed to fetch prefixes for {Peer} (list '{List}')", _peer, list.Name);
+                        }
                     }
-                    catch (Exception ex)
-                    {
-                        _logger.LogError(ex, "Failed to fetch prefixes for {Peer}", _peer);
-                    }
+                    _logger.LogInformation("Fetched {Count} prefixes for {Peer} from ASN subscriptions",
+                        routes.Count - before, _peer);
                 }
 
-                // Country-based lists (e.g. RU with no ASNs → use local nets.txt)
-                if (subscribedLists.Any(l => l.Asns.Count == 0 && l.Country is not null))
+                // Country-based lists (e.g. RU with no ASNs → use local nets.txt). All country lists
+                // currently resolve to the RU default prefix set; stamp the configured community
+                // (if any) of the first country list on those prefixes.
+                var countryLists = subscribedLists.Where(l => l.Asns.Count == 0 && l.Country is not null).ToList();
+                if (countryLists.Count > 0)
                 {
                     try
                     {
+                        var comms = _communityResolver.Resolve(
+                            new CommunitySource(CommunitySourceKind.Country, countryLists[0].Name));
                         var ruPrefixes = await _prefixService.GetRuPrefixesAsync();
                         foreach (var (prefix, length, _) in ruPrefixes)
-                        {
-                            routes.Add(new Route
-                            {
-                                Prefix = prefix,
-                                PrefixLength = length,
-                                NextHop = nextHop
-                            });
-                        }
+                            routes.Add(MakeRoute(prefix, length, nextHop, null, comms));
                         _logger.LogInformation("Fetched {Count} RU prefixes for {Peer}", ruPrefixes.Count, _peer);
                     }
                     catch (Exception ex)
@@ -616,16 +614,10 @@ public sealed class BgpSession : IDisposable
                 {
                     try
                     {
+                        var comms = _communityResolver.Resolve(new CommunitySource(CommunitySourceKind.PrefixSource, name));
                         var srcPrefixes = await _prefixService.GetSourcePrefixesAsync(name);
                         foreach (var (prefix, length) in srcPrefixes)
-                        {
-                            routes.Add(new Route
-                            {
-                                Prefix = prefix,
-                                PrefixLength = length,
-                                NextHop = nextHop
-                            });
-                        }
+                            routes.Add(MakeRoute(prefix, length, nextHop, null, comms));
                         _logger.LogInformation("Fetched {Count} prefixes from source '{Source}' for {Peer}",
                             srcPrefixes.Count, name, _peer);
                     }
@@ -639,18 +631,14 @@ public sealed class BgpSession : IDisposable
                 _logger.LogInformation("Peer {Peer} has {SubRoutes} subscription routes + {CustomCount} custom prefixes",
                     _peer, routes.Count, customPrefixes.Count);
 
+                var customComms = _communityResolver.Resolve(new CommunitySource(CommunitySourceKind.Custom));
                 foreach (var cidr in customPrefixes)
                 {
                     var slash = cidr.IndexOf('/');
                     var ip = IPAddress.Parse(cidr[..slash]);
                     var length = byte.Parse(cidr[(slash + 1)..]);
                     var prefix = BgpConstants.IPAddressToUint(ip);
-                    routes.Add(new Route
-                    {
-                        Prefix = prefix,
-                        PrefixLength = length,
-                        NextHop = nextHop
-                    });
+                    routes.Add(MakeRoute(prefix, length, nextHop, null, customComms));
                 }
 
                 // Add custom AS prefixes (already loaded above)
@@ -660,15 +648,7 @@ public sealed class BgpSession : IDisposable
                     {
                         var asnPrefixes = await _prefixService.GetPrefixesForAsns(customAsns);
                         foreach (var (prefix, length, asn) in asnPrefixes)
-                        {
-                            routes.Add(new Route
-                            {
-                                Prefix = prefix,
-                                PrefixLength = length,
-                                NextHop = nextHop,
-                                AsPath = [asn]
-                            });
-                        }
+                            routes.Add(MakeRoute(prefix, length, nextHop, [asn], customComms));
                         _logger.LogInformation("Peer {Peer} custom AS: {Asns} -> {Count} prefixes",
                             _peer, string.Join(",", customAsns), asnPrefixes.Count);
                     }
@@ -688,14 +668,7 @@ public sealed class BgpSession : IDisposable
                     {
                         var ruPrefixes = await _prefixService.GetRuPrefixesAsync();
                         foreach (var (prefix, length, _) in ruPrefixes)
-                        {
-                            routes.Add(new Route
-                            {
-                                Prefix = prefix,
-                                PrefixLength = length,
-                                NextHop = nextHop
-                            });
-                        }
+                            routes.Add(MakeRoute(prefix, length, nextHop, null, defaultComms));
                     }
                     catch (Exception ex)
                     {
@@ -703,6 +676,8 @@ public sealed class BgpSession : IDisposable
                     }
                 }
 
+                // Apply the per-peer outgoing community filter (same rule as the shared-table path).
+                routes = routes.Where(r => _routeFilter.AcceptOutgoing(r, _peerConfig)).ToList();
                 await SendRoutesAsync(nextHop, routes);
                 return;
             }
@@ -717,14 +692,7 @@ public sealed class BgpSession : IDisposable
                 {
                     var ruPrefixes = await _prefixService.GetRuPrefixesAsync();
                     foreach (var (prefix, length, _) in ruPrefixes)
-                    {
-                        routes.Add(new Route
-                        {
-                            Prefix = prefix,
-                            PrefixLength = length,
-                            NextHop = nextHop
-                        });
-                    }
+                        routes.Add(MakeRoute(prefix, length, nextHop, null, defaultComms));
                     _logger.LogInformation("Fetched {Count} RU prefixes for unknown peer {Peer}",
                         ruPrefixes.Count, _peer);
                 }
@@ -898,6 +866,19 @@ public sealed class BgpSession : IDisposable
         routes.GroupBy(r => r.Communities, CommunitySetComparer.Instance)
               .Select(g => g.ToList())
               .ToList();
+
+    /// <summary>
+    /// Builds a <see cref="Route"/> carrying the given community set. Internal so the per-list
+    /// community stamping logic is unit-testable without a live session (Route is init-only).
+    /// </summary>
+    internal static Route MakeRoute(uint prefix, byte length, uint nextHop, uint[]? asPath, uint[] communities) => new()
+    {
+        Prefix = prefix,
+        PrefixLength = length,
+        NextHop = nextHop,
+        AsPath = asPath ?? [],
+        Communities = communities
+    };
 
     /// <summary>Sequence equality over a route's community array (set-equivalence within a batch).</summary>
     private sealed class CommunitySetComparer : IEqualityComparer<uint[]>

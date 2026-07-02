@@ -516,6 +516,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
                 l.Name,
                 l.Description,
                 l.Country,
+                Community = l.Community,
                 prefixCount,
                 type = l.Country is not null ? "country" : "asn"
             });
@@ -535,6 +536,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
                     Name = source.Name,
                     Description = source.Description,
                     Country = (string?)null,
+                    Community = source.Community,
                     prefixCount = prefixes.Count,
                     type = "list"
                 });

@@ -21,6 +21,7 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
     private readonly IPeerStore? _peerStore;
     private readonly IPrefixService? _prefixService;
     private readonly IPrefixAggregator _prefixAggregator;
+    private readonly ICommunityResolver _communityResolver;
     // Keyed by the accepted TCP connection (remote IP + remote source port), NOT by remote IP
     // alone: per RFC 4271 §8.2.1 there is one session per TCP connection, so several distinct peers
     // arriving from the same source IP (different ephemeral source ports) must coexist as separate
@@ -46,7 +47,8 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
         Action<string, uint>? onPeerIdentified = null,
         IPeerStore? peerStore = null,
         IPrefixService? prefixService = null,
-        IPrefixAggregator? prefixAggregator = null)
+        IPrefixAggregator? prefixAggregator = null,
+        ICommunityResolver? communityResolver = null)
     {
         _config = config;
         _routeTable = routeTable;
@@ -58,6 +60,7 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
         _peerStore = peerStore;
         _prefixService = prefixService;
         _prefixAggregator = prefixAggregator ?? new ExactUnionPrefixAggregator();
+        _communityResolver = communityResolver ?? NullCommunityResolver.Instance;
     }
 
     public Task StartAsync(CancellationToken cancellationToken)
@@ -159,7 +162,7 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
                     socket, peerConfig, _config.Bgp, _routeTable,
                     _routeFilter, _metrics, _sessionLogger,
                     _onPeerIdentified,
-                    _peerStore, _prefixService, _config, _prefixAggregator);
+                    _peerStore, _prefixService, _config, _prefixAggregator, _communityResolver);
 
                 if (Volatile.Read(ref _acceptingConnections) == 0)
                 {

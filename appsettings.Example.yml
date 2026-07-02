@@ -21,6 +21,9 @@ RipeStat:
   #   - Name: tier1
   #     Description: "Tier-1 transit ASes"
   #     Asns: [3356, 1299]
+  #     Community: "65444:200"   # optional "ASN:VALUE" stamped on every prefix advertised from this list
+  # A Community (here or on a PrefixSource below) tags advertised prefixes so a peer can filter by origin;
+  # lists without a Community are advertised untagged (no behavior change).
 
 # Prefix sources loaded at startup via the provider factory (Kind: file | http).
 # "http" fetches any direct raw-file URL (raw.githubusercontent.com, a gist, self-hosted, ...).

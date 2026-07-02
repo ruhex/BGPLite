@@ -44,4 +44,8 @@ public sealed class AsnList
 
     [YamlMember(Alias = "Country")]
     public string? Country { get; init; }
+
+    /// <summary>Optional community in <c>"ASN:VALUE"</c> form stamped on every prefix advertised from this list (e.g. <c>"65444:100"</c>).</summary>
+    [YamlMember(Alias = "Community")]
+    public string? Community { get; init; }
 }

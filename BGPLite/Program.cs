@@ -40,6 +40,14 @@ builder.Services.AddSingleton<IRouteFilter>(sp =>
     var store = sp.GetRequiredService<PeerStore>();
     return new PeerCommunityFilter(ip => store.GetCommunitiesByIp(ip));
 });
+// Per-list community resolver: stamps a configured BGP community on prefixes by source
+// (AsnList / Country / PrefixSource). ConfigCommunityResolver reads static config; Phase 2 will
+// add a DB-backed resolver for named user lists behind the same ICommunityResolver interface.
+builder.Services.AddSingleton<ICommunityResolver>(sp =>
+    new ConfigCommunityResolver(
+        sp.GetRequiredService<AppConfig>(),
+        sp.GetRequiredService<BgpConfig>(),
+        sp.GetService<ILogger<ConfigCommunityResolver>>()));
 builder.Services.AddSingleton(new BgpMetrics());
 
 // Prefix sources (file / HTTP / ...) resolved by Kind via a provider factory,
@@ -98,7 +106,8 @@ builder.Services.AddHostedService(sp =>
         sp.GetRequiredService<ILogger<BgpServer>>(),
         (ip, asn) => store.UpsertPeer(ip, asn),
         store,
-        prefixService);
+        prefixService,
+        communityResolver: sp.GetRequiredService<ICommunityResolver>());
     return bgpServer;
 });
 builder.Services.AddSingleton<ISessionManager>(sp => bgpServer!);
