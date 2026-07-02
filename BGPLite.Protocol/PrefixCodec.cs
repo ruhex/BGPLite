@@ -44,6 +44,8 @@ public static class PrefixCodec
             return (new IpPrefix(0, 0), 1);
 
         var byteCount = (length + 7) / 8;
+        if (buffer.Length < 1 + byteCount)
+            throw new ArgumentOutOfRangeException(nameof(buffer), buffer.Length, $"Buffer too small: need {1 + byteCount} bytes for prefix length {length}.");
         uint addr = 0;
         for (var i = 0; i < byteCount; i++)
             addr |= (uint)buffer[1 + i] << (24 - i * 8);

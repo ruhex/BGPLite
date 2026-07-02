@@ -156,4 +156,14 @@ public class PrefixCodecTests
             PrefixCodec.Decode(span);
         });
     }
+
+    [Fact]
+    public void Decode_BufferTooSmallForPrefix_Throws()
+    {
+        // /24 needs 4 bytes total (1 length + 3 data). 2-byte buffer is truncated
+        // mid-prefix and must be rejected before any read past the length byte.
+        var buffer = new byte[] { 24, 0xC0 };
+
+        Assert.Throws<ArgumentOutOfRangeException>(() => PrefixCodec.Decode(buffer));
+    }
 }
