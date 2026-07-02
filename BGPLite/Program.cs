@@ -83,6 +83,11 @@ builder.Services.AddSingleton(sp => new RipeStatProvider(
     sp.GetRequiredService<ILogger<RipeStatProvider>>(),
     ripeStatConfig));
 
+// AS-originated prefix source (Kind: "asn") — fetches an AS's prefixes via RIPEstat through the
+// provider factory, so `Kind: asn` entries under PrefixSources load like any other source.
+builder.Services.AddSingleton<AsnPrefixProvider>();
+builder.Services.AddSingleton<IPrefixSourceProvider>(sp => sp.GetRequiredService<AsnPrefixProvider>());
+
 builder.Services.AddSingleton<IPrefixService>(sp =>
 {
     var ripe = sp.GetRequiredService<RipeStatProvider>();

@@ -38,6 +38,14 @@ PrefixSources:
     # Headers:                    # optional request headers (Authorization, X-API-Key, ...)
     #   Authorization: "Bearer <token>"
 
+  # Kind: asn — fetch all prefixes originated by an AS via RIPEstat (cached per ASN).
+  # Optional Community tags the prefixes advertised from this source.
+  - Kind: asn
+    Name: cloudflare
+    Description: "AS13335 Cloudflare Inc."
+    Asn: 13335
+    Community: "65444:101"
+
   - Kind: file
     Name: local
     Description: "Local override list"
