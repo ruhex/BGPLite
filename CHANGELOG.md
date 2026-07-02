@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.1.0](https://github.com/ruhex/BGPLite/compare/v1.0.1...v1.1.0) (2026-07-02)
+
+
+### Features
+
+* **routing:** per-list BGP communities via ICommunityResolver (Phase 1 of [#63](https://github.com/ruhex/BGPLite/issues/63)) ([#64](https://github.com/ruhex/BGPLite/issues/64)) ([f3e3e1d](https://github.com/ruhex/BGPLite/commit/f3e3e1d687334564baf82f9730defdb9571c0899))
+* **routing:** static communities for custom prefixes/AS + /api/community-scheme ([#66](https://github.com/ruhex/BGPLite/issues/66)) ([eb29aae](https://github.com/ruhex/BGPLite/commit/eb29aae50827b8715d93e36928980e0815325598))
+
 ## [1.0.1](https://github.com/ruhex/BGPLite/compare/v1.0.0...v1.0.1) (2026-07-02)
 
 
