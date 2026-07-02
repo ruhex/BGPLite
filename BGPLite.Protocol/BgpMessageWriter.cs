@@ -32,6 +32,13 @@ public static class BgpMessageWriter
 
     private static void WriteHeader(BgpMessageType type, int totalLength, Span<byte> buffer)
     {
+        // RFC 4271 §4.1: BGP message length is a 16-bit field. BgpMessageReader
+        // rejects anything outside [MinMessageSize, MaxMessageSize], so we must
+        // reject the same range up front to keep writer and reader aligned
+        // (otherwise the writer could emit a frame the reader would discard).
+        if (totalLength < BgpConstants.MinMessageSize || totalLength > BgpConstants.MaxMessageSize)
+            throw new ArgumentOutOfRangeException(nameof(totalLength), totalLength, $"BGP message length must be in {BgpConstants.MinMessageSize}..{BgpConstants.MaxMessageSize}.");
+
         BgpConstants.Marker.CopyTo(buffer);
         BinaryPrimitives.WriteUInt16BigEndian(buffer[16..], (ushort)totalLength);
         buffer[18] = (byte)type;
@@ -41,7 +48,16 @@ public static class BgpMessageWriter
 
     private static int WriteOpen(BgpOpenMessage msg, Span<byte> buffer)
     {
-        var payloadSize = GetOpenPayloadSize(msg);
+        // optParamsLen = 2 (type+length) + capDataLen. If optParamsLen fits in
+        // a byte, then capDataLen and every individual cap.Data.Length fit too,
+        // so one guard covers all three (RFC 4271 §4.2 / §6.2). Run the check
+        // BEFORE writing to the caller's buffer so a rejected write leaves the
+        // span untouched.
+        var capDataLen = GetCapabilitiesDataLength(msg.Capabilities);
+        var optParamsLen = msg.Capabilities.Count == 0 ? 0 : 2 + capDataLen;
+        RequireFitsByte(optParamsLen, nameof(BgpOpenMessage.Capabilities), "optional-parameters");
+
+        var payloadSize = 9 + 1 + optParamsLen;
         var totalLength = BgpConstants.MessageHeaderSize + payloadSize;
 
         WriteHeader(BgpMessageType.Open, totalLength, buffer);
@@ -55,35 +71,31 @@ public static class BgpMessageWriter
         BinaryPrimitives.WriteUInt32BigEndian(buffer[p..], msg.RouterId);
         p += 4;
 
-        var optParamsLen = GetOptParamsLength(msg.Capabilities);
         buffer[p++] = (byte)optParamsLen;
 
-        WriteCapabilities(msg.Capabilities, buffer[p..]);
+        WriteCapabilities(msg.Capabilities, capDataLen, buffer[p..]);
 
         return totalLength;
     }
 
-    private static int GetOpenPayloadSize(BgpOpenMessage msg) =>
-        9 + 1 + GetOptParamsLength(msg.Capabilities);
-
-    private static int GetOptParamsLength(List<BgpCapabilityInfo> capabilities)
+    private static int GetOpenPayloadSize(BgpOpenMessage msg)
     {
-        if (capabilities.Count == 0) return 0;
-
-        var capDataLen = 0;
-        foreach (var cap in capabilities)
-            capDataLen += 2 + cap.Data.Length;
-
-        return 2 + capDataLen;
+        if (msg.Capabilities.Count == 0) return 10; // 9 (fixed) + 1 (optParams length byte)
+        // Capabilities present: 9 (fixed) + 1 (optParams length byte) + 2 (Capabilities TLV header) + capDataLen
+        return 12 + GetCapabilitiesDataLength(msg.Capabilities);
     }
 
-    private static void WriteCapabilities(List<BgpCapabilityInfo> capabilities, Span<byte> buffer)
+    private static int GetCapabilitiesDataLength(List<BgpCapabilityInfo> capabilities)
     {
-        if (capabilities.Count == 0) return;
-
         var capDataLen = 0;
         foreach (var cap in capabilities)
             capDataLen += 2 + cap.Data.Length;
+        return capDataLen;
+    }
+
+    private static void WriteCapabilities(List<BgpCapabilityInfo> capabilities, int capDataLen, Span<byte> buffer)
+    {
+        if (capabilities.Count == 0) return;
 
         var p = 0;
         buffer[p++] = 2; // Type: Capabilities
@@ -96,6 +108,12 @@ public static class BgpMessageWriter
             cap.Data.AsSpan().CopyTo(buffer[p..]);
             p += cap.Data.Length;
         }
+    }
+
+    private static void RequireFitsByte(int value, string paramName, string field)
+    {
+        if (value < 0 || value > byte.MaxValue)
+            throw new ArgumentOutOfRangeException(paramName, value, $"{field} length must fit in a single byte (0..{byte.MaxValue}).");
     }
 
     #endregion

@@ -1,4 +1,5 @@
 using System.Buffers.Binary;
+using System.Linq;
 using BGPLite.Protocol;
 
 namespace BGPLite.Tests;
@@ -255,5 +256,153 @@ public class BgpMessageTests
         buffer[21] = 1;
 
         Assert.Throws<BgpParseException>(() => BgpMessageReader.ReadMessage(buffer.AsSpan(0, 22)));
+    }
+
+    [Fact]
+    public void Open_SingleCapabilityExceedingByte_Throws()
+    {
+        // Regression: a capability whose data length > 255 also makes the total
+        // optional-params exceed 255, so the optParams-length guard in WriteOpen
+        // fires first. Writer must fail loud instead of silently truncating.
+        var bigData = new byte[300];
+        var open = new BgpOpenMessage
+        {
+            Version = 4,
+            Asn = 65000,
+            HoldTime = 90,
+            RouterId = 0x01020304,
+            Capabilities = [new BgpCapabilityInfo { Code = 0xFF, Data = bigData }]
+        };
+        var buffer = new byte[1024];
+
+        Assert.Throws<ArgumentOutOfRangeException>(() => BgpMessageWriter.WriteMessage(open, buffer));
+    }
+
+    [Fact]
+    public void Open_TotalCapabilityDataExceedingByte_Throws()
+    {
+        // Regression: total optional-params (capabilities block) must fit in a single
+        // byte per RFC 4271 §4.2. 40 capabilities × (2-byte header + 5-byte data) = 280
+        // bytes of capability TLVs + 2-byte optional-params type/length = 282 total,
+        // exceeding 255; writer must fail loud instead of silently truncating.
+        var caps = new List<BgpCapabilityInfo>();
+        // 40 capabilities * (2 header + 5 data) = 280 bytes of capability TLVs.
+        for (var i = 0; i < 40; i++)
+            caps.Add(new BgpCapabilityInfo { Code = (byte)(0x10 + i), Data = new byte[5] });
+
+        var open = new BgpOpenMessage
+        {
+            Version = 4,
+            Asn = 65000,
+            HoldTime = 90,
+            RouterId = 0x01020304,
+            Capabilities = caps
+        };
+        var buffer = new byte[1024];
+
+        Assert.Throws<ArgumentOutOfRangeException>(() => BgpMessageWriter.WriteMessage(open, buffer));
+    }
+
+    [Fact]
+    public void Open_AtByteBoundary_Succeeds()
+    {
+        // Sanity: exactly 255 bytes of optional-params must encode without throwing.
+        // optParamsLen = 2 (type+length) + Σ(2 + cap.Data.Length).
+        // 27 caps of 7 bytes data each -> 27 * 9 = 243.
+        // Last cap of 8 bytes data -> 2 + 8 = 10. Total = 2 + 243 + 10 = 255.
+        var caps = new List<BgpCapabilityInfo>();
+        for (var i = 0; i < 27; i++)
+            caps.Add(new BgpCapabilityInfo { Code = (byte)(0x20 + i), Data = new byte[7] });
+        caps.Add(new BgpCapabilityInfo { Code = 0x3F, Data = new byte[8] });
+
+        var open = new BgpOpenMessage
+        {
+            Version = 4,
+            Asn = 65000,
+            HoldTime = 90,
+            RouterId = 0x01020304,
+            Capabilities = caps
+        };
+        var size = BgpMessageWriter.GetBufferSize(open);
+        var buffer = new byte[size];
+        var written = BgpMessageWriter.WriteMessage(open, buffer);
+
+        Assert.Equal(size, written);
+        // Optional-params length field sits at offset 19 (header) + 9 (fixed open payload).
+        Assert.Equal(255, buffer[28]);
+    }
+
+    [Fact]
+    public void Open_Overflow_DoesNotMutateBuffer()
+    {
+        // Regression: failed validation must not partially mutate the caller's
+        // buffer. Fill the buffer with a sentinel pattern, trigger an overflow
+        // (single cap with 300-byte data), and assert every byte is still the
+        // sentinel afterwards.
+        var bigData = new byte[300];
+        var open = new BgpOpenMessage
+        {
+            Version = 4,
+            Asn = 65000,
+            HoldTime = 90,
+            RouterId = 0x01020304,
+            Capabilities = [new BgpCapabilityInfo { Code = 0xFF, Data = bigData }]
+        };
+        var buffer = new byte[1024];
+        var sentinel = 0x5A;
+        Array.Fill(buffer, (byte)sentinel);
+
+        Assert.Throws<ArgumentOutOfRangeException>(() => BgpMessageWriter.WriteMessage(open, buffer));
+        Assert.All(buffer, b => Assert.Equal(sentinel, b));
+    }
+
+    [Fact]
+    public void Open_TotalOverflow_DoesNotMutateBuffer()
+    {
+        // Same regression for the total-overflow path (40 caps * 7 bytes = 280
+        // bytes of capability TLVs, optParamsLen > 255).
+        var caps = new List<BgpCapabilityInfo>();
+        for (var i = 0; i < 40; i++)
+            caps.Add(new BgpCapabilityInfo { Code = (byte)(0x10 + i), Data = new byte[5] });
+
+        var open = new BgpOpenMessage
+        {
+            Version = 4,
+            Asn = 65000,
+            HoldTime = 90,
+            RouterId = 0x01020304,
+            Capabilities = caps
+        };
+        var buffer = new byte[1024];
+        var sentinel = 0xA5;
+        Array.Fill(buffer, (byte)sentinel);
+
+        Assert.Throws<ArgumentOutOfRangeException>(() => BgpMessageWriter.WriteMessage(open, buffer));
+        Assert.All(buffer, b => Assert.Equal(sentinel, b));
+    }
+
+    [Fact]
+    public void WriteHeader_ExceedsMaxMessageSize_Throws()
+    {
+        // Writer and reader must agree on the message size envelope
+        // (BgpConstants.MaxMessageSize = 4096). Build an UPDATE whose total
+        // length exceeds the cap: 1019 withdrawn /24 routes = 4076 bytes of
+        // NLRI, plus 2 (withdrawn-len) + 2 (path-attrs-len) = 4080 bytes of
+        // payload, plus 19 (header) = 4099 bytes — three over the cap.
+        var tooManyPrefixes = Enumerable.Range(0, 1019)
+            .Select(_ => new IpPrefix(0xC0A80000, 24))
+            .ToList();
+        var update = new BgpUpdateMessage
+        {
+            WithdrawnRoutes = tooManyPrefixes
+        };
+        var buffer = new byte[8192];
+        var sentinel = 0x77;
+        Array.Fill(buffer, (byte)sentinel);
+
+        // GetBufferSize does NOT cap; only WriteHeader enforces MaxMessageSize.
+        // Assert the writer rejects it without mutating buffer.
+        Assert.Throws<ArgumentOutOfRangeException>(() => BgpMessageWriter.WriteMessage(update, buffer));
+        Assert.All(buffer, b => Assert.Equal(sentinel, b));
     }
 }
