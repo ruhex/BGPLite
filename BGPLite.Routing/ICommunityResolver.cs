@@ -9,8 +9,10 @@ public enum CommunitySourceKind
     PrefixSource,
     /// <summary>A country-based <c>AsnList</c> (resolved like an AsnList by name).</summary>
     Country,
-    /// <summary>Per-peer custom prefixes / custom ASNs (no list identity in Phase 1).</summary>
+    /// <summary>Per-peer custom prefixes (static community <c>&lt;Asn&gt;:100</c>, overridable via config).</summary>
     Custom,
+    /// <summary>Per-peer custom AS-originated prefixes (static community <c>&lt;Asn&gt;:200</c>, overridable via config).</summary>
+    CustomAsn,
     /// <summary>Fallback / default source when nothing else applies.</summary>
     Default
 }

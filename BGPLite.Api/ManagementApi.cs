@@ -147,6 +147,10 @@ public sealed class ManagementApi : IHostedService, IDisposable
         if (IsGet(method, segments, "api", "asn-lists"))
             return HandleGetAsnListsAsync().GetAwaiter().GetResult();
 
+        // /api/community-scheme
+        if (IsGet(method, segments, "api", "community-scheme"))
+            return HandleGetCommunityScheme();
+
         // /api/sessions
         if (IsGet(method, segments, "api", "sessions"))
             return HandleGetSessions();
@@ -544,6 +548,24 @@ public sealed class ManagementApi : IHostedService, IDisposable
         }
 
         return ApiResponse.Ok(result);
+    }
+
+    #endregion
+
+    #region GET /api/community-scheme
+
+    // Static community scheme for the per-peer custom categories, so the UI can show the community
+    // a peer's custom prefixes / custom-AS prefixes will carry before they are advertised.
+    // Config overrides win; otherwise the hardcoded defaults "<Asn>:100" / "<Asn>:200".
+    private ApiResponse HandleGetCommunityScheme()
+    {
+        var asn = _config.Bgp.Asn;
+        return ApiResponse.Ok(new
+        {
+            asn,
+            customPrefixes = _config.CustomPrefixCommunity ?? $"{asn}:100",
+            customAsns = _config.CustomAsnCommunity ?? $"{asn}:200"
+        });
     }
 
     #endregion

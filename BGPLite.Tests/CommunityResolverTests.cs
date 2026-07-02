@@ -70,10 +70,9 @@ public class CommunityResolverTests
     }
 
     [Fact]
-    public void Resolve_Custom_And_Default_ReturnEmpty()
+    public void Resolve_Default_ReturnsEmpty()
     {
         var r = Resolver(ConfigWith());
-        Assert.Empty(r.Resolve(new CommunitySource(CommunitySourceKind.Custom)));
         Assert.Empty(r.Resolve(new CommunitySource(CommunitySourceKind.Default)));
     }
 
@@ -111,5 +110,51 @@ public class CommunityResolverTests
         var route = BgpSession.MakeRoute(0x0A000000, 8, 0, null, []);
         Assert.Empty(route.AsPath);
         Assert.Empty(route.Communities);
+    }
+
+    [Fact]
+    public void Resolve_Custom_DefaultsToAsn100()
+    {
+        var r = new ConfigCommunityResolver(new AppConfig(), new BgpConfig { Asn = 65444 }, null);
+        Assert.Equal([CommunityCodec.Parse("65444:100")], r.Resolve(new CommunitySource(CommunitySourceKind.Custom)));
+    }
+
+    [Fact]
+    public void Resolve_CustomAsn_DefaultsToAsn200()
+    {
+        var r = new ConfigCommunityResolver(new AppConfig(), new BgpConfig { Asn = 65444 }, null);
+        Assert.Equal([CommunityCodec.Parse("65444:200")], r.Resolve(new CommunitySource(CommunitySourceKind.CustomAsn)));
+    }
+
+    [Fact]
+    public void Resolve_Custom_ConfigOverrideWins()
+    {
+        var cfg = new AppConfig { CustomPrefixCommunity = "65000:999" };
+        var r = new ConfigCommunityResolver(cfg, new BgpConfig { Asn = 65444 }, null);
+        Assert.Equal([CommunityCodec.Parse("65000:999")], r.Resolve(new CommunitySource(CommunitySourceKind.Custom)));
+    }
+
+    [Fact]
+    public void Resolve_CustomAsn_ConfigOverrideWins()
+    {
+        var cfg = new AppConfig { CustomAsnCommunity = "65000:888" };
+        var r = new ConfigCommunityResolver(cfg, new BgpConfig { Asn = 65444 }, null);
+        Assert.Equal([CommunityCodec.Parse("65000:888")], r.Resolve(new CommunitySource(CommunitySourceKind.CustomAsn)));
+    }
+
+    [Fact]
+    public void Resolve_Custom_InvalidOverride_FallsBackToDefault()
+    {
+        var cfg = new AppConfig { CustomPrefixCommunity = "not-a-community" };
+        var r = new ConfigCommunityResolver(cfg, new BgpConfig { Asn = 65444 }, null);
+        Assert.Equal([CommunityCodec.Parse("65444:100")], r.Resolve(new CommunitySource(CommunitySourceKind.Custom)));
+    }
+
+    [Fact]
+    public void Resolve_Custom_FourByteAsn_DefaultUnformed_Empty()
+    {
+        // ASN > 65535 cannot form an "ASN:VALUE" community → untagged.
+        var r = new ConfigCommunityResolver(new AppConfig(), new BgpConfig { Asn = 200000 }, null);
+        Assert.Empty(r.Resolve(new CommunitySource(CommunitySourceKind.Custom)));
     }
 }

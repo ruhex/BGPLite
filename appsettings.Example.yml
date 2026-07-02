@@ -46,3 +46,9 @@ PrefixSources:
 
 # Name of the source served as the RU/default set for unconfigured peers.
 DefaultPrefixSource: ru
+
+# Optional overrides for the static communities stamped on per-peer custom categories.
+# Defaults: custom prefixes → "<Asn>:100", custom AS-originated prefixes → "<Asn>:200".
+# CustomPrefixCommunity: "65444:100"
+# CustomAsnCommunity: "65444:200"
+

@@ -23,4 +23,12 @@ public sealed class AppConfig
     /// <summary>Name of the source served as the RU/default set for unconfigured peers.</summary>
     [YamlMember(Alias = "DefaultPrefixSource")]
     public string? DefaultPrefixSource { get; init; }
+
+    /// <summary>Optional override for the community stamped on per-peer custom prefixes (default <c>&lt;Asn&gt;:100</c>).</summary>
+    [YamlMember(Alias = "CustomPrefixCommunity")]
+    public string? CustomPrefixCommunity { get; init; }
+
+    /// <summary>Optional override for the community stamped on per-peer custom-AS-originated prefixes (default <c>&lt;Asn&gt;:200</c>).</summary>
+    [YamlMember(Alias = "CustomAsnCommunity")]
+    public string? CustomAsnCommunity { get; init; }
 }

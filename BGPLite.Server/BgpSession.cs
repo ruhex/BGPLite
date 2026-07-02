@@ -631,24 +631,27 @@ public sealed class BgpSession : IDisposable
                 _logger.LogInformation("Peer {Peer} has {SubRoutes} subscription routes + {CustomCount} custom prefixes",
                     _peer, routes.Count, customPrefixes.Count);
 
-                var customComms = _communityResolver.Resolve(new CommunitySource(CommunitySourceKind.Custom));
+                // Custom prefixes carry the static "custom prefix" community (<Asn>:100).
+                var customPrefixComms = _communityResolver.Resolve(new CommunitySource(CommunitySourceKind.Custom));
                 foreach (var cidr in customPrefixes)
                 {
                     var slash = cidr.IndexOf('/');
                     var ip = IPAddress.Parse(cidr[..slash]);
                     var length = byte.Parse(cidr[(slash + 1)..]);
                     var prefix = BgpConstants.IPAddressToUint(ip);
-                    routes.Add(MakeRoute(prefix, length, nextHop, null, customComms));
+                    routes.Add(MakeRoute(prefix, length, nextHop, null, customPrefixComms));
                 }
 
-                // Add custom AS prefixes (already loaded above)
+                // Add custom AS prefixes (already loaded above). Custom-AS routes carry the static
+                // "custom AS" community (<Asn>:200).
                 if (customAsns.Count > 0)
                 {
                     try
                     {
+                        var customAsnComms = _communityResolver.Resolve(new CommunitySource(CommunitySourceKind.CustomAsn));
                         var asnPrefixes = await _prefixService.GetPrefixesForAsns(customAsns);
                         foreach (var (prefix, length, asn) in asnPrefixes)
-                            routes.Add(MakeRoute(prefix, length, nextHop, [asn], customComms));
+                            routes.Add(MakeRoute(prefix, length, nextHop, [asn], customAsnComms));
                         _logger.LogInformation("Peer {Peer} custom AS: {Asns} -> {Count} prefixes",
                             _peer, string.Join(",", customAsns), asnPrefixes.Count);
                     }
