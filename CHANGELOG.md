@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.1](https://github.com/ruhex/BGPLite/compare/v1.0.0...v1.0.1) (2026-07-02)
+
+
+### Bug Fixes
+
+* **deps:** bump EF Core Sqlite to 10.0.9 in Tests (NU1605 with [#54](https://github.com/ruhex/BGPLite/issues/54)) ([#58](https://github.com/ruhex/BGPLite/issues/58)) ([c495f11](https://github.com/ruhex/BGPLite/commit/c495f1173949fecb65c32303dfea8d67b7a5540f))
+
 ## 1.0.0 (2026-07-02)
 
 
