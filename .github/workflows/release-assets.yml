@@ -1,0 +1,59 @@
+name: Release Assets
+
+# When release-please publishes a Release (creates the vX.Y.Z tag), build
+# self-contained single-file binaries and attach them to that Release.
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - rid: linux-x64
+            archive: tar.gz
+          - rid: linux-arm64
+            archive: tar.gz
+          - rid: win-x64
+            archive: zip
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Publish self-contained (${{ matrix.rid }})
+        run: |
+          dotnet publish BGPLite/BGPLite.csproj \
+            -c Release \
+            -r ${{ matrix.rid }} \
+            --self-contained true \
+            -p:PublishSingleFile=true \
+            -p:IncludeNativeLibrariesForSelfExtract=true \
+            -o publish/${{ matrix.rid }} \
+            --source https://api.nuget.org/v3/index.json
+
+      - name: Package (${{ matrix.rid }})
+        run: |
+          cd publish/${{ matrix.rid }}
+          if [ "${{ matrix.archive }}" = "zip" ]; then
+            zip -r ../../bgplite-${{ github.event.release.tag_name }}-${{ matrix.rid }}.zip .
+          else
+            tar -czf ../../bgplite-${{ github.event.release.tag_name }}-${{ matrix.rid }}.tar.gz .
+          fi
+
+      - name: Upload asset to Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "${{ github.event.release.tag_name }}" \
+            bgplite-${{ github.event.release.tag_name }}-${{ matrix.rid }}.${{ matrix.archive }} \
+            --repo "$GITHUB_REPOSITORY" --clobber

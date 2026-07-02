@@ -1,0 +1,25 @@
+name: Release
+
+# release-please: manages version + tag + GitHub Release from Conventional Commits.
+#   feat:     -> minor (e.g. 1.2.3 -> 1.3.0)
+#   fix:      -> patch (e.g. 1.2.3 -> 1.3.0... wait: 1.2.4)
+#   feat!/fix! or "BREAKING CHANGE:" footer -> major
+#   chore:/docs:/ci: -> no release
+# It opens a "release PR" that accumulates the changelog; merging that PR tags
+# vX.Y.Z and publishes the Release (which triggers release-assets.yml).
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: googleapis/release-please-action@v4
+        with:
+          release-type: simple
+          include-v-in-tag: true
