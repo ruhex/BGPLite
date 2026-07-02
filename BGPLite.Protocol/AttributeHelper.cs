@@ -98,7 +98,7 @@ public static class AttributeHelper
 
         return new PathAttribute
         {
-            Flags = BgpConstants.Attribute.FlagTransitive,
+            Flags = BgpConstants.Attribute.FlagOptional | BgpConstants.Attribute.FlagTransitive,
             TypeCode = BgpConstants.Attribute.As4Path,
             Data = data
         };
@@ -107,6 +107,7 @@ public static class AttributeHelper
     /// <summary>
     /// Reads AS4_PATH attribute (type 17) per RFC 6793 §6.
     /// Returns the 4-byte AS sequence for reconstruction when receiving from a 2-byte-only peer.
+    /// NOTE: AS_SET segments are not preserved — returns a flat AS sequence (matching ReadAsPath).
     /// </summary>
     public static uint[] ReadAs4Path(PathAttribute attr)
     {

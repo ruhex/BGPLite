@@ -11,7 +11,7 @@ namespace BGPLite.Tests;
 public class BgpSessionRfc6793Tests
 {
     [Fact]
-    public void GroupByCommunitySet_With2BytePeer_UsesAsTransForAsn()
+    public void GroupByCommunitySet_GroupsRoutesWithEmptyCommunitySet()
     {
         // Verify that BgpSession.GroupByCommunitySet works correctly
         // (static method, no session state needed)
@@ -48,6 +48,8 @@ public class BgpSessionRfc6793Tests
         var as4Path = AttributeHelper.WriteAs4Path([localAsn]);
 
         Assert.Equal(BgpConstants.Attribute.As4Path, as4Path.TypeCode);
+        // RFC 6793: AS4_PATH is optional transitive (FlagOptional | FlagTransitive)
+        Assert.Equal(BgpConstants.Attribute.FlagOptional | BgpConstants.Attribute.FlagTransitive, as4Path.Flags);
         var readAses = AttributeHelper.ReadAs4Path(as4Path);
         Assert.Equal([localAsn], readAses);
     }
@@ -58,7 +60,7 @@ public class BgpSessionRfc6793Tests
         // Simulate what SendRouteBatchAsync should produce for a 2-byte-only peer
         // when local ASN > 65535
         var localAsn = 200000u;
-        var is2BytePeer = false; // _localFourByteAsn = false
+        var is2BytePeer = true; // _localFourByteAsn = false → 2-byte-only peer
 
         var attrs = new List<PathAttribute>
         {

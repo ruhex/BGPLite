@@ -305,7 +305,8 @@ public class BgpMessageTests
         var as4Path = AttributeHelper.WriteAs4Path([200000u, 300000u]);
 
         Assert.Equal(BgpConstants.Attribute.As4Path, as4Path.TypeCode);
-        Assert.Equal(BgpConstants.Attribute.FlagTransitive, as4Path.Flags);
+        // RFC 6793: AS4_PATH is optional transitive (FlagOptional | FlagTransitive)
+        Assert.Equal(BgpConstants.Attribute.FlagOptional | BgpConstants.Attribute.FlagTransitive, as4Path.Flags);
         // 2 (segment header) + 2 * 4 (two 4-byte ASNs) = 10 bytes
         Assert.Equal(10, as4Path.Data.Length);
 

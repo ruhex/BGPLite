@@ -51,9 +51,9 @@ public static class BgpConstants
         public const byte Community = 8;
         public const byte OriginatorId = 9;
         public const byte ClusterList = 10;
+        public const byte ExtendedCommunity = 16;
         public const byte As4Path = 17;       // RFC 6793 §6 — 4-byte AS path for 2-byte peers
         public const byte As4PathAggregator = 18; // RFC 6793 — 4-byte aggregator
-        public const byte ExtendedCommunity = 16;
         public const byte LargeCommunity = 32;
 
         public const byte FlagOptional = 0x80;

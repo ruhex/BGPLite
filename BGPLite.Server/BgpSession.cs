@@ -47,7 +47,7 @@ public sealed class BgpSession : IDisposable
     private int _disposed;
     private uint _remoteAsn;
     private bool _remoteFourByteAsn;
-    private bool _localFourByteAsn; // определяется из согласованного OPEN (RFC 6793)
+    private bool _localFourByteAsn; // derived from negotiated OPEN capability (RFC 6793)
     private ushort _negotiatedHoldTime;
     private List<IpPrefix> _advertisedPrefixes = [];
     private TimeSpan _keepAliveInterval;
@@ -1045,7 +1045,7 @@ public sealed class BgpSession : IDisposable
 
         _remoteFourByteAsn = CapabilityHelper.GetRemoteAsn(open).HasValue;
         _remoteAsn = CapabilityHelper.GetEffectiveAsn(open);
-        // RFC 6793 §6: определяем формат AS_PATH из согласованной capability
+        // RFC 6793 §6: derive AS_PATH encoding format from negotiated capability
         _localFourByteAsn = _remoteFourByteAsn;
 
         _onPeerIdentified?.Invoke(_peerConfig.Address, _remoteAsn);
