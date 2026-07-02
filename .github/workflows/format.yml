@@ -1,0 +1,24 @@
+name: format
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  format-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      # Fails the check if `dotnet format` would change anything.
+      # Run `dotnet format BGPLite.sln` locally if this check fails.
+      - name: Verify formatting
+        run: dotnet format BGPLite.sln --verify-no-changes --severity warn --no-restore

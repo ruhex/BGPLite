@@ -1,0 +1,22 @@
+version: 2
+
+# Conservative: no auto-merge (Dependabot only opens PRs); CI build+test must pass.
+# Minor + patch are grouped into one PR; major bumps open separate PRs for review
+# (xUnit 2->3 and YamlDotNet major are known-breaking — review carefully).
+# Security/vulnerability updates run independently of this config.
+updates:
+  - package-ecosystem: "nuget"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    groups:
+      patch-and-minor:
+        update-types:
+          - "patch"
+          - "minor"
+    labels:
+      - "dependencies"
+    commit-message:
+      prefix: "chore(deps)"

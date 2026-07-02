@@ -25,7 +25,7 @@ public sealed class PrefixSourceConfig
     /// <summary>Raw URL of a CIDR list (kind = <c>"http"</c>).</summary>
     [YamlMember(Alias = "Url")]
     public string? Url { get; init; }
-    
+
     /// <summary>AS number(s) this prefix source is valid for (kind = <c>"asn"</c>).</summary>
     [YamlMember(Alias = "Asn")]
     public uint? Asn { get; init; }
