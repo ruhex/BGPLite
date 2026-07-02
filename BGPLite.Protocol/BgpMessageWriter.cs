@@ -30,6 +30,12 @@ public static class BgpMessageWriter
 
     private static void WriteHeader(BgpMessageType type, int totalLength, Span<byte> buffer)
     {
+        // RFC 4271 §4.1: BGP message length is a 16-bit field, min 19 (header only).
+        // Reject any length outside the representable range up front to avoid a
+        // silent (ushort) truncation that would emit a malformed frame.
+        if (totalLength < 19 || totalLength > ushort.MaxValue)
+            throw new ArgumentOutOfRangeException(nameof(totalLength), totalLength, $"BGP message length must be in 19..{ushort.MaxValue}.");
+
         BgpConstants.Marker.CopyTo(buffer);
         BinaryPrimitives.WriteUInt16BigEndian(buffer[16..], (ushort)totalLength);
         buffer[18] = (byte)type;
@@ -39,7 +45,17 @@ public static class BgpMessageWriter
 
     private static int WriteOpen(BgpOpenMessage msg, Span<byte> buffer)
     {
-        var payloadSize = GetOpenPayloadSize(msg);
+        // Validate every length that could overflow a single byte BEFORE writing
+        // anything to the caller's buffer, so a rejected write leaves the span
+        // untouched (RFC 4271 §4.2 / §6.2).
+        var optParamsLen = GetOptParamsLength(msg.Capabilities);
+        RequireFitsByte(optParamsLen, nameof(BgpOpenMessage.Capabilities), "optional-parameters");
+        if (msg.Capabilities.Count > 0)
+            RequireFitsByte(GetCapabilitiesDataLength(msg.Capabilities), nameof(BgpCapabilityInfo.Data), "capability data");
+        foreach (var cap in msg.Capabilities)
+            RequireFitsByte(cap.Data.Length, nameof(BgpCapabilityInfo.Data), "capability length");
+
+        var payloadSize = 9 + 1 + optParamsLen;
         var totalLength = BgpConstants.MessageHeaderSize + payloadSize;
 
         WriteHeader(BgpMessageType.Open, totalLength, buffer);
@@ -53,10 +69,6 @@ public static class BgpMessageWriter
         BinaryPrimitives.WriteUInt32BigEndian(buffer[p..], msg.RouterId);
         p += 4;
 
-        var optParamsLen = GetOptParamsLength(msg.Capabilities);
-        // RFC 4271 §4.2: optional-parameters length is a single byte.
-        // Silently truncating > 255 yields a malformed frame; reject up front.
-        RequireFitsByte(optParamsLen, nameof(BgpOpenMessage.Capabilities), "optional-parameters");
         buffer[p++] = (byte)optParamsLen;
 
         WriteCapabilities(msg.Capabilities, buffer[p..]);
@@ -70,33 +82,36 @@ public static class BgpMessageWriter
     private static int GetOptParamsLength(List<BgpCapabilityInfo> capabilities)
     {
         if (capabilities.Count == 0) return 0;
+        return 2 + GetCapabilitiesDataLength(capabilities);
+    }
 
+    private static int GetCapabilitiesDataLength(List<BgpCapabilityInfo> capabilities)
+    {
         var capDataLen = 0;
         foreach (var cap in capabilities)
             capDataLen += 2 + cap.Data.Length;
-
-        return 2 + capDataLen;
+        return capDataLen;
     }
 
     private static void WriteCapabilities(List<BgpCapabilityInfo> capabilities, Span<byte> buffer)
     {
         if (capabilities.Count == 0) return;
 
-        var capDataLen = 0;
-        foreach (var cap in capabilities)
-            capDataLen += 2 + cap.Data.Length;
+        var capDataLen = GetCapabilitiesDataLength(capabilities);
+        // Pre-validated in WriteOpen; the second guard is here for the (currently
+        // unreachable via Encode) direct call path.
+        RequireFitsByte(capDataLen, nameof(BgpCapabilityInfo.Data), "capability data");
 
         var p = 0;
         buffer[p++] = 2; // Type: Capabilities
-        // RFC 4271 §6.2: capability data length is a single byte.
-        RequireFitsByte(capDataLen, nameof(BgpCapabilityInfo.Data), "capability data");
         buffer[p++] = (byte)capDataLen;
 
         foreach (var cap in capabilities)
         {
-            buffer[p++] = cap.Code;
-            // RFC 4271 §6.2: per-capability length is a single byte.
+            // Pre-validated in WriteOpen; the second guard is here for the
+            // direct call path.
             RequireFitsByte(cap.Data.Length, nameof(BgpCapabilityInfo.Data), "capability length");
+            buffer[p++] = cap.Code;
             buffer[p++] = (byte)cap.Data.Length;
             cap.Data.AsSpan().CopyTo(buffer[p..]);
             p += cap.Data.Length;

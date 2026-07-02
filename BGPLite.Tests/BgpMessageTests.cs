@@ -296,4 +296,53 @@ public class BgpMessageTests
         // Optional-params length field sits at offset 19 (header) + 9 (fixed open payload).
         Assert.Equal(255, buffer[28]);
     }
+
+    [Fact]
+    public void Open_Overflow_DoesNotMutateBuffer()
+    {
+        // Regression: failed validation must not partially mutate the caller's
+        // buffer. Fill the buffer with a sentinel pattern, trigger an overflow
+        // (single cap with 300-byte data), and assert every byte is still the
+        // sentinel afterwards.
+        var bigData = new byte[300];
+        var open = new BgpOpenMessage
+        {
+            Version = 4,
+            Asn = 65000,
+            HoldTime = 90,
+            RouterId = 0x01020304,
+            Capabilities = [new BgpCapabilityInfo { Code = 0xFF, Data = bigData }]
+        };
+        var buffer = new byte[1024];
+        var sentinel = 0x5A;
+        Array.Fill(buffer, (byte)sentinel);
+
+        Assert.Throws<ArgumentOutOfRangeException>(() => BgpMessageWriter.WriteMessage(open, buffer));
+        Assert.All(buffer, b => Assert.Equal(sentinel, b));
+    }
+
+    [Fact]
+    public void Open_TotalOverflow_DoesNotMutateBuffer()
+    {
+        // Same regression for the total-overflow path (40 caps * 7 bytes = 280
+        // bytes of capability TLVs, optParamsLen > 255).
+        var caps = new List<BgpCapabilityInfo>();
+        for (var i = 0; i < 40; i++)
+            caps.Add(new BgpCapabilityInfo { Code = (byte)(0x10 + i), Data = new byte[5] });
+
+        var open = new BgpOpenMessage
+        {
+            Version = 4,
+            Asn = 65000,
+            HoldTime = 90,
+            RouterId = 0x01020304,
+            Capabilities = caps
+        };
+        var buffer = new byte[1024];
+        var sentinel = 0xA5;
+        Array.Fill(buffer, (byte)sentinel);
+
+        Assert.Throws<ArgumentOutOfRangeException>(() => BgpMessageWriter.WriteMessage(open, buffer));
+        Assert.All(buffer, b => Assert.Equal(sentinel, b));
+    }
 }
