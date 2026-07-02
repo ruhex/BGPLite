@@ -1,16 +1,55 @@
 name: Release Assets
 
-# When release-please publishes a Release (creates the vX.Y.Z tag), build
-# self-contained single-file binaries and attach them to that Release.
+# release-please creates the Release/tag using GITHUB_TOKEN, and GitHub does NOT
+# fire `on: release` for actions done by GITHUB_TOKEN (anti-recursion). So instead
+# we trigger off the Release workflow finishing, and only build when a tag points
+# at that commit. `workflow_dispatch` lets us (re)build a specific tag manually.
 on:
-  release:
-    types: [published]
+  workflow_run:
+    workflows: ["Release"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to build assets for (e.g. v1.0.0)"
+        required: true
 
 permissions:
   contents: write
+  packages: write
 
 jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.t.outputs.tag }}
+      do: ${{ steps.t.outputs.do }}
+    steps:
+      - id: t
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+            echo "do=true" >> "$GITHUB_OUTPUT"
+          else
+            if [ "${{ github.event.workflow_run.conclusion }}" != "success" ]; then
+              echo "do=false" >> "$GITHUB_OUTPUT"; exit 0
+            fi
+            SHA="${{ github.event.workflow_run.head_sha }}"
+            TAG=$(git ls-remote --tags origin | awk -F/ '{print $3}' | sed 's/\^{}$//' | while read t; do
+                    s=$(git ls-remote origin "refs/tags/$t" | awk '{print $1}')
+                    [ "$s" = "$SHA" ] && echo "$t" && break
+                  done)
+            if [ -z "$TAG" ]; then
+              echo "do=false" >> "$GITHUB_OUTPUT"   # Release run without a new tag
+            else
+              echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+              echo "do=true" >> "$GITHUB_OUTPUT"
+            fi
+          fi
+
   build:
+    needs: resolve
+    if: needs.resolve.outputs.do == 'true'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -41,28 +80,30 @@ jobs:
             -o publish/${{ matrix.rid }} \
             --source https://api.nuget.org/v3/index.json
 
+      - name: Stage example config alongside binary
+        run: cp appsettings.Example.yml publish/${{ matrix.rid }}/appsettings.Example.yml
+
       - name: Package (${{ matrix.rid }})
         run: |
           cd publish/${{ matrix.rid }}
           if [ "${{ matrix.archive }}" = "zip" ]; then
-            zip -r ../../bgplite-${{ github.event.release.tag_name }}-${{ matrix.rid }}.zip .
+            zip -r "../../bgplite-${{ needs.resolve.outputs.tag }}-${{ matrix.rid }}.zip" .
           else
-            tar -czf ../../bgplite-${{ github.event.release.tag_name }}-${{ matrix.rid }}.tar.gz .
+            tar -czf "../../bgplite-${{ needs.resolve.outputs.tag }}-${{ matrix.rid }}.tar.gz" .
           fi
 
       - name: Upload asset to Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release upload "${{ github.event.release.tag_name }}" \
-            bgplite-${{ github.event.release.tag_name }}-${{ matrix.rid }}.${{ matrix.archive }} \
+          gh release upload "${{ needs.resolve.outputs.tag }}" \
+            bgplite-${{ needs.resolve.outputs.tag }}-${{ matrix.rid }}.${{ matrix.archive }} \
             --repo "$GITHUB_REPOSITORY" --clobber
 
   docker:
+    needs: resolve
+    if: needs.resolve.outputs.do == 'true'
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
     steps:
       - uses: actions/checkout@v4
 
@@ -80,9 +121,8 @@ jobs:
         with:
           context: .
           push: true
-          # repository_owner is lowercase (ruhex); image name lowercased explicitly.
           tags: |
             ghcr.io/${{ github.repository_owner }}/bgplite:latest
-            ghcr.io/${{ github.repository_owner }}/bgplite:${{ github.event.release.tag_name }}
+            ghcr.io/${{ github.repository_owner }}/bgplite:${{ needs.resolve.outputs.tag }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
