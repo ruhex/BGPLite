@@ -63,4 +63,16 @@ public class ClientIpResolverTests
     public void Null_Remote_Returns_Unknown() =>
         Assert.Equal("unknown",
             ManagementApi.ResolveClientIp(null, "198.51.100.5", null, Proxy));
+
+    [Fact]
+    public void IPv4MappedIPv6_Remote_Normalized_For_TrustCheck()
+    {
+        // Linux dual-stack HttpListener (http://+) reports IPv4 peers as ::ffff:x.x.x.x; the
+        // address must be normalized to IPv4 before matching against IPv4 trusted-proxy CIDRs,
+        // else the proxy is never trusted and XFF is ignored (CodeRabbit).
+        var mapped = IPAddress.Parse("::ffff:127.0.0.1");
+        Assert.True(mapped.IsIPv4MappedToIPv6);
+        Assert.Equal("198.51.100.5",
+            ManagementApi.ResolveClientIp(mapped, "198.51.100.5", null, Proxy));
+    }
 }

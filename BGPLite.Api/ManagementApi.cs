@@ -652,6 +652,11 @@ public sealed class ManagementApi : IHostedService, IDisposable
     {
         if (remote is null) return "unknown";
 
+        // HttpListener on a dual-stack (http://+) listener reports IPv4 peers as IPv4-mapped IPv6
+        // (::ffff:x.x.x.x); normalize so IPv4 trusted-proxy CIDRs match and the returned string is clean.
+        IPAddress Normalize(IPAddress ip) => ip.IsIPv4MappedToIPv6 ? ip.MapToIPv4() : ip;
+        remote = Normalize(remote);
+
         bool IsTrusted(IPAddress ip) => trustedProxies.Count > 0 && trustedProxies.Any(n => n.Contains(ip));
 
         // Direct (non-proxy) client: never trust client-supplied forwarding headers.
@@ -667,8 +672,11 @@ public sealed class ManagementApi : IHostedService, IDisposable
             {
                 var hop = raw.Trim();
                 if (hop.Length == 0) continue;
-                if (IPAddress.TryParse(hop, out var ip) && !IsTrusted(ip))
-                    return hop;
+                if (IPAddress.TryParse(hop, out var ip))
+                {
+                    var normalized = Normalize(ip);
+                    if (!IsTrusted(normalized)) return normalized.ToString();
+                }
             }
         }
 
