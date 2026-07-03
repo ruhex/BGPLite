@@ -39,6 +39,13 @@ public static class BgpConstants
         public const byte MissingWellKnownAttribute = 3;
         public const byte BadBgpIdentifier = 3;
         public const byte UnacceptableHoldTime = 6;
+
+        // RFC 4486 Cease subcodes (apply when ErrorCode = Cease = 6)
+        public const byte CeaseMaxPrefixes = 1;
+        public const byte CeaseAdministrativeShutdown = 2;
+        public const byte CeasePeerDeconfigured = 3;
+        public const byte CeaseAdministrativeReset = 6;
+        public const byte CeaseConnectionRejected = 7;
     }
 
     public static class Attribute

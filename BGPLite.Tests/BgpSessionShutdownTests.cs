@@ -69,7 +69,7 @@ public class BgpSessionShutdownTests
         var msg = BgpMessageReader.ReadMessage(buf.AsSpan(0, len));
         var notif = Assert.IsType<BgpNotificationMessage>(msg);
         Assert.Equal(BgpConstants.Error.Cease, notif.ErrorCode);
-        Assert.Equal(BgpConstants.SubError.Unspecific, notif.SubErrorCode);
+        Assert.Equal(BgpConstants.SubError.CeaseAdministrativeReset, notif.SubErrorCode);
     }
 
     [Fact]

@@ -1120,7 +1120,7 @@ public sealed class BgpSession : IDisposable
 
         try
         {
-            await SendNotificationAsync(BgpConstants.Error.Cease, BgpConstants.SubError.Unspecific);
+            await SendNotificationAsync(BgpConstants.Error.Cease, BgpConstants.SubError.CeaseAdministrativeReset);
             _logger.LogInformation("Cease sent to {Peer} on shutdown", _peer);
         }
         catch (Exception ex)

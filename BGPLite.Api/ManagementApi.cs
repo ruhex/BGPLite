@@ -542,7 +542,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
                     Country = (string?)null,
                     Community = source.Community,
                     prefixCount = prefixes.Count,
-                    type = "list"
+                    type = source.Kind == "asn" ? "asn" : "list"
                 });
             }
         }
