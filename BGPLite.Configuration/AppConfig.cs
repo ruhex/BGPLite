@@ -41,4 +41,8 @@ public sealed class AppConfig
     /// </summary>
     [YamlMember(Alias = "TrustedProxies")]
     public List<string> TrustedProxies { get; init; } = [];
+
+    /// <summary>Per-client-IP rate limiting for the management API (#116). Null = defaults applied.</summary>
+    [YamlMember(Alias = "ApiRateLimit")]
+    public ApiRateLimitConfig? ApiRateLimit { get; init; }
 }

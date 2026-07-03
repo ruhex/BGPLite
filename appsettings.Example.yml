@@ -71,3 +71,13 @@ DefaultPrefixSource: ru
 #   - "127.0.0.0/8"
 #   - "10.0.0.0/8"
 
+# Management API — per-client-IP rate limiting (#116). Opt-in: absent = no limiting (live behavior
+# unchanged). When present, each resolved client IP (via TrustedProxies) gets a token bucket; a
+# request is rejected with 429 once its bucket drains. Defaults are generous (normal management-API
+# usage never trips them); set Enabled: false to turn off.
+# ApiRateLimit:
+#   Enabled: true
+#   TokenLimit: 120        # burst capacity (default 120)
+#   TokensPerPeriod: 120   # tokens replenished per period (default 120)
+#   PeriodSeconds: 60      # replenishment period in seconds (default 60)
+

@@ -52,6 +52,29 @@ public class ConfigurationTests
     }
 
     [Fact]
+    public void LoadFromText_ParsesApiRateLimit()
+    {
+        var yaml = """
+            Bgp:
+              Asn: 65444
+              RouterId: 10.0.0.1
+            ApiRateLimit:
+              Enabled: true
+              TokenLimit: 60
+              TokensPerPeriod: 60
+              PeriodSeconds: 60
+            """;
+
+        var config = ConfigLoader.LoadFromText(yaml);
+
+        Assert.NotNull(config.ApiRateLimit);
+        Assert.True(config.ApiRateLimit!.Enabled);
+        Assert.Equal(60, config.ApiRateLimit.TokenLimit);
+        Assert.Equal(60, config.ApiRateLimit.TokensPerPeriod);
+        Assert.Equal(60, config.ApiRateLimit.PeriodSeconds);
+    }
+
+    [Fact]
     public void LoadFromText_MultiplePeers()
     {
         var yaml = """
