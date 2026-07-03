@@ -86,23 +86,6 @@ public class PeerStoreKeyingTests
     }
 
     [Fact]
-    public void UpdateSessionStatus_Is_Scoped_To_IpAsn()
-    {
-        var (store, connection) = NewStore();
-        using var conn = connection;
-
-        var idA = store.CreatePeer(SharedIp, 64512, "A");
-        var idB = store.CreatePeer(SharedIp, 64513, "B");
-        store.UpdateSessionStatus(SharedIp, 64512, active: true);
-
-        Assert.Equal("active", store.GetDbPeerById(idA)!.Status);
-        Assert.Equal("inactive", store.GetDbPeerById(idB)!.Status); // untouched — different AS
-
-        store.UpdateSessionStatus(SharedIp, 64513, active: true);
-        Assert.Equal("active", store.GetDbPeerById(idB)!.Status);
-    }
-
-    [Fact]
     public void CreatePeer_Is_Idempotent_On_IpAsn()
     {
         var (store, connection) = NewStore();
@@ -115,8 +98,23 @@ public class PeerStoreKeyingTests
         Assert.Equal("second", store.GetDbPeerById(id1)!.Description);
     }
 
-<<<<<<< HEAD
-=======
+    [Fact]
+    public void UpdateSessionStatus_Is_Scoped_To_IpAsn()
+    {
+        var (store, connection) = NewStore();
+        using var conn = connection;
+
+        var idA = store.CreatePeer(SharedIp, 64512, "A");
+        var idB = store.CreatePeer(SharedIp, 64513, "B");
+        store.UpdateSessionStatus(SharedIp, 64512, true);
+
+        Assert.Equal("active", store.GetDbPeerById(idA)!.Status);
+        Assert.Equal("inactive", store.GetDbPeerById(idB)!.Status); // untouched — different AS
+
+        store.UpdateSessionStatus(SharedIp, 64513, true);
+        Assert.Equal("active", store.GetDbPeerById(idB)!.Status);
+    }
+
     [Fact]
     public void GetPeersByIp_Returns_All_Peers_On_One_Source_Ip()
     {
@@ -150,7 +148,6 @@ public class PeerStoreKeyingTests
         Assert.Equal(new HashSet<uint> { 0x0000FF01, 0x0000FF02 }, store.GetCommunitiesByIp(SharedIp));
     }
 
->>>>>>> 02703cd (fix(api): disambiguate /api/me for shared IPs)
     /// <summary>
     /// Hard requirement: existing peer data on the server must survive the index change. Simulates a
     /// database created by a previous (Ip-only-unique) version holding a real peer row, runs the

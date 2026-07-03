@@ -26,7 +26,6 @@ public class BgpDbContext : DbContext
         db.Database.ExecuteSqlRaw("DROP INDEX IF EXISTS IX_Peers_Ip;");
         db.Database.ExecuteSqlRaw(
             "CREATE UNIQUE INDEX IF NOT EXISTS UX_Peers_Ip_Asn ON Peers (Ip, Asn);");
-
         db.Peers.Where(p => p.Status == "active").ExecuteUpdate(
             s => s.SetProperty(p => p.Status, "inactive"));
     }
