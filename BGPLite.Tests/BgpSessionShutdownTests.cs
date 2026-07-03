@@ -351,6 +351,55 @@ public class BgpSessionShutdownTests
     }
 
     /// <summary>
+    /// #94 / RFC 7606: a single malformed inbound UPDATE (here: NLRI present but the mandatory ORIGIN
+    /// attribute is missing → MissingWellKnownAttribute) must NOT tear down the session. The read loop
+    /// catches BgpNotificationException(UpdateMessageError), logs + counts it, and keeps going — a
+    /// route-server should not lose a long-lived session over one bad/adversarial UPDATE. Stream-level
+    /// errors (FSM / message header) still propagate and tear down.
+    /// </summary>
+    [Fact]
+    public async Task MalformedUpdate_Does_Not_Tear_Down_Session()
+    {
+        var (server, client) = ConnectedPair();
+        using var clientSock = client;
+        var bgpConfig = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1", HoldTime = 0, KeepAlive = 0 };
+        var metrics = new BgpMetrics();
+        using var session = new BgpSession(
+            server,
+            new PeerConfig { Address = "127.0.0.1" },
+            bgpConfig,
+            new RouteTable(),
+            AllowAllFilter.Instance,
+            metrics,
+            new NopLogger<BgpSession>());
+
+        var runTask = await EstablishSessionAsync(session, client, bgpConfig);
+
+        // Malformed UPDATE: announces NLRI but omits the mandatory ORIGIN attribute.
+        var malformed = new BgpUpdateMessage
+        {
+            Nlri = [new IpPrefix(0xC0A80100u, 24)],
+            PathAttributes = []
+        };
+        var buf = new byte[BgpMessageWriter.GetBufferSize(malformed)];
+        var len = BgpMessageWriter.WriteMessage(malformed, buf);
+        client.Send(buf, 0, len, SocketFlags.None);
+
+        // Let the read loop receive and reject the bad UPDATE.
+        await Task.Delay(TimeSpan.FromMilliseconds(500));
+
+        Assert.True(session.IsEstablished, "session must survive a single malformed UPDATE (#94)");
+        Assert.True(metrics.UpdatesRejected >= 1, "the malformed UPDATE must be counted as rejected");
+
+        // No NOTIFICATION on the wire — we keep the session instead of notifying/tearing down.
+        var sent = await DrainAsync(client, TimeSpan.FromSeconds(2));
+        Assert.DoesNotContain(sent, m => m is BgpNotificationMessage);
+
+        session.MarkSilentClose();
+        await runTask.WaitAsync(TimeSpan.FromSeconds(5));
+    }
+
+    /// <summary>
     /// RFC 4724 §4 / §8.1: a Graceful-Restart-aware silent close (MarkSilentClose) must not emit a
     /// NOTIFICATION — the TCP connection is dropped so the peer retains routes across the restart.
     /// Regression for the bug where StopAsync with GR enabled skipped NotifyCeaseAsync but then

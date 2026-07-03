@@ -341,7 +341,26 @@ public sealed class BgpSession : IDisposable
             {
                 case BgpUpdateMessage update:
                     _metrics.UpdateReceived();
-                    await HandleUpdateAsync(update);
+                    try
+                    {
+                        await HandleUpdateAsync(update);
+                    }
+                    catch (BgpNotificationException ex) when (ex.ErrorCode == BgpConstants.Error.UpdateMessageError)
+                    {
+                        // Per-UPDATE content error (malformed attribute, missing mandatory attr, bad
+                        // AS_PATH/AS4_PATH merge, …): the message was framed correctly, so this is one bad
+                        // route, not a broken stream. RFC 7606 "treat-as-withdraw": discard the UPDATE and
+                        // keep the session — a route-server should not lose a long-lived session over a
+                        // single bad/adversarial UPDATE (#94). Reserve teardown for stream-level errors
+                        // (FSM / message-header), which surface as other error codes and propagate.
+                        // NOTE: deliberately do NOT send a NOTIFICATION — RFC 4271 §6.1 requires the
+                        // receiver of a NOTIFICATION to tear down, so notifying would make the peer kill
+                        // the very session we are trying to preserve.
+                        _metrics.UpdateRejected();
+                        _logger.LogWarning(
+                            "Rejected malformed UPDATE from {Peer}: {Error}/{SubError} — {Reason}; session stays up",
+                            _peer, ex.ErrorCode, ex.SubErrorCode, ex.Message);
+                    }
                     break;
                 case BgpKeepaliveMessage:
                     _logger.LogDebug("KeepAliveReceived from {Peer}", _peer);
