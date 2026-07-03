@@ -60,3 +60,14 @@ DefaultPrefixSource: ru
 # CustomPrefixCommunity: "65444:100"
 # CustomAsnCommunity: "65444:200"
 
+# Management API — client-IP resolution behind a reverse proxy (#91).
+# X-Forwarded-For / X-Real-IP are honored ONLY when the immediate TCP peer is one of these trusted
+# CIDRs; otherwise the direct RemoteEndPoint is used and any client-supplied forwarding header is
+# ignored (secure default). X-Forwarded-For is walked right-to-left past trusted hops, so spoofed
+# entries injected on the left are defeated. When the API runs behind a reverse proxy, list the
+# proxy's CIDR here so /api/me (and future per-IP rate limiting, #116) see the real client.
+# Empty/absent = never trust forwarding headers.
+# TrustedProxies:
+#   - "127.0.0.0/8"
+#   - "10.0.0.0/8"
+

@@ -34,6 +34,24 @@ public class ConfigurationTests
     }
 
     [Fact]
+    public void LoadFromText_ParsesTrustedProxies()
+    {
+        var yaml = """
+            Bgp:
+              Asn: 65444
+              RouterId: 10.0.0.1
+
+            TrustedProxies:
+              - "127.0.0.0/8"
+              - "10.0.0.0/8"
+            """;
+
+        var config = ConfigLoader.LoadFromText(yaml);
+
+        Assert.Equal(new[] { "127.0.0.0/8", "10.0.0.0/8" }, config.TrustedProxies);
+    }
+
+    [Fact]
     public void LoadFromText_MultiplePeers()
     {
         var yaml = """
