@@ -662,8 +662,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
         var sb = new StringBuilder(value.Length);
         foreach (var ch in value)
         {
-            if (char.IsControl(ch)) { sb.Append(' '); continue; }
-            sb.Append(ch);
+            sb.Append(char.IsControl(ch) ? ' ' : ch);
             if (sb.Length >= maxLength) { sb.Append('…'); break; }
         }
         return sb.ToString();

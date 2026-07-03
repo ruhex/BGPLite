@@ -35,6 +35,15 @@ public class LogSanitizationTests
     }
 
     [Fact]
+    public void Truncates_All_Control_Char_Input()
+    {
+        // Regression: control chars must also count toward the length limit (no unbounded spaces).
+        var result = ManagementApi.SanitizeForLog(new string('\n', 1000), maxLength: 50);
+        Assert.DoesNotContain('\n', result);
+        Assert.True(result.Length <= 51);
+    }
+
+    [Fact]
     public void Preserves_Normal_Content()
     {
         Assert.Equal("198.51.100.5", ManagementApi.SanitizeForLog("198.51.100.5"));
