@@ -643,9 +643,27 @@ public sealed class ManagementApi : IHostedService, IDisposable
 
     #region Helpers
 
+    internal static string ResolveClientIp(string? xRealIp, string? xForwardedFor, string? remoteEndPoint)
+    {
+        if (!string.IsNullOrWhiteSpace(xRealIp))
+            return xRealIp.Trim();
+
+        if (!string.IsNullOrWhiteSpace(xForwardedFor))
+        {
+            var forwardedIp = xForwardedFor.Split(',')[0].Trim();
+            if (!string.IsNullOrEmpty(forwardedIp))
+                return forwardedIp;
+        }
+
+        return remoteEndPoint ?? "unknown";
+    }
+
     private static string GetClientIp(HttpListenerContext ctx)
     {
-        return ctx.Request.RemoteEndPoint?.Address.ToString() ?? "unknown";
+        return ResolveClientIp(
+            ctx.Request.Headers["X-Real-IP"],
+            ctx.Request.Headers["X-Forwarded-For"],
+            ctx.Request.RemoteEndPoint?.Address.ToString());
     }
 
     private static async Task WriteResponse(HttpListenerContext ctx, ApiResponse response)
