@@ -399,10 +399,13 @@ public sealed class ManagementApi : IHostedService, IDisposable
             return ApiResponse.Error("Invalid request body", 400);
 
         // Validate ALL custom prefixes BEFORE any mutation so a bad prefix rejects the whole
-        // request with a 400 without partial mutation (#100).
-        var parsedPrefixes = new List<(string Prefix, byte Length)>();
+        // request with a 400 without partial mutation (#100). parsedPrefixes stays null when the
+        // field is omitted so existing prefixes are preserved (partial-update semantics: omitting a
+        // field must not wipe it — same as Description/Lists above and CustomAsns below).
+        List<(string Prefix, byte Length)>? parsedPrefixes = null;
         if (data.CustomPrefixes is not null)
         {
+            parsedPrefixes = [];
             foreach (var cidr in data.CustomPrefixes)
             {
                 var parsed = ParseCustomPrefix(cidr);
@@ -413,7 +416,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
         }
 
         _logger.LogInformation("UpdatePeer {Id}: CustomPrefixes={Count}, CustomAsns={AsnCount}",
-            SanitizeForLog(peerId), parsedPrefixes.Count, (data.CustomAsns ?? []).Count);
+            SanitizeForLog(peerId), parsedPrefixes?.Count ?? 0, data.CustomAsns?.Count ?? 0);
 
         if (data.Description is not null)
             _store.SetDescription(peerId, data.Description);
@@ -421,8 +424,10 @@ public sealed class ManagementApi : IHostedService, IDisposable
         if (data.Lists is not null)
             _store.SetSubscriptions(peerId, data.Lists);
 
-        _store.SetCustomPrefixes(peerId, parsedPrefixes);
-        _store.SetCustomAsns(peerId, data.CustomAsns ?? []);
+        if (parsedPrefixes is not null)
+            _store.SetCustomPrefixes(peerId, parsedPrefixes);
+        if (data.CustomAsns is not null)
+            _store.SetCustomAsns(peerId, data.CustomAsns);
 
         _logger.LogInformation("Updated peer {Id}", SanitizeForLog(peerId));
 
