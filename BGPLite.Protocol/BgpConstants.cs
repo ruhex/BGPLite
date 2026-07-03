@@ -63,7 +63,7 @@ public static class BgpConstants
         public const byte ClusterList = 10;
         public const byte ExtendedCommunity = 16;
         public const byte As4Path = 17;
-        public const byte As4PathAggregator = 18;
+        public const byte As4Aggregator = 18;
         public const byte LargeCommunity = 32;
 
         public const byte FlagOptional = 0x80;

@@ -8,7 +8,9 @@ namespace BGPLite.Protocol;
 /// </summary>
 public sealed class BgpNotificationException(byte errorCode, byte subErrorCode, string message, byte[]? notificationData = null) : Exception(message)
 {
+    private readonly byte[]? _notificationData = notificationData is null ? null : (byte[])notificationData.Clone();
+
     public byte ErrorCode { get; } = errorCode;
     public byte SubErrorCode { get; } = subErrorCode;
-    public byte[]? NotificationData { get; } = notificationData is null ? null : (byte[])notificationData.Clone();
+    public byte[]? NotificationData => _notificationData is null ? null : (byte[])_notificationData.Clone();
 }

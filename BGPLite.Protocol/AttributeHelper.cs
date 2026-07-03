@@ -118,7 +118,7 @@ public static class AttributeHelper
         BgpConstants.Attribute.AtomicAggregate => true,
         BgpConstants.Attribute.Aggregator => true,
         BgpConstants.Attribute.As4Path => true,
-        BgpConstants.Attribute.As4PathAggregator => true,
+        BgpConstants.Attribute.As4Aggregator => true,
         _ => false
     };
 
@@ -159,6 +159,9 @@ public static class AttributeHelper
 
     private static byte[] WritePathData(uint[] ases, int asSize, string attributeName)
     {
+        // Intentionally emits a single AS_SEQUENCE segment. For the current route-server use case,
+        // paths longer than 255 ASNs are treated as out of scope instead of being split into
+        // multiple segments.
         if (ases.Length > byte.MaxValue)
             throw new ArgumentOutOfRangeException(nameof(ases), $"{attributeName} segment length cannot exceed 255 ASNs.");
 

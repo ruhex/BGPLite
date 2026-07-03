@@ -476,7 +476,7 @@ public sealed class BgpSession : IDisposable
                         case BgpConstants.Attribute.Aggregator:
                             aggregatorAsn = AttributeHelper.ReadAggregatorAsn(attr, _remoteFourByteAsn);
                             break;
-                        case BgpConstants.Attribute.As4PathAggregator when !_remoteFourByteAsn:
+                        case BgpConstants.Attribute.As4Aggregator when !_remoteFourByteAsn:
                             as4AggregatorAsn = AttributeHelper.ReadAs4AggregatorAsn(attr);
                             break;
                     }
