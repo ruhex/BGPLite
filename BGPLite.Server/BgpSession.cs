@@ -557,7 +557,7 @@ public sealed class BgpSession : IDisposable
                     _logger.LogInformation("Unconfigured peer {Peer}, sending RU defaults", _peer);
                     try
                     {
-                        var ruPrefixes = await _prefixService.GetRuPrefixesAsync();
+                        var ruPrefixes = await _prefixService.GetRuPrefixesAsync(_cts.Token);
                         foreach (var (prefix, length, _) in ruPrefixes)
                         {
                             routes.Add(MakeRoute(prefix, length, nextHop, null, defaultComms));
@@ -598,7 +598,7 @@ public sealed class BgpSession : IDisposable
                         {
                             var comms = _communityResolver.Resolve(
                                 new CommunitySource(CommunitySourceKind.AsnList, list.Name));
-                            var prefixes = await _prefixService.GetPrefixesForAsns(list.Asns);
+                            var prefixes = await _prefixService.GetPrefixesForAsns(list.Asns, _cts.Token);
                             foreach (var (prefix, length, asn) in prefixes)
                                 routes.Add(MakeRoute(prefix, length, nextHop, [asn], comms));
                         }
@@ -621,7 +621,7 @@ public sealed class BgpSession : IDisposable
                     {
                         var comms = _communityResolver.Resolve(
                             new CommunitySource(CommunitySourceKind.Country, countryLists[0].Name));
-                        var ruPrefixes = await _prefixService.GetRuPrefixesAsync();
+                        var ruPrefixes = await _prefixService.GetRuPrefixesAsync(_cts.Token);
                         foreach (var (prefix, length, _) in ruPrefixes)
                             routes.Add(MakeRoute(prefix, length, nextHop, null, comms));
                         _logger.LogInformation("Fetched {Count} RU prefixes for {Peer}", ruPrefixes.Count, _peer);
@@ -644,7 +644,7 @@ public sealed class BgpSession : IDisposable
                     try
                     {
                         var comms = _communityResolver.Resolve(new CommunitySource(CommunitySourceKind.PrefixSource, name));
-                        var srcPrefixes = await _prefixService.GetSourcePrefixesAsync(name);
+                        var srcPrefixes = await _prefixService.GetSourcePrefixesAsync(name, _cts.Token);
                         foreach (var (prefix, length) in srcPrefixes)
                             routes.Add(MakeRoute(prefix, length, nextHop, null, comms));
                         _logger.LogInformation("Fetched {Count} prefixes from source '{Source}' for {Peer}",
@@ -678,7 +678,7 @@ public sealed class BgpSession : IDisposable
                     try
                     {
                         var customAsnComms = _communityResolver.Resolve(new CommunitySource(CommunitySourceKind.CustomAsn));
-                        var asnPrefixes = await _prefixService.GetPrefixesForAsns(customAsns);
+                        var asnPrefixes = await _prefixService.GetPrefixesForAsns(customAsns, _cts.Token);
                         foreach (var (prefix, length, asn) in asnPrefixes)
                             routes.Add(MakeRoute(prefix, length, nextHop, [asn], customAsnComms));
                         _logger.LogInformation("Peer {Peer} custom AS: {Asns} -> {Count} prefixes",
@@ -698,7 +698,7 @@ public sealed class BgpSession : IDisposable
                     _logger.LogInformation("Peer {Peer} resolved 0 prefixes, falling back to RU defaults", _peer);
                     try
                     {
-                        var ruPrefixes = await _prefixService.GetRuPrefixesAsync();
+                        var ruPrefixes = await _prefixService.GetRuPrefixesAsync(_cts.Token);
                         foreach (var (prefix, length, _) in ruPrefixes)
                             routes.Add(MakeRoute(prefix, length, nextHop, null, defaultComms));
                     }
@@ -725,7 +725,7 @@ public sealed class BgpSession : IDisposable
 
                 try
                 {
-                    var ruPrefixes = await _prefixService.GetRuPrefixesAsync();
+                    var ruPrefixes = await _prefixService.GetRuPrefixesAsync(_cts.Token);
                     foreach (var (prefix, length, _) in ruPrefixes)
                         routes.Add(MakeRoute(prefix, length, nextHop, null, defaultComms));
                     _logger.LogInformation("Fetched {Count} RU prefixes for unknown peer {Peer}",

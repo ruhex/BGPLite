@@ -20,26 +20,26 @@ public sealed class PrefixService : IPrefixService
         _cacheTtl = cacheTtl ?? TimeSpan.FromHours(1);
     }
 
-    public async Task<IReadOnlyList<(uint Prefix, byte Length)>> GetPrefixesAsync(uint asn)
+    public async Task<IReadOnlyList<(uint Prefix, byte Length)>> GetPrefixesAsync(uint asn, CancellationToken ct = default)
     {
         if (_cache.TryGetValue(asn, out var cached) && DateTime.UtcNow - cached.CachedAt < _cacheTtl)
             return cached.Data;
 
         if (_ripeStat is null) return [];
 
-        var prefixes = await _ripeStat.GetPrefixesAsync(asn);
+        var prefixes = await _ripeStat.GetPrefixesAsync(asn, ct);
         _cache[asn] = (prefixes, DateTime.UtcNow);
         return prefixes;
     }
 
-    public async Task<List<(uint Prefix, byte Length, uint Asn)>> GetPrefixesForAsns(IEnumerable<uint> asns)
+    public async Task<List<(uint Prefix, byte Length, uint Asn)>> GetPrefixesForAsns(IEnumerable<uint> asns, CancellationToken ct = default)
     {
         var result = new List<(uint Prefix, byte Length, uint Asn)>();
         foreach (var asn in asns)
         {
             try
             {
-                var prefixes = await GetPrefixesAsync(asn);
+                var prefixes = await GetPrefixesAsync(asn, ct);
                 foreach (var (prefix, length) in prefixes)
                     result.Add((prefix, length, asn));
             }
@@ -51,9 +51,9 @@ public sealed class PrefixService : IPrefixService
         return result;
     }
 
-    public async Task<int> GetPrefixCountAsync(uint asn)
+    public async Task<int> GetPrefixCountAsync(uint asn, CancellationToken ct = default)
     {
-        var prefixes = await GetPrefixesAsync(asn);
+        var prefixes = await GetPrefixesAsync(asn, ct);
         return prefixes.Count;
     }
 
@@ -63,22 +63,22 @@ public sealed class PrefixService : IPrefixService
     private List<(uint Prefix, byte Length, uint Asn)>? _ruProjected;
     private DateTime _ruCachedAt;
 
-    public async Task<List<(uint Prefix, byte Length, uint Asn)>> GetRuPrefixesAsync()
+    public async Task<List<(uint Prefix, byte Length, uint Asn)>> GetRuPrefixesAsync(CancellationToken ct = default)
     {
         if (_ruProjected is not null && DateTime.UtcNow - _ruCachedAt < _cacheTtl)
             return _ruProjected;
 
-        var prefixes = await _prefixSources.GetDefaultAsync();
+        var prefixes = await _prefixSources.GetDefaultAsync(ct);
         _ruProjected = prefixes.Select(p => (p.Prefix, p.Length, 0u)).ToList();
         _ruCachedAt = DateTime.UtcNow;
         return _ruProjected;
     }
 
     /// <summary>Prefixes of a configured source by name (cache-through).</summary>
-    public Task<IReadOnlyList<(uint Prefix, byte Length)>> GetSourcePrefixesAsync(string name) =>
-        _prefixSources.GetAsync(name);
+    public Task<IReadOnlyList<(uint Prefix, byte Length)>> GetSourcePrefixesAsync(string name, CancellationToken ct = default) =>
+        _prefixSources.GetAsync(name, ct);
 
-    public async Task WarmUpAsync()
+    public async Task WarmUpAsync(CancellationToken ct = default)
     {
         var lists = _config.RipeStat?.AsnLists ?? [];
 
@@ -87,7 +87,7 @@ public sealed class PrefixService : IPrefixService
         {
             try
             {
-                await GetPrefixesAsync(asn);
+                await GetPrefixesAsync(asn, ct);
                 Console.WriteLine($"  WarmUp: AS{asn} cached");
             }
             catch (Exception ex)
@@ -97,6 +97,6 @@ public sealed class PrefixService : IPrefixService
         }
 
         // Pre-load all configured prefix sources (file/HTTP/...) into the in-memory cache.
-        await _prefixSources.WarmUpAsync();
+        await _prefixSources.WarmUpAsync(ct);
     }
 }
