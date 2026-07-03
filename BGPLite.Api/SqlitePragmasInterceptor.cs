@@ -27,12 +27,9 @@ public sealed class SqlitePragmasInterceptor : DbConnectionInterceptor
     public override void ConnectionOpened(DbConnection connection, ConnectionEndEventData eventData)
         => ApplyPragmas(connection);
 
-    public override Task ConnectionOpenedAsync(
+    public override async Task ConnectionOpenedAsync(
         DbConnection connection, ConnectionEndEventData eventData, CancellationToken cancellationToken = default)
-    {
-        ApplyPragmas(connection);
-        return Task.CompletedTask;
-    }
+        => await ApplyPragmasAsync(connection, cancellationToken);
 
     private static void ApplyPragmas(DbConnection connection)
     {
@@ -44,10 +41,25 @@ public sealed class SqlitePragmasInterceptor : DbConnectionInterceptor
         Execute(sqlite, $"PRAGMA busy_timeout={BusyTimeoutMs};");
     }
 
+    private static async Task ApplyPragmasAsync(DbConnection connection, CancellationToken cancellationToken)
+    {
+        if (connection is not SqliteConnection sqlite) return;
+        await ExecuteAsync(sqlite, $"PRAGMA journal_mode=WAL;", cancellationToken);
+        await ExecuteAsync(sqlite, "PRAGMA synchronous=NORMAL;", cancellationToken);
+        await ExecuteAsync(sqlite, $"PRAGMA busy_timeout={BusyTimeoutMs};", cancellationToken);
+    }
+
     private static void Execute(SqliteConnection sqlite, string pragma)
     {
         using var cmd = sqlite.CreateCommand();
         cmd.CommandText = pragma;
         cmd.ExecuteNonQuery();
+    }
+
+    private static async Task ExecuteAsync(SqliteConnection sqlite, string pragma, CancellationToken cancellationToken)
+    {
+        using var cmd = sqlite.CreateCommand();
+        cmd.CommandText = pragma;
+        await cmd.ExecuteNonQueryAsync(cancellationToken);
     }
 }
