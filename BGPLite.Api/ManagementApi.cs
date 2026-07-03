@@ -24,6 +24,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
     private readonly ISessionManager? _sessionManager;
     private readonly ILogger<ManagementApi> _logger;
     private readonly int _port;
+    private readonly IReadOnlyList<IPNetwork> _trustedProxyNetworks;
     private HttpListener? _listener;
     private Task? _listenTask;
     private CancellationTokenSource _cts = new();
@@ -47,6 +48,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
         _sessionManager = sessionManager;
         _logger = logger;
         _port = config.ApiPort;
+        _trustedProxyNetworks = ParseTrustedProxies(config.TrustedProxies);
     }
 
     public Task StartAsync(CancellationToken cancellationToken)
@@ -631,19 +633,75 @@ public sealed class ManagementApi : IHostedService, IDisposable
 
     #region Helpers
 
-    private static string GetClientIp(HttpListenerContext ctx)
-    {
-        var realIp = ctx.Request.Headers["X-Real-IP"];
-        if (!string.IsNullOrEmpty(realIp)) return realIp;
+    private string GetClientIp(HttpListenerContext ctx) =>
+        ResolveClientIp(
+            ctx.Request.RemoteEndPoint?.Address,
+            ctx.Request.Headers["X-Forwarded-For"],
+            ctx.Request.Headers["X-Real-IP"],
+            _trustedProxyNetworks);
 
-        var forwarded = ctx.Request.Headers["X-Forwarded-For"];
-        if (!string.IsNullOrEmpty(forwarded))
+    /// <summary>
+    /// Resolves the real client IP from the connection's remote endpoint and forwarding headers.
+    /// Forwarding headers are honored ONLY when the immediate peer (<paramref name="remote"/>) is a
+    /// configured trusted proxy (#91) — a direct client cannot inject <c>X-Forwarded-For</c> /
+    /// <c>X-Real-IP</c>. <c>X-Forwarded-For</c> is walked right-to-left and the first hop that is not
+    /// itself a trusted proxy is returned, defeating injection through the proxy. Extracted as a pure
+    /// function so the security logic is unit-testable without an HttpListener.
+    /// </summary>
+    internal static string ResolveClientIp(IPAddress? remote, string? xForwardedFor, string? xRealIp, IReadOnlyList<IPNetwork> trustedProxies)
+    {
+        if (remote is null) return "unknown";
+
+        bool IsTrusted(IPAddress ip) => trustedProxies.Count > 0 && trustedProxies.Any(n => n.Contains(ip));
+
+        // Direct (non-proxy) client: never trust client-supplied forwarding headers.
+        if (!IsTrusted(remote))
+            return remote.ToString();
+
+        // Trusted proxy: recover the original client from X-Forwarded-For, walking right-to-left past
+        // trusted hops (the proxy appends the real client on the right; attacker-controlled entries
+        // land on the left and are skipped).
+        if (!string.IsNullOrWhiteSpace(xForwardedFor))
         {
-            var first = forwarded.Split(',')[0].Trim();
-            if (first.Length > 0) return first;
+            foreach (var raw in xForwardedFor.Split(',').Reverse())
+            {
+                var hop = raw.Trim();
+                if (hop.Length == 0) continue;
+                if (IPAddress.TryParse(hop, out var ip) && !IsTrusted(ip))
+                    return hop;
+            }
         }
 
-        return ctx.Request.RemoteEndPoint?.Address.ToString() ?? "unknown";
+        // Single-hop proxies commonly set X-Real-IP instead of (or alongside) X-Forwarded-For.
+        if (!string.IsNullOrWhiteSpace(xRealIp))
+            return xRealIp.Trim();
+
+        return remote.ToString();
+    }
+
+    /// <summary>Parses configured TrustedProxies CIDRs (or bare IPs → /32 or /128) into IPNetworks.
+    /// Unparseable entries are logged and skipped (that CIDR simply won't be trusted).</summary>
+    private IReadOnlyList<IPNetwork> ParseTrustedProxies(List<string>? cidrs)
+    {
+        var nets = new List<IPNetwork>();
+        if (cidrs is null || cidrs.Count == 0) return nets;
+
+        foreach (var entry in cidrs)
+        {
+            var s = entry.Trim();
+            if (s.Length == 0) continue;
+
+            if (IPNetwork.TryParse(s, out var net)) { nets.Add(net); continue; }
+
+            if (IPAddress.TryParse(s, out var ip))
+            {
+                nets.Add(new IPNetwork(ip, ip.GetAddressBytes().Length * 8)); // /32 (IPv4) or /128 (IPv6)
+                continue;
+            }
+
+            _logger.LogWarning("Ignoring unparseable TrustedProxies entry '{Entry}'.", s);
+        }
+        return nets;
     }
 
     private static async Task WriteResponse(HttpListenerContext ctx, ApiResponse response)

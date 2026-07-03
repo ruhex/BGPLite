@@ -31,4 +31,14 @@ public sealed class AppConfig
     /// <summary>Optional override for the community stamped on per-peer custom-AS-originated prefixes (default <c>&lt;Asn&gt;:200</c>).</summary>
     [YamlMember(Alias = "CustomAsnCommunity")]
     public string? CustomAsnCommunity { get; init; }
+
+    /// <summary>
+    /// Trusted reverse-proxy CIDRs whose <c>X-Forwarded-For</c> / <c>X-Real-IP</c> headers are
+    /// honored when resolving the management-API client IP (e.g. <c>["127.0.0.0/8", "10.0.0.0/8"]</c>).
+    /// Empty (default) = never trust forwarding headers — the direct <c>RemoteEndPoint</c> is used,
+    /// and any client-supplied <c>X-Forwarded-For</c> is ignored (#91). When the API runs behind a
+    /// reverse proxy, list the proxy's CIDR here so the real client IP is resolved.
+    /// </summary>
+    [YamlMember(Alias = "TrustedProxies")]
+    public List<string> TrustedProxies { get; init; } = [];
 }
