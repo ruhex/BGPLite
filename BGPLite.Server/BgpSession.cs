@@ -443,6 +443,7 @@ public sealed class BgpSession : IDisposable
                 uint[] asPath = [];
                 uint[] communities = [];
                 uint[] as4Path = [];
+                var filterPeerConfig = GetFilterPeerConfig();
 
                 foreach (var attr in update.PathAttributes)
                 {
@@ -487,7 +488,7 @@ public sealed class BgpSession : IDisposable
                         Communities = communities
                     };
 
-                    if (_routeFilter.AcceptIncoming(route, _peerConfig))
+                    if (_routeFilter.AcceptIncoming(route, filterPeerConfig))
                     {
                         _routeTable.AddOrUpdate(route);
                         _logger.LogDebug("Route added: {Prefix} via {NextHop}", nlri, BgpConstants.UintToIPAddress(nextHop));

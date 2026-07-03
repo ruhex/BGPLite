@@ -206,6 +206,13 @@ public class BgpMessageTests
     }
 
     [Fact]
+    public void IpAddressToUint_ValidIpv4_ReturnsExpectedValue()
+    {
+        var result = BgpConstants.IPAddressToUint(IPAddress.Parse("192.168.1.1"));
+        Assert.Equal(0xC0A80101u, result);
+    }
+
+    [Fact]
     public void GetBufferSize_MatchesWriteSize()
     {
         var open = new BgpOpenMessage
