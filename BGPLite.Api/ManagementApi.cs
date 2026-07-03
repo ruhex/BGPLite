@@ -107,7 +107,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
 
         try
         {
-            var response = Route(method, segments, ctx);
+            var response = await RouteAsync(method, segments, ctx);
             await WriteResponse(ctx, response);
         }
         catch (Exception ex)
@@ -117,7 +117,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
         }
     }
 
-    private ApiResponse Route(string method, string[] segments, HttpListenerContext ctx)
+    private async Task<ApiResponse> RouteAsync(string method, string[] segments, HttpListenerContext ctx)
     {
         // /api/server
         if (IsGet(method, segments, "api", "server"))
@@ -129,23 +129,23 @@ public sealed class ManagementApi : IHostedService, IDisposable
 
         // /api/peers
         if (IsPost(method, segments, "api", "peers"))
-            return HandleCreatePeer(ctx).GetAwaiter().GetResult();
+            return await HandleCreatePeer(ctx);
 
         // /api/peers/{id}
         if (segments.Length == 3 && segments[0] == "api" && segments[1] == "peers" && method == "GET")
             return HandleGetPeer(segments[2]);
         if (segments.Length == 3 && segments[0] == "api" && segments[1] == "peers" && method == "PUT")
-            return HandleUpdatePeer(segments[2], ctx).GetAwaiter().GetResult();
+            return await HandleUpdatePeer(segments[2], ctx);
         if (segments.Length == 3 && segments[0] == "api" && segments[1] == "peers" && method == "DELETE")
             return HandleDeletePeer(segments[2]);
 
         // /api/peers/{id}/prefixes
         if (segments.Length == 4 && segments[0] == "api" && segments[1] == "peers" && segments[3] == "prefixes" && method == "GET")
-            return HandleExportPrefixes(segments[2], ctx);
+            return await HandleExportPrefixes(segments[2], ctx);
 
         // /api/asn-lists
         if (IsGet(method, segments, "api", "asn-lists"))
-            return HandleGetAsnListsAsync().GetAwaiter().GetResult();
+            return await HandleGetAsnListsAsync();
 
         // /api/community-scheme
         if (IsGet(method, segments, "api", "community-scheme"))
@@ -161,7 +161,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
 
         // /api/as/{asn}/prefixes
         if (segments.Length == 4 && segments[0] == "api" && segments[1] == "as" && segments[3] == "prefixes" && method == "GET")
-            return HandleGetAsnPrefixes(segments[2], ctx);
+            return await HandleGetAsnPrefixes(segments[2], ctx);
 
         return ApiResponse.Error("Not found", 404);
     }
@@ -422,13 +422,13 @@ public sealed class ManagementApi : IHostedService, IDisposable
 
     #region /api/peers/{id}/prefixes
 
-    private ApiResponse HandleExportPrefixes(string peerId, HttpListenerContext ctx)
+    private async Task<ApiResponse> HandleExportPrefixes(string peerId, HttpListenerContext ctx)
     {
         var peer = _store.GetDbPeerById(peerId);
         if (peer is null)
             return ApiResponse.Error("Peer not found", 404);
 
-        var prefixes = CollectPeerPrefixes(peerId).GetAwaiter().GetResult();
+        var prefixes = await CollectPeerPrefixes(peerId);
 
         var format = ctx.Request.QueryString["format"] ?? "txt";
         if (format == "json")
@@ -601,7 +601,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
 
     #region GET /api/as/{asn}/prefixes
 
-    private ApiResponse HandleGetAsnPrefixes(string asnStr, HttpListenerContext ctx)
+    private async Task<ApiResponse> HandleGetAsnPrefixes(string asnStr, HttpListenerContext ctx)
     {
         if (!uint.TryParse(asnStr, out var asn))
             return ApiResponse.Error("Invalid ASN", 400);
@@ -615,7 +615,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
 
             try
             {
-                var count = _prefixService.GetPrefixCountAsync(asn).GetAwaiter().GetResult();
+                var count = await _prefixService.GetPrefixCountAsync(asn);
                 return ApiResponse.Ok(new { asn, prefixCount = count });
             }
             catch (Exception ex)
