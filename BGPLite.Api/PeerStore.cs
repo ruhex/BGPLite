@@ -89,19 +89,7 @@ public sealed class PeerStore : IPeerStore
     public List<PeerInfo> GetPeersByIp(string ip)
     {
         using var db = _dbFactory.CreateDbContext();
-        return db.Peers
-            .Where(p => p.Ip == ip)
-            .Select(p => new PeerInfo
-            {
-                Id = p.Id,
-                Ip = p.Ip,
-                Asn = p.Asn,
-                Description = p.Description,
-                Status = p.Status,
-                CreatedAt = p.CreatedAt.ToString("O"),
-                LastSessionAt = p.LastSessionAt.HasValue ? p.LastSessionAt.Value.ToString("O") : null
-            })
-            .ToList();
+        return db.Peers.Where(p => p.Ip == ip).ToList().Select(MapToInfo).ToList();
     }
 
     /// <summary>

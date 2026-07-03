@@ -194,7 +194,7 @@ Available on port **5000**.
 ### Peers
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `GET` | `/api/me` | Returns the caller's peer record; `?asn=` disambiguates shared-IP peers (`409` if ambiguous) |
+| `GET` | `/api/me` | Returns the caller's peer record from the request source IP; `?asn=` disambiguates shared-IP peers (`409` if ambiguous) |
 | `POST` | `/api/peers` | Register a new peer |
 | `GET`  | `/api/peers` | List all peers |
 

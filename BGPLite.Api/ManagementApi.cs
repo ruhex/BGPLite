@@ -359,7 +359,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
         var subscriptions = _store.GetSubscriptions(peer.Id);
         var customPrefixes = _store.GetCustomPrefixes(peer.Id);
         var customAsns = _store.GetCustomAsns(peer.Id);
-        var communities = _store.GetCommunitiesByIp(peer.Ip);
+        var communities = _store.GetCommunities(peer.Id);
 
         return ApiResponse.Ok(new
         {
@@ -645,16 +645,6 @@ public sealed class ManagementApi : IHostedService, IDisposable
 
     private static string GetClientIp(HttpListenerContext ctx)
     {
-        var realIp = ctx.Request.Headers["X-Real-IP"];
-        if (!string.IsNullOrEmpty(realIp)) return realIp;
-
-        var forwarded = ctx.Request.Headers["X-Forwarded-For"];
-        if (!string.IsNullOrEmpty(forwarded))
-        {
-            var first = forwarded.Split(',')[0].Trim();
-            if (first.Length > 0) return first;
-        }
-
         return ctx.Request.RemoteEndPoint?.Address.ToString() ?? "unknown";
     }
 

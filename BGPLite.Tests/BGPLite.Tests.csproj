@@ -15,7 +15,6 @@
     <ProjectReference Include="..\BGPLite.Server\BGPLite.Server.csproj" />
     <ProjectReference Include="..\BGPLite.Routing\BGPLite.Routing.csproj" />
     <ProjectReference Include="..\BGPLite.Configuration\BGPLite.Configuration.csproj" />
-    <ProjectReference Include="..\BGPLite.Api\BGPLite.Api.csproj" />
   </ItemGroup>
 
   <ItemGroup>
