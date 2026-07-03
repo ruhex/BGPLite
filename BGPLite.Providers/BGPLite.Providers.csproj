@@ -9,7 +9,6 @@
   <ItemGroup>
     <ProjectReference Include="..\BGPLite.Configuration\BGPLite.Configuration.csproj" />
     <ProjectReference Include="..\BGPLite.Protocol\BGPLite.Protocol.csproj" />
-    <ProjectReference Include="..\BGPLite.Server\BGPLite.Server.csproj" />
   </ItemGroup>
 
   <ItemGroup>

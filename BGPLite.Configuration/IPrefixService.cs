@@ -1,5 +1,11 @@
-namespace BGPLite.Server;
+namespace BGPLite.Configuration;
 
+/// <summary>
+/// Origin-AS / source prefix lookup contract. Lives in this neutral lower layer so that the
+/// concrete <c>PrefixService</c> implementation (BGPLite.Providers, a data layer) can implement it
+/// without depending upward on BGPLite.Server — Server (the consumer) depends on this contract,
+/// giving the dependency direction Server→Configuration←Providers as peers (#88).
+/// </summary>
 public interface IPrefixService
 {
     Task<IReadOnlyList<(uint Prefix, byte Length)>> GetPrefixesAsync(uint asn, CancellationToken ct = default);
