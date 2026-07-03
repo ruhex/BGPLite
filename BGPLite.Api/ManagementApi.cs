@@ -1,4 +1,5 @@
 using System.Net;
+using System.Net.Sockets;
 using System.Text;
 using System.Threading.RateLimiting;
 using System.Text.Json;
@@ -322,12 +323,10 @@ public sealed class ManagementApi : IHostedService, IDisposable
         {
             foreach (var cidr in data.CustomPrefixes)
             {
-                var slash = cidr.IndexOf('/');
-                if (slash < 0)
+                var parsed = ParseCustomPrefix(cidr);
+                if (parsed is null)
                     return ApiResponse.Error($"Invalid CIDR: {cidr}", 400);
-                var prefix = cidr[..slash];
-                var length = byte.Parse(cidr[(slash + 1)..]);
-                customPrefixes.Add((prefix, length));
+                customPrefixes.Add(parsed.Value);
             }
         }
 
@@ -399,24 +398,30 @@ public sealed class ManagementApi : IHostedService, IDisposable
         if (data is null)
             return ApiResponse.Error("Invalid request body", 400);
 
+        // Validate ALL custom prefixes BEFORE any mutation so a bad prefix rejects the whole
+        // request with a 400 without partial mutation (#100).
+        var parsedPrefixes = new List<(string Prefix, byte Length)>();
+        if (data.CustomPrefixes is not null)
+        {
+            foreach (var cidr in data.CustomPrefixes)
+            {
+                var parsed = ParseCustomPrefix(cidr);
+                if (parsed is null)
+                    return ApiResponse.Error($"Invalid CIDR: {cidr}", 400);
+                parsedPrefixes.Add(parsed.Value);
+            }
+        }
+
+        _logger.LogInformation("UpdatePeer {Id}: CustomPrefixes={Count}, CustomAsns={AsnCount}",
+            SanitizeForLog(peerId), parsedPrefixes.Count, (data.CustomAsns ?? []).Count);
+
         if (data.Description is not null)
             _store.SetDescription(peerId, data.Description);
 
         if (data.Lists is not null)
             _store.SetSubscriptions(peerId, data.Lists);
 
-        var customPrefixes = data.CustomPrefixes ?? [];
-        _logger.LogInformation("UpdatePeer {Id}: CustomPrefixes={Count}, CustomAsns={AsnCount}",
-            SanitizeForLog(peerId), customPrefixes.Count, (data.CustomAsns ?? []).Count);
-        var parsed = new List<(string, byte)>();
-        foreach (var cidr in customPrefixes)
-        {
-            var slash = cidr.IndexOf('/');
-            if (slash < 0) return ApiResponse.Error($"Invalid CIDR: {cidr}", 400);
-            parsed.Add((cidr[..slash], byte.Parse(cidr[(slash + 1)..])));
-        }
-        _store.SetCustomPrefixes(peerId, parsed);
-
+        _store.SetCustomPrefixes(peerId, parsedPrefixes);
         _store.SetCustomAsns(peerId, data.CustomAsns ?? []);
 
         _logger.LogInformation("Updated peer {Id}", SanitizeForLog(peerId));
@@ -666,6 +671,37 @@ public sealed class ManagementApi : IHostedService, IDisposable
             if (sb.Length >= maxLength) { sb.Append('…'); break; }
         }
         return sb.ToString();
+    }
+
+    /// <summary>
+    /// Parses a single user-supplied custom prefix CIDR ("<prefix>/<length>") into a validated
+    /// (prefix, mask length) tuple. Splitting is done on the first '/', requiring exactly two
+    /// parts. The prefix is validated with <see cref="IPAddress.TryParse"/> (IPv4 only — IPv6 is
+    /// rejected); the length must parse as a byte in 0..32. Returns null on any failure so callers
+    /// can reject the whole request with a 400 before touching the store (no partial mutation).
+    /// Extracted as a pure helper for unit tests (#100).
+    /// </summary>
+    internal static (string Prefix, byte Length)? ParseCustomPrefix(string? cidr)
+    {
+        if (string.IsNullOrWhiteSpace(cidr))
+            return null;
+
+        var parts = cidr.Split('/');
+        if (parts.Length != 2)
+            return null;
+
+        var prefix = parts[0];
+        var lengthStr = parts[1];
+
+        // IPv4 only: reject IPv6 (and any non-IP string).
+        if (!IPAddress.TryParse(prefix, out var addr) || addr.AddressFamily != AddressFamily.InterNetwork)
+            return null;
+
+        // Length must be a byte in the valid IPv4 range 0..32 (rejects 33..255, negatives, non-numeric).
+        if (!byte.TryParse(lengthStr, out byte length) || length > 32)
+            return null;
+
+        return (prefix, length);
     }
 
     private string GetClientIp(HttpListenerContext ctx) =>
