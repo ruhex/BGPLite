@@ -132,7 +132,8 @@ public sealed class ManagementApi : IHostedService, IDisposable
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "API error {Method} {Path}: {Message}", method, path, ex.Message);
+            _logger.LogError(ex, "API error {Method} {Path}: {Message}",
+                SanitizeForLog(method), SanitizeForLog(path), SanitizeForLog(ex.Message));
             await WriteResponse(ctx, ApiResponse.Error(ex.InnerException?.Message ?? ex.Message, 500));
         }
     }
@@ -313,7 +314,6 @@ public sealed class ManagementApi : IHostedService, IDisposable
         var asnLists = data.AsnLists ?? [];
         var customPrefixes = new List<(string Prefix, byte Length)>();
 
-        _logger.LogInformation("CreatePeer raw body: {Body}", body);
         _logger.LogInformation("CreatePeer deserialized: AsnLists={Lists}, CustomPrefixes={Prefixes}, CustomAsns={Asns}",
             string.Join(",", asnLists), string.Join(",", data.CustomPrefixes ?? []),
             string.Join(",", data.CustomAsns ?? []));
@@ -406,8 +406,8 @@ public sealed class ManagementApi : IHostedService, IDisposable
             _store.SetSubscriptions(peerId, data.Lists);
 
         var customPrefixes = data.CustomPrefixes ?? [];
-        _logger.LogInformation("UpdatePeer {Id}: CustomPrefixes={Count}, CustomAsns={AsnCount}, raw={Raw}",
-            peerId, customPrefixes.Count, (data.CustomAsns ?? []).Count, body);
+        _logger.LogInformation("UpdatePeer {Id}: CustomPrefixes={Count}, CustomAsns={AsnCount}",
+            SanitizeForLog(peerId), customPrefixes.Count, (data.CustomAsns ?? []).Count);
         var parsed = new List<(string, byte)>();
         foreach (var cidr in customPrefixes)
         {
@@ -419,7 +419,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
 
         _store.SetCustomAsns(peerId, data.CustomAsns ?? []);
 
-        _logger.LogInformation("Updated peer {Id}", peerId);
+        _logger.LogInformation("Updated peer {Id}", SanitizeForLog(peerId));
 
         if (_sessionManager is not null)
             _ = _sessionManager.RefreshPeerAsync(peer.Ip);
@@ -434,7 +434,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
             return ApiResponse.Error("Peer not found", 404);
 
         _store.DeletePeer(peerId);
-        _logger.LogInformation("Deleted peer {Id} ({Ip})", peerId, peer.Ip);
+        _logger.LogInformation("Deleted peer {Id} ({Ip})", SanitizeForLog(peerId), peer.Ip);
         return ApiResponse.Ok(new { id = peerId, deleted = true });
     }
 
@@ -650,6 +650,24 @@ public sealed class ManagementApi : IHostedService, IDisposable
     #endregion
 
     #region Helpers
+
+    /// <summary>
+    /// Strips CR/LF and other control characters (and truncates) from a user-controlled string so it
+    /// cannot forge log lines when rendered by a log sink (CodeQL cs/log-forging). Structured logging
+    /// (<c>{...}</c> placeholders) is the primary mitigation; this is defense-in-depth on the value.
+    /// </summary>
+    internal static string SanitizeForLog(string? value, int maxLength = 200)
+    {
+        if (string.IsNullOrEmpty(value)) return string.Empty;
+        var sb = new StringBuilder(value.Length);
+        foreach (var ch in value)
+        {
+            if (char.IsControl(ch)) { sb.Append(' '); continue; }
+            sb.Append(ch);
+            if (sb.Length >= maxLength) { sb.Append('…'); break; }
+        }
+        return sb.ToString();
+    }
 
     private string GetClientIp(HttpListenerContext ctx) =>
         ResolveClientIp(
