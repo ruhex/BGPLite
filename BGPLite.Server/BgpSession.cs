@@ -1233,7 +1233,8 @@ public sealed class BgpSession : IDisposable
         foreach (var cap in open.Capabilities)
         {
             if (cap.Code == BgpConstants.Capability.FourOctetAsn && cap.Data.Length != 4)
-                return [BgpConstants.Capability.FourOctetAsn, (byte)cap.Data.Length, ..cap.Data];
+                return [BgpConstants.Capability.FourOctetAsn, (byte)cap.Data.Length,
+                    ..cap.Data];
         }
 
         return [];
