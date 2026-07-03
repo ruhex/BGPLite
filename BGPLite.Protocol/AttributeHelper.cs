@@ -34,10 +34,6 @@ public static class AttributeHelper
         };
     }
 
-    /// <summary>
-    /// Writes AS4_PATH attribute (type 17) per RFC 6793 §6.
-    /// Carries the true 4-byte AS sequence when sending to a 2-byte-only peer.
-    /// </summary>
     public static PathAttribute WriteAs4Path(uint[] ases)
     {
         return new PathAttribute
@@ -48,91 +44,32 @@ public static class AttributeHelper
         };
     }
 
-    /// <summary>
-    /// Reads AS4_PATH attribute (type 17) per RFC 6793 §6.
-    /// Returns the 4-byte AS sequence for reconstruction when receiving from a 2-byte-only peer.
-    /// NOTE: AS_SET segments are not preserved — returns a flat AS sequence (matching ReadAsPath).
-    /// </summary>
     public static uint[] ReadAs4Path(PathAttribute attr)
     {
         return ReadPathData(attr.Data, 4, "AS4_PATH");
     }
 
-    private static uint[] ReadPathData(ReadOnlySpan<byte> data, int asSize, string attributeName)
-    {
-        var ases = new List<uint>();
-        var offset = 0;
-
-        while (offset + 2 <= data.Length)
-        {
-            // segment header: [type][length]
-            var segmentType = data[offset++];
-            var segmentLength = data[offset++];
-
-            if (segmentType != BgpConstants.AsPath.AsSequence &&
-                segmentType != BgpConstants.AsPath.AsSet)
-                throw new BgpParseException($"Invalid {attributeName} segment type: {segmentType}");
-
-            var segBytes = segmentLength * asSize;
-            if (offset + segBytes > data.Length)
-                throw new BgpParseException($"Truncated {attributeName} segment");
-
-            for (var i = 0; i < segmentLength; i++)
-            {
-                ases.Add(ReadAsn(data.Slice(offset, asSize), asSize));
-                offset += asSize;
-            }
-        }
-
-        if (offset != data.Length)
-            throw new BgpParseException($"Malformed {attributeName} attribute");
-
-        return ases.ToArray();
-    }
-
-    private static byte[] WritePathData(uint[] ases, int asSize, string attributeName)
-    {
-        if (ases.Length > byte.MaxValue)
-            throw new ArgumentOutOfRangeException(nameof(ases), $"{attributeName} segment length cannot exceed 255 ASNs.");
-
-        var data = new byte[2 + ases.Length * asSize];
-        data[0] = BgpConstants.AsPath.AsSequence;
-        data[1] = (byte)ases.Length;
-
-        var offset = 2;
-        foreach (var asn in ases)
-        {
-            WriteAsn(data.AsSpan(offset, asSize), asn, asSize);
-            offset += asSize;
-        }
-
-        return data;
-    }
-
-    private static uint ReadAsn(ReadOnlySpan<byte> data, int asSize) => asSize switch
-    {
-        2 => BinaryPrimitives.ReadUInt16BigEndian(data),
-        4 => BinaryPrimitives.ReadUInt32BigEndian(data),
-        _ => throw new ArgumentOutOfRangeException(nameof(asSize))
-    };
-
-    private static void WriteAsn(Span<byte> data, uint asn, int asSize)
-    {
-        switch (asSize)
-        {
-            case 2:
-                BinaryPrimitives.WriteUInt16BigEndian(data, (ushort)asn);
-                break;
-            case 4:
-                BinaryPrimitives.WriteUInt32BigEndian(data, asn);
-                break;
-            default:
-                throw new ArgumentOutOfRangeException(nameof(asSize));
-        }
-    }
-
     public static uint ReadNextHop(PathAttribute attr)
     {
+        return BinaryPrimitives.ReadUInt32BigEndian(attr.Data);
+    }
+
+    public static uint ReadAggregatorAsn(PathAttribute attr, bool fourByteAsn)
+    {
+        var expectedLength = fourByteAsn ? 8 : 6;
+        if (attr.Data.Length != expectedLength)
+            throw new BgpParseException($"Malformed AGGREGATOR attribute: expected {expectedLength} bytes, got {attr.Data.Length}");
+
+        return fourByteAsn
+            ? BinaryPrimitives.ReadUInt32BigEndian(attr.Data)
+            : BinaryPrimitives.ReadUInt16BigEndian(attr.Data);
+    }
+
+    public static uint ReadAs4AggregatorAsn(PathAttribute attr)
+    {
+        if (attr.Data.Length != 4)
+            throw new BgpParseException($"Malformed AS4_AGGREGATOR attribute: expected 4 bytes, got {attr.Data.Length}");
+
         return BinaryPrimitives.ReadUInt32BigEndian(attr.Data);
     }
 
@@ -180,6 +117,73 @@ public static class AttributeHelper
         BgpConstants.Attribute.LocalPref => true,
         BgpConstants.Attribute.AtomicAggregate => true,
         BgpConstants.Attribute.Aggregator => true,
+        BgpConstants.Attribute.As4Path => true,
+        BgpConstants.Attribute.As4PathAggregator => true,
         _ => false
     };
+
+    private static uint[] ReadPathData(ReadOnlySpan<byte> data, int asSize, string attributeName)
+    {
+        var ases = new List<uint>();
+        var offset = 0;
+
+        while (offset + 2 <= data.Length)
+        {
+            var segmentType = data[offset++];
+            var segmentLength = data[offset++];
+
+            if (segmentType != BgpConstants.AsPath.AsSequence && segmentType != BgpConstants.AsPath.AsSet)
+                throw new BgpParseException($"Invalid {attributeName} segment type: {segmentType}");
+
+            var segBytes = segmentLength * asSize;
+            if (offset + segBytes > data.Length)
+                throw new BgpParseException($"Truncated {attributeName} segment");
+
+            for (var i = 0; i < segmentLength; i++)
+            {
+                ases.Add(asSize switch
+                {
+                    2 => BinaryPrimitives.ReadUInt16BigEndian(data.Slice(offset, asSize)),
+                    4 => BinaryPrimitives.ReadUInt32BigEndian(data.Slice(offset, asSize)),
+                    _ => throw new ArgumentOutOfRangeException(nameof(asSize))
+                });
+                offset += asSize;
+            }
+        }
+
+        if (offset != data.Length)
+            throw new BgpParseException($"Malformed {attributeName} attribute");
+
+        return ases.ToArray();
+    }
+
+    private static byte[] WritePathData(uint[] ases, int asSize, string attributeName)
+    {
+        if (ases.Length > byte.MaxValue)
+            throw new ArgumentOutOfRangeException(nameof(ases), $"{attributeName} segment length cannot exceed 255 ASNs.");
+
+        var data = new byte[2 + ases.Length * asSize];
+        data[0] = BgpConstants.AsPath.AsSequence;
+        data[1] = (byte)ases.Length;
+
+        var offset = 2;
+        foreach (var asn in ases)
+        {
+            switch (asSize)
+            {
+                case 2:
+                    BinaryPrimitives.WriteUInt16BigEndian(data.AsSpan(offset, asSize), (ushort)asn);
+                    break;
+                case 4:
+                    BinaryPrimitives.WriteUInt32BigEndian(data.AsSpan(offset, asSize), asn);
+                    break;
+                default:
+                    throw new ArgumentOutOfRangeException(nameof(asSize));
+            }
+
+            offset += asSize;
+        }
+
+        return data;
+    }
 }

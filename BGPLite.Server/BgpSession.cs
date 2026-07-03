@@ -244,7 +244,7 @@ public sealed class BgpSession : IDisposable
             // close (RFC 4724 §4) / no-reply (RFC 4271 §6.3) and exactly-one-NOTIFICATION (§8.1).
             if (Interlocked.CompareExchange(ref _teardownReason, (int)TeardownReason.LocalCease, (int)TeardownReason.None) == (int)TeardownReason.None)
             {
-                try { await SendNotificationAsync(ex.ErrorCode, ex.SubErrorCode); }
+                try { await SendNotificationAsync(ex.ErrorCode, ex.SubErrorCode, ex.NotificationData); }
                 catch { /* best-effort */ }
             }
         }
@@ -443,6 +443,8 @@ public sealed class BgpSession : IDisposable
                 uint[] asPath = [];
                 uint[] communities = [];
                 uint[] as4Path = [];
+                uint? aggregatorAsn = null;
+                uint? as4AggregatorAsn = null;
                 var filterPeerConfig = GetFilterPeerConfig();
 
                 foreach (var attr in update.PathAttributes)
@@ -471,11 +473,18 @@ public sealed class BgpSession : IDisposable
                         case BgpConstants.Attribute.Community:
                             communities = AttributeHelper.ReadCommunities(attr);
                             break;
+                        case BgpConstants.Attribute.Aggregator:
+                            aggregatorAsn = AttributeHelper.ReadAggregatorAsn(attr, _remoteFourByteAsn);
+                            break;
+                        case BgpConstants.Attribute.As4PathAggregator when !_remoteFourByteAsn:
+                            as4AggregatorAsn = AttributeHelper.ReadAs4AggregatorAsn(attr);
+                            break;
                     }
                 }
 
                 ValidateMandatoryAttributes(originSeen, asPathSeen, nextHopSeen);
                 asPath = MergeAsPathWithAs4Path(asPath, as4Path);
+                ValidateAggregatorReconstruction(aggregatorAsn, as4AggregatorAsn);
 
                 foreach (var nlri in update.Nlri)
                 {
@@ -848,16 +857,20 @@ public sealed class BgpSession : IDisposable
         if (as4Path.Length == 0)
             return asPath;
 
-        if (as4Path.Length >= asPath.Length)
-        {
-            if (as4Path.Length > asPath.Length)
-                return asPath;
+        if (as4Path.Length > asPath.Length)
+            throw new BgpNotificationException(BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.Unspecific, "AS4_PATH longer than AS_PATH");
 
+        if (as4Path.Length == asPath.Length)
             return as4Path;
+
+        var leadingCount = asPath.Length - as4Path.Length;
+        for (var i = 0; i < leadingCount; i++)
+        {
+            if (asPath[i] == BgpConstants.AsPath.AsTrans)
+                throw new BgpNotificationException(BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.Unspecific, "Unresolved AS_TRANS in AS_PATH");
         }
 
         var merged = new uint[asPath.Length];
-        var leadingCount = asPath.Length - as4Path.Length;
         Array.Copy(asPath, 0, merged, 0, leadingCount);
         Array.Copy(as4Path, 0, merged, leadingCount, as4Path.Length);
 
@@ -1097,7 +1110,17 @@ public sealed class BgpSession : IDisposable
 
     private async Task SendNotificationAsync(byte errorCode, byte subErrorCode)
     {
-        var notification = new BgpNotificationMessage { ErrorCode = errorCode, SubErrorCode = subErrorCode };
+        await SendNotificationAsync(errorCode, subErrorCode, null);
+    }
+
+    private async Task SendNotificationAsync(byte errorCode, byte subErrorCode, byte[]? data)
+    {
+        var notification = new BgpNotificationMessage
+        {
+            ErrorCode = errorCode,
+            SubErrorCode = subErrorCode,
+            Data = data is null ? null : (byte[])data.Clone()
+        };
         await SendMessageAsync(notification);
         _logger.LogInformation("NotificationSent to {Peer}: {Error}/{SubError}", _peer, errorCode, subErrorCode);
     }
@@ -1159,6 +1182,16 @@ public sealed class BgpSession : IDisposable
         if (open.Version != BgpConstants.BgpVersion)
             throw new BgpNotificationException(BgpConstants.Error.OpenMessageError, BgpConstants.SubError.UnsupportedVersion, $"Unsupported BGP version: {open.Version}");
 
+        var malformedFourOctetAsnCapability = GetMalformedFourOctetAsnCapabilityData(open);
+        if (malformedFourOctetAsnCapability.Length > 0)
+        {
+            throw new BgpNotificationException(
+                BgpConstants.Error.OpenMessageError,
+                BgpConstants.SubError.UnsupportedCapability,
+                "Malformed 4-octet ASN capability",
+                malformedFourOctetAsnCapability);
+        }
+
         _remoteFourByteAsn = CapabilityHelper.GetRemoteAsn(open).HasValue;
         _remoteAsn = CapabilityHelper.GetEffectiveAsn(open);
         // RFC 6793 §6: derive AS_PATH encoding format from negotiated capability
@@ -1193,6 +1226,26 @@ public sealed class BgpSession : IDisposable
         _keepAliveInterval = holdTime == 0
             ? TimeSpan.Zero
             : TimeSpan.FromSeconds(Math.Max(holdTime / 3, 1));
+    }
+
+    internal static byte[] GetMalformedFourOctetAsnCapabilityData(BgpOpenMessage open)
+    {
+        foreach (var cap in open.Capabilities)
+        {
+            if (cap.Code == BgpConstants.Capability.FourOctetAsn && cap.Data.Length != 4)
+                return [BgpConstants.Capability.FourOctetAsn, (byte)cap.Data.Length, ..cap.Data];
+        }
+
+        return [];
+    }
+
+    internal static void ValidateAggregatorReconstruction(uint? aggregatorAsn, uint? as4AggregatorAsn)
+    {
+        if (aggregatorAsn == BgpConstants.AsPath.AsTrans && as4AggregatorAsn is null)
+            throw new BgpNotificationException(BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.Unspecific, "Missing AS4_AGGREGATOR for AGGREGATOR AS_TRANS");
+
+        if (!aggregatorAsn.HasValue && as4AggregatorAsn.HasValue)
+            throw new BgpNotificationException(BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.Unspecific, "Missing AGGREGATOR attribute for AS4_AGGREGATOR");
     }
 
     #endregion

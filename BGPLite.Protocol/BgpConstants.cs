@@ -39,6 +39,7 @@ public static class BgpConstants
         public const byte MissingWellKnownAttribute = 3;
         public const byte BadBgpIdentifier = 3;
         public const byte UnacceptableHoldTime = 6;
+        public const byte UnsupportedCapability = 7;
 
         // RFC 4486 Cease subcodes (apply when ErrorCode = Cease = 6)
         public const byte CeaseMaxPrefixes = 1;
@@ -61,8 +62,8 @@ public static class BgpConstants
         public const byte OriginatorId = 9;
         public const byte ClusterList = 10;
         public const byte ExtendedCommunity = 16;
-        public const byte As4Path = 17;       // RFC 6793 §6 — 4-byte AS path for 2-byte peers
-        public const byte As4PathAggregator = 18; // RFC 6793 — 4-byte aggregator
+        public const byte As4Path = 17;
+        public const byte As4PathAggregator = 18;
         public const byte LargeCommunity = 32;
 
         public const byte FlagOptional = 0x80;
