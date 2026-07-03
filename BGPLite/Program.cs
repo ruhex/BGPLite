@@ -11,6 +11,12 @@ using Microsoft.Extensions.Logging;
 
 var builder = Host.CreateApplicationBuilder(args);
 
+// EF Core logs every SQL statement at Information by default; with no appsettings.json the host
+// uses Information for everything → EF SQL is ~85% of log volume. Silence EF SQL (warnings/errors
+// still surface) without muting startup/host logs. (appsettings.yml Logging:LogLevel is NOT read
+// by the host — YAML loads only into AppConfig — so this filter is the reliable place.)
+builder.Logging.AddFilter("Microsoft.EntityFrameworkCore", LogLevel.Warning);
+
 var baseDir = AppContext.BaseDirectory;
 var dataDir = Environment.GetEnvironmentVariable("BGPLITE_DATA") ?? Path.Combine(baseDir, "data");
 

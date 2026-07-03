@@ -17,3 +17,8 @@ services:
       - ./appsettings.yml:/app/appsettings.yml:ro
       - ./data:/app/data
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
