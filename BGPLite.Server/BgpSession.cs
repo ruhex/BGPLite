@@ -690,8 +690,10 @@ public sealed class BgpSession : IDisposable
                 }
 
                 // Apply the per-peer outgoing community filter (same rule as the shared-table path).
+                // Resolve the community allow-set ONCE for the whole send — not once per route (#79).
                 var filterPeerConfig = GetFilterPeerConfig();
-                routes = routes.Where(r => _routeFilter.AcceptOutgoing(r, filterPeerConfig)).ToList();
+                var allowSet = _routeFilter.ResolveOutgoingAllowSet(filterPeerConfig);
+                routes = routes.Where(r => _routeFilter.AcceptOutgoing(r, filterPeerConfig, allowSet)).ToList();
                 await SendRoutesAsync(nextHop, routes);
                 return;
             }
@@ -722,10 +724,11 @@ public sealed class BgpSession : IDisposable
 
         // Final fallback: send from shared route table (single pass — one allocation, not two)
         var sharedFilterPeerConfig = GetFilterPeerConfig();
+        var sharedAllowSet = _routeFilter.ResolveOutgoingAllowSet(sharedFilterPeerConfig);
         var filtered = new List<Route>();
         foreach (var r in _routeTable.Enumerate())
         {
-            if (_routeFilter.AcceptOutgoing(r, sharedFilterPeerConfig))
+            if (_routeFilter.AcceptOutgoing(r, sharedFilterPeerConfig, sharedAllowSet))
                 filtered.Add(r);
         }
         if (filtered.Count == 0) return;

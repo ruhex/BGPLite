@@ -16,15 +16,21 @@ public sealed class PeerCommunityFilter : IRouteFilter
 
     public bool AcceptIncoming(Route route, PeerConfig peer) => true;
 
-    public bool AcceptOutgoing(Route route, PeerConfig peer)
+    /// <summary>
+    /// Resolves the peer's community allow-set once per send. This is the only place the
+    /// (potentially database-backed) resolver runs on the advertise path — never per route.
+    /// </summary>
+    public IReadOnlySet<uint> ResolveOutgoingAllowSet(PeerConfig peer)
+        => _getCommunities(peer.Address, peer.RemoteAsn);
+
+    public bool AcceptOutgoing(Route route, PeerConfig peer, IReadOnlySet<uint> allowSet)
     {
         var isEbgp = !peer.RemoteAsn.HasValue || peer.RemoteAsn.Value != _localAsn;
 
         if (HasWellKnownSuppressingCommunity(route, isEbgp))
             return false;
 
-        var allowed = _getCommunities(peer.Address, peer.RemoteAsn);
-        if (allowed.Count == 0)
+        if (allowSet.Count == 0)
             return true; // no filter = all routes
 
         if (route.Communities.Length == 0)
@@ -32,7 +38,7 @@ public sealed class PeerCommunityFilter : IRouteFilter
 
         foreach (var c in route.Communities)
         {
-            if (allowed.Contains(c))
+            if (allowSet.Contains(c))
                 return true;
         }
 

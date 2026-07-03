@@ -22,6 +22,11 @@ public class PeerCommunityFilterTests
     private static PeerCommunityFilter NewFilter(Func<string, uint?, HashSet<uint>>? resolver = null) =>
         new(LocalAsn, resolver ?? ((_, _) => new HashSet<uint>()));
 
+    // Exercises the resolve-once-per-send contract used by the advertise hot path: resolve the
+    // peer's allow-set once, then make the per-route decision against the pre-resolved set.
+    private static bool Outgoing(PeerCommunityFilter filter, Route route, PeerConfig peer)
+        => filter.AcceptOutgoing(route, peer, filter.ResolveOutgoingAllowSet(peer));
+
     [Theory]
     [InlineData(BgpConstants.Community.NoExport)]
     [InlineData(BgpConstants.Community.NoAdvertise)]
@@ -30,7 +35,7 @@ public class PeerCommunityFilterTests
     {
         var filter = NewFilter();
 
-        Assert.False(filter.AcceptOutgoing(RouteWith(community), EbgpPeer));
+        Assert.False(Outgoing(filter, RouteWith(community), EbgpPeer));
     }
 
     [Fact]
@@ -50,10 +55,10 @@ public class PeerCommunityFilterTests
         var peerA = new PeerConfig { Address = SharedIp, RemoteAsn = 64512 };
         var peerB = new PeerConfig { Address = SharedIp, RemoteAsn = 64513 };
 
-        Assert.True(filter.AcceptOutgoing(RouteWith(0x0000FF01), peerA));
-        Assert.False(filter.AcceptOutgoing(RouteWith(0x0000FF01), peerB));
-        Assert.True(filter.AcceptOutgoing(RouteWith(0x0000FF02), peerB));
-        Assert.False(filter.AcceptOutgoing(RouteWith(0x0000FF02), peerA));
+        Assert.True(Outgoing(filter, RouteWith(0x0000FF01), peerA));
+        Assert.False(Outgoing(filter, RouteWith(0x0000FF01), peerB));
+        Assert.True(Outgoing(filter, RouteWith(0x0000FF02), peerB));
+        Assert.False(Outgoing(filter, RouteWith(0x0000FF02), peerA));
     }
 
     [Fact]
@@ -66,8 +71,8 @@ public class PeerCommunityFilterTests
 
         var peerNullAsn = new PeerConfig { Address = SharedIp, RemoteAsn = null };
 
-        Assert.True(filter.AcceptOutgoing(RouteWith(0x0000FF03), peerNullAsn));
-        Assert.False(filter.AcceptOutgoing(RouteWith(0x0000FF01), peerNullAsn));
+        Assert.True(Outgoing(filter, RouteWith(0x0000FF03), peerNullAsn));
+        Assert.False(Outgoing(filter, RouteWith(0x0000FF01), peerNullAsn));
     }
 
     [Theory]
@@ -79,7 +84,7 @@ public class PeerCommunityFilterTests
         var allowed = new HashSet<uint> { community };
         var filter = NewFilter((_, _) => allowed);
 
-        Assert.False(filter.AcceptOutgoing(RouteWith(community), EbgpPeer));
+        Assert.False(Outgoing(filter, RouteWith(community), EbgpPeer));
     }
 
     [Theory]
@@ -91,8 +96,7 @@ public class PeerCommunityFilterTests
         var allowed = new HashSet<uint> { 0x0000FF01 };
         var filter = NewFilter((_, _) => allowed);
 
-        Assert.False(filter.AcceptOutgoing(
-            RouteWith(0x0000FF01, community), EbgpPeer));
+        Assert.False(Outgoing(filter, RouteWith(0x0000FF01, community), EbgpPeer));
     }
 
     [Theory]
@@ -102,7 +106,7 @@ public class PeerCommunityFilterTests
     {
         var filter = NewFilter();
 
-        Assert.True(filter.AcceptOutgoing(RouteWith(community), IbgpPeer));
+        Assert.True(Outgoing(filter, RouteWith(community), IbgpPeer));
     }
 
     [Fact]
@@ -110,7 +114,7 @@ public class PeerCommunityFilterTests
     {
         var filter = NewFilter();
 
-        Assert.False(filter.AcceptOutgoing(RouteWith(BgpConstants.Community.NoAdvertise), IbgpPeer));
+        Assert.False(Outgoing(filter, RouteWith(BgpConstants.Community.NoAdvertise), IbgpPeer));
     }
 
     [Fact]
@@ -119,7 +123,7 @@ public class PeerCommunityFilterTests
         var allowed = new HashSet<uint> { 0x0000FF01 };
         var filter = NewFilter((_, _) => allowed);
 
-        Assert.True(filter.AcceptOutgoing(RouteWith(0x0000FF01), EbgpPeer));
+        Assert.True(Outgoing(filter, RouteWith(0x0000FF01), EbgpPeer));
     }
 
     [Fact]
@@ -127,7 +131,7 @@ public class PeerCommunityFilterTests
     {
         var filter = NewFilter();
 
-        Assert.True(filter.AcceptOutgoing(RouteWith(), EbgpPeer));
+        Assert.True(Outgoing(filter, RouteWith(), EbgpPeer));
     }
 
     [Fact]
@@ -136,6 +140,30 @@ public class PeerCommunityFilterTests
         var allowed = new HashSet<uint> { 0x0000FF01 };
         var filter = NewFilter((_, _) => allowed);
 
-        Assert.False(filter.AcceptOutgoing(RouteWith(0x0000FF02), EbgpPeer));
+        Assert.False(Outgoing(filter, RouteWith(0x0000FF02), EbgpPeer));
+    }
+
+    [Fact]
+    public void Resolver_IsInvokedOncePerSend_NotPerRoute()
+    {
+        // #79: the community allow-set (a database roundtrip in production) must be resolved
+        // ONCE per send, then reused for every per-route AcceptOutgoing decision — not once per
+        // advertised route (~20k queries per refresh before the fix).
+        var invocations = 0;
+        var filter = NewFilter((_, _) =>
+        {
+            invocations++;
+            return new HashSet<uint> { 0x0000FF01 };
+        });
+
+        // One resolution for the whole send.
+        var allowSet = filter.ResolveOutgoingAllowSet(EbgpPeer);
+        Assert.Equal(1, invocations);
+
+        // Many per-route decisions against the pre-resolved set must NOT re-invoke the resolver.
+        for (var i = 0; i < 1000; i++)
+            filter.AcceptOutgoing(RouteWith(0x0000FF01), EbgpPeer, allowSet);
+
+        Assert.Equal(1, invocations);
     }
 }
