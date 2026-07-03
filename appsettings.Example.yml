@@ -81,3 +81,13 @@ DefaultPrefixSource: ru
 #   TokensPerPeriod: 120   # tokens replenished per period (default 120)
 #   PeriodSeconds: 60      # replenishment period in seconds (default 60)
 
+# Management API — CORS origin allowlist (#99). A request's Origin header is reflected back as
+# Access-Control-Allow-Origin ONLY when it matches an entry here (case-insensitive); otherwise no
+# CORS headers are emitted and the browser blocks the cross-origin request. The previous blanket
+# "Access-Control-Allow-Origin: *" on every response was a drive-by CSRF hole on the unauthenticated
+# mutating routes. Empty/absent = CORS fully disabled (secure default — consistent with
+# TrustedProxies opt-in). List the operator/frontend origins to enable cross-origin browser access.
+# CorsAllowedOrigins:
+#   - "https://operator.example.com"
+#   - "https://bgp.example.net"
+

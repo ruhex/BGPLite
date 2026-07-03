@@ -45,4 +45,16 @@ public sealed class AppConfig
     /// <summary>Per-client-IP rate limiting for the management API (#116). Null = defaults applied.</summary>
     [YamlMember(Alias = "ApiRateLimit")]
     public ApiRateLimitConfig? ApiRateLimit { get; init; }
+
+    /// <summary>
+    /// Origins allowed to make cross-origin (CORS) requests to the management API (#99), e.g.
+    /// <c>["https://operator.example.com", "https://bgp.example.net"]</c>. A request's
+    /// <c>Origin</c> header is echoed back as <c>Access-Control-Allow-Origin</c> only when it
+    /// exactly matches an entry here (case-insensitive); otherwise <c>no</c> CORS headers are
+    /// emitted and the browser blocks the cross-origin request. Null/empty (default) = CORS fully
+    /// disabled (secure default, consistent with <see cref="TrustedProxies"/> opt-in) — the
+    /// previous blanket <c>"*"</c> was a drive-by CSRF hole on the unauthenticated mutating routes.
+    /// </summary>
+    [YamlMember(Alias = "CorsAllowedOrigins")]
+    public List<string>? CorsAllowedOrigins { get; init; }
 }

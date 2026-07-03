@@ -780,9 +780,37 @@ public sealed class ManagementApi : IHostedService, IDisposable
         ctx.Response.Close();
     }
 
-    private static void AddCorsHeaders(HttpListenerContext ctx)
+    /// <summary>
+    /// Resolves the CORS <c>Access-Control-Allow-Origin</c> value for a request (#99). Returns the
+    /// request's own <paramref name="requestOrigin"/> when it is non-empty AND exactly matches an
+    /// entry in <paramref name="allowed"/> (case-insensitive) — never <c>"*"</c> and never a
+    /// non-allowlisted origin, so an untrusted client cannot trick the API into reflecting an
+    /// arbitrary origin. Returns <c>null</c> for an absent/empty origin or an empty/absent
+    /// allowlist, which <see cref="AddCorsHeaders"/> maps to "no CORS headers emitted" (CORS
+    /// disabled — the secure default). Extracted as a pure function for unit tests.
+    /// </summary>
+    internal static string? ResolveCorsOrigin(string? requestOrigin, IReadOnlyList<string>? allowed)
     {
-        ctx.Response.Headers.Add("Access-Control-Allow-Origin", "*");
+        if (string.IsNullOrEmpty(requestOrigin)) return null;
+        if (allowed is null || allowed.Count == 0) return null;
+        foreach (var entry in allowed)
+        {
+            if (string.Equals(entry, requestOrigin, StringComparison.OrdinalIgnoreCase))
+                return requestOrigin;
+        }
+        return null;
+    }
+
+    private void AddCorsHeaders(HttpListenerContext ctx)
+    {
+        // #99: gate CORS on an explicit origin allowlist. ResolveCorsOrigin returns the request's
+        // own Origin only when allowlisted, else null. Null => emit NO Access-Control-Allow-Origin
+        // (CORS disabled — secure default); matched => reflect the origin with Vary: Origin so caches
+        // key by origin. Allow-Methods/Allow-Headers are emitted only alongside a real ACAO.
+        var origin = ResolveCorsOrigin(ctx.Request.Headers["Origin"], _config.CorsAllowedOrigins);
+        if (origin is null) return;
+        ctx.Response.Headers.Add("Access-Control-Allow-Origin", origin);
+        ctx.Response.Headers.Add("Vary", "Origin");
         ctx.Response.Headers.Add("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
         ctx.Response.Headers.Add("Access-Control-Allow-Headers", "Content-Type");
     }
