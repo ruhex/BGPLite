@@ -243,18 +243,30 @@ public sealed class ManagementApi : IHostedService, IDisposable
     {
         var clientIp = GetClientIp(ctx);
 
-        var peerInfo = _store.GetPeerByIp(clientIp);
-        if (peerInfo is null)
+        var peers = _store.GetPeersByIp(clientIp);
+        var asnRaw = ctx.Request.QueryString["asn"];
+        if (!string.IsNullOrWhiteSpace(asnRaw))
+        {
+            if (!uint.TryParse(asnRaw, out var asn))
+                return ApiResponse.Error("Invalid ASN", 400);
+
+            peers = peers.Where(p => p.Asn == asn).ToList();
+        }
+
+        if (peers.Count == 0)
             return ApiResponse.Ok(new { ip = clientIp, peer = (object?)null });
 
-        var peer = _store.GetDbPeerById(peerInfo.Id);
+        if (peers.Count > 1)
+            return ApiResponse.Error("Ambiguous peer; specify ?asn=", 409);
+
+        var peer = _store.GetDbPeerById(peers[0].Id);
         if (peer is null)
             return ApiResponse.Ok(new { ip = clientIp, peer = (object?)null });
 
         var subscriptions = _store.GetSubscriptions(peer.Id);
         var customPrefixes = _store.GetCustomPrefixes(peer.Id);
         var customAsns = _store.GetCustomAsns(peer.Id);
-        var communities = _store.GetCommunitiesByIp(clientIp);
+        var communities = peer.Communities.Select(c => (uint)c.Community).ToHashSet();
 
         return ApiResponse.Ok(new
         {

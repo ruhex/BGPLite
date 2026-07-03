@@ -115,6 +115,42 @@ public class PeerStoreKeyingTests
         Assert.Equal("second", store.GetDbPeerById(id1)!.Description);
     }
 
+<<<<<<< HEAD
+=======
+    [Fact]
+    public void GetPeersByIp_Returns_All_Peers_On_One_Source_Ip()
+    {
+        var (store, connection) = NewStore();
+        using var conn = connection;
+
+        var idA = store.CreatePeer(SharedIp, 64512, "A");
+        var idB = store.CreatePeer(SharedIp, 64513, "B");
+
+        var peers = store.GetPeersByIp(SharedIp);
+
+        Assert.Equal(2, peers.Count);
+        Assert.Contains(peers, p => p.Id == idA && p.Asn == 64512);
+        Assert.Contains(peers, p => p.Id == idB && p.Asn == 64513);
+    }
+
+    [Fact]
+    public void Communities_Are_Stored_Per_PeerId_Not_Per_Ip()
+    {
+        var (store, connection) = NewStore();
+        using var conn = connection;
+
+        var idA = store.CreatePeer(SharedIp, 64512, "A");
+        var idB = store.CreatePeer(SharedIp, 64513, "B");
+
+        store.SetCommunities(idA, new HashSet<uint> { 0x0000FF01 });
+        store.SetCommunities(idB, new HashSet<uint> { 0x0000FF02 });
+
+        Assert.Equal(new HashSet<uint> { 0x0000FF01 }, store.GetCommunities(idA));
+        Assert.Equal(new HashSet<uint> { 0x0000FF02 }, store.GetCommunities(idB));
+        Assert.Equal(new HashSet<uint> { 0x0000FF01, 0x0000FF02 }, store.GetCommunitiesByIp(SharedIp));
+    }
+
+>>>>>>> 02703cd (fix(api): disambiguate /api/me for shared IPs)
     /// <summary>
     /// Hard requirement: existing peer data on the server must survive the index change. Simulates a
     /// database created by a previous (Ip-only-unique) version holding a real peer row, runs the

@@ -194,8 +194,8 @@ Available on port **5000**.
 ### Peers
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `GET`  | `/api/my-ip` | Returns the caller's IP |
-| `POST` | `/api/peers` | Register a peer |
+| `GET` | `/api/me` | Returns the caller's peer record; `?asn=` disambiguates shared-IP peers (`409` if ambiguous) |
+| `POST` | `/api/peers` | Register a new peer |
 | `GET`  | `/api/peers` | List all peers |
 
 ```bash

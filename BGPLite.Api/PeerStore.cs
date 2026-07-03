@@ -86,6 +86,24 @@ public sealed class PeerStore : IPeerStore
         return peer is null ? null : MapToInfo(peer);
     }
 
+    public List<PeerInfo> GetPeersByIp(string ip)
+    {
+        using var db = _dbFactory.CreateDbContext();
+        return db.Peers
+            .Where(p => p.Ip == ip)
+            .Select(p => new PeerInfo
+            {
+                Id = p.Id,
+                Ip = p.Ip,
+                Asn = p.Asn,
+                Description = p.Description,
+                Status = p.Status,
+                CreatedAt = p.CreatedAt.ToString("O"),
+                LastSessionAt = p.LastSessionAt.HasValue ? p.LastSessionAt.Value.ToString("O") : null
+            })
+            .ToList();
+    }
+
     /// <summary>
     /// Resolves a peer by its durable identity <c>(Ip, Asn)</c> — the form a BGP session knows once
     /// it has parsed the peer's OPEN (issue #19). Several peers may share a source IP with distinct
