@@ -720,8 +720,10 @@ public sealed class ManagementApi : IHostedService, IDisposable
         }
 
         // Single-hop proxies commonly set X-Real-IP instead of (or alongside) X-Forwarded-For.
-        if (!string.IsNullOrWhiteSpace(xRealIp))
-            return xRealIp.Trim();
+        // Validate + normalize so a malformed header can't surface garbage (e.g. newlines for log
+        // forging) — fall back to the proxy address if it isn't a parseable IP.
+        if (!string.IsNullOrWhiteSpace(xRealIp) && IPAddress.TryParse(xRealIp.Trim(), out var realAddr))
+            return Normalize(realAddr).ToString();
 
         return remote.ToString();
     }

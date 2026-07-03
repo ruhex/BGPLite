@@ -55,6 +55,14 @@ public class ClientIpResolverTests
             ManagementApi.ResolveClientIp(IPAddress.Parse("127.0.0.1"), null, "198.51.100.5", Proxy));
 
     [Fact]
+    public void TrustedProxy_Malformed_XRealIp_FallsBack_To_Remote()
+    {
+        // A garbage X-Real-IP (e.g. with log-forging newlines) must not be returned verbatim.
+        Assert.Equal("127.0.0.1",
+            ManagementApi.ResolveClientIp(IPAddress.Parse("127.0.0.1"), null, "not-an-ip\nFAKE", Proxy));
+    }
+
+    [Fact]
     public void NoTrustedProxies_Always_Returns_Remote() =>
         Assert.Equal("203.0.113.9",
             ManagementApi.ResolveClientIp(IPAddress.Parse("203.0.113.9"), "198.51.100.5", "1.2.3.4", Array.Empty<IPNetwork>()));
