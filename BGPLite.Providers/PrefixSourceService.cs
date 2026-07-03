@@ -54,6 +54,7 @@ public sealed class PrefixSourceService : IPrefixSourceService
         }
 
         try { return await LoadCachedAsync(source, ct); }
+        catch (OperationCanceledException) { throw; }
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Failed to load prefix source '{Name}'.", name);
@@ -75,6 +76,7 @@ public sealed class PrefixSourceService : IPrefixSourceService
         }
 
         try { return await LoadCachedAsync(source, ct); }
+        catch (OperationCanceledException) { throw; }
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Failed to load default prefix source '{Name}'.", defaultName);
@@ -89,6 +91,7 @@ public sealed class PrefixSourceService : IPrefixSourceService
         {
             IReadOnlyList<(uint Prefix, byte Length)> prefixes;
             try { prefixes = await LoadCachedAsync(source, ct); }
+            catch (OperationCanceledException) { throw; }
             catch (Exception ex)
             {
                 _logger.LogWarning(ex, "Failed to load prefix source '{Name}' ({Kind}).", source.Name, source.Kind);
@@ -124,6 +127,7 @@ public sealed class PrefixSourceService : IPrefixSourceService
                 var provider = _factory.Get(source.Kind);
                 prefixes = await provider.LoadAsync(source, ct);
             }
+            catch (OperationCanceledException) { throw; }
             catch
             {
                 // Serve the last good copy if we have one (regardless of its age).
