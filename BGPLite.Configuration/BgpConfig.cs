@@ -1,4 +1,5 @@
 using System.Net;
+using System.Net.Sockets;
 using YamlDotNet.Serialization;
 
 namespace BGPLite.Configuration;
@@ -36,4 +37,43 @@ public sealed class BgpConfig
     public bool GracefulRestartForwardingState { get; init; } = true;
 
     public IPAddress GetRouterIdAddress() => IPAddress.Parse(RouterId);
+
+    /// <summary>
+    /// Validates the BGP settings, throwing <see cref="InvalidOperationException"/> with a clear
+    /// message on the first violation. Called from <see cref="AppConfig.Validate"/> at startup so
+    /// invalid YAML fails loud before the host is built (rather than surfacing later as a peer
+    /// OPEN rejection / wrong-port bind). Rules follow RFC 4271 §4.2/§6.8.
+    /// </summary>
+    public void Validate()
+    {
+        if (Asn == 0)
+            throw new InvalidOperationException(
+                $"Invalid configuration: Bgp.Asn must be greater than 0 (got 0).");
+
+        // RFC 4271 §6.8: the BGP Identifier (RouterId) must be a non-zero IPv4 address. The peer-side
+        // OPEN validator already rejects 0.0.0.0; this catches the local side before it is advertised.
+        var routerIdValid = IPAddress.TryParse(RouterId, out var routerIdAddress)
+            && routerIdAddress.AddressFamily == AddressFamily.InterNetwork
+            && !routerIdAddress.Equals(IPAddress.Any);
+        if (!routerIdValid)
+            throw new InvalidOperationException(
+                $"Invalid configuration: Bgp.RouterId must be a non-zero IPv4 address (got '{RouterId}').");
+
+        // RFC 4271 §4.2: a Hold Time of 0 disables KeepAlive processing; any other value must be >= 3s.
+        if (HoldTime != 0 && HoldTime < 3)
+            throw new InvalidOperationException(
+                $"Invalid configuration: Bgp.HoldTime must be 0 (disabled) or at least 3 seconds (got {HoldTime}).");
+
+        // KeepAlive is only meaningful when a Hold Time is negotiated. The session computes its
+        // keepalive interval as max(HoldTime/3, 1) (BgpSession OPEN negotiation), so the configured
+        // value must fit within the same window: 1..max(HoldTime/3, 1).
+        if (HoldTime > 0)
+        {
+            var maxKeepAlive = Math.Max(HoldTime / 3, 1);
+            if (KeepAlive < 1 || KeepAlive > maxKeepAlive)
+                throw new InvalidOperationException(
+                    $"Invalid configuration: Bgp.KeepAlive must be between 1 and {maxKeepAlive} seconds " +
+                    $"for HoldTime={HoldTime} (got {KeepAlive}).");
+        }
+    }
 }

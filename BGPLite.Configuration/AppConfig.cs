@@ -1,3 +1,5 @@
+using System.Net;
+using System.Net.Sockets;
 using YamlDotNet.Serialization;
 
 namespace BGPLite.Configuration;
@@ -57,4 +59,33 @@ public sealed class AppConfig
     /// </summary>
     [YamlMember(Alias = "CorsAllowedOrigins")]
     public List<string>? CorsAllowedOrigins { get; init; }
+
+    /// <summary>
+    /// Validates the whole configuration, throwing <see cref="InvalidOperationException"/> with a
+    /// clear message on the first violation (fail-loud). Called from Program.cs right after the YAML
+    /// is loaded and before the host is built, so invalid config (bad ASN, RouterId=0.0.0.0,
+    /// HoldTime=2, out-of-range ApiPort, malformed peer address, ...) aborts startup instead of
+    /// failing later at runtime (#89). Intentional behavior change: previously-silent invalid
+    /// config now throws — the operator must fix their YAML.
+    /// </summary>
+    public void Validate()
+    {
+        Bgp.Validate();
+
+        if (ApiPort < 1 || ApiPort > 65535)
+            throw new InvalidOperationException(
+                $"Invalid configuration: ApiPort must be between 1 and 65535 (got {ApiPort}).");
+
+        for (var i = 0; i < Peers.Count; i++)
+        {
+            var peer = Peers[i];
+            if (!IPAddress.TryParse(peer.Address, out var address)
+                || address.AddressFamily != AddressFamily.InterNetwork)
+            {
+                throw new InvalidOperationException(
+                    $"Invalid configuration: Peers[{i}].Address must be a valid IPv4 address " +
+                    $"(got '{peer.Address}').");
+            }
+        }
+    }
 }

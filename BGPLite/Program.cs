@@ -23,6 +23,12 @@ var dataDir = Environment.GetEnvironmentVariable("BGPLITE_DATA") ?? Path.Combine
 var configPath = args.Length > 0 ? Path.GetFullPath(args[0]) : Path.Combine(baseDir, "appsettings.yml");
 var config = ConfigLoader.Load(configPath);
 
+// Fail loud on invalid YAML before the host is built / DB initialized / BGP listener started, so
+// misconfiguration (bad ASN, RouterId=0.0.0.0, HoldTime=2, bad ApiPort, malformed peer address) is
+// reported with a clear message at the earliest possible point instead of surfacing later at
+// runtime (#89). Behavior change: invalid config that previously loaded silently now throws.
+config.Validate();
+
 var routeTable = new RouteTable();
 var nextHop = BgpConstants.IPAddressToUint(config.Bgp.GetRouterIdAddress());
 
