@@ -11,10 +11,6 @@
   </ItemGroup>
 
   <ItemGroup>
-    <InternalsVisibleTo Include="BGPLite.Tests" />
-  </ItemGroup>
-
-  <ItemGroup>
     <ProjectReference Include="..\BGPLite.Configuration\BGPLite.Configuration.csproj" />
     <ProjectReference Include="..\BGPLite.Providers\BGPLite.Providers.csproj" />
     <ProjectReference Include="..\BGPLite.Routing\BGPLite.Routing.csproj" />

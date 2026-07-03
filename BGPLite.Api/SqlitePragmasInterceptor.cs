@@ -20,7 +20,7 @@ namespace BGPLite.Api;
 /// </list>
 /// <c>synchronous</c>/<c>busy_timeout</c> are per-connection, so they are re-applied on every open.
 /// </summary>
-internal sealed class SqlitePragmasInterceptor : DbConnectionInterceptor
+public sealed class SqlitePragmasInterceptor : DbConnectionInterceptor
 {
     private const int BusyTimeoutMs = 5000;
 
