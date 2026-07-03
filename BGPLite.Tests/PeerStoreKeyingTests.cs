@@ -102,6 +102,64 @@ public class PeerStoreKeyingTests
         Assert.Equal("active", store.GetDbPeerById(idB)!.Status);
     }
 
+    /// <summary>
+    /// Regression for issue #84: <see cref="PeerStore.LoadPeerRoutingView"/> must return the SAME
+    /// data the five standalone calls used to produce (GetPeer + GetSubscriptions + GetCustomPrefixes
+    /// + GetCustomAsns) AND fold the session-status update into the same DbContext
+    /// (<see cref="PeerStore.UpdateSessionStatus"/>(active:true)). Asserts both equivalence of shape
+    /// and the side effect (Status="active", LastSessionAt set) so a future refactor cannot silently
+    /// drop either the read or the folded write.
+    /// </summary>
+    [Fact]
+    public void LoadPeerRoutingView_Matches_Standalone_Calls_And_Folds_Status_Update()
+    {
+        var (store, connection) = NewStore();
+        using var conn = connection;
+
+        var id = store.CreatePeer(SharedIp, 64512, "routed peer");
+        store.SetSubscriptions(id, ["ru", "microsoft"]);
+        store.SetCustomPrefixes(id, [("203.0.113.0", 24), ("198.51.100.0", 25)]);
+        store.SetCustomAsns(id, [65001, 65002]);
+
+        var before = DateTime.UtcNow;
+        var view = store.LoadPeerRoutingView(SharedIp, 64512);
+
+        Assert.NotNull(view);
+        // Same peer row.
+        Assert.Equal(id, view!.PeerId);
+        // Same child-collection shapes (types) as the standalone getters.
+        Assert.IsType<List<string>>(view.Subscriptions);
+        Assert.IsType<List<string>>(view.CustomPrefixes);
+        Assert.IsType<List<uint>>(view.CustomAsns);
+        // Same ELEMENTS as the standalone getters. Order is unspecified (neither the getters nor
+        // LoadPeerRoutingView impose ORDER BY; the BGP send path treats these as sets), so compare
+        // sorted to avoid a flaky test while still pinning exact contents.
+        Assert.Equal(store.GetSubscriptions(id).Order().ToArray(), view.Subscriptions.Order().ToArray());
+        Assert.Equal(store.GetCustomPrefixes(id).Order().ToArray(), view.CustomPrefixes.Order().ToArray());
+        Assert.Equal(store.GetCustomAsns(id).Order().ToArray(), view.CustomAsns.Order().ToArray());
+        // Explicit contents (guards against a future shape regression even if getters change).
+        Assert.Equal(new[] { "microsoft", "ru" }, view.Subscriptions.Order().ToArray());
+        Assert.Equal(new[] { "198.51.100.0/25", "203.0.113.0/24" }, view.CustomPrefixes.Order().ToArray());
+        Assert.Equal(new uint[] { 65001, 65002 }, view.CustomAsns.Order().ToArray());
+
+        // The folded status write took effect: Status="active" and LastSessionAt stamped at/after
+        // the call (was a separate UpdateSessionStatus call on its own DbContext before #84).
+        var peer = store.GetDbPeerById(id)!;
+        Assert.Equal("active", peer.Status);
+        Assert.NotNull(peer.LastSessionAt);
+        Assert.True(peer.LastSessionAt >= before);
+    }
+
+    [Fact]
+    public void LoadPeerRoutingView_Returns_Null_For_Unknown_Peer()
+    {
+        var (store, connection) = NewStore();
+        using var conn = connection;
+
+        // No CreatePeer — the send path must see null so it auto-registers the unknown peer.
+        Assert.Null(store.LoadPeerRoutingView(SharedIp, 64599));
+    }
+
     [Fact]
     public void CreatePeer_Is_Idempotent_On_IpAsn()
     {

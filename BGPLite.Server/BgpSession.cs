@@ -542,14 +542,15 @@ public sealed class BgpSession : IDisposable
 
         if (_peerStore is not null && _prefixService is not null && _appConfig is not null)
         {
-            var peer = _peerStore.GetPeer(_peerConfig.Address, _remoteAsn);
+            var peer = _peerStore.LoadPeerRoutingView(_peerConfig.Address, _remoteAsn);
             if (peer is not null)
             {
-                _peerStore.UpdateSessionStatus(_peerConfig.Address, _remoteAsn, true);
-
-                var subscriptionIds = _peerStore.GetSubscriptions(peer.Id);
-                var customPrefixes = _peerStore.GetCustomPrefixes(peer.Id);
-                var customAsns = _peerStore.GetCustomAsns(peer.Id);
+                // LoadPeerRoutingView folds GetPeer + UpdateSessionStatus + GetSubscriptions +
+                // GetCustomPrefixes + GetCustomAsns into a single DbContext (one read+write
+                // roundtrip), replacing five separate PeerStore calls (issue #84).
+                var subscriptionIds = peer.Subscriptions;
+                var customPrefixes = peer.CustomPrefixes;
+                var customAsns = peer.CustomAsns;
 
                 // Unconfigured peer — send RU defaults
                 if (subscriptionIds.Count == 0 && customPrefixes.Count == 0 && customAsns.Count == 0)
