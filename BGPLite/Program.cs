@@ -34,11 +34,15 @@ builder.Services.AddSingleton(config);
 builder.Services.AddSingleton(config.Bgp);
 builder.Services.AddSingleton(routeTable);
 
+// SQLite resilience (#95): WAL (readers don't block writers), synchronous=NORMAL, and a 5s
+// busy_timeout (engine-level lock retry) applied on every connection via a DbConnectionInterceptor,
+// so both the factory-created and scoped contexts get the same settings.
+var sqlitePragmas = new SqlitePragmasInterceptor();
 builder.Services.AddDbContextFactory<BgpDbContext>(options =>
-    options.UseSqlite($"Data Source={dbPath}"));
+    options.UseSqlite($"Data Source={dbPath}").AddInterceptors(sqlitePragmas));
 
 builder.Services.AddDbContext<BgpDbContext>(options =>
-    options.UseSqlite($"Data Source={dbPath}"), ServiceLifetime.Scoped);
+    options.UseSqlite($"Data Source={dbPath}").AddInterceptors(sqlitePragmas), ServiceLifetime.Scoped);
 
 builder.Services.AddSingleton<PeerStore>();
 builder.Services.AddSingleton<IRouteFilter>(sp =>
@@ -141,7 +145,17 @@ if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
 using (var scope = host.Services.CreateScope())
 {
     var db = scope.ServiceProvider.GetRequiredService<BgpDbContext>();
-    BgpDbContext.Initialize(db);
+    try
+    {
+        BgpDbContext.Initialize(db);
+    }
+    catch (Exception ex)
+    {
+        // Fail loud at startup with a human-readable cause (read-only FS, disk full, locked file)
+        // rather than surfacing later as a per-request 'database is locked' 500 (#95).
+        Console.Error.WriteLine($"FATAL: peer database at '{dbPath}' is not writable or could not be initialized: {ex.Message}");
+        throw;
+    }
     var peerCount = db.Peers.Count();
     Console.WriteLine(peerCount == 0
         ? "Created new database"
