@@ -31,23 +31,52 @@ public sealed class PrefixService : IPrefixService
         return prefixes;
     }
 
+    /// <summary>Bounds how many ASNs are resolved against RIPEstat concurrently on a cold cache
+    /// (warm traffic is cache-flat). Keeps cold-start fan-out from tripping RIPEstat rate limits.</summary>
+    private const int MaxDegreeOfParallelism = 8;
+
     public async Task<List<(uint Prefix, byte Length, uint Asn)>> GetPrefixesForAsns(IEnumerable<uint> asns, CancellationToken ct = default)
     {
+        // Materialize once: we enumerate for fan-out and again for ordered assembly.
+        var asnList = asns as IList<uint> ?? asns.ToList();
+        if (asnList.Count == 0) return [];
+
+        // Resolve every ASN concurrently (bounded) — latency is max, not sum, on cold RIPEstat misses.
+        // Each ASN keeps its own try/catch so one failure (incl. cancellation) can't drop the others,
+        // matching the previous sequential semantics; results are reassembled in input order.
+        using var gate = new SemaphoreSlim(MaxDegreeOfParallelism, MaxDegreeOfParallelism);
+        var resolved = new Task<IReadOnlyList<(uint Prefix, byte Length)>>[asnList.Count];
+        for (var i = 0; i < asnList.Count; i++)
+            resolved[i] = ResolveAsnAsync(asnList[i], gate, ct);
+
+        await Task.WhenAll(resolved);
+
         var result = new List<(uint Prefix, byte Length, uint Asn)>();
-        foreach (var asn in asns)
+        for (var i = 0; i < asnList.Count; i++)
+            foreach (var (prefix, length) in resolved[i].Result)
+                result.Add((prefix, length, asnList[i]));
+        return result;
+    }
+
+    private async Task<IReadOnlyList<(uint Prefix, byte Length)>> ResolveAsnAsync(uint asn, SemaphoreSlim gate, CancellationToken ct)
+    {
+        try
         {
+            await gate.WaitAsync(ct);
             try
             {
-                var prefixes = await GetPrefixesAsync(asn, ct);
-                foreach (var (prefix, length) in prefixes)
-                    result.Add((prefix, length, asn));
+                return await GetPrefixesAsync(asn, ct);
             }
-            catch
+            finally
             {
-                // skip failed ASN, continue with others
+                gate.Release();
             }
         }
-        return result;
+        catch
+        {
+            // skip failed ASN (incl. cancellation while queued), continue with the others
+            return [];
+        }
     }
 
     public async Task<int> GetPrefixCountAsync(uint asn, CancellationToken ct = default)
