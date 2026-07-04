@@ -904,7 +904,27 @@ public sealed class BgpSession : IDisposable
     /// Partitions routes into groups that share an identical community set, so each emitted
     /// UPDATE carries a single COMMUNITY attribute. Internal for test coverage.
     /// </summary>
-    internal static List<List<Route>> GroupByCommunitySet(IReadOnlyList<Route> routes) =>
+    internal static List<List<Route>> GroupByCommunitySet(IReadOnlyList<Route> routes)
+    {
+        if (routes.Count == 0)
+            return [];
+
+        // Fast path: the common case where every route in the batch carries the same
+        // community set. Skip the GroupBy lookup-dictionary allocation (and the per-route
+        // hashing it implies) and emit a single group directly. Output is identical to the
+        // GroupBy path: one group holding every route in original order.
+        var firstCommunities = routes[0].Communities;
+        for (var i = 1; i < routes.Count; i++)
+        {
+            if (!CommunitySetComparer.Instance.Equals(firstCommunities, routes[i].Communities))
+                return PartitionByCommunitySet(routes);
+        }
+
+        return [new List<Route>(routes)];
+    }
+
+    /// <summary>Slow path: partition a batch whose routes span more than one community set.</summary>
+    private static List<List<Route>> PartitionByCommunitySet(IReadOnlyList<Route> routes) =>
         routes.GroupBy(r => r.Communities, CommunitySetComparer.Instance)
               .Select(g => g.ToList())
               .ToList();

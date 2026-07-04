@@ -233,4 +233,73 @@ public class PrefixAggregatorTests
         Assert.Contains(groups, g => g.Count == 2 && g[0].Communities.Contains(0xC1u));
         Assert.Contains(groups, g => g.Count == 1 && g[0].Communities.Contains(0xC2u));
     }
+
+    [Fact]
+    public void GroupByCommunitySet_SingleCommunitySet_FastPathCollapsesToOneGroup()
+    {
+        // The common send-batch case: every route carries the same community set. Each entry
+        // uses a distinct array instance with identical contents, so the short-circuit must
+        // compare by value (not reference) and collapse the batch into a single group while
+        // preserving original order — identical to what GroupBy would emit.
+        var routes = new List<Route>
+        {
+            R(0xC0A80100, 24, [0xC1u, 0xC2u]),
+            R(0xC0A80200, 24, [0xC1u, 0xC2u]),
+            R(0xC0A80300, 24, [0xC1u, 0xC2u]),
+        };
+
+        var groups = BgpSession.GroupByCommunitySet(routes);
+
+        var group = Assert.Single(groups);
+        Assert.Equal(3, group.Count);
+        Assert.Equal(0xC0A80100u, group[0].Prefix);
+        Assert.Equal(0xC0A80200u, group[1].Prefix);
+        Assert.Equal(0xC0A80300u, group[2].Prefix);
+        Assert.All(group, r => Assert.Equal([0xC1u, 0xC2u], r.Communities));
+    }
+
+    [Fact]
+    public void GroupByCommunitySet_EmptyCommunitiesAllShared_FastPathOneGroup()
+    {
+        // A batch with no communities anywhere is still a single community set (the empty set)
+        // and must take the fast path → one group.
+        var routes = new List<Route>
+        {
+            R(0x0A000100, 24),
+            R(0x0A000200, 24),
+        };
+
+        var groups = BgpSession.GroupByCommunitySet(routes);
+
+        var group = Assert.Single(groups);
+        Assert.Equal(2, group.Count);
+        Assert.All(group, r => Assert.Empty(r.Communities));
+    }
+
+    [Fact]
+    public void GroupByCommunitySet_MixedSets_FallsBackToPartitioning()
+    {
+        // When the batch spans more than one community set the fast path must defer to the
+        // GroupBy partition, preserving first-occurrence group order and per-group identity.
+        var routes = new List<Route>
+        {
+            R(0xC0A80100, 24, [0xC1u]),
+            R(0xC0A80200, 24, [0xC2u, 0xC3u]),
+            R(0xC0A80300, 24, [0xC1u]),
+        };
+
+        var groups = BgpSession.GroupByCommunitySet(routes);
+
+        Assert.Equal(2, groups.Count);
+        Assert.Equal([0xC1u], groups[0][0].Communities);
+        Assert.Equal(2, groups[0].Count);
+        Assert.Equal([0xC2u, 0xC3u], groups[1][0].Communities);
+        Assert.Single(groups[1]);
+    }
+
+    [Fact]
+    public void GroupByCommunitySet_EmptyBatch_ReturnsNoGroups()
+    {
+        Assert.Empty(BgpSession.GroupByCommunitySet([]));
+    }
 }
