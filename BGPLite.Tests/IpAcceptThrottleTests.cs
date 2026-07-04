@@ -156,4 +156,36 @@ public class IpAcceptThrottleTests
 
         Assert.Equal(limit, allowedCount);
     }
+
+    [Fact]
+    public void SweepStale_Evicts_Idle_Ips()
+    {
+        var ticks = 1_000L;
+        var throttle = new IpAcceptThrottle(maxPerMinute: 10, nowTicks: () => ticks);
+
+        Assert.True(throttle.TryAccept("1.1.1.1"));
+        Assert.True(throttle.TryAccept("2.2.2.2"));
+        Assert.True(throttle.TryAccept("3.3.3.3"));
+        Assert.Equal(3, throttle.TrackedCount);
+
+        // Advance past the 60s window — all three are now idle (stale) → sweep evicts them so the
+        // tracker can't grow without bound under a distinct-IP flood.
+        ticks += MinuteTicks + 1;
+        throttle.SweepStale(ticks);
+        Assert.Equal(0, throttle.TrackedCount);
+    }
+
+    [Fact]
+    public void SweepStale_Keeps_Recent_Ip_Evicts_Stale()
+    {
+        var ticks = 1_000L;
+        var throttle = new IpAcceptThrottle(maxPerMinute: 10, nowTicks: () => ticks);
+
+        Assert.True(throttle.TryAccept("1.1.1.1"));        // t=1000 — will go stale
+        ticks += MinuteTicks + 1;                          // >60s later
+        Assert.True(throttle.TryAccept("2.2.2.2"));        // recent (at the advanced time)
+
+        throttle.SweepStale(ticks);                        // evict 1.1.1.1, keep 2.2.2.2
+        Assert.Equal(1, throttle.TrackedCount);
+    }
 }

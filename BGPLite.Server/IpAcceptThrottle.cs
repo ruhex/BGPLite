@@ -10,19 +10,21 @@ namespace BGPLite.Server;
 /// here is connections from a single source, not the established-session count.
 /// <para>
 /// Thread-safe sliding-window counter: each distinct IP gets a bounded list of recent accept
-/// timestamps guarded by a per-IP lock; entries older than the window are pruned on every access so
-/// an idle IP's slot reclaims. The list per IP is bounded by <c>limit+1</c> (one over on the
-/// rejected attempt), so memory is bounded by (distinct IPs) × (limit). The OS firewall (nftables)
-/// is the PRIMARY gate; this is a cheap in-app backstop for misconfigured-firewall /
-/// misbehaving-authorized-peer cases.
+/// timestamps guarded by a per-IP lock; entries older than the window are pruned on every access.
+/// Stale entries (an IP idle longer than one window, with no recent timestamp) are evicted from the
+/// tracker on an amortized sweep so a distinct-IP flood cannot grow the tracker without bound. The
+/// list per IP is bounded by <c>limit+1</c>. The OS firewall (nftables) is the PRIMARY gate; this
+/// is a cheap in-app backstop.
 /// </para>
 /// </summary>
 internal sealed class IpAcceptThrottle
 {
+    private const int SweepEvery = 64;
     private readonly int _maxPerMinute;
     private readonly long _windowTicks;
     private readonly ConcurrentDictionary<string, Window> _byIp = new(StringComparer.Ordinal);
     private readonly Func<long> _nowTicks;
+    private int _callsSinceSweep;
 
     public IpAcceptThrottle(int maxPerMinute, Func<long>? nowTicks = null)
     {
@@ -30,6 +32,9 @@ internal sealed class IpAcceptThrottle
         _windowTicks = TimeSpan.FromMinutes(1).Ticks;
         _nowTicks = nowTicks ?? (() => DateTime.UtcNow.Ticks);
     }
+
+    /// <summary>Number of distinct IPs currently tracked (test/observability).</summary>
+    internal int TrackedCount => _byIp.Count;
 
     /// <summary>
     /// Pure sliding-window decision: prune timestamps older than the window, then allow iff the
@@ -77,12 +82,42 @@ internal sealed class IpAcceptThrottle
 
         var nowTicks = _nowTicks();
         var window = _byIp.GetOrAdd(ip, _ => new Window());
+        bool allowed;
         lock (window)
         {
-            var allowed = Decide(window.Timestamps, nowTicks, _windowTicks, _maxPerMinute, out var updated);
+            allowed = Decide(window.Timestamps, nowTicks, _windowTicks, _maxPerMinute, out var updated);
             window.Timestamps = updated;
-            return allowed;
         }
+
+        // Amortized eviction of idle IPs (no timestamp newer than one window) so the tracker can't
+        // grow without bound under a distinct-IP flood. Active/recent IPs are always retained.
+        if (Interlocked.Increment(ref _callsSinceSweep) >= SweepEvery)
+        {
+            _callsSinceSweep = 0;
+            SweepStale(nowTicks);
+        }
+        return allowed;
+    }
+
+    /// <summary>Removes tracked IPs whose every timestamp is older than one window (idle IPs).</summary>
+    internal void SweepStale(long nowTicks)
+    {
+        var cutoff = nowTicks - _windowTicks;
+        foreach (var (ip, window) in _byIp)
+        {
+            bool stale;
+            lock (window)
+                stale = window.Timestamps.Count == 0 || IsAllStale(window.Timestamps, cutoff);
+            if (stale)
+                _byIp.TryRemove(ip, out _);
+        }
+    }
+
+    private static bool IsAllStale(IReadOnlyList<long> timestamps, long cutoff)
+    {
+        for (var i = 0; i < timestamps.Count; i++)
+            if (timestamps[i] > cutoff) return false;
+        return true;
     }
 
     /// <summary>Per-IP mutable window state, guarded by locking the instance itself.</summary>
