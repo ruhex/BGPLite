@@ -36,6 +36,30 @@ public sealed class BgpConfig
     [YamlMember(Alias = "GracefulRestartForwardingState")]
     public bool GracefulRestartForwardingState { get; init; } = true;
 
+    /// <summary>
+    /// Connect-to-OPEN timeout in seconds (#115, Slowloris defense). Bounds how long a freshly
+    /// accepted TCP connection may wait for the peer's OPEN before being dropped. The negotiated
+    /// hold timer only starts AFTER the handshake, so without this bound a connection that opens
+    /// TCP but never sends OPEN pins a BgpSession + task + socket FD until the OS TCP timeout
+    /// (minutes). 30s comfortably exceeds a legitimate peer's OPEN latency. 0 = disabled (legacy
+    /// behavior). Peers that complete OPEN within the window are unaffected.
+    /// </summary>
+    [YamlMember(Alias = "OpenTimeoutSeconds")]
+    public int OpenTimeoutSeconds { get; init; } = 30;
+
+    /// <summary>
+    /// Per-source-IP accept throttle for the BGP listener (#115): the maximum number of inbound TCP
+    /// connects accepted from a single remote IP within any rolling 60s window. An IP exceeding the
+    /// limit has its just-accepted socket closed immediately WITHOUT spawning a session — no
+    /// FD/task/session pinned — defending one-IP accept floods. This deliberately does NOT cap the
+    /// count of legitimate established sessions (a route server is designed to hold many peers —
+    /// that is capacity/business logic, not a security control); it only bounds incomplete-handshake
+    /// floods. 0 = disabled (legacy behavior). Default 60/min is generous for legitimate peers (one
+    /// connect per session) while still throttling a flood.
+    /// </summary>
+    [YamlMember(Alias = "MaxAcceptsPerIpPerMinute")]
+    public int MaxAcceptsPerIpPerMinute { get; init; } = 60;
+
     public IPAddress GetRouterIdAddress() => IPAddress.Parse(RouterId);
 
     /// <summary>
@@ -75,5 +99,16 @@ public sealed class BgpConfig
                     $"Invalid configuration: Bgp.KeepAlive must be between 1 and {maxKeepAlive} seconds " +
                     $"for HoldTime={HoldTime} (got {KeepAlive}).");
         }
+
+        // Listener hardening (#115): the connect-to-OPEN timeout and per-source-IP accept throttle
+        // are non-negative integers; 0 disables each (legacy behavior). Reject negatives at startup
+        // rather than letting them surprise the operator (negative → treated as disabled silently).
+        if (OpenTimeoutSeconds < 0)
+            throw new InvalidOperationException(
+                $"Invalid configuration: Bgp.OpenTimeoutSeconds must be >= 0 (got {OpenTimeoutSeconds}).");
+
+        if (MaxAcceptsPerIpPerMinute < 0)
+            throw new InvalidOperationException(
+                $"Invalid configuration: Bgp.MaxAcceptsPerIpPerMinute must be >= 0 (got {MaxAcceptsPerIpPerMinute}).");
     }
 }

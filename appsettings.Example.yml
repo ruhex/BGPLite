@@ -3,6 +3,10 @@ Bgp:
   RouterId: 1.2.3.4
   KeepAlive: 60
   HoldTime: 180
+  # Listener hardening (#115) — connect-to-OPEN timeout (Slowloris defense) and per-source-IP
+  # accept throttle. Both have secure, generous defaults; set to 0 to disable either.
+  # OpenTimeoutSeconds: 30                 # drop a peer that connects but never sends OPEN (default 30, 0 = off)
+  # MaxAcceptsPerIpPerMinute: 60           # per-source-IP accept flood limit (default 60, 0 = off)
 
 Peers:
   - Address: 10.0.0.1

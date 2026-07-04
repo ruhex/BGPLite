@@ -158,8 +158,39 @@ public sealed class BgpSession : IDisposable
             _metrics.PeerConnected();
             _logger.LogInformation("PeerConnected {Peer}", _peer);
 
-            // Receive OPEN
-            var openMessage = await ReceiveMessageAsync(linkedCts.Token);
+            // Receive OPEN — bounded by a connect-to-OPEN timeout (#115, Slowloris defense). The
+            // negotiated hold timer only starts AFTER the handshake, so without this bound a
+            // connection that opens TCP but never sends OPEN pins a BgpSession + task + socket FD
+            // until the OS TCP timeout (minutes). OpenTimeoutSeconds=0 disables the timeout (legacy
+            // behavior). The timeout CTS is linked to linkedCts and disposed right after OPEN is
+            // received so later receives fall back to the session-wide linkedCts / negotiated hold
+            // timer. On a pure timeout (external/session token NOT cancelled) we drop the peer.
+            var openTimeoutSeconds = _bgpConfig.OpenTimeoutSeconds;
+            BgpMessage openMessage;
+            if (openTimeoutSeconds > 0)
+            {
+                using var openCts = CancellationTokenSource.CreateLinkedTokenSource(linkedCts.Token);
+                openCts.CancelAfter(TimeSpan.FromSeconds(openTimeoutSeconds));
+                try
+                {
+                    openMessage = await ReceiveMessageAsync(openCts.Token);
+                }
+                catch (OperationCanceledException) when (!linkedCts.IsCancellationRequested)
+                {
+                    // Only the OPEN timeout fired (the external/session token is still alive) — the
+                    // peer never completed the handshake. Drop it; do not emit a NOTIFICATION (the
+                    // FSM never reached OpenSent, and a Slowloris socket would not read it anyway).
+                    _logger.LogWarning(
+                        "No OPEN received from {Peer} within {Timeout}s — closing (Slowloris defense, #115)",
+                        _peer, openTimeoutSeconds);
+                    return;
+                }
+            }
+            else
+            {
+                openMessage = await ReceiveMessageAsync(linkedCts.Token);
+            }
+
             if (openMessage is not BgpOpenMessage remoteOpen)
             {
                 await SendNotificationAsync(BgpConstants.Error.OpenMessageError, BgpConstants.SubError.Unspecific);

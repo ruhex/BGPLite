@@ -28,6 +28,9 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
     // entries. Keying by IP only made them clobber each other (issue #18).
     private readonly ConcurrentDictionary<SessionKey, BgpSession> _sessions = new();
     private readonly CancellationTokenSource _cts = new();
+    // Per-source-IP accept throttle (#115): bounds inbound-connect floods from a single IP. Disabled
+    // (always-allow) when Bgp.MaxAcceptsPerIpPerMinute <= 0.
+    private readonly IpAcceptThrottle _acceptThrottle;
     private int _acceptingConnections = 1;
     private Socket? _listener;
     private Task? _acceptTask;
@@ -61,6 +64,7 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
         _prefixService = prefixService;
         _prefixAggregator = prefixAggregator ?? new ExactUnionPrefixAggregator();
         _communityResolver = communityResolver ?? NullCommunityResolver.Instance;
+        _acceptThrottle = new IpAcceptThrottle(config.Bgp.MaxAcceptsPerIpPerMinute);
     }
 
     public Task StartAsync(CancellationToken cancellationToken)
@@ -153,6 +157,20 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
                 // PeerStore, which is still keyed by IP.
                 var key = new SessionKey(remoteEndpoint.Address, remoteEndpoint.Port);
                 var peerAddress = remoteEndpoint.Address.ToString();
+
+                // Per-source-IP accept throttle (#115): defend one-IP accept floods. If this IP has
+                // already exceeded MaxAcceptsPerIpPerMinute within the rolling 60s window, close the
+                // just-accepted socket immediately WITHOUT spawning a session — no FD/task/session
+                // pinned. The rejected attempt is logged and the loop continues (continue, not break:
+                // this is a per-IP limit, not a server-wide stop). Disabled when the limit is 0.
+                if (!_acceptThrottle.TryAccept(peerAddress))
+                {
+                    _logger.LogWarning(
+                        "Accept throttle: closing connection from {Peer} (over {Limit} accepts/min, #115)",
+                        peerAddress, _config.Bgp.MaxAcceptsPerIpPerMinute);
+                    socket.Dispose();
+                    continue;
+                }
 
                 _logger.LogInformation("Incoming connection from {Peer} ({Key})", peerAddress, key);
 

@@ -6,8 +6,18 @@ public class ConfigValidationTests
 {
     // Factory helpers keep each test mutating exactly one field so the assertion isolates the rule
     // under test. Defaults match appsettings.Example.yml: a known-good baseline.
-    private static BgpConfig Bgp(uint asn = 65001, string routerId = "10.0.0.1", int keepAlive = 60, int holdTime = 180)
-        => new() { Asn = asn, RouterId = routerId, KeepAlive = keepAlive, HoldTime = holdTime };
+    private static BgpConfig Bgp(
+        uint asn = 65001, string routerId = "10.0.0.1", int keepAlive = 60, int holdTime = 180,
+        int openTimeoutSeconds = 30, int maxAcceptsPerIpPerMinute = 60)
+        => new()
+        {
+            Asn = asn,
+            RouterId = routerId,
+            KeepAlive = keepAlive,
+            HoldTime = holdTime,
+            OpenTimeoutSeconds = openTimeoutSeconds,
+            MaxAcceptsPerIpPerMinute = maxAcceptsPerIpPerMinute
+        };
 
     private static AppConfig Config(BgpConfig? bgp = null, int apiPort = 5001, List<PeerConfig>? peers = null)
         => new() { Bgp = bgp ?? Bgp(), ApiPort = apiPort, Peers = peers ?? [] };
@@ -114,6 +124,50 @@ public class ConfigValidationTests
         var bgp = Bgp();
 
         var act = () => bgp.Validate();
+
+        act();
+    }
+
+    [Theory]
+    [InlineData(-1)]
+    [InlineData(-100)]
+    public void Validate_RejectsNegativeOpenTimeoutSeconds(int openTimeoutSeconds)
+    {
+        var config = Config(Bgp(openTimeoutSeconds: openTimeoutSeconds));
+
+        var ex = Assert.Throws<InvalidOperationException>(() => config.Validate());
+        Assert.Contains("Bgp.OpenTimeoutSeconds", ex.Message);
+    }
+
+    [Fact]
+    public void Validate_AcceptsZeroOpenTimeoutSeconds_Disabled()
+    {
+        // 0 = disabled (legacy behavior) — valid.
+        var config = Config(Bgp(openTimeoutSeconds: 0));
+
+        var act = () => config.Validate();
+
+        act();
+    }
+
+    [Theory]
+    [InlineData(-1)]
+    [InlineData(-100)]
+    public void Validate_RejectsNegativeMaxAcceptsPerIpPerMinute(int maxPerMinute)
+    {
+        var config = Config(Bgp(maxAcceptsPerIpPerMinute: maxPerMinute));
+
+        var ex = Assert.Throws<InvalidOperationException>(() => config.Validate());
+        Assert.Contains("Bgp.MaxAcceptsPerIpPerMinute", ex.Message);
+    }
+
+    [Fact]
+    public void Validate_AcceptsZeroMaxAcceptsPerIpPerMinute_Disabled()
+    {
+        // 0 = disabled (legacy behavior) — valid.
+        var config = Config(Bgp(maxAcceptsPerIpPerMinute: 0));
+
+        var act = () => config.Validate();
 
         act();
     }

@@ -551,6 +551,90 @@ public class BgpSessionShutdownTests
         Assert.DoesNotContain(sent, m => m is BgpNotificationMessage);
     }
 
+    /// <summary>
+    /// #115 (connect-to-OPEN timeout, Slowloris defense): a peer that opens the TCP connection but
+    /// NEVER sends OPEN must be dropped within OpenTimeoutSeconds, not pinned until the OS TCP
+    /// timeout (minutes). The negotiated hold timer only starts AFTER the handshake, so without this
+    /// bound the session+task+FD would linger. Uses a short OpenTimeoutSeconds=1s and tolerates
+    /// scheduling jitter (5s ceiling). The session must end cleanly (RunAsync completes) and never
+    /// reach Established. Verifies the real BgpSession.RunAsync path via the loopback socket harness.
+    /// </summary>
+    [Fact]
+    public async Task Peer_That_Never_Sends_Open_Is_Dropped_Within_Timeout()
+    {
+        var (server, client) = ConnectedPair();
+        using var clientSock = client;
+        // OpenTimeoutSeconds=1 keeps the test fast; HoldTime=0/KeepAlive=0 (irrelevant — handshake
+        // never completes, but valid so Validate() would pass if it ran here).
+        var bgpConfig = new BgpConfig
+        {
+            Asn = 65001,
+            RouterId = "127.0.0.1",
+            HoldTime = 0,
+            KeepAlive = 0,
+            OpenTimeoutSeconds = 1
+        };
+        using var session = new BgpSession(
+            server,
+            new PeerConfig { Address = "127.0.0.1" },
+            bgpConfig,
+            new RouteTable(),
+            AllowAllFilter.Instance,
+            new BgpMetrics(),
+            new NopLogger<BgpSession>());
+
+        // Run RunAsync but NEVER send OPEN — a Slowloris socket.
+        var runTask = Task.Run(() => session.RunAsync(CancellationToken.None));
+
+        // Must complete well under the legacy OS-TCP-timeout bound. 5s ceiling tolerates scheduler
+        // jitter on top of the 1s timeout.
+        await runTask.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.False(session.IsEstablished, "a peer that never sends OPEN must not become Established");
+
+        // No NOTIFICATION may be sent — the FSM never reached OpenSent, and a Slowloris socket would
+        // not read it anyway. The timeout path returns without emitting anything.
+        var wire = await DrainAsync(client, TimeSpan.FromSeconds(2));
+        Assert.DoesNotContain(wire, m => m is BgpNotificationMessage);
+    }
+
+    /// <summary>
+    /// #115 positive control: when the peer DOES send OPEN within OpenTimeoutSeconds, the handshake
+    /// proceeds normally and the session reaches Established — the timeout must not fire on a fast,
+    /// legitimate peer. Guards against an off-by-one that would drop healthy peers.
+    /// </summary>
+    [Fact]
+    public async Task Peer_That_Sends_Open_Fast_Proceeds_Past_Timeout()
+    {
+        var (server, client) = ConnectedPair();
+        using var clientSock = client;
+        // A real (non-zero) timeout that the fast handshake must comfortably beat.
+        var bgpConfig = new BgpConfig
+        {
+            Asn = 65001,
+            RouterId = "127.0.0.1",
+            HoldTime = 0,
+            KeepAlive = 0,
+            OpenTimeoutSeconds = 10
+        };
+        using var session = new BgpSession(
+            server,
+            new PeerConfig { Address = "127.0.0.1" },
+            bgpConfig,
+            new RouteTable(),
+            AllowAllFilter.Instance,
+            new BgpMetrics(),
+            new NopLogger<BgpSession>());
+
+        // EstablishSessionAsync drives the full OPEN/KEEPALIVE handshake immediately.
+        var runTask = await EstablishSessionAsync(session, client, bgpConfig);
+
+        Assert.True(session.IsEstablished, "a fast legitimate peer must reach Established despite the OPEN timeout");
+
+        session.MarkSilentClose();
+        await runTask.WaitAsync(TimeSpan.FromSeconds(5));
+    }
+
     private static byte[] Concat(byte[] a, byte[] b)
     {
         var r = new byte[a.Length + b.Length];
