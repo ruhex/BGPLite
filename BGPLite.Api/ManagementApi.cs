@@ -26,6 +26,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
     private IReadOnlyList<IPNetwork> _trustedProxyNetworks;
     private PartitionedRateLimiter<string>? _rateLimiter;
     private ConcurrencyLimiter? _concurrencyLimiter;
+    private IReadOnlyList<string>? _corsAllowedOrigins;
     private readonly BgpMetrics _metrics;
     private readonly IPrefixService? _prefixService;
     private readonly IPrefixSourceService? _prefixSources;
@@ -64,6 +65,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
         // rate: a burst passing the per-client token check still cannot run more than this many at once.
         _concurrencyLimiter = config.ApiRateLimit is { Enabled: true, MaxConcurrentRequests: > 0 } limitCfg
             ? CreateConcurrencyLimiter(limitCfg) : null;
+        _corsAllowedOrigins = config.CorsAllowedOrigins;
     }
 
     /// <summary>
@@ -89,15 +91,13 @@ public sealed class ManagementApi : IHostedService, IDisposable
         // Swap every reloadable field atomically. A request that has already captured the old
         // references into locals finishes against them; the next request reads the new ones.
         // _config is swapped last so CORS / client-IP and the limiters always move together.
-        var oldRateLimiter = Interlocked.Exchange(ref _rateLimiter, rateLimiter);
-        var oldConcurrencyLimiter = Interlocked.Exchange(ref _concurrencyLimiter, concurrencyLimiter);
+        Interlocked.Exchange(ref _rateLimiter, rateLimiter);
+        Interlocked.Exchange(ref _concurrencyLimiter, concurrencyLimiter);
         Interlocked.Exchange(ref _trustedProxyNetworks, trusted);
-        Interlocked.Exchange(ref _config, newConfig);
+        Interlocked.Exchange(ref _corsAllowedOrigins, newConfig.CorsAllowedOrigins);
 
-        // The discarded limiters hold replenishment timers; dispose them AFTER the swap so no
-        // in-flight request is mid-acquire on a disposed limiter (requests captured the old refs).
-        oldRateLimiter?.Dispose();
-        oldConcurrencyLimiter?.Dispose();
+        // Old limiters are NOT disposed: a concurrent HandleAsync may have captured the old reference
+        // and be mid-acquire. Let GC collect them (reload is rare, one retired object per reload).
 
         _logger.LogInformation(
             "Soft config reloaded: trustedProxies={TrustedProxyCount}, corsOrigins={CorsOriginCount}, rateLimit={RateLimitEnabled}, concurrencyLimit={ConcurrencyEnabled}",
@@ -121,7 +121,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
     /// <see cref="AddCorsHeaders"/>'s resolution.
     /// </summary>
     internal string? ResolveCorsOriginLive(string? requestOrigin) =>
-        ResolveCorsOrigin(requestOrigin, Volatile.Read(ref _config).CorsAllowedOrigins);
+        ResolveCorsOrigin(requestOrigin, Volatile.Read(ref _corsAllowedOrigins));
 
     /// <summary>Whether a per-client rate limiter is currently active — exposed for hot-reload tests.</summary>
     internal bool IsRateLimitingEnabled => Volatile.Read(ref _rateLimiter) is not null;
@@ -969,7 +969,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
         // key by origin. Allow-Methods/Allow-Headers are emitted only alongside a real ACAO.
         // The allowlist is read off the live _config (#136) so a hot reload of CorsAllowedOrigins
         // takes effect on the next request without a restart.
-        var origin = ResolveCorsOrigin(ctx.Request.Headers["Origin"], Volatile.Read(ref _config).CorsAllowedOrigins);
+        var origin = ResolveCorsOrigin(ctx.Request.Headers["Origin"], Volatile.Read(ref _corsAllowedOrigins));
         if (origin is null) return;
         ctx.Response.Headers.Add("Access-Control-Allow-Origin", origin);
         ctx.Response.Headers.Add("Vary", "Origin");

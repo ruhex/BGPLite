@@ -58,14 +58,15 @@ public sealed class ConfigReloader : IHostedService, IDisposable
         _watcher = new FileSystemWatcher(dir)
         {
             Filter = file,
-            NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.CreationTime,
-            EnableRaisingEvents = true
+            NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.CreationTime
         };
         // Most editors trigger Changed (LastWrite). Some do atomic save-as (write a temp file then
         // rename onto the target), so also react to Created/Renamed to catch those workflows.
+        // Wire handlers BEFORE enabling events so no change between init and subscription is missed.
         _watcher.Changed += OnFileChanged;
         _watcher.Created += OnFileChanged;
         _watcher.Renamed += OnFileChanged;
+        _watcher.EnableRaisingEvents = true;
 
         // One debounce timer, rearmed (never auto-recurring): fires exactly once, DebounceMs after
         // the last change event, so a burst collapses into a single reload.
@@ -144,6 +145,7 @@ public sealed class ConfigReloader : IHostedService, IDisposable
 
     public Task StopAsync(CancellationToken cancellationToken)
     {
+        _debounceTimer?.Change(Timeout.Infinite, Timeout.Infinite);
         if (_watcher is not null)
             _watcher.EnableRaisingEvents = false;
         return Task.CompletedTask;
