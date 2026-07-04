@@ -5,6 +5,20 @@ namespace BGPLite.Tests;
 public class ConfigurationTests
 {
     [Fact]
+    public void LoadFromText_UnknownKey_Throws()
+    {
+        // #102: strict YAML — unknown/typo'd keys must fail-loud at deserialization (not silently
+        // ignored). Operator gets a clear "(Lin: N): Property 'X' not found" pointing to the typo.
+        var yaml = """
+            Bgp:
+              Asn: 65444
+              TypoKey: 42
+            """;
+        var ex = Assert.ThrowsAny<Exception>(() => ConfigLoader.LoadFromText(yaml));
+        Assert.Contains("TypoKey", ex.Message);
+    }
+
+    [Fact]
     public void LoadFromText_ParsesValidYaml()
     {
         var yaml = """
