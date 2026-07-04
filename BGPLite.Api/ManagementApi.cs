@@ -28,6 +28,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
     private readonly int _port;
     private readonly IReadOnlyList<IPNetwork> _trustedProxyNetworks;
     private readonly PartitionedRateLimiter<string>? _rateLimiter;
+    private readonly ConcurrencyLimiter? _concurrencyLimiter;
     private HttpListener? _listener;
     private Task? _listenTask;
     private CancellationTokenSource _cts = new();
@@ -55,6 +56,11 @@ public sealed class ManagementApi : IHostedService, IDisposable
         // Opt-in (#116): no rate limiting unless an ApiRateLimit section is configured, so the live
         // service's behavior is unchanged until the operator enables it.
         _rateLimiter = config.ApiRateLimit is { Enabled: true } cfg ? CreateRateLimiter(cfg) : null;
+        // Opt-in (#119): no global concurrency cap unless MaxConcurrentRequests > 0, so the live
+        // service's behavior is unchanged until the operator sets a limit. Independent of the per-IP
+        // rate: a burst passing the per-client token check still cannot run more than this many at once.
+        _concurrencyLimiter = config.ApiRateLimit is { Enabled: true, MaxConcurrentRequests: > 0 } limitCfg
+            ? CreateConcurrencyLimiter(limitCfg) : null;
     }
 
     public Task StartAsync(CancellationToken cancellationToken)
@@ -126,6 +132,22 @@ public sealed class ManagementApi : IHostedService, IDisposable
         var method = ctx.Request.HttpMethod;
         var segments = path.Split('/', StringSplitOptions.RemoveEmptyEntries);
 
+        // Global concurrency cap (#119): hold the lease for the whole request so total in-flight work
+        // (RIPEstat fetches / DB ops) is bounded regardless of source. QueueLimit = 0 means acquisition
+        // is immediate — either granted or denied with 503 Server busy when at capacity.
+        RateLimitLease? concurrencyLease = null;
+        if (_concurrencyLimiter is not null)
+        {
+            concurrencyLease = await _concurrencyLimiter.AcquireAsync();
+            if (!concurrencyLease.IsAcquired)
+            {
+                concurrencyLease.Dispose();
+                _logger.LogWarning("API concurrency limit reached, request rejected");
+                await WriteResponse(ctx, ApiResponse.Error("Server busy", 503));
+                return;
+            }
+        }
+
         try
         {
             var response = await RouteAsync(method, segments, ctx);
@@ -136,6 +158,12 @@ public sealed class ManagementApi : IHostedService, IDisposable
             _logger.LogError(ex, "API error {Method} {Path}: {Message}",
                 SanitizeForLog(method), SanitizeForLog(path), SanitizeForLog(ex.Message));
             await WriteResponse(ctx, ApiResponse.Error(ex.InnerException?.Message ?? ex.Message, 500));
+        }
+        finally
+        {
+            // Release the slot back to the global pool (#119) — also covers the success path so the
+            // lease is held exactly for the request duration.
+            concurrencyLease?.Dispose();
         }
     }
 
@@ -738,6 +766,25 @@ public sealed class ManagementApi : IHostedService, IDisposable
     }
 
     /// <summary>
+    /// Builds the GLOBAL concurrency limiter for the management API (#119). A single non-partitioned
+    /// <see cref="ConcurrencyLimiter"/> with <see cref="ConcurrencyLimiterOptions.PermitLimit"/> =
+    /// <see cref="ApiRateLimitConfig.MaxConcurrentRequests"/> and
+    /// <see cref="ConcurrencyLimiterOptions.QueueLimit"/> = 0, so at most PermitLimit requests run at
+    /// once across ALL clients; the next is denied immediately (503) rather than queued. Only created
+    /// when the operator opts in (MaxConcurrentRequests &gt; 0 and ApiRateLimit enabled). Extracted as a
+    /// pure factory for unit tests.
+    /// </summary>
+    internal static ConcurrencyLimiter CreateConcurrencyLimiter(ApiRateLimitConfig cfg)
+    {
+        var options = new ConcurrencyLimiterOptions
+        {
+            PermitLimit = Math.Max(1, cfg.MaxConcurrentRequests),
+            QueueLimit = 0,         // deny immediately (503) when at capacity — never queue
+        };
+        return new ConcurrencyLimiter(options);
+    }
+
+    /// <summary>
     /// Resolves the real client IP from the connection's remote endpoint and forwarding headers.
     /// Forwarding headers are honored ONLY when the immediate peer (<paramref name="remote"/>) is a
     /// configured trusted proxy (#91) — a direct client cannot inject <c>X-Forwarded-For</c> /
@@ -862,6 +909,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
     {
         _cts.Cancel();
         _cts.Dispose();
+        _concurrencyLimiter?.Dispose();
         _listener?.Close();
     }
 

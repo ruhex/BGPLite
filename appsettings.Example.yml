@@ -77,9 +77,14 @@ DefaultPrefixSource: ru
 # usage never trips them); set Enabled: false to turn off.
 # ApiRateLimit:
 #   Enabled: true
-#   TokenLimit: 120        # burst capacity (default 120)
-#   TokensPerPeriod: 120   # tokens replenished per period (default 120)
-#   PeriodSeconds: 60      # replenishment period in seconds (default 60)
+#   TokenLimit: 120            # burst capacity (default 120)
+#   TokensPerPeriod: 120       # tokens replenished per period (default 120)
+#   PeriodSeconds: 60          # replenishment period in seconds (default 60)
+#   # Global concurrency cap (#119). Opt-in: default 0 = no cap (live behavior unchanged). When > 0,
+#   # at most this many requests run at once across ALL clients; the next is rejected with 503 until an
+#   # in-flight request completes. Bounds total resource use regardless of flood source (defense in
+#   # depth with the per-IP rate, which only bounds flood speed per client).
+#   MaxConcurrentRequests: 0   # e.g. 32 to cap in-flight work (default 0 = unlimited)
 
 # Management API — CORS origin allowlist (#99). A request's Origin header is reflected back as
 # Access-Control-Allow-Origin ONLY when it matches an entry here (case-insensitive); otherwise no
