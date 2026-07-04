@@ -32,7 +32,8 @@ public class LargeCommunityCodecTests
     {
         var attr = AttributeHelper.WriteLargeCommunities([]);
         Assert.Empty(attr.Data);
-        Assert.Empty(AttributeHelper.ReadLargeCommunities(attr));
+        // RFC 8092 §2: a zero-length payload is malformed (non-zero multiple of 12 required) → reject on decode.
+        Assert.Throws<BgpParseException>(() => AttributeHelper.ReadLargeCommunities(attr));
     }
 
     [Fact]
@@ -49,15 +50,16 @@ public class LargeCommunityCodecTests
     }
 
     [Fact]
-    public void Read_ZeroLength_ReturnsEmpty()
+    public void Read_ZeroLength_Throws()
     {
+        // RFC 8092 §2: the attribute length MUST be a non-zero multiple of 12 — zero is malformed.
         var attr = new PathAttribute
         {
             Flags = BgpConstants.Attribute.FlagOptional | BgpConstants.Attribute.FlagTransitive,
             TypeCode = BgpConstants.Attribute.LargeCommunity,
             Data = []
         };
-        Assert.Empty(AttributeHelper.ReadLargeCommunities(attr));
+        Assert.Throws<BgpParseException>(() => AttributeHelper.ReadLargeCommunities(attr));
     }
 
     [Theory]

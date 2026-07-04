@@ -115,8 +115,8 @@ public static class AttributeHelper
     /// </summary>
     public static (uint Global, uint Local1, uint Local2)[] ReadLargeCommunities(PathAttribute attr)
     {
-        if (attr.Data.Length % 12 != 0)
-            throw new BgpParseException("Large Communities attribute length must be a multiple of 12");
+        if (attr.Data.Length == 0 || attr.Data.Length % 12 != 0)
+            throw new BgpParseException("Large Communities attribute length must be a non-zero multiple of 12");
 
         var count = attr.Data.Length / 12;
         var large = new (uint Global, uint Local1, uint Local2)[count];
