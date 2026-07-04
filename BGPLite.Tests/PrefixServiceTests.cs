@@ -24,13 +24,14 @@ public class PrefixServiceTests
     private sealed class PerAsnHandler : HttpMessageHandler
     {
         private readonly HashSet<uint> _failures;
-        public int Calls { get; private set; }
+        private int _calls;
+        public int Calls => _calls;
 
         public PerAsnHandler(params uint[] failures) => _failures = [.. failures];
 
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
         {
-            Calls++;
+            Interlocked.Increment(ref _calls);
             var asn = ExtractAsn(request.RequestUri!);
             if (_failures.Contains(asn))
                 return Task.FromResult(new HttpResponseMessage(HttpStatusCode.ServiceUnavailable));

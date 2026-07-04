@@ -41,20 +41,23 @@ public sealed class PrefixService : IPrefixService
         var asnList = asns as IList<uint> ?? asns.ToList();
         if (asnList.Count == 0) return [];
 
-        // Resolve every ASN concurrently (bounded) — latency is max, not sum, on cold RIPEstat misses.
-        // Each ASN keeps its own try/catch so one failure (incl. cancellation) can't drop the others,
-        // matching the previous sequential semantics; results are reassembled in input order.
+        // Resolve each DISTINCT ASN concurrently (bounded) — latency is max, not sum, on cold
+        // RIPEstat misses. Duplicates are coalesced for the fan-out so they cannot race the cold
+        // per-ASN cache and double-fetch (CodeRabbit #130); output multiplicity is preserved below.
+        // Each ASN keeps its own try/catch so one failure (incl. cancellation) can't drop the others.
         using var gate = new SemaphoreSlim(MaxDegreeOfParallelism, MaxDegreeOfParallelism);
-        var resolved = new Task<IReadOnlyList<(uint Prefix, byte Length)>>[asnList.Count];
-        for (var i = 0; i < asnList.Count; i++)
-            resolved[i] = ResolveAsnAsync(asnList[i], gate, ct);
+        var resolvedByAsn = new Dictionary<uint, Task<IReadOnlyList<(uint Prefix, byte Length)>>>();
+        foreach (var asn in asnList.Distinct())
+            resolvedByAsn[asn] = ResolveAsnAsync(asn, gate, ct);
 
-        await Task.WhenAll(resolved);
+        await Task.WhenAll(resolvedByAsn.Values);
 
+        // Reassemble in ORIGINAL input order (and multiplicity) — byte-for-byte identical to the
+        // prior sequential output, including for duplicate ASNs.
         var result = new List<(uint Prefix, byte Length, uint Asn)>();
-        for (var i = 0; i < asnList.Count; i++)
-            foreach (var (prefix, length) in resolved[i].Result)
-                result.Add((prefix, length, asnList[i]));
+        foreach (var asn in asnList)
+            foreach (var (prefix, length) in resolvedByAsn[asn].Result)
+                result.Add((prefix, length, asn));
         return result;
     }
 
