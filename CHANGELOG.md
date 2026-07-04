@@ -1,5 +1,44 @@
 # Changelog
 
+## [1.3.0](https://github.com/ruhex/BGPLite/compare/v1.2.0...v1.3.0) (2026-07-04)
+
+
+### Features
+
+* **api:** cap concurrent management-API requests ([#119](https://github.com/ruhex/BGPLite/issues/119)) ([71761b2](https://github.com/ruhex/BGPLite/commit/71761b2f7eb062c853c704b637da5d31ad1a47d2))
+* **api:** per-client-IP token-bucket rate limiting ([#118](https://github.com/ruhex/BGPLite/issues/118)) ([3d35e9d](https://github.com/ruhex/BGPLite/commit/3d35e9db353c0b310ad97329dd8b0896f18e3708))
+* **config:** hot-reload soft config without restarting the service ([#136](https://github.com/ruhex/BGPLite/issues/136)) ([bb722c9](https://github.com/ruhex/BGPLite/commit/bb722c9a16d12181b418963d5070b4561fe83c4e))
+* **protocol:** add RFC 8092 Large Communities codec + wiring ([#35](https://github.com/ruhex/BGPLite/issues/35)) ([19abd15](https://github.com/ruhex/BGPLite/commit/19abd15a6840b6e3bf110a6d8b38d5474693e191))
+
+
+### Bug Fixes
+
+* **api:** enable SQLite WAL + busy_timeout for peer-store resilience ([#111](https://github.com/ruhex/BGPLite/issues/111)) ([8ca4c9c](https://github.com/ruhex/BGPLite/commit/8ca4c9cf6e7582a3725f9474fef16bb872314198))
+* **api:** gate CORS on configurable origin allowlist ([#99](https://github.com/ruhex/BGPLite/issues/99)) ([1a66679](https://github.com/ruhex/BGPLite/commit/1a666792cd4ca6d3ea98dfcdf82ce9b9e8299a77))
+* **api:** gate forwarding headers on trusted proxies ([#117](https://github.com/ruhex/BGPLite/issues/117)) ([3e0dae4](https://github.com/ruhex/BGPLite/commit/3e0dae4fddac6a678bf6c7b48abb6531e1a0da2d))
+* **api:** make ManagementApi routing fully async ([#92](https://github.com/ruhex/BGPLite/issues/92)) ([#113](https://github.com/ruhex/BGPLite/issues/113)) ([5d419e8](https://github.com/ruhex/BGPLite/commit/5d419e8a867e97a7a2578833f29e64c1dc219b09))
+* **api:** sanitize user input in logs + drop raw-body logging ([#120](https://github.com/ruhex/BGPLite/issues/120)) ([e875f1d](https://github.com/ruhex/BGPLite/commit/e875f1dc6cb7f4d112adddde6cd85cfbc0c0ba83))
+* **api:** validate custom-prefix CIDRs + preserve on omit in peer update ([#100](https://github.com/ruhex/BGPLite/issues/100)) ([0676748](https://github.com/ruhex/BGPLite/commit/06767489a570cffa647a72ff8fb7ffd4289b83ad))
+* Cease subcode (RFC 4486) + /api/asn-lists type by Kind ([#75](https://github.com/ruhex/BGPLite/issues/75)) ([fb960b7](https://github.com/ruhex/BGPLite/commit/fb960b7b2ca941fc82ca9bf32f5638fd5de5c749))
+* **config:** strict YAML deserialization — unknown keys fail-loud ([#102](https://github.com/ruhex/BGPLite/issues/102)) ([43e60c2](https://github.com/ruhex/BGPLite/commit/43e60c2e62fc30011ddb2d03b3fbd2b77f1b773b))
+* **config:** validate YAML at startup ([#89](https://github.com/ruhex/BGPLite/issues/89)) ([8dcde68](https://github.com/ruhex/BGPLite/commit/8dcde68017ef654fa65071a0dc41f0a37631ec69))
+* **logging:** silence EF Core SQL spam + Docker log rotation ([#72](https://github.com/ruhex/BGPLite/issues/72)) ([#73](https://github.com/ruhex/BGPLite/issues/73)) ([0d06496](https://github.com/ruhex/BGPLite/commit/0d06496aa67f1f650abbfd24b76fe8e140927568))
+* **providers:** thread CancellationToken through IPrefixService ([#114](https://github.com/ruhex/BGPLite/issues/114)) ([dd57479](https://github.com/ruhex/BGPLite/commit/dd57479147839d4627be137fb6f254671bf59d1d))
+* reject IPv6 next hops and honor well-known communities ([#67](https://github.com/ruhex/BGPLite/issues/67)) ([d51e5d6](https://github.com/ruhex/BGPLite/commit/d51e5d648fab798117b3156dba3444a4e2a10e93))
+* **server:** evict idle IPs from IpAcceptThrottle ([#115](https://github.com/ruhex/BGPLite/issues/115) follow-up) ([42ff0dd](https://github.com/ruhex/BGPLite/commit/42ff0dda22c4a0e977b6d5f673aef1472eb0f429))
+* **server:** harden BGP listener against connection floods ([#115](https://github.com/ruhex/BGPLite/issues/115)) ([c9b7201](https://github.com/ruhex/BGPLite/commit/c9b72017ecf68eab3ebf37b0e44a54ebc5f68c2e))
+* **server:** keep session up on a single malformed UPDATE ([#94](https://github.com/ruhex/BGPLite/issues/94)) ([#109](https://github.com/ruhex/BGPLite/issues/109)) ([7aa935c](https://github.com/ruhex/BGPLite/commit/7aa935c28ee94e18642a2598a59410c7686e07d7))
+
+
+### Performance Improvements
+
+* **api:** AsNoTracking on all PeerStore read paths ([#112](https://github.com/ruhex/BGPLite/issues/112)) ([ea05c93](https://github.com/ruhex/BGPLite/commit/ea05c93ad5962dd24a99ad9c1ca6eb85f47a93ad))
+* **api:** collapse SendAllRoutesAsync peer loads into one roundtrip ([#84](https://github.com/ruhex/BGPLite/issues/84)) ([c6ffc43](https://github.com/ruhex/BGPLite/commit/c6ffc439331e2d7cdf5cd8b7f9fce20ff7867d0b))
+* **providers:** parallelize PrefixService ASN resolution ([#83](https://github.com/ruhex/BGPLite/issues/83)) ([372284a](https://github.com/ruhex/BGPLite/commit/372284a840722f569a916e36d084c54edad12e6e))
+* **routing:** resolve peer community allow-set once per send ([#106](https://github.com/ruhex/BGPLite/issues/106)) ([e3bec19](https://github.com/ruhex/BGPLite/commit/e3bec19297cf121c276115a8ee1d7bd5095ebe4a))
+* **server:** cache UPDATE path attributes per community set ([#87](https://github.com/ruhex/BGPLite/issues/87)) ([e2977f5](https://github.com/ruhex/BGPLite/commit/e2977f588e35d2056a77201a5be5f5274b4acd04))
+* **server:** short-circuit GroupByCommunitySet for single-set batches ([#86](https://github.com/ruhex/BGPLite/issues/86)) ([c23fa89](https://github.com/ruhex/BGPLite/commit/c23fa899896e5a205f9cd4717546741e31a132a3))
+
 ## [1.2.0](https://github.com/ruhex/BGPLite/compare/v1.1.0...v1.2.0) (2026-07-02)
 
 
