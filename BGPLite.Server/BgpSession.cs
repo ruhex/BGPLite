@@ -772,13 +772,20 @@ public sealed class BgpSession : IDisposable
         var sent = 0;
         var batch = new List<Route>(maxNlriPerUpdate);
 
+        // Path attributes for a community set are byte-identical across every 100-NLRI batch of
+        // a single send (localAsn/localFourByteAsn/nextHop are constant for the whole send), so
+        // build them once per community set and reuse instead of rebuilding on each batch (#87).
+        // Scoped to this send only: the cache dies with the dictionary, so it can never serve a
+        // later send that carries a different nextHop or renegotiated ASN.
+        var attrCache = CreateUpdateAttributeCache();
+
         foreach (var route in routes)
         {
             batch.Add(route);
             _advertisedPrefixes.Add(new IpPrefix(route.Prefix, route.PrefixLength));
             if (batch.Count >= maxNlriPerUpdate)
             {
-                await SendRouteBatchAsync(nextHop, batch);
+                await SendRouteBatchAsync(nextHop, batch, attrCache);
                 sent += batch.Count;
                 batch.Clear();
             }
@@ -786,21 +793,21 @@ public sealed class BgpSession : IDisposable
 
         if (batch.Count > 0)
         {
-            await SendRouteBatchAsync(nextHop, batch);
+            await SendRouteBatchAsync(nextHop, batch, attrCache);
             sent += batch.Count;
         }
 
         _logger.LogInformation("UpdateSent {Count} routes to {Peer}", sent, _peer);
     }
 
-    private async Task SendRouteBatchAsync(uint nextHop, List<Route> routes)
+    private async Task SendRouteBatchAsync(uint nextHop, List<Route> routes, Dictionary<uint[], List<PathAttribute>> attrCache)
     {
         // The COMMUNITY path attribute applies to EVERY NLRI in an UPDATE, so partition the
         // batch by community set and emit one UPDATE per set. Otherwise prefixes belonging to
         // one group would be tagged with another group's communities on the wire.
         foreach (var groupRoutes in GroupByCommunitySet(routes))
         {
-            var attrs = BuildUpdateAttributes(_bgpConfig.Asn, _localFourByteAsn, nextHop, groupRoutes[0].Communities);
+            var attrs = GetCachedUpdateAttributes(_bgpConfig.Asn, _localFourByteAsn, nextHop, groupRoutes[0].Communities, attrCache);
 
             var nlri = groupRoutes.Select(r => new IpPrefix(r.Prefix, r.PrefixLength)).ToList();
             await SendUpdateBatchAsync(attrs, nlri);
@@ -853,6 +860,34 @@ public sealed class BgpSession : IDisposable
         if (asPathAttrs.Count > 1)
             attrs.Add(asPathAttrs[1]);
 
+        return attrs;
+    }
+
+    /// <summary>
+    /// Creates a per-send cache of built UPDATE path attributes, keyed by community set. The
+    /// cache is scoped to a single <see cref="SendRoutesAsync"/> invocation: the ASN/nextHop
+    /// inputs are constant for that whole send, so identical community sets yield byte-identical
+    /// <see cref="PathAttribute"/> lists that can be reused across the N 100-NLRI batches (#87).
+    /// Internal for test coverage.
+    /// </summary>
+    internal static Dictionary<uint[], List<PathAttribute>> CreateUpdateAttributeCache() =>
+        new(CommunitySetComparer.Instance);
+
+    /// <summary>
+    /// Returns the UPDATE path attributes for <paramref name="communities"/>, building them on
+    /// first request for a community set and returning the cached list thereafter. The cached
+    /// <see cref="PathAttribute"/> payloads are immutable, so the same list is safely shared by
+    /// every UPDATE emitted for that community set. Internal for test coverage.
+    /// </summary>
+    internal static List<PathAttribute> GetCachedUpdateAttributes(
+        uint localAsn, bool localFourByteAsn, uint nextHop, uint[] communities,
+        Dictionary<uint[], List<PathAttribute>> cache)
+    {
+        if (cache.TryGetValue(communities, out var cached))
+            return cached;
+
+        var attrs = BuildUpdateAttributes(localAsn, localFourByteAsn, nextHop, communities);
+        cache[communities] = attrs;
         return attrs;
     }
 
