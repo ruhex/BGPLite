@@ -492,6 +492,7 @@ public sealed class BgpSession : IDisposable
                 uint nextHop = 0;
                 uint[] asPath = [];
                 uint[] communities = [];
+                (uint Global, uint Local1, uint Local2)[] largeCommunities = [];
                 uint[] as4Path = [];
                 uint? aggregatorAsn = null;
                 uint? as4AggregatorAsn = null;
@@ -523,6 +524,9 @@ public sealed class BgpSession : IDisposable
                         case BgpConstants.Attribute.Community:
                             communities = AttributeHelper.ReadCommunities(attr);
                             break;
+                        case BgpConstants.Attribute.LargeCommunity:
+                            largeCommunities = AttributeHelper.ReadLargeCommunities(attr);
+                            break;
                         case BgpConstants.Attribute.Aggregator:
                             aggregatorAsn = AttributeHelper.ReadAggregatorAsn(attr, _remoteFourByteAsn);
                             break;
@@ -544,7 +548,8 @@ public sealed class BgpSession : IDisposable
                         PrefixLength = nlri.Length,
                         NextHop = nextHop,
                         AsPath = asPath,
-                        Communities = communities
+                        Communities = communities,
+                        LargeCommunities = largeCommunities
                     };
 
                     if (_routeFilter.AcceptIncoming(route, filterPeerConfig))
@@ -833,12 +838,18 @@ public sealed class BgpSession : IDisposable
 
     private async Task SendRouteBatchAsync(uint nextHop, List<Route> routes, Dictionary<uint[], List<PathAttribute>> attrCache)
     {
-        // The COMMUNITY path attribute applies to EVERY NLRI in an UPDATE, so partition the
-        // batch by community set and emit one UPDATE per set. Otherwise prefixes belonging to
-        // one group would be tagged with another group's communities on the wire.
+        // The COMMUNITY/LARGE_COMMUNITY path attributes apply to EVERY NLRI in an UPDATE, so
+        // partition the batch by (community set, large-community set) and emit one UPDATE per
+        // set. Otherwise prefixes belonging to one group would be tagged with another group's
+        // communities on the wire.
         foreach (var groupRoutes in GroupByCommunitySet(routes))
         {
             var attrs = GetCachedUpdateAttributes(_bgpConfig.Asn, _localFourByteAsn, nextHop, groupRoutes[0].Communities, attrCache);
+            // LARGE_COMMUNITY is appended per group AFTER fetching the cached base attrs, so the
+            // #87 cache stays keyed by regular communities only and is never mutated. Routes that
+            // share regular communities but differ in large communities reuse the same base attrs
+            // and only diverge in this final attribute.
+            attrs = WithLargeCommunityAttribute(attrs, groupRoutes[0].LargeCommunities);
 
             var nlri = groupRoutes.Select(r => new IpPrefix(r.Prefix, r.PrefixLength)).ToList();
             await SendUpdateBatchAsync(attrs, nlri);
@@ -923,6 +934,28 @@ public sealed class BgpSession : IDisposable
     }
 
     /// <summary>
+    /// Returns the path attributes for an UPDATE carrying the given Large Community set: the
+    /// cached base attributes (ORIGIN/AS_PATH/NEXT_HOP/COMMUNITY/AS4_PATH) untouched when
+    /// <paramref name="largeCommunities"/> is empty, otherwise a shallow copy with a
+    /// LARGE_COMMUNITY attribute appended. The cached base list is never mutated, so other
+    /// batches in the same send that share regular communities but carry a different (or empty)
+    /// large-community set still observe the correct base. Appended last, which keeps the
+    /// emitted attributes in ascending type-code order (32 sorts after AS4_PATH 17). Internal
+    /// for test coverage.
+    /// </summary>
+    internal static List<PathAttribute> WithLargeCommunityAttribute(
+        List<PathAttribute> baseAttrs, (uint Global, uint Local1, uint Local2)[] largeCommunities)
+    {
+        if (largeCommunities.Length == 0)
+            return baseAttrs;
+
+        var withLarge = new List<PathAttribute>(baseAttrs.Count + 1);
+        withLarge.AddRange(baseAttrs);
+        withLarge.Add(AttributeHelper.WriteLargeCommunities(largeCommunities));
+        return withLarge;
+    }
+
+    /// <summary>
     /// Validates that a route announcement carried the mandatory well-known attributes.
     /// Internal for test coverage.
     /// </summary>
@@ -967,8 +1000,9 @@ public sealed class BgpSession : IDisposable
     }
 
     /// <summary>
-    /// Partitions routes into groups that share an identical community set, so each emitted
-    /// UPDATE carries a single COMMUNITY attribute. Internal for test coverage.
+    /// Partitions routes into groups that share an identical (regular + large) community set,
+    /// so each emitted UPDATE carries a single COMMUNITY and a single LARGE_COMMUNITY
+    /// attribute. Internal for test coverage.
     /// </summary>
     internal static List<List<Route>> GroupByCommunitySet(IReadOnlyList<Route> routes)
     {
@@ -976,37 +1010,49 @@ public sealed class BgpSession : IDisposable
             return [];
 
         // Fast path: the common case where every route in the batch carries the same
-        // community set. Skip the GroupBy lookup-dictionary allocation (and the per-route
-        // hashing it implies) and emit a single group directly. Output is identical to the
-        // GroupBy path: one group holding every route in original order.
-        var firstCommunities = routes[0].Communities;
+        // community set (both regular and large). Skip the GroupBy lookup-dictionary
+        // allocation (and the per-route hashing it implies) and emit a single group directly.
+        // Output is identical to the GroupBy path: one group holding every route in order.
+        var first = routes[0];
         for (var i = 1; i < routes.Count; i++)
         {
-            if (!CommunitySetComparer.Instance.Equals(firstCommunities, routes[i].Communities))
+            if (!SameCommunitySet(first, routes[i]))
                 return PartitionByCommunitySet(routes);
         }
 
         return [new List<Route>(routes)];
     }
 
+    /// <summary>
+    /// True when two routes carry identical regular and large community sets (sequence
+    /// equality), i.e. they are interchangeable as the community tag of a single UPDATE.
+    /// </summary>
+    private static bool SameCommunitySet(Route a, Route b) =>
+        CommunitySetComparer.Instance.Equals(a.Communities, b.Communities) &&
+        LargeCommunitySetComparer.Instance.Equals(a.LargeCommunities, b.LargeCommunities);
+
     /// <summary>Slow path: partition a batch whose routes span more than one community set.</summary>
     private static List<List<Route>> PartitionByCommunitySet(IReadOnlyList<Route> routes) =>
-        routes.GroupBy(r => r.Communities, CommunitySetComparer.Instance)
+        routes.GroupBy(r => (r.Communities, r.LargeCommunities), CommunitySetPairComparer.Instance)
               .Select(g => g.ToList())
               .ToList();
 
     /// <summary>
-    /// Builds a <see cref="Route"/> carrying the given community set. Internal so the per-list
-    /// community stamping logic is unit-testable without a live session (Route is init-only).
+    /// Builds a <see cref="Route"/> carrying the given regular and large community sets.
+    /// Internal so the per-list community stamping logic is unit-testable without a live
+    /// session (Route is init-only).
     /// </summary>
-    internal static Route MakeRoute(uint prefix, byte length, uint nextHop, uint[]? asPath, uint[] communities) => new()
-    {
-        Prefix = prefix,
-        PrefixLength = length,
-        NextHop = nextHop,
-        AsPath = asPath ?? [],
-        Communities = communities
-    };
+    internal static Route MakeRoute(
+        uint prefix, byte length, uint nextHop, uint[]? asPath, uint[] communities,
+        (uint Global, uint Local1, uint Local2)[]? largeCommunities = null) => new()
+        {
+            Prefix = prefix,
+            PrefixLength = length,
+            NextHop = nextHop,
+            AsPath = asPath ?? [],
+            Communities = communities,
+            LargeCommunities = largeCommunities ?? []
+        };
 
     /// <summary>Sequence equality over a route's community array (set-equivalence within a batch).</summary>
     private sealed class CommunitySetComparer : IEqualityComparer<uint[]>
@@ -1026,6 +1072,53 @@ public sealed class BgpSession : IDisposable
         {
             var hc = new HashCode();
             foreach (var c in obj) hc.Add(c);
+            return hc.ToHashCode();
+        }
+    }
+
+    /// <summary>Sequence equality over a route's Large Community array (RFC 8092 triplets).</summary>
+    private sealed class LargeCommunitySetComparer : IEqualityComparer<(uint Global, uint Local1, uint Local2)[]>
+    {
+        public static readonly LargeCommunitySetComparer Instance = new();
+
+        public bool Equals((uint Global, uint Local1, uint Local2)[]? x, (uint Global, uint Local1, uint Local2)[]? y)
+        {
+            if (ReferenceEquals(x, y)) return true;
+            if (x is null || y is null || x.Length != y.Length) return false;
+            for (var i = 0; i < x.Length; i++)
+                if (x[i] != y[i]) return false;
+            return true;
+        }
+
+        public int GetHashCode((uint Global, uint Local1, uint Local2)[] obj)
+        {
+            var hc = new HashCode();
+            foreach (var c in obj) hc.Add(c);
+            return hc.ToHashCode();
+        }
+    }
+
+    /// <summary>
+    /// Composite sequence equality over a route's (regular, large) community pair, used to
+    /// partition a send batch that spans more than one community set.
+    /// </summary>
+    private sealed class CommunitySetPairComparer
+        : IEqualityComparer<(uint[] Communities, (uint Global, uint Local1, uint Local2)[] LargeCommunities)>
+    {
+        public static readonly CommunitySetPairComparer Instance = new();
+
+        public bool Equals(
+            (uint[] Communities, (uint Global, uint Local1, uint Local2)[] LargeCommunities) x,
+            (uint[] Communities, (uint Global, uint Local1, uint Local2)[] LargeCommunities) y) =>
+            CommunitySetComparer.Instance.Equals(x.Communities, y.Communities) &&
+            LargeCommunitySetComparer.Instance.Equals(x.LargeCommunities, y.LargeCommunities);
+
+        public int GetHashCode(
+            (uint[] Communities, (uint Global, uint Local1, uint Local2)[] LargeCommunities) obj)
+        {
+            var hc = new HashCode();
+            foreach (var c in obj.Communities) hc.Add(c);
+            foreach (var l in obj.LargeCommunities) hc.Add(l);
             return hc.ToHashCode();
         }
     }

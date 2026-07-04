@@ -107,6 +107,59 @@ public static class AttributeHelper
         };
     }
 
+    /// <summary>
+    /// Decodes a BGP Large Communities attribute (RFC 8092 §2). Each Large Community is three
+    /// 4-octet fields — Global Administrator : Local Data 1 : Local Data 2 — in network byte
+    /// order, so the attribute payload MUST be a multiple of 12 bytes. A zero-length payload is
+    /// a valid (empty) set; any other non-multiple-of-12 length is malformed.
+    /// </summary>
+    public static (uint Global, uint Local1, uint Local2)[] ReadLargeCommunities(PathAttribute attr)
+    {
+        if (attr.Data.Length % 12 != 0)
+            throw new BgpParseException("Large Communities attribute length must be a multiple of 12");
+
+        var count = attr.Data.Length / 12;
+        var large = new (uint Global, uint Local1, uint Local2)[count];
+        for (var i = 0; i < count; i++)
+        {
+            var offset = i * 12;
+            large[i] = (
+                BinaryPrimitives.ReadUInt32BigEndian(attr.Data.AsSpan(offset)),
+                BinaryPrimitives.ReadUInt32BigEndian(attr.Data.AsSpan(offset + 4)),
+                BinaryPrimitives.ReadUInt32BigEndian(attr.Data.AsSpan(offset + 8)));
+        }
+        return large;
+    }
+
+    /// <summary>
+    /// Encodes a BGP Large Communities attribute (RFC 8092 §2): 12 bytes per triplet, network
+    /// byte order, flags OPTIONAL + TRANSITIVE (0xC0), type code 32.
+    /// </summary>
+    public static PathAttribute WriteLargeCommunities((uint Global, uint Local1, uint Local2)[] large)
+    {
+        var data = new byte[large.Length * 12];
+        for (var i = 0; i < large.Length; i++)
+        {
+            var offset = i * 12;
+            BinaryPrimitives.WriteUInt32BigEndian(data.AsSpan(offset), large[i].Global);
+            BinaryPrimitives.WriteUInt32BigEndian(data.AsSpan(offset + 4), large[i].Local1);
+            BinaryPrimitives.WriteUInt32BigEndian(data.AsSpan(offset + 8), large[i].Local2);
+        }
+        return new PathAttribute
+        {
+            Flags = BgpConstants.Attribute.FlagOptional | BgpConstants.Attribute.FlagTransitive,
+            TypeCode = BgpConstants.Attribute.LargeCommunity,
+            Data = data
+        };
+    }
+
+    /// <summary>
+    /// Renders a Large Community as the canonical RFC 8092 text form
+    /// "<c>global:local1:local2</c>" (e.g. for logging/diagnostics).
+    /// </summary>
+    public static string FormatLargeCommunity((uint Global, uint Local1, uint Local2) large) =>
+        $"{large.Global}:{large.Local1}:{large.Local2}";
+
     public static bool IsKnownAttribute(byte typeCode) => typeCode switch
     {
         BgpConstants.Attribute.Origin => true,
@@ -119,6 +172,7 @@ public static class AttributeHelper
         BgpConstants.Attribute.Aggregator => true,
         BgpConstants.Attribute.As4Path => true,
         BgpConstants.Attribute.As4Aggregator => true,
+        BgpConstants.Attribute.LargeCommunity => true,
         _ => false
     };
 

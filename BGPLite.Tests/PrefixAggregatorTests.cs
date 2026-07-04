@@ -8,8 +8,16 @@ public class PrefixAggregatorTests
     private const uint NextHop = 0x01020304;
     private readonly IPrefixAggregator _aggregator = new ExactUnionPrefixAggregator();
 
-    private static Route R(uint prefix, byte length, uint[]? communities = null) =>
-        new() { Prefix = prefix, PrefixLength = length, NextHop = NextHop, Communities = communities ?? [] };
+    private static Route R(uint prefix, byte length, uint[]? communities = null,
+        (uint Global, uint Local1, uint Local2)[]? largeCommunities = null) =>
+        new()
+        {
+            Prefix = prefix,
+            PrefixLength = length,
+            NextHop = NextHop,
+            Communities = communities ?? [],
+            LargeCommunities = largeCommunities ?? []
+        };
 
     private static List<(uint Prefix, byte Length)> Pfx(IReadOnlyList<Route> routes) =>
         routes.Select(r => (r.Prefix, r.PrefixLength)).ToList();
@@ -301,5 +309,85 @@ public class PrefixAggregatorTests
     public void GroupByCommunitySet_EmptyBatch_ReturnsNoGroups()
     {
         Assert.Empty(BgpSession.GroupByCommunitySet([]));
+    }
+
+    [Fact]
+    public void DifferentLargeCommunities_DoNotMerge()
+    {
+        // Adjacent aligned /24s, identical regular communities, but different Large Community
+        // sets → stay separate (a single UPDATE cannot carry two LARGE_COMMUNITY values).
+        var result = _aggregator.Aggregate([
+            R(0xC0A80000, 24, [0x12345601u], [(2914u, 1u, 1u)]),
+            R(0xC0A80100, 24, [0x12345601u], [(2914u, 2u, 2u)]),
+        ]);
+        Assert.Equal(2, result.Count);
+        Assert.Contains(result, r => r.Prefix == 0xC0A80000 && r.LargeCommunities.SequenceEqual([(2914u, 1u, 1u)]));
+        Assert.Contains(result, r => r.Prefix == 0xC0A80100 && r.LargeCommunities.SequenceEqual([(2914u, 2u, 2u)]));
+    }
+
+    [Fact]
+    public void SameLargeCommunities_MergeAndPreserveLargeCommunity()
+    {
+        var large = new (uint, uint, uint)[] { (65000u, 100u, 200u), (2914u, 1u, 2u) };
+        var result = _aggregator.Aggregate([
+            R(0xC0A80000, 24, [0x65u], large),
+            R(0xC0A80100, 24, [0x65u], [(2914u, 1u, 2u), (65000u, 100u, 200u)]), // same set, different order
+        ]);
+        var route = Assert.Single(result);
+        Assert.Equal([(0xC0A80000u, (byte)23)], Pfx(result));
+        // Set semantics: the key normalizes order, but the propagated value is the template's.
+        Assert.Equal(large, route.LargeCommunities);
+    }
+
+    [Fact]
+    public void Aggregation_PreservesLargeCommunities_OnMergedRoute()
+    {
+        var result = _aggregator.Aggregate([
+            R(0x0A000000, 24, null, [(200000u, 1u, 1u)]),
+            R(0x0A000100, 24, null, [(200000u, 1u, 1u)]),
+        ]);
+        var route = Assert.Single(result);
+        Assert.Equal([(0x0A000000u, (byte)23)], Pfx(result));
+        Assert.Equal([(200000u, 1u, 1u)], route.LargeCommunities);
+    }
+
+    [Fact]
+    public void GroupByCommunitySet_SameRegular_DifferentLarge_StaysSeparate()
+    {
+        // Identical regular communities but distinct Large Community sets must NOT collapse: the
+        // send path would otherwise tag one group's prefixes with the other's LARGE_COMMUNITY.
+        var routes = new List<Route>
+        {
+            R(0xC0A80100, 24, [0xC1u], [(1u, 1u, 1u)]),
+            R(0xC0A80200, 24, [0xC1u], [(2u, 2u, 2u)]),
+            R(0xC0A80300, 24, [0xC1u], [(1u, 1u, 1u)]),
+        };
+
+        var groups = BgpSession.GroupByCommunitySet(routes);
+
+        Assert.Equal(2, groups.Count);
+        foreach (var g in groups)
+        {
+            var first = g[0].LargeCommunities;
+            Assert.All(g, r => Assert.Equal(first, r.LargeCommunities));
+        }
+        Assert.Contains(groups, g => g.Count == 2 && g[0].LargeCommunities.Contains((1u, 1u, 1u)));
+        Assert.Contains(groups, g => g.Count == 1 && g[0].LargeCommunities.Contains((2u, 2u, 2u)));
+    }
+
+    [Fact]
+    public void GroupByCommunitySet_IdenticalRegularAndLarge_FastPathOneGroup()
+    {
+        // The common case: same regular and large community set on every route, via distinct
+        // array instances → value comparison must collapse the batch into one group.
+        var routes = new List<Route>
+        {
+            R(0xC0A80100, 24, [0xC1u], [(1u, 1u, 1u)]),
+            R(0xC0A80200, 24, [0xC1u], [(1u, 1u, 1u)]),
+        };
+
+        var group = Assert.Single(BgpSession.GroupByCommunitySet(routes));
+        Assert.Equal(2, group.Count);
+        Assert.All(group, r => Assert.Equal([(1u, 1u, 1u)], r.LargeCommunities));
     }
 }

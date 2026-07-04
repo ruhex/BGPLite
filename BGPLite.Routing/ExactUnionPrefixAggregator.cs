@@ -26,9 +26,9 @@ public sealed class ExactUnionPrefixAggregator : IPrefixAggregator
         var result = new List<Route>(source.Count);
 
         // Group by the attributes that survive to the wire. The outgoing path rewrites
-        // AS_PATH (to the local ASN) and NEXT_HOP, so only Communities distinguish
-        // otherwise-mergeable prefixes; prefixes carrying different communities stay in
-        // separate groups so community information is never mixed during merging.
+        // AS_PATH (to the local ASN) and NEXT_HOP, so only Communities/LargeCommunities
+        // distinguish otherwise-mergeable prefixes; prefixes carrying different communities
+        // stay in separate groups so community information is never mixed during merging.
         foreach (var group in source.GroupBy(AttributeKey.From))
         {
             var template = group.First();
@@ -39,7 +39,8 @@ public sealed class ExactUnionPrefixAggregator : IPrefixAggregator
                     Prefix = prefix,
                     PrefixLength = length,
                     NextHop = template.NextHop,
-                    Communities = template.Communities
+                    Communities = template.Communities,
+                    LargeCommunities = template.LargeCommunities
                 });
             }
         }
@@ -112,17 +113,52 @@ public sealed class ExactUnionPrefixAggregator : IPrefixAggregator
     private readonly struct AttributeKey : IEquatable<AttributeKey>
     {
         private readonly uint[] _communities;
+        private readonly (uint Global, uint Local1, uint Local2)[] _largeCommunities;
 
-        private AttributeKey(uint[] communities) => _communities = communities;
+        private AttributeKey(uint[] communities, (uint Global, uint Local1, uint Local2)[] largeCommunities)
+        {
+            _communities = communities;
+            _largeCommunities = largeCommunities;
+        }
 
         public static AttributeKey From(Route route)
         {
             var c = route.Communities;
-            if (c.Length <= 1) return new AttributeKey(c);
             // Communities are a set: dedup (and sort) so set-equivalent routes key together.
-            var sorted = c.Distinct().ToArray();
+            var communities = c.Length <= 1 ? c : NormalizeCommunities(c);
+
+            var l = route.LargeCommunities;
+            // Large Communities are likewise a set: dedup and order by (Global,Local1,Local2)
+            // so set-equivalent routes key together. (Value tuples have no IComparable, hence
+            // the explicit Comparison rather than Array.Sort(items).)
+            var large = l.Length <= 1 ? l : NormalizeLargeCommunities(l);
+
+            return new AttributeKey(communities, large);
+        }
+
+        private static uint[] NormalizeCommunities(uint[] communities)
+        {
+            var sorted = communities.Distinct().ToArray();
             Array.Sort(sorted);
-            return new AttributeKey(sorted);
+            return sorted;
+        }
+
+        private static (uint Global, uint Local1, uint Local2)[] NormalizeLargeCommunities(
+            (uint Global, uint Local1, uint Local2)[] large)
+        {
+            var distinct = large.Distinct().ToArray();
+            Array.Sort(distinct, LargeCommunityComparison);
+            return distinct;
+        }
+
+        private static int LargeCommunityComparison(
+            (uint Global, uint Local1, uint Local2) a, (uint Global, uint Local1, uint Local2) b)
+        {
+            var c = a.Global.CompareTo(b.Global);
+            if (c != 0) return c;
+            c = a.Local1.CompareTo(b.Local1);
+            if (c != 0) return c;
+            return a.Local2.CompareTo(b.Local2);
         }
 
         public bool Equals(AttributeKey other)
@@ -130,6 +166,9 @@ public sealed class ExactUnionPrefixAggregator : IPrefixAggregator
             if (_communities.Length != other._communities.Length) return false;
             for (var i = 0; i < _communities.Length; i++)
                 if (_communities[i] != other._communities[i]) return false;
+            if (_largeCommunities.Length != other._largeCommunities.Length) return false;
+            for (var i = 0; i < _largeCommunities.Length; i++)
+                if (_largeCommunities[i] != other._largeCommunities[i]) return false;
             return true;
         }
 
@@ -139,6 +178,7 @@ public sealed class ExactUnionPrefixAggregator : IPrefixAggregator
         {
             var hc = new HashCode();
             foreach (var c in _communities) hc.Add(c);
+            foreach (var l in _largeCommunities) hc.Add(l);
             return hc.ToHashCode();
         }
     }
