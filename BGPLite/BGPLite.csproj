@@ -25,4 +25,9 @@
     <None Include="..\appsettings.yml" Link="appsettings.yml" CopyToOutputDirectory="PreserveNewest" Condition="Exists('..\appsettings.yml')" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- #136: ConfigReloader.Reload is internal so it is directly unit-testable without the FSW. -->
+    <InternalsVisibleTo Include="BGPLite.Tests" />
+  </ItemGroup>
+
 </Project>

@@ -20,6 +20,8 @@
 
   <ItemGroup>
     <InternalsVisibleTo Include="BGPLite.Tests" />
+    <!-- #136: the entrypoint's ConfigReloader needs to call ManagementApi.ApplyConfig (internal). -->
+    <InternalsVisibleTo Include="BGPLite" />
   </ItemGroup>
 
 </Project>

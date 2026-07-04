@@ -1,3 +1,4 @@
+using BGPLite;
 using BGPLite.Api;
 using BGPLite.Configuration;
 using BGPLite.Protocol;
@@ -133,7 +134,21 @@ builder.Services.AddHostedService(sp =>
     return bgpServer;
 });
 builder.Services.AddSingleton<ISessionManager>(sp => bgpServer!);
-builder.Services.AddHostedService<ManagementApi>();
+
+// ManagementApi is registered as a singleton FIRST so the ConfigReloader below can resolve the SAME
+// running instance (AddHostedService<T> creates a separate instance owned by the host, which the
+// reloader could not reach). AddHostedService(sp => sp.GetRequiredService<ManagementApi>()) tells the
+// host to start/stop the singleton as a hosted service without making a second copy (#136).
+builder.Services.AddSingleton<ManagementApi>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<ManagementApi>());
+
+// Hot-reload (#136): watch appsettings.yml and apply the soft (non-session-disrupting) fields
+// (TrustedProxies / CORS / rate & concurrency limits) without restarting the BGP service. BGP,
+// peers, port, sources and community changes still require a restart.
+builder.Services.AddHostedService(sp => new ConfigReloader(
+    configPath,
+    sp.GetRequiredService<ManagementApi>(),
+    sp.GetRequiredService<ILogger<ConfigReloader>>()));
 
 if (config.RipeStat is { AsnLists.Count: > 0 })
 {
