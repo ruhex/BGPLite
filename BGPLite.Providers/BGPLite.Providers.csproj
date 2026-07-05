@@ -17,4 +17,8 @@
     <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.9" />
   </ItemGroup>
 
+  <ItemGroup>
+    <InternalsVisibleTo Include="BGPLite.Tests" />
+  </ItemGroup>
+
 </Project>
