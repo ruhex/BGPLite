@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using BGPLite.Configuration;
+using Microsoft.Extensions.Logging;
 
 namespace BGPLite.Providers;
 
@@ -11,21 +12,26 @@ public sealed class PrefixService : IPrefixService
     private readonly HttpPrefixProvider? _httpProvider;
     private readonly ConcurrentDictionary<uint, (IReadOnlyList<(uint Prefix, byte Length)> Data, DateTime CachedAt)> _cache = new();
     private readonly TimeSpan _cacheTtl;
+    private readonly UserSourceCache _userSourceCache;
 
-    public PrefixService(AppConfig config, RipeStatProvider? ripeStat, IPrefixSourceService prefixSources, HttpPrefixProvider? httpProvider = null, TimeSpan? cacheTtl = null)
+    public PrefixService(AppConfig config, RipeStatProvider? ripeStat, IPrefixSourceService prefixSources, HttpPrefixProvider? httpProvider = null, TimeSpan? cacheTtl = null, ILogger<PrefixService>? logger = null)
     {
         _config = config;
         _ripeStat = ripeStat;
         _prefixSources = prefixSources;
         _httpProvider = httpProvider;
         _cacheTtl = cacheTtl ?? TimeSpan.FromHours(1);
+        _userSourceCache = new UserSourceCache(logger: logger);
     }
 
     /// <summary>
-    /// Fetches a per-peer user-supplied URL prefix-list source (issue #147). The URL is peer-supplied
-    /// (not in <c>AppConfig.PrefixSources</c>), so it bypasses the name-keyed cache and loads directly
-    /// through the http provider — inheriting SSRF defense (#144: validated <c>ConnectCallback</c>,
-    /// no redirect-following, 10 MB cap). Returns empty when no http provider is wired.
+    /// Fetches a per-peer user-supplied URL prefix-list source (issues #147 / #150). The URL is
+    /// peer-supplied (not in <c>AppConfig.PrefixSources</c>, so the name-keyed <see cref="PrefixSourceService"/>
+    /// cache can't help); instead a URL-keyed TTL cache (<see cref="UserSourceCache"/>) dedupes fetches
+    /// across peers and serves a stale copy on transient failure. SSRF defense (#144) is inherited from
+    /// the http provider's named client. Returns empty when no http provider is wired. The <c>Active</c>
+    /// lifecycle is handled by the caller (LoadPeerRoutingView filters Active before this is reached),
+    /// so paused sources are never advertised regardless of cache state.
     /// </summary>
     public async Task<IReadOnlyList<(uint Prefix, byte Length)>> GetUserSourcePrefixesAsync(string name, string url, string? community, CancellationToken ct = default)
     {
@@ -37,7 +43,7 @@ public sealed class PrefixService : IPrefixService
             Url = url,
             Community = community
         };
-        return await _httpProvider.LoadAsync(source, ct);
+        return await _userSourceCache.GetOrLoadAsync(url, name, ct => _httpProvider.LoadAsync(source, ct), ct);
     }
 
     public async Task<IReadOnlyList<(uint Prefix, byte Length)>> GetPrefixesAsync(uint asn, CancellationToken ct = default)
