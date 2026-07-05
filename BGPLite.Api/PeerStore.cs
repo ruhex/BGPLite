@@ -260,9 +260,6 @@ public sealed class PeerStore : IPeerStore
     public PeerCustomSource AddCustomSource(string peerId, string name, string url, string? community)
     {
         using var db = _dbFactory.CreateDbContext();
-        if (db.Set<PeerCustomSource>().Any(c => c.PeerId == peerId && c.Name == name))
-            throw new InvalidOperationException($"A source named '{name}' already exists for this peer.");
-
         var source = new PeerCustomSource
         {
             PeerId = peerId,

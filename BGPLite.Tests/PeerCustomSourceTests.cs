@@ -52,31 +52,18 @@ public class PeerCustomSourceTests
     }
 
     [Fact]
-    public void AddCustomSource_DuplicateName_Throws()
+    public void AddCustomSource_SameName_SamePeer_OK()
     {
+        // Name is just a label, not a unique key — duplicates are allowed (different Ids).
         var (store, conn) = NewStore();
         using var _ = conn;
         var peerId = store.CreatePeer(TestIp, 65001, null);
 
-        store.AddCustomSource(peerId, "list-a", "https://a.com/list.txt", null);
+        var a = store.AddCustomSource(peerId, "my-list", "https://a.com/list.txt", null);
+        var b = store.AddCustomSource(peerId, "my-list", "https://b.com/other.txt", null);
 
-        Assert.Throws<InvalidOperationException>(() =>
-            store.AddCustomSource(peerId, "list-a", "https://b.com/other.txt", null));
-    }
-
-    [Fact]
-    public void AddCustomSource_SameName_DifferentPeer_OK()
-    {
-        var (store, conn) = NewStore();
-        using var _ = conn;
-        var idA = store.CreatePeer(TestIp, 65001, null);
-        var idB = store.CreatePeer("203.0.113.11", 65002, null);
-
-        store.AddCustomSource(idA, "shared-name", "https://a.com/list.txt", null);
-        store.AddCustomSource(idB, "shared-name", "https://b.com/list.txt", null);
-
-        Assert.Single(store.GetCustomSources(idA));
-        Assert.Single(store.GetCustomSources(idB));
+        Assert.NotEqual(a.Id, b.Id);
+        Assert.Equal(2, store.GetCustomSources(peerId).Count);
     }
 
     [Fact]

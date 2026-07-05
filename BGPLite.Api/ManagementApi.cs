@@ -596,15 +596,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
         if (!Uri.TryCreate(data.Url, UriKind.Absolute, out var uri) || uri.Scheme is not ("http" or "https"))
             return ApiResponse.Error($"Invalid URL: {data.Url}", 400);
 
-        PeerCustomSource source;
-        try
-        {
-            source = _store.AddCustomSource(peerId, data.Name, data.Url, data.Community);
-        }
-        catch (InvalidOperationException)
-        {
-            return ApiResponse.Error($"A source named '{data.Name}' already exists", 409);
-        }
+        var source = _store.AddCustomSource(peerId, data.Name, data.Url, data.Community);
 
         _logger.LogInformation("Added source '{Name}' ({Url}) to peer {PeerId}",
             SanitizeForLog(data.Name), SanitizeForLog(data.Url), SanitizeForLog(peerId));
