@@ -1,6 +1,7 @@
 using BGPLite;
 using BGPLite.Api;
 using BGPLite.Configuration;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 using BGPLite.Protocol;
 using BGPLite.Providers;
 using BGPLite.Routing;
@@ -45,11 +46,16 @@ builder.Services.AddSingleton(routeTable);
 // busy_timeout (engine-level lock retry) applied on every connection via a DbConnectionInterceptor,
 // so both the factory-created and scoped contexts get the same settings.
 var sqlitePragmas = new SqlitePragmasInterceptor();
+// Suppress EF Core warning 20504 (MultipleCollectionIncludeWarning): LoadPeerRoutingView includes 3
+// collection navigations in a SingleQuery. For SQLite (local, embedded) with small per-peer data
+// (tens of rows), the Cartesian product is negligible and SingleQuery keeps the read atomic (#138).
 builder.Services.AddDbContextFactory<BgpDbContext>(options =>
-    options.UseSqlite($"Data Source={dbPath}").AddInterceptors(sqlitePragmas));
+    options.UseSqlite($"Data Source={dbPath}").AddInterceptors(sqlitePragmas)
+        .ConfigureWarnings(w => w.Ignore(RelationalEventId.MultipleCollectionIncludeWarning)));
 
 builder.Services.AddDbContext<BgpDbContext>(options =>
-    options.UseSqlite($"Data Source={dbPath}").AddInterceptors(sqlitePragmas), ServiceLifetime.Scoped);
+    options.UseSqlite($"Data Source={dbPath}").AddInterceptors(sqlitePragmas)
+        .ConfigureWarnings(w => w.Ignore(RelationalEventId.MultipleCollectionIncludeWarning)), ServiceLifetime.Scoped);
 
 builder.Services.AddSingleton<PeerStore>();
 builder.Services.AddSingleton<IRouteFilter>(sp =>

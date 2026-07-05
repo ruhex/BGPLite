@@ -115,7 +115,6 @@ public sealed class PeerStore : IPeerStore
             .Include(p => p.Subscriptions)
             .Include(p => p.CustomPrefixes)
             .Include(p => p.CustomAsns)
-            .AsSplitQuery()  // 3 collection Includes → split into separate SELECTs (avoids Cartesian explosion)
             .FirstOrDefault(p => p.Ip == ip && p.Asn == asn);
         if (peer is null) return null;
 
