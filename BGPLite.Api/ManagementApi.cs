@@ -616,7 +616,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
         if (_store.GetDbPeerById(peerId) is null)
             return ApiResponse.Error("Peer not found", 404);
 
-        if (!_store.DeleteCustomSource(sourceId))
+        if (!_store.DeleteCustomSource(peerId, sourceId))
             return ApiResponse.Error($"Source '{sourceId}' not found", 404);
 
         _logger.LogInformation("Deleted source {SourceId} from peer {PeerId}", SanitizeForLog(sourceId), SanitizeForLog(peerId));
@@ -635,7 +635,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
         if (data is null || data.Active is null)
             return ApiResponse.Error("PATCH body must contain { \"active\": true/false }", 400);
 
-        if (!_store.SetSourceActive(sourceId, data.Active.Value))
+        if (!_store.SetSourceActive(peerId, sourceId, data.Active.Value))
             return ApiResponse.Error($"Source '{sourceId}' not found", 404);
 
         _logger.LogInformation("Source {SourceId} active={Active}", SanitizeForLog(sourceId), data.Active.Value);

@@ -89,7 +89,7 @@ public class PeerCustomSourceTests
         var sourceA = store.AddCustomSource(peerId, "list-a", "https://a.com/list.txt", "65444:501");
         store.AddCustomSource(peerId, "list-b", "https://b.com/list.txt", null);
 
-        var deleted = store.DeleteCustomSource(sourceA.Id);
+        var deleted = store.DeleteCustomSource(peerId, sourceA.Id);
         Assert.True(deleted);
 
         var remaining = store.GetCustomSources(peerId);
@@ -104,7 +104,7 @@ public class PeerCustomSourceTests
         using var _ = conn;
         var peerId = store.CreatePeer(TestIp, 65001, null);
 
-        Assert.False(store.DeleteCustomSource("nonexistent-id"));
+        Assert.False(store.DeleteCustomSource(peerId, "nonexistent-id"));
     }
 
     [Fact]
@@ -167,11 +167,11 @@ public class PeerCustomSourceTests
         var source = store.AddCustomSource(peerId, "toggle", "https://example.com/list.txt", null);
         Assert.False(source.Active);
 
-        Assert.True(store.SetSourceActive(source.Id, true));
+        Assert.True(store.SetSourceActive(peerId, source.Id, true));
         var fetched = Assert.Single(store.GetCustomSources(peerId));
         Assert.True(fetched.Active);
 
-        Assert.True(store.SetSourceActive(source.Id, false));
+        Assert.True(store.SetSourceActive(peerId, source.Id, false));
         fetched = Assert.Single(store.GetCustomSources(peerId));
         Assert.False(fetched.Active);
     }
@@ -181,7 +181,39 @@ public class PeerCustomSourceTests
     {
         var (store, conn) = NewStore();
         using var _ = conn;
+        var peerId = store.CreatePeer(TestIp, 65001, null);
 
-        Assert.False(store.SetSourceActive("nonexistent", true));
+        Assert.False(store.SetSourceActive(peerId, "nonexistent", true));
+    }
+
+    [Fact]
+    public void DeleteCustomSource_CrossPeer_Returns_False()
+    {
+        var (store, conn) = NewStore();
+        using var _ = conn;
+        var idA = store.CreatePeer(TestIp, 65001, null);
+        var idB = store.CreatePeer("203.0.113.11", 65002, null);
+
+        var source = store.AddCustomSource(idA, "list-a", "https://a.com/list.txt", null);
+
+        // Peer B tries to delete Peer A's source — must fail (peer-scoped).
+        Assert.False(store.DeleteCustomSource(idB, source.Id));
+        Assert.Single(store.GetCustomSources(idA)); // source still exists for A
+    }
+
+    [Fact]
+    public void SetSourceActive_CrossPeer_Returns_False()
+    {
+        var (store, conn) = NewStore();
+        using var _ = conn;
+        var idA = store.CreatePeer(TestIp, 65001, null);
+        var idB = store.CreatePeer("203.0.113.11", 65002, null);
+
+        var source = store.AddCustomSource(idA, "list-a", "https://a.com/list.txt", null);
+
+        // Peer B tries to toggle Peer A's source — must fail.
+        Assert.False(store.SetSourceActive(idB, source.Id, true));
+        var fetched = Assert.Single(store.GetCustomSources(idA));
+        Assert.False(fetched.Active); // unchanged
     }
 }

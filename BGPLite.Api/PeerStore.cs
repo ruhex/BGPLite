@@ -275,22 +275,22 @@ public sealed class PeerStore : IPeerStore
         return source;
     }
 
-    /// <summary>Removes a URL-based source by its Id. Returns true if found and removed.</summary>
-    public bool DeleteCustomSource(string sourceId)
+    /// <summary>Removes a URL-based source by its Id, scoped to a peer. Returns true if found and removed.</summary>
+    public bool DeleteCustomSource(string peerId, string sourceId)
     {
         using var db = _dbFactory.CreateDbContext();
         var deleted = db.Set<PeerCustomSource>()
-            .Where(c => c.Id == sourceId)
+            .Where(c => c.Id == sourceId && c.PeerId == peerId)
             .ExecuteDelete();
         return deleted > 0;
     }
 
-    /// <summary>Toggles a source's active state (pause/resume without deleting).</summary>
-    public bool SetSourceActive(string sourceId, bool active)
+    /// <summary>Toggles a source's active state, scoped to a peer. Returns true if found and updated.</summary>
+    public bool SetSourceActive(string peerId, string sourceId, bool active)
     {
         using var db = _dbFactory.CreateDbContext();
         var updated = db.Set<PeerCustomSource>()
-            .Where(c => c.Id == sourceId)
+            .Where(c => c.Id == sourceId && c.PeerId == peerId)
             .ExecuteUpdate(s => s.SetProperty(c => c.Active, active));
         return updated > 0;
     }
