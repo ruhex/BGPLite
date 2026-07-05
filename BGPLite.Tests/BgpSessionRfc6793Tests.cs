@@ -96,6 +96,58 @@ public class BgpSessionRfc6793Tests
         Assert.Equal(BgpConstants.SubError.Unspecific, ex.SubErrorCode);
     }
 
+    // --- #154: wire-format codec for AGGREGATOR (type 7) and AS4_AGGREGATOR (type 18) ---
+    // The prior code had the lengths inverted (AGGREGATOR accepted 8 bytes on a 4-byte session,
+    // AS4_AGGREGATOR expected 4) — every legal value was rejected. These tests pin the RFC 6793 §3
+    // wire format so the regression cannot slip back.
+
+    [Fact]
+    public void ReadAggregatorAsn_LegacySixByteForm_ReadsTwoOctetAs()
+    {
+        // RFC 6793 §3: AGGREGATOR is unconditionally 6 octets (2 AS + 4 IPv4), independent of the
+        // session's 4-byte-ASN capability. The fourByteAsn flag must NOT change the wire format.
+        var data = new byte[] { 0xFD, 0xE9, 10, 0, 0, 1 }; // AS 65001, aggregator IP 10.0.0.1
+        var attr = new PathAttribute { Flags = BgpConstants.Attribute.FlagTransitive, TypeCode = BgpConstants.Attribute.Aggregator, Data = data };
+
+        Assert.Equal(65001u, AttributeHelper.ReadAggregatorAsn(attr, fourByteAsn: false));
+        // The flag must be ignored — AGGREGATOR is always 6 bytes.
+        Assert.Equal(65001u, AttributeHelper.ReadAggregatorAsn(attr, fourByteAsn: true));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void ReadAggregatorAsn_WrongLength_Throws(bool fourByteAsn)
+    {
+        // The old bug: passing fourByteAsn=true expected 8 bytes and rejected the legal 6-byte form.
+        var tooShort = new PathAttribute { TypeCode = BgpConstants.Attribute.Aggregator, Data = new byte[4] };
+        var tooLong = new PathAttribute { TypeCode = BgpConstants.Attribute.Aggregator, Data = new byte[8] };
+
+        Assert.Throws<BgpParseException>(() => AttributeHelper.ReadAggregatorAsn(tooShort, fourByteAsn));
+        Assert.Throws<BgpParseException>(() => AttributeHelper.ReadAggregatorAsn(tooLong, fourByteAsn));
+    }
+
+    [Fact]
+    public void ReadAs4AggregatorAsn_EightByteForm_ReadsFourOctetAs()
+    {
+        // RFC 6793 §3: AS4_AGGREGATOR is 8 octets (4 AS + 4 IPv4). The prior code expected exactly
+        // 4 bytes (#31 regression), rejecting every well-formed AS4_AGGREGATOR.
+        var data = new byte[] { 0x00, 0x03, 0x0D, 0x40, 10, 0, 0, 1 }; // AS 200000, IP 10.0.0.1
+        var attr = new PathAttribute { Flags = BgpConstants.Attribute.FlagTransitive, TypeCode = BgpConstants.Attribute.As4Aggregator, Data = data };
+
+        Assert.Equal(200000u, AttributeHelper.ReadAs4AggregatorAsn(attr));
+    }
+
+    [Theory]
+    [InlineData(4)]  // the length the buggy code accepted
+    [InlineData(6)]  // AGGREGATOR's length — wrong attribute
+    [InlineData(12)]
+    public void ReadAs4AggregatorAsn_WrongLength_Throws(int len)
+    {
+        var attr = new PathAttribute { TypeCode = BgpConstants.Attribute.As4Aggregator, Data = new byte[len] };
+        Assert.Throws<BgpParseException>(() => AttributeHelper.ReadAs4AggregatorAsn(attr));
+    }
+
     [Fact]
     public void ValidateMandatoryAttributes_MissingRequiredAttribute_Throws()
     {

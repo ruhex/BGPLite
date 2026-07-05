@@ -54,21 +54,35 @@ public static class AttributeHelper
         return BinaryPrimitives.ReadUInt32BigEndian(attr.Data);
     }
 
-    public static uint ReadAggregatorAsn(PathAttribute attr, bool fourByteAsn)
+    /// <summary>
+    /// Reads the aggregator ASN from a legacy AGGREGATOR attribute (type 7). Per RFC 6793 §3 the
+    /// AGGREGATOR attribute is unconditionally 6 octets: a 2-octet AS followed by a 4-octet IPv4
+    /// address — independent of whether the session negotiated 4-byte AS support. The 4-byte AS
+    /// form lives in the separate AS4_AGGREGATOR attribute (type 18, see <see cref="ReadAs4AggregatorAsn"/>).
+    /// The <paramref name="fourByteAsn"/> parameter is retained for signature compatibility with
+    /// the call site but no longer affects the wire format — the prior branch accepted a malformed
+    /// 8-byte AGGREGATOR and rejected every legal 6-byte one on a 4-byte session (regression of #31).
+    /// </summary>
+    public static uint ReadAggregatorAsn(PathAttribute attr, bool fourByteAsn = false)
     {
-        var expectedLength = fourByteAsn ? 8 : 6;
-        if (attr.Data.Length != expectedLength)
-            throw new BgpParseException($"Malformed AGGREGATOR attribute: expected {expectedLength} bytes, got {attr.Data.Length}");
+        _ = fourByteAsn; // retained for API compatibility; AGGREGATOR is always 6 octets (RFC 6793 §3).
+        if (attr.Data.Length != 6)
+            throw new BgpParseException($"Malformed AGGREGATOR attribute: expected 6 bytes, got {attr.Data.Length}");
 
-        return fourByteAsn
-            ? BinaryPrimitives.ReadUInt32BigEndian(attr.Data)
-            : BinaryPrimitives.ReadUInt16BigEndian(attr.Data);
+        return BinaryPrimitives.ReadUInt16BigEndian(attr.Data);
     }
 
+    /// <summary>
+    /// Reads the aggregator ASN from an AS4_AGGREGATOR attribute (type 18). Per RFC 6793 §3 it is
+    /// 8 octets: a 4-octet AS followed by a 4-octet IPv4 address. Only the leading AS is returned;
+    /// the trailing aggregator IP is not currently consumed (it does not influence AS_PATH
+    /// reconstruction). The prior code expected exactly 4 bytes (#31 regression), rejecting every
+    /// well-formed AS4_AGGREGATOR.
+    /// </summary>
     public static uint ReadAs4AggregatorAsn(PathAttribute attr)
     {
-        if (attr.Data.Length != 4)
-            throw new BgpParseException($"Malformed AS4_AGGREGATOR attribute: expected 4 bytes, got {attr.Data.Length}");
+        if (attr.Data.Length != 8)
+            throw new BgpParseException($"Malformed AS4_AGGREGATOR attribute: expected 8 bytes, got {attr.Data.Length}");
 
         return BinaryPrimitives.ReadUInt32BigEndian(attr.Data);
     }
