@@ -45,6 +45,36 @@ public class UserSourceCacheTests
     }
 
     [Fact]
+    public async Task Concurrent_Same_Url_Fetched_Once_Gate_Serializes()
+    {
+        // Exercises the per-URL SemaphoreSlim (the actual thundering-herd defense): many concurrent
+        // callers for the same URL share a single fetch. A blocking fetcher holds all racers in-flight
+        // until released, so this can't pass by accident via sequential cache reuse.
+        var cache = new UserSourceCache();
+        var hold = new TaskCompletionSource();
+        int calls = 0;
+        Task<IReadOnlyList<(uint Prefix, byte Length)>> Load(CancellationToken ct)
+        {
+            Interlocked.Increment(ref calls);
+            return HoldAndReturn();
+        }
+        async Task<IReadOnlyList<(uint Prefix, byte Length)>> HoldAndReturn()
+        {
+            await hold.Task;          // keep the in-flight fetch blocked until all racers are queued
+            return P((0u, 0));
+        }
+
+        var tasks = Enumerable.Range(0, 16)
+            .Select(_ => cache.GetOrLoadAsync("https://example.com/l", "src", Load, CancellationToken.None))
+            .ToArray();
+        hold.SetResult();             // release the single fetch
+        var results = await Task.WhenAll(tasks);
+
+        Assert.Equal(1, calls);       // exactly one fetch despite 16 concurrent callers
+        Assert.All(results, r => Assert.Single(r));
+    }
+
+    [Fact]
     public async Task Different_Urls_Fetched_Separately()
     {
         var cache = new UserSourceCache();
