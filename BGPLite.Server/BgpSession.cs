@@ -1241,16 +1241,19 @@ public sealed class BgpSession : IDisposable
     // Single synchronized entry point for ALL outbound BGP bytes (RFC 4271 framing requires a
     // continuous message stream; NetworkStream is not thread-safe). Callers do NOT need to
     // acquire _sendLock themselves — every send path goes through here.
-    private async Task SendMessageAsync(BgpMessage message, CancellationToken ct = default)
+    // Returns true if the message was fully written; false if the send was cancelled (e.g. the
+    // shutdown grace elapsed) or the session was disposed mid-send — callers that need accurate
+    // teardown logging (NotifyCeaseAsync) branch on this instead of assuming success.
+    private async Task<bool> SendMessageAsync(BgpMessage message, CancellationToken ct = default)
     {
         try
         {
             await _sendLock.WaitAsync(ct);
         }
-        catch (OperationCanceledException) { return; }
+        catch (OperationCanceledException) { return false; }
         catch (ObjectDisposedException)
         {
-            return;
+            return false;
         }
 
         try
@@ -1261,14 +1264,17 @@ public sealed class BgpSession : IDisposable
             {
                 var written = BgpMessageWriter.WriteMessage(message, buffer);
                 await _stream.WriteAsync(buffer.AsMemory(0, written), ct);
+                return true;
             }
             catch (OperationCanceledException)
             {
                 // Caller cancelled the send (e.g. shutdown grace expired) — best effort during teardown.
+                return false;
             }
             catch (ObjectDisposedException)
             {
                 // Session disposed mid-send — best effort during teardown.
+                return false;
             }
             finally
             {
@@ -1362,10 +1368,10 @@ public sealed class BgpSession : IDisposable
 
     private Task SendKeepaliveAsync() => SendMessageAsync(BgpKeepaliveMessage.Instance);
 
-    private Task SendNotificationAsync(byte errorCode, byte subErrorCode, CancellationToken ct = default)
+    private Task<bool> SendNotificationAsync(byte errorCode, byte subErrorCode, CancellationToken ct = default)
         => SendNotificationAsync(errorCode, subErrorCode, null, ct);
 
-    private async Task SendNotificationAsync(byte errorCode, byte subErrorCode, byte[]? data, CancellationToken ct = default)
+    private async Task<bool> SendNotificationAsync(byte errorCode, byte subErrorCode, byte[]? data, CancellationToken ct = default)
     {
         var notification = new BgpNotificationMessage
         {
@@ -1373,8 +1379,10 @@ public sealed class BgpSession : IDisposable
             SubErrorCode = subErrorCode,
             Data = data is null ? null : (byte[])data.Clone()
         };
-        await SendMessageAsync(notification, ct);
-        _logger.LogInformation("NotificationSent to {Peer}: {Error}/{SubError}", _peer, errorCode, subErrorCode);
+        var sent = await SendMessageAsync(notification, ct);
+        if (sent)
+            _logger.LogInformation("NotificationSent to {Peer}: {Error}/{SubError}", _peer, errorCode, subErrorCode);
+        return sent;
     }
 
     /// <summary>
@@ -1397,13 +1405,13 @@ public sealed class BgpSession : IDisposable
 
         try
         {
-            await SendNotificationAsync(BgpConstants.Error.Cease, BgpConstants.SubError.CeaseAdministrativeReset, ct);
-            _logger.LogInformation("Cease sent to {Peer} on shutdown", _peer);
-        }
-        catch (OperationCanceledException)
-        {
-            // Shutdown grace elapsed before the Cease send completed — best effort during teardown;
-            // the socket close below is the ultimate signal to the peer.
+            var sent = await SendNotificationAsync(BgpConstants.Error.Cease, BgpConstants.SubError.CeaseAdministrativeReset, ct);
+            if (sent)
+                _logger.LogInformation("Cease sent to {Peer} on shutdown", _peer);
+            else
+                // Cancellation (host grace elapsed) or session disposed mid-send — best effort during
+                // teardown; the socket close below is the ultimate signal to the peer.
+                _logger.LogDebug("Cease to {Peer} on shutdown did not complete (cancelled or disposed)", _peer);
         }
         catch (Exception ex)
         {
