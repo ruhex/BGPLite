@@ -99,9 +99,14 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
             _listener.Close();
         }
 
+        // The host's shutdown token bounds how long each step blocks — a stuck peer (TCP receive
+        // window full → WriteAsync blocks on the send buffer) must not pin StopAsync past the host's
+        // grace (#161). WaitAsync propagates the cancellation as OperationCanceledException; on
+        // cancel we abandon the pending step and move on to force-disposing the sessions below.
         if (_acceptTask is not null)
         {
-            try { await _acceptTask; }
+            try { await _acceptTask.WaitAsync(cancellationToken); }
+            catch (OperationCanceledException) { /* host grace elapsed — proceed to force teardown */ }
             catch { }
         }
 
@@ -122,14 +127,20 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
         {
             var ceases = _sessions.Values
                 .Where(s => s.IsEstablished)
-                .Select(s => s.NotifyCeaseAsync())
+                .Select(s => s.NotifyCeaseAsync(cancellationToken))
                 .ToArray();
             if (ceases.Length > 0)
-                await Task.WhenAll(ceases);
+            {
+                try { await Task.WhenAll(ceases).WaitAsync(cancellationToken); }
+                catch (OperationCanceledException) { /* host grace elapsed — proceed to force teardown */ }
+                catch { }
+            }
         }
 
         _cts.Cancel();
 
+        // Always dispose the sessions even if a Cease step was cancelled above — the socket close is
+        // the ultimate signal to the peer and releases FDs/timers/tasks so the process can exit.
         foreach (var session in _sessions.Values)
         {
             session.Dispose();
@@ -139,7 +150,9 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
         _statusTimer?.Dispose();
         if (_statusTask is not null)
         {
-            try { await _statusTask; } catch { }
+            try { await _statusTask.WaitAsync(cancellationToken); }
+            catch (OperationCanceledException) { /* host grace elapsed */ }
+            catch { }
         }
     }
 

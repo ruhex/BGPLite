@@ -653,4 +653,32 @@ public class BgpSessionShutdownTests
             got += n;
         }
     }
+
+    /// <summary>
+    /// Regression for #161: NotifyCeaseAsync must honor a CancellationToken so the host's shutdown
+    /// grace can bound how long a Cease send blocks. With an already-cancelled token the call must
+    /// return promptly instead of blocking on the socket write — the ultimate signal to the peer is
+    /// the socket close that follows, not the Cease bytes.
+    /// </summary>
+    [Fact]
+    public async Task NotifyCeaseAsync_Honors_Cancelled_Token_Returns_Promptly()
+    {
+        var (server, client) = ConnectedPair();
+        using var clientSock = client;
+        var bgpConfig = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1", HoldTime = 0, KeepAlive = 0 };
+        using var session = new BgpSession(
+            server, new PeerConfig { Address = "127.0.0.1" }, bgpConfig,
+            new RouteTable(), AllowAllFilter.Instance, new BgpMetrics(), new NopLogger<BgpSession>());
+
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
+
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        await session.NotifyCeaseAsync(cts.Token);
+        sw.Stop();
+
+        // Must return well under a second — cancellation short-circuits the send path.
+        Assert.True(sw.Elapsed < TimeSpan.FromSeconds(2),
+            $"NotifyCeaseAsync with a cancelled token took {sw.ElapsedMilliseconds}ms — token not honored");
+    }
 }

@@ -1241,12 +1241,13 @@ public sealed class BgpSession : IDisposable
     // Single synchronized entry point for ALL outbound BGP bytes (RFC 4271 framing requires a
     // continuous message stream; NetworkStream is not thread-safe). Callers do NOT need to
     // acquire _sendLock themselves — every send path goes through here.
-    private async Task SendMessageAsync(BgpMessage message)
+    private async Task SendMessageAsync(BgpMessage message, CancellationToken ct = default)
     {
         try
         {
-            await _sendLock.WaitAsync();
+            await _sendLock.WaitAsync(ct);
         }
+        catch (OperationCanceledException) { return; }
         catch (ObjectDisposedException)
         {
             return;
@@ -1259,7 +1260,11 @@ public sealed class BgpSession : IDisposable
             try
             {
                 var written = BgpMessageWriter.WriteMessage(message, buffer);
-                await _stream.WriteAsync(buffer.AsMemory(0, written));
+                await _stream.WriteAsync(buffer.AsMemory(0, written), ct);
+            }
+            catch (OperationCanceledException)
+            {
+                // Caller cancelled the send (e.g. shutdown grace expired) — best effort during teardown.
             }
             catch (ObjectDisposedException)
             {
@@ -1357,12 +1362,10 @@ public sealed class BgpSession : IDisposable
 
     private Task SendKeepaliveAsync() => SendMessageAsync(BgpKeepaliveMessage.Instance);
 
-    private async Task SendNotificationAsync(byte errorCode, byte subErrorCode)
-    {
-        await SendNotificationAsync(errorCode, subErrorCode, null);
-    }
+    private Task SendNotificationAsync(byte errorCode, byte subErrorCode, CancellationToken ct = default)
+        => SendNotificationAsync(errorCode, subErrorCode, null, ct);
 
-    private async Task SendNotificationAsync(byte errorCode, byte subErrorCode, byte[]? data)
+    private async Task SendNotificationAsync(byte errorCode, byte subErrorCode, byte[]? data, CancellationToken ct = default)
     {
         var notification = new BgpNotificationMessage
         {
@@ -1370,7 +1373,7 @@ public sealed class BgpSession : IDisposable
             SubErrorCode = subErrorCode,
             Data = data is null ? null : (byte[])data.Clone()
         };
-        await SendMessageAsync(notification);
+        await SendMessageAsync(notification, ct);
         _logger.LogInformation("NotificationSent to {Peer}: {Error}/{SubError}", _peer, errorCode, subErrorCode);
     }
 
@@ -1379,8 +1382,10 @@ public sealed class BgpSession : IDisposable
     /// should only invoke this on an Established session and only when Graceful Restart is disabled —
     /// a NOTIFICATION termination bypasses GR (RFC 4724 §4), so with GR on we drop the TCP connection
     /// instead to let peers retain our routes. Write/IO errors are swallowed (we are shutting down).
+    /// Accepts a <see cref="CancellationToken"/> so the host's shutdown grace can bound how long a
+    /// single Cease send blocks (a slow/stuck peer otherwise pins the send lock indefinitely).
     /// </summary>
-    public async Task NotifyCeaseAsync()
+    public async Task NotifyCeaseAsync(CancellationToken ct = default)
     {
         // Atomically claim the teardown as LocalCease BEFORE sending. If a concurrent
         // MarkSilentClose (GR-aware shutdown / session replacement) or a peer NOTIFICATION
@@ -1392,8 +1397,13 @@ public sealed class BgpSession : IDisposable
 
         try
         {
-            await SendNotificationAsync(BgpConstants.Error.Cease, BgpConstants.SubError.CeaseAdministrativeReset);
+            await SendNotificationAsync(BgpConstants.Error.Cease, BgpConstants.SubError.CeaseAdministrativeReset, ct);
             _logger.LogInformation("Cease sent to {Peer} on shutdown", _peer);
+        }
+        catch (OperationCanceledException)
+        {
+            // Shutdown grace elapsed before the Cease send completed — best effort during teardown;
+            // the socket close below is the ultimate signal to the peer.
         }
         catch (Exception ex)
         {
