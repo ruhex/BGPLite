@@ -68,7 +68,9 @@ public sealed class HttpPrefixProvider(
 
         var text = Encoding.UTF8.GetString(ms.GetBuffer(), 0, (int)ms.Length);
         var prefixes = PrefixListParser.Parse(text);
-        logger.LogInformation("Source '{Name}' (http): loaded {Count} prefixes from {Url}", source.Name, prefixes.Count, url);
+        // Log only the source Name (the operator/peer-supplied identifier), never the URL — peer URLs
+        // (#147) may carry tokens in the query string that must not reach application logs.
+        logger.LogInformation("Source '{Name}' (http): loaded {Count} prefixes", source.Name, prefixes.Count);
         return prefixes;
     }
 }

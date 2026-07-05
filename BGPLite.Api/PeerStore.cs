@@ -115,7 +115,7 @@ public sealed class PeerStore : IPeerStore
             .Include(p => p.Subscriptions)
             .Include(p => p.CustomPrefixes)
             .Include(p => p.CustomAsns)
-            .Include(p => p.CustomSources)
+            .Include(p => p.CustomSources.Where(c => c.Active))
             .FirstOrDefault(p => p.Ip == ip && p.Asn == asn);
         if (peer is null) return null;
 
@@ -131,8 +131,9 @@ public sealed class PeerStore : IPeerStore
             peer.Subscriptions.Select(s => s.AsnListName).ToList(),
             peer.CustomPrefixes.Select(c => c.Prefix + "/" + c.PrefixLength).ToList(),
             peer.CustomAsns.Select(c => c.Asn).ToList(),
-            // Only Active user sources are advertised (issue #147); paused ones never leave the DB.
-            peer.CustomSources.Where(c => c.Active)
+            // Only Active user sources are advertised (issue #147); the filtered Include above
+            // already excluded paused rows at the SQL level.
+            peer.CustomSources
                 .Select(c => new CustomSourceView(c.Name, c.Url, c.Community))
                 .ToList());
     }
