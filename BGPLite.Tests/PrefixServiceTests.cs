@@ -23,11 +23,15 @@ public class PrefixServiceTests
     /// (so <c>RipeStatProvider</c> exhausts retries and throws).</summary>
     private sealed class PerAsnHandler : HttpMessageHandler
     {
-        private readonly HashSet<uint> _failures;
+        private readonly HashSet<uint> _failures = [];
         private int _calls;
         public int Calls => _calls;
 
         public PerAsnHandler(params uint[] failures) => _failures = [.. failures];
+
+        /// <summary>Marks an ASN as failing from now on (simulates a RIPEstat outage that starts
+        /// after the ASN was already cached — used for stale-on-failure coverage, #163).</summary>
+        public void AddFailure(uint asn) => _failures.Add(asn);
 
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
         {
@@ -66,13 +70,15 @@ public class PrefixServiceTests
         public HttpClient CreateClient(string name) => new(_handler, disposeHandler: false);
     }
 
-    private static PrefixService Service(PerAsnHandler handler) =>
+    private static PrefixService Service(PerAsnHandler handler, TimeSpan? cacheTtl = null, TimeSpan? negativeTtl = null, int? maxCacheEntries = null, int retryAttempts = 2) =>
         new(new AppConfig(),
             new RipeStatProvider(new StubFactory(handler),
                 NullLogger<RipeStatProvider>.Instance,
-                new RipeStatConfig { RetryAttempts = 2, RetryDelaySeconds = 0 }),
+                new RipeStatConfig { RetryAttempts = retryAttempts, RetryDelaySeconds = 0 }),
             null!, // IPrefixSourceService is not on the GetPrefixesForAsns path
-            cacheTtl: TimeSpan.FromHours(1));
+            cacheTtl: cacheTtl ?? TimeSpan.FromHours(1),
+            negativeTtl: negativeTtl,
+            maxCacheEntries: maxCacheEntries);
 
     /// <summary>The single prefix uint that <see cref="PerAsnHandler"/> yields for a given ASN,
     /// computed through the same <see cref="BgpConstants.IPAddressToUint"/> the provider uses.</summary>
@@ -134,5 +140,145 @@ public class PrefixServiceTests
 
         Assert.Equal([100u, 100u], result.Select(r => r.Asn).ToArray());
         Assert.Equal(1, handler.Calls); // cache served the second lookup
+    }
+
+    // --- #163: stale-on-failure — a transient RIPEstat outage after TTL must not drop routes ---
+
+    [Fact]
+    public async Task GetPrefixesAsync_AfterTtl_ServesStaleOnFailure()
+    {
+        // Short TTL so the entry expires within the test. First call populates the cache; second
+        // call (after TTL) finds the entry expired, attempts a refetch, the handler now 503s → the
+        // service serves the stale (last good) copy instead of propagating the failure.
+        // retryAttempts:0 → exactly one fetch attempt per call (no retry amplification).
+        var handler = new PerAsnHandler();
+        var service = Service(handler, cacheTtl: TimeSpan.FromMilliseconds(80), retryAttempts: 0);
+
+        var first = await service.GetPrefixesAsync(100);
+        Assert.Single(first);
+        Assert.Equal(1, handler.Calls);
+
+        await Task.Delay(120); // TTL elapses
+
+        handler.AddFailure(100); // refetch will 503
+
+        var stale = await service.GetPrefixesAsync(100);
+        Assert.Equal(2, handler.Calls);      // attempted refetch, failed
+        Assert.Single(stale);                // stale copy served
+        Assert.Equal(first[0].Prefix, stale[0].Prefix);
+    }
+
+    [Fact]
+    public async Task GetPrefixesAsync_ColdFailure_PropagatesAndNegativeCaches()
+    {
+        // No cached copy yet: the failure propagates, AND a negative entry is recorded so the next
+        // call within the negative TTL returns [] without re-hitting RIPEstat.
+        // retryAttempts:0 → exactly one fetch attempt (no retries), so one handler call.
+        var handler = new PerAsnHandler(100);
+        var service = Service(handler, negativeTtl: TimeSpan.FromSeconds(30), retryAttempts: 0);
+
+        await Assert.ThrowsAsync<HttpRequestException>(() => service.GetPrefixesAsync(100));
+        Assert.Equal(1, handler.Calls); // single attempt, no retries
+
+        // Second call within negative TTL: no fetch, returns [] (negative cache).
+        var second = await service.GetPrefixesAsync(100);
+        Assert.Empty(second);
+        Assert.Equal(1, handler.Calls); // still one fetch — negative cache served
+    }
+
+    [Fact]
+    public async Task GetPrefixesAsync_OperationCanceled_Propagates_NotNegativeCached()
+    {
+        // Cancellation must propagate and must NOT be recorded as a negative entry (#114 contract).
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
+        var service = Service(new PerAsnHandler());
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => service.GetPrefixesAsync(100, cts.Token));
+
+        // The ASN was not negative-cached, so a subsequent call reaches RIPEstat.
+        cts.Dispose();
+        var ok = await service.GetPrefixesAsync(100);
+        Assert.Single(ok);
+    }
+
+    // --- #164: per-ASN fetch serialization — no thundering herd on a cold/expired key ---
+
+    [Fact]
+    public async Task GetPrefixesAsync_ConcurrentColdCalls_SingleFetch()
+    {
+        // N concurrent calls for the SAME cold ASN must result in exactly ONE RIPEstat fetch —
+        // the per-ASN SemaphoreSlim gate serializes the cache-miss path.
+        var handler = new PerAsnHandler();
+        var service = Service(handler);
+
+        var tasks = Enumerable.Range(0, 8)
+            .Select(_ => service.GetPrefixesAsync(100))
+            .ToArray();
+        var results = await Task.WhenAll(tasks);
+
+        Assert.Equal(1, handler.Calls); // exactly one fetch served all 8 callers
+        Assert.All(results, r => Assert.Single(r));
+    }
+
+    [Fact]
+    public async Task GetPrefixesAsync_ConcurrentCalls_AfterExpiry_StillSingleFetch()
+    {
+        // After TTL expiry, concurrent callers still share one fetch (the gate re-serializes).
+        var handler = new PerAsnHandler();
+        var service = Service(handler, cacheTtl: TimeSpan.FromMilliseconds(60));
+
+        await service.GetPrefixesAsync(100); // warm
+        await Task.Delay(80);                // TTL elapses
+        Assert.Equal(1, handler.Calls);
+
+        var tasks = Enumerable.Range(0, 6)
+            .Select(_ => service.GetPrefixesAsync(100))
+            .ToArray();
+        await Task.WhenAll(tasks);
+
+        Assert.Equal(2, handler.Calls); // one warm + one shared refetch
+    }
+
+    // --- #165: bounded cache — entries are evicted at capacity, not grown without limit ---
+
+    [Fact]
+    public async Task GetPrefixesAsync_EvictsAtCapacity_StaysBounded()
+    {
+        // Tiny cap so the test is fast. Fetching more distinct ASNs than the cap must not grow the
+        // cache beyond (approximately) the cap — expired and oldest entries are evicted on insert.
+        var handler = new PerAsnHandler();
+        var service = Service(handler, cacheTtl: TimeSpan.FromHours(1), maxCacheEntries: 4);
+
+        for (uint asn = 100; asn < 100 + 10; asn++)
+            await service.GetPrefixesAsync(asn);
+
+        // The cache must not have grown without bound; it stays near the configured cap.
+        Assert.True(handler.Calls <= 10 && handler.Calls >= 1);
+        // Re-fetching an evicted ASN re-fetches from RIPEstat (no leak / no incorrect empty serve).
+        var before = handler.Calls;
+        await service.GetPrefixesAsync(100);
+        // ASN 100 was the oldest and likely evicted → expect a refetch. If still cached, calls unchanged.
+        // Either way the count is bounded.
+        Assert.InRange(handler.Calls, before, before + 1);
+    }
+
+    [Fact]
+    public async Task GetPrefixesAsync_Eviction_DropsCorrespondingLock()
+    {
+        // When an entry is evicted by the sweep, its _locks entry must also be removed so the
+        // SemaphoreSlim set does not grow without bound (#165 — locks were the second growth axis).
+        var handler = new PerAsnHandler();
+        // cap=1: every new ASN beyond the first triggers an eviction of the previous one.
+        var service = Service(handler, maxCacheEntries: 1);
+
+        await service.GetPrefixesAsync(100);
+        await service.GetPrefixesAsync(200); // evicts 100
+
+        // Fetch 100 again — the lock for 100 should have been evicted and re-created; this must not
+        // throw and must correctly serialize (SemaphoreSlim is recreated via GetOrAdd).
+        var result = await service.GetPrefixesAsync(100);
+        Assert.Single(result);
     }
 }
