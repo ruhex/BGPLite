@@ -31,6 +31,10 @@ public static class PrefixSourceUrlValidator
         IPNetwork.Parse("fe80::/10"),           // IPv6 link-local
     ];
 
+    /// <summary>Per-address connect budget so one blackholed candidate can't consume the whole
+    /// ConnectTimeout before the next resolved address is tried.</summary>
+    private static readonly TimeSpan PerAttemptConnectTimeout = TimeSpan.FromSeconds(5);
+
     /// <summary>True if the address falls in a blocked (non-public) range.</summary>
     internal static bool IsBlockedAddress(IPAddress address)
     {
@@ -80,11 +84,22 @@ public static class PrefixSourceUrlValidator
         Exception? last = null;
         foreach (var addr in OrderForConnect(addresses))
         {
+            // Bound each attempt so one blackholed address can't consume the whole connect budget
+            // before the next candidate is tried. Real cancellation (ct) still propagates.
+            using var attempt = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            attempt.CancelAfter(PerAttemptConnectTimeout);
+
             var socket = new Socket(addr.AddressFamily, SocketType.Stream, ProtocolType.Tcp) { NoDelay = true };
             try
             {
-                await socket.ConnectAsync(addr, port, ct);
+                await socket.ConnectAsync(addr, port, attempt.Token);
                 return new NetworkStream(socket, ownsSocket: true);
+            }
+            catch (OperationCanceledException) when (attempt.IsCancellationRequested && !ct.IsCancellationRequested)
+            {
+                socket.Dispose();
+                last = new TimeoutException(
+                    $"Timed out connecting to '{host}' ({addr}) after {PerAttemptConnectTimeout.TotalSeconds:0}s; trying next address.");
             }
             catch (OperationCanceledException) { socket.Dispose(); throw; }
             catch (Exception ex)
