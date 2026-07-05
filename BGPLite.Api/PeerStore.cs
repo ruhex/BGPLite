@@ -256,31 +256,43 @@ public sealed class PeerStore : IPeerStore
             .ToList();
     }
 
-    /// <summary>Adds a URL-based prefix-list source to a peer. Throws if the name already exists.</summary>
-    public void AddCustomSource(string peerId, string name, string url, string? community)
+    /// <summary>Adds a URL-based prefix-list source to a peer. Returns the created entity (with Id).</summary>
+    public PeerCustomSource AddCustomSource(string peerId, string name, string url, string? community)
     {
         using var db = _dbFactory.CreateDbContext();
         if (db.Set<PeerCustomSource>().Any(c => c.PeerId == peerId && c.Name == name))
             throw new InvalidOperationException($"A source named '{name}' already exists for this peer.");
 
-        db.Set<PeerCustomSource>().Add(new PeerCustomSource
+        var source = new PeerCustomSource
         {
             PeerId = peerId,
             Name = name,
             Url = url,
             Community = community
-        });
+        };
+        db.Set<PeerCustomSource>().Add(source);
         db.SaveChanges();
+        return source;
     }
 
-    /// <summary>Removes a URL-based source by name. Returns true if found and removed.</summary>
-    public bool DeleteCustomSource(string peerId, string name)
+    /// <summary>Removes a URL-based source by its Id. Returns true if found and removed.</summary>
+    public bool DeleteCustomSource(string sourceId)
     {
         using var db = _dbFactory.CreateDbContext();
         var deleted = db.Set<PeerCustomSource>()
-            .Where(c => c.PeerId == peerId && c.Name == name)
+            .Where(c => c.Id == sourceId)
             .ExecuteDelete();
         return deleted > 0;
+    }
+
+    /// <summary>Toggles a source's active state (pause/resume without deleting).</summary>
+    public bool SetSourceActive(string sourceId, bool active)
+    {
+        using var db = _dbFactory.CreateDbContext();
+        var updated = db.Set<PeerCustomSource>()
+            .Where(c => c.Id == sourceId)
+            .ExecuteUpdate(s => s.SetProperty(c => c.Active, active));
+        return updated > 0;
     }
 
     private static PeerInfo MapToInfo(Peer peer) => new()

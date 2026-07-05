@@ -274,9 +274,14 @@ public sealed class ManagementApi : IHostedService, IDisposable
                 return await HandleAddSource(segments[2], ctx);
         }
 
-        // /api/peers/{id}/sources/{name} — DELETE (#143)
-        if (segments.Length == 5 && segments[0] == "api" && segments[1] == "peers" && segments[3] == "sources" && method == "DELETE")
-            return HandleDeleteSource(segments[2], segments[4]);
+        // /api/peers/{id}/sources/{sourceId} — DELETE / PATCH (#143)
+        if (segments.Length == 5 && segments[0] == "api" && segments[1] == "peers" && segments[3] == "sources")
+        {
+            if (method == "DELETE")
+                return HandleDeleteSource(segments[2], segments[4]);
+            if (method == "PATCH")
+                return await HandlePatchSource(segments[2], segments[4], ctx);
+        }
 
         // /api/asn-lists
         if (IsGet(method, segments, "api", "asn-lists"))
@@ -494,7 +499,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
             lists = subscriptions,
             customPrefixes,
             customAsns,
-            customSources = customSources.Select(s => new { name = s.Name, url = s.Url, community = s.Community }),
+            customSources = customSources.Select(s => new { id = s.Id, name = s.Name, url = s.Url, community = s.Community, active = s.Active }),
             communities = communities.Select(CommunityCodec.Format),
             allRoutes = communities.Count == 0
         });
@@ -573,7 +578,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
             return ApiResponse.Error("Peer not found", 404);
 
         var sources = _store.GetCustomSources(peerId);
-        return ApiResponse.Ok(sources.Select(s => new { name = s.Name, url = s.Url, community = s.Community }));
+        return ApiResponse.Ok(sources.Select(s => new { id = s.Id, name = s.Name, url = s.Url, community = s.Community, active = s.Active }));
     }
 
     private async Task<ApiResponse> HandleAddSource(string peerId, HttpListenerContext ctx)
@@ -591,9 +596,10 @@ public sealed class ManagementApi : IHostedService, IDisposable
         if (!Uri.TryCreate(data.Url, UriKind.Absolute, out var uri) || uri.Scheme is not ("http" or "https"))
             return ApiResponse.Error($"Invalid URL: {data.Url}", 400);
 
+        PeerCustomSource source;
         try
         {
-            _store.AddCustomSource(peerId, data.Name, data.Url, data.Community);
+            source = _store.AddCustomSource(peerId, data.Name, data.Url, data.Community);
         }
         catch (InvalidOperationException)
         {
@@ -602,19 +608,38 @@ public sealed class ManagementApi : IHostedService, IDisposable
 
         _logger.LogInformation("Added source '{Name}' ({Url}) to peer {PeerId}",
             SanitizeForLog(data.Name), SanitizeForLog(data.Url), SanitizeForLog(peerId));
-        return ApiResponse.Ok(new { name = data.Name, url = data.Url, community = data.Community });
+        return ApiResponse.Ok(new { id = source.Id, name = source.Name, url = source.Url, community = source.Community, active = source.Active });
     }
 
-    private ApiResponse HandleDeleteSource(string peerId, string name)
+    private ApiResponse HandleDeleteSource(string peerId, string sourceId)
     {
         if (_store.GetDbPeerById(peerId) is null)
             return ApiResponse.Error("Peer not found", 404);
 
-        if (!_store.DeleteCustomSource(peerId, name))
-            return ApiResponse.Error($"Source '{name}' not found", 404);
+        if (!_store.DeleteCustomSource(sourceId))
+            return ApiResponse.Error($"Source '{sourceId}' not found", 404);
 
-        _logger.LogInformation("Deleted source '{Name}' from peer {PeerId}", SanitizeForLog(name), SanitizeForLog(peerId));
-        return ApiResponse.Ok(new { name, deleted = true });
+        _logger.LogInformation("Deleted source {SourceId} from peer {PeerId}", SanitizeForLog(sourceId), SanitizeForLog(peerId));
+        return ApiResponse.Ok(new { id = sourceId, deleted = true });
+    }
+
+    private async Task<ApiResponse> HandlePatchSource(string peerId, string sourceId, HttpListenerContext ctx)
+    {
+        if (_store.GetDbPeerById(peerId) is null)
+            return ApiResponse.Error("Peer not found", 404);
+
+        using var reader = new StreamReader(ctx.Request.InputStream, Encoding.UTF8);
+        var body = await reader.ReadToEndAsync();
+        var data = JsonSerializer.Deserialize<PatchSourceRequest>(body, _jsonOpts);
+
+        if (data is null || data.Active is null)
+            return ApiResponse.Error("PATCH body must contain { \"active\": true/false }", 400);
+
+        if (!_store.SetSourceActive(sourceId, data.Active.Value))
+            return ApiResponse.Error($"Source '{sourceId}' not found", 404);
+
+        _logger.LogInformation("Source {SourceId} active={Active}", SanitizeForLog(sourceId), data.Active.Value);
+        return ApiResponse.Ok(new { id = sourceId, active = data.Active.Value });
     }
 
     #endregion
@@ -1067,6 +1092,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
     private record CreatePeerRequest(string Ip, uint Asn, string? Description, [property: JsonPropertyName("lists")] List<string>? AsnLists, List<string>? CustomPrefixes, List<uint>? CustomAsns);
     private record UpdatePeerRequest(string? Description, [property: JsonPropertyName("lists")] List<string>? Lists, List<string>? CustomPrefixes, List<uint>? CustomAsns);
     private record AddSourceRequest(string Name, string Url, string? Community);
+    private record PatchSourceRequest([property: JsonPropertyName("active")] bool? Active);
 
     private record ApiResponse(object? Body, int StatusCode = 200)
     {

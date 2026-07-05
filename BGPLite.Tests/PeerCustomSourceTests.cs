@@ -1,5 +1,6 @@
 using BGPLite.Api;
 using BGPLite.Api.Entities;
+using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 
 namespace BGPLite.Tests;
@@ -39,13 +40,15 @@ public class PeerCustomSourceTests
         using var _ = conn;
         var peerId = store.CreatePeer(TestIp, 65001, null);
 
-        store.AddCustomSource(peerId, "my-list", "https://example.com/list.txt", "65444:501");
+        var source = store.AddCustomSource(peerId, "my-list", "https://example.com/list.txt", "65444:501");
 
+        Assert.NotEmpty(source.Id);
         var sources = store.GetCustomSources(peerId);
-        var source = Assert.Single(sources);
-        Assert.Equal("my-list", source.Name);
-        Assert.Equal("https://example.com/list.txt", source.Url);
-        Assert.Equal("65444:501", source.Community);
+        var fetched = Assert.Single(sources);
+        Assert.Equal(source.Id, fetched.Id);
+        Assert.Equal("my-list", fetched.Name);
+        Assert.Equal("https://example.com/list.txt", fetched.Url);
+        Assert.Equal("65444:501", fetched.Community);
     }
 
     [Fact]
@@ -77,16 +80,16 @@ public class PeerCustomSourceTests
     }
 
     [Fact]
-    public void DeleteCustomSource_Removes_Only_That_Source()
+    public void DeleteCustomSource_BySourceId_Removes_Only_That_Source()
     {
         var (store, conn) = NewStore();
         using var _ = conn;
         var peerId = store.CreatePeer(TestIp, 65001, null);
 
-        store.AddCustomSource(peerId, "list-a", "https://a.com/list.txt", "65444:501");
+        var sourceA = store.AddCustomSource(peerId, "list-a", "https://a.com/list.txt", "65444:501");
         store.AddCustomSource(peerId, "list-b", "https://b.com/list.txt", null);
 
-        var deleted = store.DeleteCustomSource(peerId, "list-a");
+        var deleted = store.DeleteCustomSource(sourceA.Id);
         Assert.True(deleted);
 
         var remaining = store.GetCustomSources(peerId);
@@ -101,7 +104,7 @@ public class PeerCustomSourceTests
         using var _ = conn;
         var peerId = store.CreatePeer(TestIp, 65001, null);
 
-        Assert.False(store.DeleteCustomSource(peerId, "nonexistent"));
+        Assert.False(store.DeleteCustomSource("nonexistent-id"));
     }
 
     [Fact]
@@ -140,5 +143,45 @@ public class PeerCustomSourceTests
 
         var source = Assert.Single(store.GetCustomSources(peerId));
         Assert.Null(source.Community);
+    }
+
+    [Fact]
+    public void NewSource_Is_Inactive_ByDefault()
+    {
+        var (store, conn) = NewStore();
+        using var _ = conn;
+        var peerId = store.CreatePeer(TestIp, 65001, null);
+
+        var source = store.AddCustomSource(peerId, "paused", "https://example.com/list.txt", null);
+
+        Assert.False(source.Active, "new source must default to inactive (user explicitly activates)");
+    }
+
+    [Fact]
+    public void SetSourceActive_Toggles_State()
+    {
+        var (store, conn) = NewStore();
+        using var _ = conn;
+        var peerId = store.CreatePeer(TestIp, 65001, null);
+
+        var source = store.AddCustomSource(peerId, "toggle", "https://example.com/list.txt", null);
+        Assert.False(source.Active);
+
+        Assert.True(store.SetSourceActive(source.Id, true));
+        var fetched = Assert.Single(store.GetCustomSources(peerId));
+        Assert.True(fetched.Active);
+
+        Assert.True(store.SetSourceActive(source.Id, false));
+        fetched = Assert.Single(store.GetCustomSources(peerId));
+        Assert.False(fetched.Active);
+    }
+
+    [Fact]
+    public void SetSourceActive_NotFound_Returns_False()
+    {
+        var (store, conn) = NewStore();
+        using var _ = conn;
+
+        Assert.False(store.SetSourceActive("nonexistent", true));
     }
 }

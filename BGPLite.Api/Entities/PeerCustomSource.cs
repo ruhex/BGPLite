@@ -7,10 +7,14 @@ namespace BGPLite.Api.Entities;
 /// </summary>
 public class PeerCustomSource
 {
+    public string Id { get; set; } = Guid.NewGuid().ToString();
     public string PeerId { get; set; } = "";
     public string Name { get; set; } = "";
     public string Url { get; set; } = "";
     public string? Community { get; set; }
+    /// <summary>If false (default), the source is stored but NOT fetched at send time (paused).
+    /// User must explicitly activate via PATCH. DELETE removes permanently.</summary>
+    public bool Active { get; set; } = false;
 
     public Peer Peer { get; set; } = null!;
 }

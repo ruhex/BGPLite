@@ -20,10 +20,14 @@ public class BgpDbContext : DbContext
 
         db.Database.ExecuteSqlRaw(
             "CREATE TABLE IF NOT EXISTS PeerCustomSources (" +
+            "Id TEXT NOT NULL PRIMARY KEY, " +
             "PeerId TEXT NOT NULL, Name TEXT NOT NULL, " +
             "Url TEXT NOT NULL, Community TEXT, " +
-            "PRIMARY KEY (PeerId, Name), " +
+            "Active INTEGER NOT NULL DEFAULT 0, " +
             "FOREIGN KEY (PeerId) REFERENCES Peers(Id) ON DELETE CASCADE)");
+        db.Database.ExecuteSqlRaw(
+            "CREATE UNIQUE INDEX IF NOT EXISTS UX_PeerCustomSources_PeerId_Name " +
+            "ON PeerCustomSources (PeerId, Name);");
 
         // Peer identity is (Ip, Asn), not Ip alone, so several peers behind one source IP (distinct
         // AS) can coexist as separate rows (issue #19). EnsureCreated does not evolve an existing
@@ -82,7 +86,8 @@ public class BgpDbContext : DbContext
         model.Entity<PeerCustomSource>(e =>
         {
             e.ToTable("PeerCustomSources");
-            e.HasKey(c => new { c.PeerId, c.Name });
+            e.HasKey(c => c.Id);
+            e.HasIndex(c => new { c.PeerId, c.Name }).IsUnique().HasDatabaseName("UX_PeerCustomSources_PeerId_Name");
             e.HasOne(c => c.Peer).WithMany(p => p.CustomSources)
                 .HasForeignKey(c => c.PeerId).OnDelete(DeleteBehavior.Cascade);
         });
