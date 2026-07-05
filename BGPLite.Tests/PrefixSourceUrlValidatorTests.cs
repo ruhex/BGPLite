@@ -87,4 +87,47 @@ public class PrefixSourceUrlValidatorTests
         Assert.False(isValid);
         Assert.Contains("Invalid URL", error);
     }
+
+    // --- OrderForConnect (#151): IPv4-first so an IPv4-only server (no IPv6 interface) still connects,
+    //     instead of throwing SocketException on a hardcoded IPv4 socket handed an IPv6 addresses[0]. ---
+
+    [Fact]
+    public void OrderForConnect_Prefers_IPv4_Before_IPv6()
+    {
+        var ipv6 = IPAddress.Parse("2606:2800:220:1::1");
+        var ipv4 = IPAddress.Parse("93.184.216.34");
+
+        var ordered = PrefixSourceUrlValidator.OrderForConnect([ipv6, ipv4]).ToArray();
+
+        Assert.Equal(ipv4, ordered[0]);
+        Assert.Equal(ipv6, ordered[1]);
+    }
+
+    [Fact]
+    public void OrderForConnect_Is_Stable_Within_Family()
+    {
+        var b = IPAddress.Parse("8.8.8.8");            // IPv4
+        var a = IPAddress.Parse("93.184.216.34");      // IPv4
+        var v6 = IPAddress.Parse("2606:2800:220:1::1");
+
+        // LINQ OrderBy is stable: IPv4 entries keep input order (b before a), IPv6 trails.
+        var ordered = PrefixSourceUrlValidator.OrderForConnect([b, v6, a]).ToArray();
+
+        Assert.Equal([b, a, v6], ordered);
+    }
+
+    [Fact]
+    public void OrderForConnect_IPv6_Only_Unchanged()
+    {
+        var x = IPAddress.Parse("2606:2800:220:1::1");
+        var y = IPAddress.Parse("2606:2800:220:2::2");
+
+        var ordered = PrefixSourceUrlValidator.OrderForConnect([x, y]).ToArray();
+
+        Assert.Equal([x, y], ordered);
+    }
+
+    [Fact]
+    public void OrderForConnect_Empty_Returns_Empty()
+        => Assert.Empty(PrefixSourceUrlValidator.OrderForConnect([]).ToArray());
 }
