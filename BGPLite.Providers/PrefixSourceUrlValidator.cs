@@ -1,12 +1,17 @@
 using System.Net;
+using System.Net.Sockets;
 
 namespace BGPLite.Providers;
 
 /// <summary>
-/// SSRF defense for user-supplied prefix-list URLs (#144): validates that a URL's host resolves
-/// to a public IP (not private/loopback/link-local/cloud-metadata) before fetch.
+/// SSRF defense for user-supplied prefix-list URLs (#144). Two layers:
+/// <list type="bullet">
+/// <item><see cref="CreateValidatedConnectionAsync"/> — wired into SocketsHttpHandler.ConnectCallback;
+/// resolves DNS ONCE and validates/connects the same IP (no TOCTOU race, no redirect bypass).</item>
+/// <item><see cref="IsBlockedAddress"/> — pure IP check, reused by the callback and by tests.</item>
+/// </list>
 /// </summary>
-internal static class PrefixSourceUrlValidator
+public static class PrefixSourceUrlValidator
 {
     private static readonly IPNetwork[] BlockedRanges =
     [
@@ -29,7 +34,6 @@ internal static class PrefixSourceUrlValidator
     /// <summary>True if the address falls in a blocked (non-public) range.</summary>
     internal static bool IsBlockedAddress(IPAddress address)
     {
-        // Normalize IPv4-mapped IPv6 (::ffff:x.x.x.x) so IPv4 CIDRs match (CodeRabbit #117 lesson).
         var normalized = address.IsIPv4MappedToIPv6 ? address.MapToIPv4() : address;
         foreach (var range in BlockedRanges)
             if (range.Contains(normalized)) return true;
@@ -37,10 +41,51 @@ internal static class PrefixSourceUrlValidator
     }
 
     /// <summary>
-    /// Validates that a URL is well-formed, uses http/https, and resolves to a public IP.
-    /// Returns (true, null) if safe; (false, reason) if blocked/malformed.
+    /// SocketsHttpHandler.ConnectCallback: resolves DNS, validates ALL resolved IPs are public,
+    /// then connects to the first valid one. No TOCTOU (the validated IP IS the connected IP).
+    /// SocketsHttpHandler does NOT follow redirects (no 302-to-internal-IP bypass).
     /// </summary>
-    /// <param name="dnsResolver">Injectable DNS resolver (for testing); default uses real DNS.</param>
+    internal static async ValueTask<Stream> CreateValidatedConnectionAsync(
+        SocketsHttpConnectionContext context, CancellationToken ct)
+    {
+        var host = context.DnsEndPoint.Host;
+        var port = context.DnsEndPoint.Port;
+
+        IPAddress[] addresses;
+        try
+        {
+            addresses = await Dns.GetHostAddressesAsync(host, ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            throw new InvalidOperationException($"DNS resolution failed for '{host}': {ex.Message}", ex);
+        }
+
+        foreach (var addr in addresses)
+        {
+            if (IsBlockedAddress(addr))
+                throw new InvalidOperationException(
+                    $"SSRF blocked: '{host}' resolves to non-public address {addr}.");
+        }
+
+        var socket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp) { NoDelay = true };
+        try
+        {
+            await socket.ConnectAsync(addresses[0], port, ct);
+            return new NetworkStream(socket, ownsSocket: true);
+        }
+        catch
+        {
+            socket.Dispose();
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// Validates that a URL is well-formed, uses http/https, and resolves to a public IP.
+    /// For future API-level validation (when a user submits a URL, validate before storing).
+    /// The actual fetch-time defense is <see cref="CreateValidatedConnectionAsync"/>.
+    /// </summary>
     internal static async Task<(bool IsValid, string? Error)> ValidateUrlAsync(
         string url,
         Func<string, CancellationToken, ValueTask<IPAddress[]>>? dnsResolver = null,

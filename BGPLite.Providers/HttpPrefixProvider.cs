@@ -1,4 +1,3 @@
-using System.Net;
 using System.Text;
 using BGPLite.Configuration;
 using Microsoft.Extensions.Http;
@@ -11,16 +10,15 @@ namespace BGPLite.Providers;
 /// raw-file URL works — raw.githubusercontent.com, a gist, a pastebin, a self-hosted list, etc.
 /// The URL is fetched as-is. Uses <see cref="IHttpClientFactory"/> so the handler pool is recycled
 /// by the factory (the provider is stateless and safe to hold as a singleton).
-/// <para>SSRF defense (#144): each URL is validated (DNS resolves to a public IP) before fetch,
-/// and the response body is capped at <see cref="MaxResponseBytes"/> to prevent OOM.</para>
+/// <para>SSRF defense (#144): the named-client's <c>SocketsHttpHandler.ConnectCallback</c> validates
+/// every connection's DNS resolution at the socket level — no TOCTOU race, no redirect bypass.
+/// Response body is capped at <see cref="MaxResponseBytes"/> to prevent OOM.</para>
 /// </summary>
 public sealed class HttpPrefixProvider(
     IHttpClientFactory httpFactory,
-    ILogger<HttpPrefixProvider> logger,
-    Func<string, CancellationToken, ValueTask<IPAddress[]>>? dnsResolver = null)
+    ILogger<HttpPrefixProvider> logger)
     : IPrefixSourceProvider
 {
-    /// <summary>Named-client key registered with <c>IHttpClientFactory</c>.</summary>
     public const string ClientName = "http";
 
     /// <summary>Maximum response body size (10 MB) — defends against OOM from huge/malicious files (#144).</summary>
@@ -34,12 +32,6 @@ public sealed class HttpPrefixProvider(
             throw new InvalidOperationException($"Prefix source '{source.Name}': Kind=http requires a Url.");
 
         var url = source.Url;
-
-        // SSRF defense (#144): validate the URL host resolves to a public IP before fetch.
-        var (isValid, error) = await PrefixSourceUrlValidator.ValidateUrlAsync(url, dnsResolver, ct);
-        if (!isValid)
-            throw new InvalidOperationException($"Prefix source '{source.Name}': {error}");
-
         var http = httpFactory.CreateClient(ClientName);
         if (source.Timeout is int seconds && seconds > 0)
             http.Timeout = TimeSpan.FromSeconds(seconds);
@@ -53,7 +45,8 @@ public sealed class HttpPrefixProvider(
             }
 
         // Stream-read with size cap (#144): ResponseHeadersRead gets headers first (fast Content-Length
-        // check), then stream the body with a hard cap to prevent OOM from huge/malicious files.
+        // check), then stream the body with a hard cap to prevent OOM. SSRF validation is at the
+        // handler level (SocketsHttpHandler.ConnectCallback in Program.cs) — no pre-resolve here.
         using var response = await http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, ct);
         response.EnsureSuccessStatusCode();
 

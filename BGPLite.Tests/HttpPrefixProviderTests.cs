@@ -9,10 +9,6 @@ namespace BGPLite.Tests;
 
 public class HttpPrefixProviderTests
 {
-    // Mock DNS resolver for SSRF validation (#144) — returns a public IP so tests don't hit real DNS.
-    private static readonly Func<string, CancellationToken, ValueTask<IPAddress[]>> MockDns =
-        (_, _) => ValueTask.FromResult<IPAddress[]>([IPAddress.Parse("93.184.216.34")]);
-
     private sealed class StubHandler : HttpMessageHandler
     {
         private readonly HttpStatusCode _status;
@@ -70,7 +66,7 @@ public class HttpPrefixProviderTests
     }
 
     private static HttpPrefixProvider Provider(StubHandler handler) =>
-        new(new StubFactory(handler), NullLogger<HttpPrefixProvider>.Instance, MockDns);
+        new(new StubFactory(handler), NullLogger<HttpPrefixProvider>.Instance);
 
     private static PrefixSourceConfig HttpSource(string url) =>
         new() { Name = "t", Kind = "http", Url = url };
@@ -100,7 +96,7 @@ public class HttpPrefixProviderTests
     public async Task AppliesPerSourceTimeout()
     {
         var factory = new StubFactory(new StubHandler(HttpStatusCode.OK, "1.2.3.0/24\n"));
-        var provider = new HttpPrefixProvider(factory, NullLogger<HttpPrefixProvider>.Instance, MockDns);
+        var provider = new HttpPrefixProvider(factory, NullLogger<HttpPrefixProvider>.Instance);
 
         await provider.LoadAsync(new PrefixSourceConfig { Name = "t", Kind = "http", Url = "https://example.com/x.txt", Timeout = 7 });
 
@@ -112,7 +108,7 @@ public class HttpPrefixProviderTests
     public async Task AppliesPerSourceHeaders()
     {
         var factory = new StubFactory(new StubHandler(HttpStatusCode.OK, "1.2.3.0/24\n"));
-        var provider = new HttpPrefixProvider(factory, NullLogger<HttpPrefixProvider>.Instance, MockDns);
+        var provider = new HttpPrefixProvider(factory, NullLogger<HttpPrefixProvider>.Instance);
 
         await provider.LoadAsync(new PrefixSourceConfig
         {
@@ -133,7 +129,7 @@ public class HttpPrefixProviderTests
         // CreateClient returns a fresh HttpClient per call, so per-source headers stay isolated
         // even when many sources are fetched concurrently through the singleton provider.
         var handler = new RecordingHandler();
-        var provider = new HttpPrefixProvider(new StubFactory(handler), NullLogger<HttpPrefixProvider>.Instance, MockDns);
+        var provider = new HttpPrefixProvider(new StubFactory(handler), NullLogger<HttpPrefixProvider>.Instance);
 
         var srcA = new PrefixSourceConfig { Name = "a", Kind = "http", Url = "https://a.example/x.txt", Headers = new() { ["Authorization"] = "Bearer AAA" } };
         var srcB = new PrefixSourceConfig { Name = "b", Kind = "http", Url = "https://b.example/x.txt", Headers = new() { ["Authorization"] = "Bearer BBB" } };
@@ -150,7 +146,7 @@ public class HttpPrefixProviderTests
     public async Task DefaultUserAgent_AppliedWhenNoOverride()
     {
         var handler = new RecordingHandler();
-        var provider = new HttpPrefixProvider(new StubFactory(handler, defaultUserAgent: "BGPLite/1.0"), NullLogger<HttpPrefixProvider>.Instance, MockDns);
+        var provider = new HttpPrefixProvider(new StubFactory(handler, defaultUserAgent: "BGPLite/1.0"), NullLogger<HttpPrefixProvider>.Instance);
 
         await provider.LoadAsync(new PrefixSourceConfig { Name = "t", Kind = "http", Url = "https://x.example/y.txt" });
 
@@ -161,7 +157,7 @@ public class HttpPrefixProviderTests
     public async Task PerSourceUserAgent_OverridesDefault()
     {
         var handler = new RecordingHandler();
-        var provider = new HttpPrefixProvider(new StubFactory(handler, defaultUserAgent: "BGPLite/1.0"), NullLogger<HttpPrefixProvider>.Instance, MockDns);
+        var provider = new HttpPrefixProvider(new StubFactory(handler, defaultUserAgent: "BGPLite/1.0"), NullLogger<HttpPrefixProvider>.Instance);
 
         await provider.LoadAsync(new PrefixSourceConfig
         {
