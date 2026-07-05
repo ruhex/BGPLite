@@ -45,7 +45,7 @@ public static class PrefixSourceUrlValidator
     /// then connects to the first valid one. No TOCTOU (the validated IP IS the connected IP).
     /// SocketsHttpHandler does NOT follow redirects (no 302-to-internal-IP bypass).
     /// </summary>
-    internal static async ValueTask<Stream> CreateValidatedConnectionAsync(
+    public static async ValueTask<Stream> CreateValidatedConnectionAsync(
         SocketsHttpConnectionContext context, CancellationToken ct)
     {
         var host = context.DnsEndPoint.Host;
