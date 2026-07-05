@@ -265,6 +265,19 @@ public sealed class ManagementApi : IHostedService, IDisposable
         if (segments.Length == 4 && segments[0] == "api" && segments[1] == "peers" && segments[3] == "prefixes" && method == "GET")
             return await HandleExportPrefixes(segments[2], ctx);
 
+        // /api/peers/{id}/sources — GET (list), POST (add) (#143)
+        if (segments.Length == 4 && segments[0] == "api" && segments[1] == "peers" && segments[3] == "sources")
+        {
+            if (method == "GET")
+                return HandleGetSources(segments[2]);
+            if (method == "POST")
+                return await HandleAddSource(segments[2], ctx);
+        }
+
+        // /api/peers/{id}/sources/{name} — DELETE (#143)
+        if (segments.Length == 5 && segments[0] == "api" && segments[1] == "peers" && segments[3] == "sources" && method == "DELETE")
+            return HandleDeleteSource(segments[2], segments[4]);
+
         // /api/asn-lists
         if (IsGet(method, segments, "api", "asn-lists"))
             return await HandleGetAsnListsAsync();
@@ -466,6 +479,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
         var subscriptions = _store.GetSubscriptions(peer.Id);
         var customPrefixes = _store.GetCustomPrefixes(peer.Id);
         var customAsns = _store.GetCustomAsns(peer.Id);
+        var customSources = _store.GetCustomSources(peer.Id);
         var communities = _store.GetCommunitiesByIp(peer.Ip);
 
         return ApiResponse.Ok(new
@@ -480,6 +494,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
             lists = subscriptions,
             customPrefixes,
             customAsns,
+            customSources = customSources.Select(s => new { name = s.Name, url = s.Url, community = s.Community }),
             communities = communities.Select(CommunityCodec.Format),
             allRoutes = communities.Count == 0
         });
@@ -546,6 +561,60 @@ public sealed class ManagementApi : IHostedService, IDisposable
         _store.DeletePeer(peerId);
         _logger.LogInformation("Deleted peer {Id} ({Ip})", SanitizeForLog(peerId), peer.Ip);
         return ApiResponse.Ok(new { id = peerId, deleted = true });
+    }
+
+    #endregion
+
+    #region /api/peers/{id}/sources (#143)
+
+    private ApiResponse HandleGetSources(string peerId)
+    {
+        if (_store.GetDbPeerById(peerId) is null)
+            return ApiResponse.Error("Peer not found", 404);
+
+        var sources = _store.GetCustomSources(peerId);
+        return ApiResponse.Ok(sources.Select(s => new { name = s.Name, url = s.Url, community = s.Community }));
+    }
+
+    private async Task<ApiResponse> HandleAddSource(string peerId, HttpListenerContext ctx)
+    {
+        if (_store.GetDbPeerById(peerId) is null)
+            return ApiResponse.Error("Peer not found", 404);
+
+        using var reader = new StreamReader(ctx.Request.InputStream, Encoding.UTF8);
+        var body = await reader.ReadToEndAsync();
+        var data = JsonSerializer.Deserialize<AddSourceRequest>(body, _jsonOpts);
+
+        if (data is null || string.IsNullOrWhiteSpace(data.Name) || string.IsNullOrWhiteSpace(data.Url))
+            return ApiResponse.Error("Name and Url are required", 400);
+
+        if (!Uri.TryCreate(data.Url, UriKind.Absolute, out var uri) || uri.Scheme is not ("http" or "https"))
+            return ApiResponse.Error($"Invalid URL: {data.Url}", 400);
+
+        try
+        {
+            _store.AddCustomSource(peerId, data.Name, data.Url, data.Community);
+        }
+        catch (InvalidOperationException)
+        {
+            return ApiResponse.Error($"A source named '{data.Name}' already exists", 409);
+        }
+
+        _logger.LogInformation("Added source '{Name}' ({Url}) to peer {PeerId}",
+            SanitizeForLog(data.Name), SanitizeForLog(data.Url), SanitizeForLog(peerId));
+        return ApiResponse.Ok(new { name = data.Name, url = data.Url, community = data.Community });
+    }
+
+    private ApiResponse HandleDeleteSource(string peerId, string name)
+    {
+        if (_store.GetDbPeerById(peerId) is null)
+            return ApiResponse.Error("Peer not found", 404);
+
+        if (!_store.DeleteCustomSource(peerId, name))
+            return ApiResponse.Error($"Source '{name}' not found", 404);
+
+        _logger.LogInformation("Deleted source '{Name}' from peer {PeerId}", SanitizeForLog(name), SanitizeForLog(peerId));
+        return ApiResponse.Ok(new { name, deleted = true });
     }
 
     #endregion
@@ -997,6 +1066,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
 
     private record CreatePeerRequest(string Ip, uint Asn, string? Description, [property: JsonPropertyName("lists")] List<string>? AsnLists, List<string>? CustomPrefixes, List<uint>? CustomAsns);
     private record UpdatePeerRequest(string? Description, [property: JsonPropertyName("lists")] List<string>? Lists, List<string>? CustomPrefixes, List<uint>? CustomAsns);
+    private record AddSourceRequest(string Name, string Url, string? Community);
 
     private record ApiResponse(object? Body, int StatusCode = 200)
     {

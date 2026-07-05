@@ -244,6 +244,45 @@ public sealed class PeerStore : IPeerStore
         db.SaveChanges();
     }
 
+    /// <summary>
+    /// Lists all user-supplied URL-based prefix-list sources for a peer (#143). Sources are stored as
+    /// URLs (not parsed); fetched at send time in SendAllRoutesAsync.
+    /// </summary>
+    public List<PeerCustomSource> GetCustomSources(string peerId)
+    {
+        using var db = _dbFactory.CreateDbContext();
+        return db.Set<PeerCustomSource>().AsNoTracking()
+            .Where(c => c.PeerId == peerId)
+            .ToList();
+    }
+
+    /// <summary>Adds a URL-based prefix-list source to a peer. Throws if the name already exists.</summary>
+    public void AddCustomSource(string peerId, string name, string url, string? community)
+    {
+        using var db = _dbFactory.CreateDbContext();
+        if (db.Set<PeerCustomSource>().Any(c => c.PeerId == peerId && c.Name == name))
+            throw new InvalidOperationException($"A source named '{name}' already exists for this peer.");
+
+        db.Set<PeerCustomSource>().Add(new PeerCustomSource
+        {
+            PeerId = peerId,
+            Name = name,
+            Url = url,
+            Community = community
+        });
+        db.SaveChanges();
+    }
+
+    /// <summary>Removes a URL-based source by name. Returns true if found and removed.</summary>
+    public bool DeleteCustomSource(string peerId, string name)
+    {
+        using var db = _dbFactory.CreateDbContext();
+        var deleted = db.Set<PeerCustomSource>()
+            .Where(c => c.PeerId == peerId && c.Name == name)
+            .ExecuteDelete();
+        return deleted > 0;
+    }
+
     private static PeerInfo MapToInfo(Peer peer) => new()
     {
         Id = peer.Id,

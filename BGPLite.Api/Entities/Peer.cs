@@ -14,4 +14,5 @@ public class Peer
     public List<PeerSubscription> Subscriptions { get; set; } = [];
     public List<PeerCustomPrefix> CustomPrefixes { get; set; } = [];
     public List<PeerCustomAsn> CustomAsns { get; set; } = [];
+    public List<PeerCustomSource> CustomSources { get; set; } = [];
 }

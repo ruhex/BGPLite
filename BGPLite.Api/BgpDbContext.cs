@@ -18,6 +18,13 @@ public class BgpDbContext : DbContext
             "PRIMARY KEY (PeerId, Asn), " +
             "FOREIGN KEY (PeerId) REFERENCES Peers(Id) ON DELETE CASCADE)");
 
+        db.Database.ExecuteSqlRaw(
+            "CREATE TABLE IF NOT EXISTS PeerCustomSources (" +
+            "PeerId TEXT NOT NULL, Name TEXT NOT NULL, " +
+            "Url TEXT NOT NULL, Community TEXT, " +
+            "PRIMARY KEY (PeerId, Name), " +
+            "FOREIGN KEY (PeerId) REFERENCES Peers(Id) ON DELETE CASCADE)");
+
         // Peer identity is (Ip, Asn), not Ip alone, so several peers behind one source IP (distinct
         // AS) can coexist as separate rows (issue #19). EnsureCreated does not evolve an existing
         // schema, so migrate the index idempotently: drop the legacy Ip-only unique index and create
@@ -69,6 +76,14 @@ public class BgpDbContext : DbContext
             e.ToTable("PeerCustomAsns");
             e.HasKey(c => new { c.PeerId, c.Asn });
             e.HasOne(c => c.Peer).WithMany(p => p.CustomAsns)
+                .HasForeignKey(c => c.PeerId).OnDelete(DeleteBehavior.Cascade);
+        });
+
+        model.Entity<PeerCustomSource>(e =>
+        {
+            e.ToTable("PeerCustomSources");
+            e.HasKey(c => new { c.PeerId, c.Name });
+            e.HasOne(c => c.Peer).WithMany(p => p.CustomSources)
                 .HasForeignKey(c => c.PeerId).OnDelete(DeleteBehavior.Cascade);
         });
     }
