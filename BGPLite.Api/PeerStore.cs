@@ -102,7 +102,7 @@ public sealed class PeerStore : IPeerStore
     /// Single-roundtrip replacement for the <c>GetPeer</c> + <c>UpdateSessionStatus</c> +
     /// <c>GetSubscriptions</c> + <c>GetCustomPrefixes</c> + <c>GetCustomAsns</c> sequence the BGP
     /// send path used to issue as FIVE separate <c>DbContext</c>s (issue #84). Loads the peer by
-    /// <c>(Ip, Asn)</c> with the three routing-relevant child collections <c>Include</c>'d in ONE
+    /// <c>(Ip, Asn)</c> with the four routing-relevant child collections <c>Include</c>'d in ONE
     /// <c>AsNoTracking</c> query (read-only intent, consistent with the other getters), then folds
     /// the "session active" status write into the SAME <c>DbContext</c> via <c>ExecuteUpdate</c> —
     /// so the whole read+update is one connection (six statements on five connections → two
@@ -115,6 +115,7 @@ public sealed class PeerStore : IPeerStore
             .Include(p => p.Subscriptions)
             .Include(p => p.CustomPrefixes)
             .Include(p => p.CustomAsns)
+            .Include(p => p.CustomSources)
             .FirstOrDefault(p => p.Ip == ip && p.Asn == asn);
         if (peer is null) return null;
 
@@ -129,7 +130,11 @@ public sealed class PeerStore : IPeerStore
             peer.Id,
             peer.Subscriptions.Select(s => s.AsnListName).ToList(),
             peer.CustomPrefixes.Select(c => c.Prefix + "/" + c.PrefixLength).ToList(),
-            peer.CustomAsns.Select(c => c.Asn).ToList());
+            peer.CustomAsns.Select(c => c.Asn).ToList(),
+            // Only Active user sources are advertised (issue #147); paused ones never leave the DB.
+            peer.CustomSources.Where(c => c.Active)
+                .Select(c => new CustomSourceView(c.Name, c.Url, c.Community))
+                .ToList());
     }
 
     public void SetDescription(string id, string description)

@@ -161,6 +161,42 @@ public class PeerStoreKeyingTests
     }
 
     [Fact]
+    public void LoadPeerRoutingView_UserSources_Only_Active_Loaded()
+    {
+        // Issue #147: paused (Active=false) sources never leave the DB — only Active ones are
+        // advertised. AddCustomSource defaults Active=false; SetSourceActive toggles.
+        var (store, connection) = NewStore();
+        using var conn = connection;
+
+        var id = store.CreatePeer(SharedIp, 64512, "sources peer");
+        var active = store.AddCustomSource(id, "on", "https://example.com/on.txt", null);
+        store.AddCustomSource(id, "off", "https://example.com/off.txt", "65000:9");
+        Assert.True(store.SetSourceActive(id, active.Id, true));
+
+        var view = store.LoadPeerRoutingView(SharedIp, 64512);
+        Assert.NotNull(view);
+        var src = Assert.Single(view!.UserSources);   // the inactive "off" source is excluded
+        Assert.Equal("on", src.Name);
+        Assert.Equal("https://example.com/on.txt", src.Url);
+        Assert.Null(src.Community);
+    }
+
+    [Fact]
+    public void LoadPeerRoutingView_UserSources_All_Inactive_Empty()
+    {
+        var (store, connection) = NewStore();
+        using var conn = connection;
+
+        var id = store.CreatePeer(SharedIp, 64512, "all-inactive");
+        store.AddCustomSource(id, "a", "https://example.com/a.txt", null);
+        store.AddCustomSource(id, "b", "https://example.com/b.txt", "65000:1");
+
+        var view = store.LoadPeerRoutingView(SharedIp, 64512);
+        Assert.NotNull(view);
+        Assert.Empty(view!.UserSources);
+    }
+
+    [Fact]
     public void CreatePeer_Is_Idempotent_On_IpAsn()
     {
         var (store, connection) = NewStore();

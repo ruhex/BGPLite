@@ -8,15 +8,36 @@ public sealed class PrefixService : IPrefixService
     private readonly RipeStatProvider? _ripeStat;
     private readonly IPrefixSourceService _prefixSources;
     private readonly AppConfig _config;
+    private readonly HttpPrefixProvider? _httpProvider;
     private readonly ConcurrentDictionary<uint, (IReadOnlyList<(uint Prefix, byte Length)> Data, DateTime CachedAt)> _cache = new();
     private readonly TimeSpan _cacheTtl;
 
-    public PrefixService(AppConfig config, RipeStatProvider? ripeStat, IPrefixSourceService prefixSources, TimeSpan? cacheTtl = null)
+    public PrefixService(AppConfig config, RipeStatProvider? ripeStat, IPrefixSourceService prefixSources, HttpPrefixProvider? httpProvider = null, TimeSpan? cacheTtl = null)
     {
         _config = config;
         _ripeStat = ripeStat;
         _prefixSources = prefixSources;
+        _httpProvider = httpProvider;
         _cacheTtl = cacheTtl ?? TimeSpan.FromHours(1);
+    }
+
+    /// <summary>
+    /// Fetches a per-peer user-supplied URL prefix-list source (issue #147). The URL is peer-supplied
+    /// (not in <c>AppConfig.PrefixSources</c>), so it bypasses the name-keyed cache and loads directly
+    /// through the http provider — inheriting SSRF defense (#144: validated <c>ConnectCallback</c>,
+    /// no redirect-following, 10 MB cap). Returns empty when no http provider is wired.
+    /// </summary>
+    public async Task<IReadOnlyList<(uint Prefix, byte Length)>> GetUserSourcePrefixesAsync(string name, string url, string? community, CancellationToken ct = default)
+    {
+        if (_httpProvider is null) return [];
+        var source = new PrefixSourceConfig
+        {
+            Kind = "http",
+            Name = name,
+            Url = url,
+            Community = community
+        };
+        return await _httpProvider.LoadAsync(source, ct);
     }
 
     public async Task<IReadOnlyList<(uint Prefix, byte Length)>> GetPrefixesAsync(uint asn, CancellationToken ct = default)

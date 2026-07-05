@@ -13,6 +13,16 @@ public enum CommunitySourceKind
     Custom,
     /// <summary>Per-peer custom AS-originated prefixes (static community <c>&lt;Asn&gt;:200</c>, overridable via config).</summary>
     CustomAsn,
+    /// <summary>
+    /// Per-peer user-supplied URL prefix-list source (epic #143 / issue #147). The community is the
+    /// source's explicit <c>Community</c> if set; otherwise it is auto-generated as
+    /// <c>&lt;LocalAsn&gt;:(500 + FNV-1a(Name) % 100)</c> — a deterministic value in the 500–599 range so
+    /// it survives restarts (receiving peers' filters stay stable). Sources sharing a <c>Name</c> share a
+    /// community by design (community tags a source CATEGORY, not a row); set <c>Community</c> explicitly
+    /// for distinct tags. With no explicit community and a 4-byte local ASN (&gt; 65535) the routes are
+    /// untagged, matching <see cref="Custom"/>/<see cref="CustomAsn"/>.
+    /// </summary>
+    UserSource,
     /// <summary>Fallback / default source when nothing else applies.</summary>
     Default
 }
@@ -21,9 +31,12 @@ public enum CommunitySourceKind
 /// Identifies where a prefix came from so a community can be resolved for it.
 /// <c>ListName</c> carries the list/source name for <see cref="CommunitySourceKind.AsnList"/>,
 /// <see cref="CommunitySourceKind.Country"/>, <see cref="CommunitySourceKind.PrefixSource"/>
-/// (and the default-source name for <see cref="CommunitySourceKind.Default"/>).
+/// (and the default-source name for <see cref="CommunitySourceKind.Default"/>), and the source name
+/// (the auto-generation hash seed) for <see cref="CommunitySourceKind.UserSource"/>.
+/// <c>Community</c> carries an explicit <c>"ASN:VALUE"</c> override for
+/// <see cref="CommunitySourceKind.UserSource"/> (null = auto-generate).
 /// </summary>
-public sealed record CommunitySource(CommunitySourceKind Kind, string? ListName = null);
+public sealed record CommunitySource(CommunitySourceKind Kind, string? ListName = null, string? Community = null);
 
 /// <summary>
 /// Resolves the BGP community/communities to attach to prefixes that came from a given source.

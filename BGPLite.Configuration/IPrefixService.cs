@@ -13,5 +13,13 @@ public interface IPrefixService
     Task<int> GetPrefixCountAsync(uint asn, CancellationToken ct = default);
     Task<List<(uint Prefix, byte Length, uint Asn)>> GetRuPrefixesAsync(CancellationToken ct = default);
     Task<IReadOnlyList<(uint Prefix, byte Length)>> GetSourcePrefixesAsync(string name, CancellationToken ct = default);
+    /// <summary>
+    /// Fetches a per-peer user-supplied URL prefix-list source (epic #143 / issue #147). Unlike
+    /// <see cref="GetSourcePrefixesAsync"/> (named, config-keyed, cache-through), this loads an
+    /// arbitrary URL directly via the http provider — the URL is peer-supplied, not in
+    /// <c>AppConfig.PrefixSources</c>, so it is not name-resolvable and not cached. SSRF defense
+    /// (#144) is inherited from the http named client's <c>ConnectCallback</c>.
+    /// </summary>
+    Task<IReadOnlyList<(uint Prefix, byte Length)>> GetUserSourcePrefixesAsync(string name, string url, string? community, CancellationToken ct = default);
     Task WarmUpAsync(CancellationToken ct = default);
 }

@@ -20,13 +20,13 @@ public interface IPeerStore
 
     /// <summary>
     /// Loads a peer by its durable identity <c>(Ip, Asn)</c> together with the routing-relevant
-    /// child data (<see cref="Subscriptions"/>, <see cref="CustomPrefixes"/>, <see cref="CustomAsns"/>)
-    /// in a SINGLE query, and folds the "session active" status update (Status="active",
-    /// LastSessionAt=now) into the SAME DbContext — so the BGP send path does one read+write
-    /// roundtrip instead of the five separate <c>GetPeer</c>/<c>UpdateSessionStatus</c>/
-    /// <c>GetSubscriptions</c>/<c>GetCustomPrefixes</c>/<c>GetCustomAsns</c> calls it used to make
-    /// (issue #84). Returns <c>null</c> when the peer is unknown (the caller then auto-registers).
-    /// The collection shapes match the standalone getters exactly (no behavior change).
+    /// child data (<see cref="PeerRoutingView.Subscriptions"/>, <see cref="PeerRoutingView.CustomPrefixes"/>,
+    /// <see cref="PeerRoutingView.CustomAsns"/>, <see cref="PeerRoutingView.UserSources"/>) in a SINGLE query,
+    /// and folds the "session active" status update (Status="active", LastSessionAt=now) into the SAME
+    /// DbContext — so the BGP send path does one read+write roundtrip instead of separate
+    /// <c>GetPeer</c>/<c>UpdateSessionStatus</c>/<c>GetSubscriptions</c>/<c>GetCustomPrefixes</c>/
+    /// <c>GetCustomAsns</c> calls (issue #84). Returns <c>null</c> when the peer is unknown (the caller
+    /// then auto-registers). The collection shapes match the standalone getters exactly (no behavior change).
     /// </summary>
     PeerRoutingView? LoadPeerRoutingView(string ip, uint asn);
 }
@@ -43,13 +43,22 @@ public class PeerInfo
 }
 
 /// <summary>
+/// A per-peer user-supplied URL prefix-list source (epic #143 / issue #147), projected from
+/// <c>PeerCustomSource</c>. Only <c>Active</c> sources appear here — paused sources never leave the DB.
+/// <c>Community</c> is the raw user-supplied <c>"ASN:VALUE"</c> override, or null for auto-generation.
+/// </summary>
+public sealed record CustomSourceView(string Name, string Url, string? Community);
+
+/// <summary>
 /// The slice of peer data the BGP send path consumes, loaded in one query for issue #84.
 /// Field shapes are identical to the standalone getters so the caller behavior is unchanged:
 /// <c>Subscriptions</c> = <c>GetSubscriptions</c>, <c>CustomPrefixes</c> = <c>"prefix/length"</c>
-/// strings like <c>GetCustomPrefixes</c>, <c>CustomAsns</c> = <c>GetCustomAsns</c>.
+/// strings like <c>GetCustomPrefixes</c>, <c>CustomAsns</c> = <c>GetCustomAsns</c>. <c>UserSources</c>
+/// (issue #147) holds only the peer's active URL sources, fetched and advertised per-peer.
 /// </summary>
 public sealed record PeerRoutingView(
     string PeerId,
     List<string> Subscriptions,
     List<string> CustomPrefixes,
-    List<uint> CustomAsns);
+    List<uint> CustomAsns,
+    List<CustomSourceView> UserSources);

@@ -1,3 +1,4 @@
+using System.Text;
 using BGPLite.Configuration;
 using BGPLite.Protocol;
 using BGPLite.Routing;
@@ -23,11 +24,14 @@ public sealed class ConfigCommunityResolver : ICommunityResolver
     // Static communities for the per-peer custom categories, resolved once in the ctor.
     private readonly uint[] _customPrefixComms;
     private readonly uint[] _customAsnComms;
+    // Local ASN, captured for UserSource auto-generation (<Asn>:5XX).
+    private readonly uint _asn;
 
     public ConfigCommunityResolver(AppConfig config, BgpConfig bgpConfig, ILogger<ConfigCommunityResolver>? logger = null)
     {
         _config = config;
         _logger = logger;
+        _asn = bgpConfig.Asn;
         _customPrefixComms = ResolveStaticCommunity(config.CustomPrefixCommunity, bgpConfig.Asn, 100, nameof(config.CustomPrefixCommunity));
         _customAsnComms = ResolveStaticCommunity(config.CustomAsnCommunity, bgpConfig.Asn, 200, nameof(config.CustomAsnCommunity));
     }
@@ -39,10 +43,35 @@ public sealed class ConfigCommunityResolver : ICommunityResolver
         CommunitySourceKind.PrefixSource => ParseOrDefault(FindPrefixSourceCommunity(source.ListName ?? _config.DefaultPrefixSource)),
         CommunitySourceKind.Custom => _customPrefixComms,
         CommunitySourceKind.CustomAsn => _customAsnComms,
+        // User-supplied URL source (#143/#147): explicit Community overrides; otherwise auto-gen from
+        // the reserved 500-599 range via a deterministic FNV-1a hash of the source name (stable across
+        // restarts). Reuses ResolveStaticCommunity so an invalid explicit value falls back to the
+        // auto-gen default and asn>0xFFFF yields Empty — identical semantics to Custom/CustomAsn.
+        CommunitySourceKind.UserSource => ResolveStaticCommunity(
+            source.Community, _asn, 500 + (int)(StableHash(source.ListName ?? "") % 100), "user-source community"),
         _ => Empty, // Default
     };
 
     private uint[] ParseOrDefault(string? raw) => string.IsNullOrWhiteSpace(raw) ? Empty : ParseCached(raw!);
+
+    /// <summary>
+    /// Deterministic 32-bit FNV-1a hash over the UTF-8 bytes of <paramref name="s"/>. Required because
+    /// <see cref="string.GetHashCode()"/> is randomized per-process, which would make auto-generated
+    /// user-source communities drift across restarts and silently break receiving peers' filters.
+    /// </summary>
+    private static uint StableHash(string s)
+    {
+        unchecked
+        {
+            uint hash = 2166136261u;
+            foreach (var b in Encoding.UTF8.GetBytes(s))
+            {
+                hash ^= b;
+                hash *= 16777619u;
+            }
+            return hash;
+        }
+    }
 
     private string? FindAsnListCommunity(string? name) =>
         name is null ? null : _config.RipeStat?.AsnLists.FirstOrDefault(l => l.Name == name)?.Community;

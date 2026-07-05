@@ -157,4 +157,78 @@ public class CommunityResolverTests
         var r = new ConfigCommunityResolver(new AppConfig(), new BgpConfig { Asn = 200000 }, null);
         Assert.Empty(r.Resolve(new CommunitySource(CommunitySourceKind.Custom)));
     }
+
+    // --- UserSource (#143 / #147) — auto-gen from a reserved 5XX range, override via Community ---
+
+    [Fact]
+    public void Resolve_UserSource_ExplicitCommunity_Wins()
+    {
+        var r = new ConfigCommunityResolver(new AppConfig(), new BgpConfig { Asn = 65444 }, null);
+        Assert.Equal([CommunityCodec.Parse("65000:42")],
+            r.Resolve(new CommunitySource(CommunitySourceKind.UserSource, "my-list", "65000:42")));
+    }
+
+    [Fact]
+    public void Resolve_UserSource_ExplicitInvalid_FallsBackToAutoGen()
+    {
+        // Mirrors Custom/CustomAsn: an invalid explicit override logs and uses the auto-gen default
+        // (NOT empty) so a typo doesn't silently untag the source's prefixes.
+        var r = new ConfigCommunityResolver(new AppConfig(), new BgpConfig { Asn = 65444 }, null);
+        var auto = r.Resolve(new CommunitySource(CommunitySourceKind.UserSource, "my-list"));
+        var fallback = r.Resolve(new CommunitySource(CommunitySourceKind.UserSource, "my-list", "not-a-community"));
+        Assert.Equal(auto, fallback);
+        Assert.NotEmpty(fallback);
+    }
+
+    [Fact]
+    public void Resolve_UserSource_AutoGen_DeterministicAcrossInstances()
+    {
+        // Auto-gen must be stable across resolver instances (and thus across restarts) —
+        // string.GetHashCode() is randomized per-process and would fail this on the next launch.
+        var r1 = new ConfigCommunityResolver(new AppConfig(), new BgpConfig { Asn = 65444 }, null);
+        var r2 = new ConfigCommunityResolver(new AppConfig(), new BgpConfig { Asn = 65444 }, null);
+        Assert.Equal(
+            r1.Resolve(new CommunitySource(CommunitySourceKind.UserSource, "list-a")),
+            r2.Resolve(new CommunitySource(CommunitySourceKind.UserSource, "list-a")));
+    }
+
+    [Fact]
+    public void Resolve_UserSource_AutoGen_KnownExpected()
+    {
+        // Locks the formula: <LocalAsn>:(500 + Fnv1a(Name) % 100), value range 500-599. Inlining
+        // FNV-1a means any future accidental switch to string.GetHashCode() fails this test.
+        static uint Fnv1a(string s)
+        {
+            unchecked
+            {
+                uint hash = 2166136261u;
+                foreach (var b in System.Text.Encoding.UTF8.GetBytes(s))
+                {
+                    hash ^= b;
+                    hash *= 16777619u;
+                }
+                return hash;
+            }
+        }
+        var expected = (65444u << 16) | (500u + Fnv1a("my-list") % 100);
+        var r = new ConfigCommunityResolver(new AppConfig(), new BgpConfig { Asn = 65444 }, null);
+        Assert.Equal([expected], r.Resolve(new CommunitySource(CommunitySourceKind.UserSource, "my-list")));
+    }
+
+    [Fact]
+    public void Resolve_UserSource_FourByteAsn_AutoGen_Empty()
+    {
+        var r = new ConfigCommunityResolver(new AppConfig(), new BgpConfig { Asn = 200000 }, null);
+        Assert.Empty(r.Resolve(new CommunitySource(CommunitySourceKind.UserSource, "list-a")));
+    }
+
+    [Fact]
+    public void Resolve_UserSource_FourByteAsn_ExplicitCommunity_StillResolves()
+    {
+        // An explicit community parses even with a 4-byte local ASN — the asn>0xFFFF guard only
+        // blocks auto-generation, mirroring Custom/CustomAsn override behavior.
+        var r = new ConfigCommunityResolver(new AppConfig(), new BgpConfig { Asn = 200000 }, null);
+        Assert.Equal([CommunityCodec.Parse("65000:42")],
+            r.Resolve(new CommunitySource(CommunitySourceKind.UserSource, "list-a", "65000:42")));
+    }
 }

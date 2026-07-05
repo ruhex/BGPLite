@@ -122,7 +122,7 @@ builder.Services.AddSingleton<IPrefixService>(sp =>
 {
     var ripe = sp.GetRequiredService<RipeStatProvider>();
     var sources = sp.GetRequiredService<IPrefixSourceService>();
-    return new PrefixService(config, ripe, sources);
+    return new PrefixService(config, ripe, sources, sp.GetRequiredService<HttpPrefixProvider>());
 });
 
 BgpServer? bgpServer = null;

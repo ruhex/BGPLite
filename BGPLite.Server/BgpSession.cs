@@ -588,8 +588,10 @@ public sealed class BgpSession : IDisposable
                 var customPrefixes = peer.CustomPrefixes;
                 var customAsns = peer.CustomAsns;
 
-                // Unconfigured peer — send RU defaults
-                if (subscriptionIds.Count == 0 && customPrefixes.Count == 0 && customAsns.Count == 0)
+                // Unconfigured peer — send RU defaults. A peer whose only configuration is active
+                // user URL sources (issue #147) is NOT unconfigured — it must not fall through to RU.
+                if (subscriptionIds.Count == 0 && customPrefixes.Count == 0 && customAsns.Count == 0
+                    && peer.UserSources.Count == 0)
                 {
                     _logger.LogInformation("Unconfigured peer {Peer}, sending RU defaults", _peer);
                     try
@@ -725,6 +727,16 @@ public sealed class BgpSession : IDisposable
                     {
                         _logger.LogError(ex, "Failed to fetch custom AS prefixes for {Peer}", _peer);
                     }
+                }
+
+                // Per-peer user URL sources (#143/#147): each Active source is fetched through the
+                // prefix service (http provider → SSRF defense #144) and stamped with its resolved
+                // UserSource community. One failing URL does not drop the peer's other sources
+                // (per-source try/catch, like the CustomAsns block above); OCE propagates (#114).
+                foreach (var source in peer.UserSources)
+                {
+                    await AddUserSourceRoutesAsync(
+                        routes, source, nextHop, _prefixService!, _communityResolver, _logger, _peer, _cts.Token);
                 }
 
                 _logger.LogInformation("Sending {Count} total routes to {Peer}", routes.Count, _peer);
@@ -1036,6 +1048,41 @@ public sealed class BgpSession : IDisposable
         routes.GroupBy(r => (r.Communities, r.LargeCommunities), CommunitySetPairComparer.Instance)
               .Select(g => g.ToList())
               .ToList();
+
+    /// <summary>
+    /// Fetches one per-peer user URL source (issue #147) and appends its prefixes to
+    /// <paramref name="routes"/>, stamped with the resolved <see cref="CommunitySourceKind.UserSource"/>
+    /// community. Fetched through <paramref name="prefixService"/> (http provider → SSRF defense #144).
+    /// One failing URL only logs and continues — it must not drop the peer's other sources (per-source
+    /// try/catch, like the CustomAsns block); <see cref="OperationCanceledException"/> is NOT caught
+    /// (session cancellation must propagate, #114). Internal so the per-source fetch-and-stamp is
+    /// unit-testable without a live session.
+    /// </summary>
+    internal static async Task AddUserSourceRoutesAsync(
+        List<Route> routes,
+        CustomSourceView source,
+        uint nextHop,
+        IPrefixService prefixService,
+        ICommunityResolver communityResolver,
+        ILogger logger,
+        string peerLabel,
+        CancellationToken ct)
+    {
+        try
+        {
+            var comms = communityResolver.Resolve(
+                new CommunitySource(CommunitySourceKind.UserSource, source.Name, source.Community));
+            var prefixes = await prefixService.GetUserSourcePrefixesAsync(source.Name, source.Url, source.Community, ct);
+            foreach (var (prefix, length) in prefixes)
+                routes.Add(MakeRoute(prefix, length, nextHop, null, comms));
+            logger.LogInformation("Peer {Peer} user-source {Source} -> {Count} prefixes",
+                peerLabel, source.Name, prefixes.Count);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogError(ex, "Failed to fetch user-source {Source} for {Peer}", source.Name, peerLabel);
+        }
+    }
 
     /// <summary>
     /// Builds a <see cref="Route"/> carrying the given regular and large community sets.
