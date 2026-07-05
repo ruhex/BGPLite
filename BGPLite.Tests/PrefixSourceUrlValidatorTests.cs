@@ -17,6 +17,10 @@ public class PrefixSourceUrlValidatorTests
     [InlineData("169.254.169.254")]  // cloud metadata
     [InlineData("0.0.0.0")]          // unspecified
     [InlineData("::1")]              // IPv6 loopback
+    [InlineData("100.64.0.1")]      // CGNAT (RFC 6598)
+    [InlineData("198.18.0.1")]      // benchmarking
+    [InlineData("224.0.0.1")]       // multicast
+    [InlineData("240.0.0.1")]       // reserved
     [InlineData("fc00::1")]          // IPv6 unique-local
     [InlineData("fe80::1")]          // IPv6 link-local
     public void IsBlockedAddress_Rejects_Internal(string ip)

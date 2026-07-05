@@ -81,6 +81,10 @@ builder.Services.AddHttpClient(HttpPrefixProvider.ClientName, c =>
 {
     c.Timeout = TimeSpan.FromSeconds(30);
     c.DefaultRequestHeaders.UserAgent.ParseAdd("BGPLite/1.0");
+})
+.ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler
+{
+    AllowAutoRedirect = false // SSRF defense (#144): prevent redirect-based bypass of URL validation
 });
 builder.Services.AddSingleton<HttpPrefixProvider>();
 builder.Services.AddSingleton<FilePrefixProvider>();

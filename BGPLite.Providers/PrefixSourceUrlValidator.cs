@@ -10,16 +10,20 @@ internal static class PrefixSourceUrlValidator
 {
     private static readonly IPNetwork[] BlockedRanges =
     [
-        IPNetwork.Parse("127.0.0.0/8"),        // loopback
+        IPNetwork.Parse("0.0.0.0/8"),           // unspecified / current-network
         IPNetwork.Parse("10.0.0.0/8"),          // private (RFC 1918)
+        IPNetwork.Parse("100.64.0.0/10"),       // CGNAT (RFC 6598)
+        IPNetwork.Parse("127.0.0.0/8"),         // loopback
+        IPNetwork.Parse("169.254.0.0/16"),      // link-local (incl. cloud metadata 169.254.169.254)
         IPNetwork.Parse("172.16.0.0/12"),       // private (RFC 1918, incl. Docker bridge 172.17.x.x)
         IPNetwork.Parse("192.168.0.0/16"),      // private (RFC 1918)
-        IPNetwork.Parse("169.254.0.0/16"),      // link-local (incl. cloud metadata 169.254.169.254)
-        IPNetwork.Parse("0.0.0.0/8"),           // unspecified / current-network
+        IPNetwork.Parse("198.18.0.0/15"),       // benchmarking (RFC 2544)
+        IPNetwork.Parse("224.0.0.0/4"),         // multicast
+        IPNetwork.Parse("240.0.0.0/4"),         // reserved (future use)
         IPNetwork.Parse("::1/128"),             // IPv6 loopback
+        IPNetwork.Parse("::/128"),              // IPv6 unspecified
         IPNetwork.Parse("fc00::/7"),            // IPv6 unique-local
         IPNetwork.Parse("fe80::/10"),           // IPv6 link-local
-        IPNetwork.Parse("::/128"),              // IPv6 unspecified
     ];
 
     /// <summary>True if the address falls in a blocked (non-public) range.</summary>
@@ -55,7 +59,7 @@ internal static class PrefixSourceUrlValidator
         {
             addresses = await resolver(host, ct);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return (false, $"DNS resolution failed for '{host}': {ex.Message}");
         }
