@@ -19,20 +19,46 @@ public sealed class ExactUnionPrefixAggregator : IPrefixAggregator
 {
     public IReadOnlyList<Route> Aggregate(IEnumerable<Route> routes)
     {
+        // #82: avoid the defensive ToList when the caller already owns a List<Route>.
+        // The sole caller (RouteAssembler → SendRoutesAsync) passes a List<Route>, so the
+        // `as List<Route>` fast path fires and the ToList allocation is skipped entirely.
         var source = routes as List<Route> ?? routes.ToList();
         if (source.Count == 0)
             return source;
 
         var result = new List<Route>(source.Count);
 
+        // #82: manual single-pass partition instead of LINQ GroupBy. GroupBy allocates a
+        // Lookup + per-group Lists; a Dictionary<AttributeKey, List<Route>> partitions in one
+        // pass with the same semantics and less intermediate allocation. The groups preserve
+        // encounter order (Dictionary maintains insertion order in .NET), matching GroupBy's
+        // documented behavior for same-key elements.
+        var groups = new Dictionary<AttributeKey, List<Route>>(source.Count);
+        foreach (var route in source)
+        {
+            var key = AttributeKey.From(route);
+            if (!groups.TryGetValue(key, out var group))
+            {
+                group = new List<Route>();
+                groups[key] = group;
+            }
+            group.Add(route);
+        }
+
         // Group by the attributes that survive to the wire. The outgoing path rewrites
         // AS_PATH (to the local ASN) and NEXT_HOP, so only Communities/LargeCommunities
         // distinguish otherwise-mergeable prefixes; prefixes carrying different communities
         // stay in separate groups so community information is never mixed during merging.
-        foreach (var group in source.GroupBy(AttributeKey.From))
+        foreach (var (key, group) in groups)
         {
-            var template = group.First();
-            foreach (var (prefix, length) in AggregatePrefixes(group.Select(r => (r.Prefix, r.PrefixLength))))
+            var template = group[0];
+            // #82: AggregatePrefixes takes the prefix tuples directly from the group list,
+            // avoiding the Select(r => (r.Prefix, r.PrefixLength)) LINQ allocation.
+            var prefixPairs = new List<(uint Prefix, byte Length)>(group.Count);
+            foreach (var r in group)
+                prefixPairs.Add((r.Prefix, r.PrefixLength));
+
+            foreach (var (prefix, length) in AggregatePrefixes(prefixPairs))
             {
                 result.Add(new Route
                 {
