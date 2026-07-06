@@ -6,6 +6,13 @@ using Microsoft.Extensions.Logging.Abstractions;
 
 namespace BGPLite.Tests;
 
+/// <summary>
+/// Tests for <see cref="RipeStatProvider"/>. Since #104, retry/circuit-breaker is handled by the
+/// Polly resilience handler on the named client (configured in Program.cs), NOT by the provider —
+/// so these tests cover the provider's single-attempt behavior: parsing, error propagation, and
+/// cancellation. The resilience pipeline itself is integration-tested by the live named-client
+/// registration; HttpPrefixProviderTests analogously exercises the http client without the pipeline.
+/// </summary>
 public class RipeStatProviderTests
 {
     private const string TwoPrefixBody =
@@ -13,35 +20,22 @@ public class RipeStatProviderTests
         {"status":"ok","data":{"resource":"65001","prefixes":{"v4":{"originating":["10.0.0.0/24","192.168.0.0/16"]},"v6":{"originating":[]}}}}
         """;
 
-    /// <summary>Returns a scripted sequence of responses: each step is either an
-    /// <see cref="HttpStatusCode"/> (as a 200/5xx body) or an <see cref="Exception"/> to throw.
-    /// The last step repeats if there are more calls than steps.</summary>
-    private sealed class ScriptedHandler : HttpMessageHandler
+    private sealed class StubHandler : HttpMessageHandler
     {
-        private readonly object[] _steps;
-        private int _index;
+        private readonly HttpStatusCode _status;
+        private readonly string _body;
         public int Calls { get; private set; }
 
-        public ScriptedHandler(params object[] steps) => _steps = steps;
+        public StubHandler(HttpStatusCode status, string body)
+        {
+            _status = status;
+            _body = body;
+        }
 
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
         {
             Calls++;
-            var i = Math.Min(_index, _steps.Length - 1);
-            _index++;
-            var step = _steps[i];
-            return step switch
-            {
-                HttpStatusCode code => Task.FromResult(new HttpResponseMessage(code)
-                {
-                    Content = new StringContent(TwoPrefixBody)
-                }),
-                Exception ex => Task.FromException<HttpResponseMessage>(ex),
-                _ => Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
-                {
-                    Content = new StringContent(TwoPrefixBody)
-                })
-            };
+            return Task.FromResult(new HttpResponseMessage(_status) { Content = new StringContent(_body) });
         }
     }
 
@@ -52,15 +46,13 @@ public class RipeStatProviderTests
         public HttpClient CreateClient(string name) => new(_handler, disposeHandler: false);
     }
 
-    private static RipeStatProvider Provider(ScriptedHandler handler, int retries = 2) =>
-        new(new StubFactory(handler),
-            NullLogger<RipeStatProvider>.Instance,
-            new RipeStatConfig { RetryAttempts = retries, RetryDelaySeconds = 0 });
+    private static RipeStatProvider Provider(HttpMessageHandler handler) =>
+        new(new StubFactory(handler), NullLogger<RipeStatProvider>.Instance, new RipeStatConfig());
 
     [Fact]
     public async Task ParsesPrefixes()
     {
-        var handler = new ScriptedHandler(HttpStatusCode.OK);
+        var handler = new StubHandler(HttpStatusCode.OK, TwoPrefixBody);
         var result = await Provider(handler).GetPrefixesAsync(65001);
 
         Assert.Equal(2, result.Count);
@@ -68,85 +60,73 @@ public class RipeStatProviderTests
     }
 
     [Fact]
-    public async Task RetriesOnTransient5xx_ThenSucceeds()
+    public async Task PropagatesTransient5xx_AsHttpRequestException()
     {
-        var handler = new ScriptedHandler(
-            HttpStatusCode.InternalServerError, HttpStatusCode.BadGateway, HttpStatusCode.OK);
+        // #104: with retry moved to the Polly pipeline on the named client, the provider performs a
+        // single attempt and propagates the transient failure. The resilience pipeline (Program.cs)
+        // is what retries — these unit tests cover the provider without the pipeline.
+        var handler = new StubHandler(HttpStatusCode.ServiceUnavailable, "");
 
-        var result = await Provider(handler, retries: 2).GetPrefixesAsync(65001);
-
-        Assert.Equal(2, result.Count);
-        Assert.Equal(3, handler.Calls); // 1 initial + 2 retries
+        await Assert.ThrowsAsync<HttpRequestException>(() => Provider(handler).GetPrefixesAsync(65001));
+        Assert.Equal(1, handler.Calls); // single attempt — no in-provider retry
     }
 
     [Fact]
-    public async Task RetriesOn429_ThenSucceeds()
+    public async Task PropagatesNonTransientStatus_AsHttpRequestException()
     {
-        var handler = new ScriptedHandler((HttpStatusCode)429, HttpStatusCode.OK);
+        var handler = new StubHandler(HttpStatusCode.NotFound, "");
 
-        var result = await Provider(handler, retries: 2).GetPrefixesAsync(65001);
-
-        Assert.Equal(2, result.Count);
-        Assert.Equal(2, handler.Calls);
-    }
-
-    [Fact]
-    public async Task RetriesOnTimeout_ThenSucceeds()
-    {
-        // A client timeout surfaces as TaskCanceledException (a subclass of
-        // OperationCanceledException). It must be retried when the caller didn't cancel.
-        var handler = new ScriptedHandler(new TaskCanceledException(), HttpStatusCode.OK);
-
-        var result = await Provider(handler, retries: 1).GetPrefixesAsync(65001);
-
-        Assert.Equal(2, result.Count);
-        Assert.Equal(2, handler.Calls);
-    }
-
-    [Fact]
-    public async Task ThrowsAfterExhaustingRetries()
-    {
-        var handler = new ScriptedHandler(HttpStatusCode.ServiceUnavailable); // repeats
-
-        await Assert.ThrowsAsync<HttpRequestException>(
-            () => Provider(handler, retries: 2).GetPrefixesAsync(65001));
-
-        Assert.Equal(3, handler.Calls); // 1 initial + 2 retries, then gives up
-    }
-
-    [Fact]
-    public async Task DoesNotRetry_WhenRetryAttemptsZero()
-    {
-        var handler = new ScriptedHandler(HttpStatusCode.InternalServerError, HttpStatusCode.OK);
-
-        await Assert.ThrowsAsync<HttpRequestException>(
-            () => Provider(handler, retries: 0).GetPrefixesAsync(65001));
-
+        await Assert.ThrowsAsync<HttpRequestException>(() => Provider(handler).GetPrefixesAsync(65001));
         Assert.Equal(1, handler.Calls);
     }
 
     [Fact]
-    public async Task DoesNotRetry_NonTransientStatus()
+    public async Task PropagatesCallerCancellation()
     {
-        // 404 is a client error — not transient, so it must not be retried.
-        var handler = new ScriptedHandler(HttpStatusCode.NotFound, HttpStatusCode.OK);
-
-        await Assert.ThrowsAsync<HttpRequestException>(
-            () => Provider(handler, retries: 2).GetPrefixesAsync(65001));
-
-        Assert.Equal(1, handler.Calls);
-    }
-
-    [Fact]
-    public async Task PropagatesCallerCancellation_WithoutCalling()
-    {
-        var handler = new ScriptedHandler(HttpStatusCode.OK);
+        // A handler that honors the CancellationToken (as HttpClient's real handler does) — throws
+        // OCE when the caller already cancelled. The provider propagates it (does not swallow).
+        var handler = new CancelAwareHandler();
         using var cts = new CancellationTokenSource();
         cts.Cancel();
 
-        await Assert.ThrowsAsync<OperationCanceledException>(
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
             () => Provider(handler).GetPrefixesAsync(65001, cts.Token));
+    }
 
-        Assert.Equal(0, handler.Calls); // bails before the first HTTP call
+    [Fact]
+    public async Task GetPrefixesAsync_BuildsCorrectUrl_ForAsn()
+    {
+        // Pin the URL shape so a future refactor that changes the endpoint is caught.
+        string? capturedUrl = null;
+        var handler = new InterceptingHandler(TwoPrefixBody, url => capturedUrl = url);
+        var provider = new RipeStatProvider(
+            new StubFactory(handler), NullLogger<RipeStatProvider>.Instance, new RipeStatConfig());
+
+        await provider.GetPrefixesAsync(64512);
+
+        Assert.NotNull(capturedUrl);
+        Assert.Contains("resource=AS64512", capturedUrl);
+    }
+
+    private sealed class InterceptingHandler : HttpMessageHandler
+    {
+        private readonly string _body;
+        private readonly Action<string?> _onUrl;
+        public InterceptingHandler(string body, Action<string?> onUrl) { _body = body; _onUrl = onUrl; }
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
+        {
+            _onUrl(request.RequestUri?.ToString());
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(_body) });
+        }
+    }
+
+    /// <summary>A handler that honors the CancellationToken like HttpClient's real handler does.</summary>
+    private sealed class CancelAwareHandler : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
+        {
+            ct.ThrowIfCancellationRequested();
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK));
+        }
     }
 }

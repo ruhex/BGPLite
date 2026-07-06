@@ -9,7 +9,9 @@ using BGPLite.Server;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Http.Resilience;
 using Microsoft.Extensions.Logging;
+using Polly;
 
 var builder = Host.CreateApplicationBuilder(args);
 
@@ -87,7 +89,11 @@ builder.Services.AddHttpClient(HttpPrefixProvider.ClientName, c =>
     // SSRF defense (#144): validate DNS resolution at the socket level — no TOCTOU race, no
     // redirect bypass (SocketsHttpHandler does not follow redirects, unlike HttpClientHandler).
     ConnectCallback = PrefixSourceUrlValidator.CreateValidatedConnectionAsync
-});
+})
+// #107: resilience handler — retry transient HTTP failures (429/5xx/timeouts/network errors)
+// with exponential backoff + jitter, plus a circuit breaker. A transient blip on a prefix-source
+// fetch previously returned 0 prefixes for that source until the next refresh; now it is retried.
+.AddResilienceHandler("http-prefix-source", ConfigureDefaultHttpResilience);
 builder.Services.AddSingleton<HttpPrefixProvider>();
 builder.Services.AddSingleton<FilePrefixProvider>();
 builder.Services.AddSingleton<IPrefixSourceProvider>(sp => sp.GetRequiredService<HttpPrefixProvider>());
@@ -100,14 +106,17 @@ builder.Services.AddSingleton<IPrefixSourceService>(sp => sp.GetRequiredService<
 // API lookups) can be resolved on demand, regardless of preconfigured RipeStat.AsnLists.
 // The ris-prefixes endpoint can take minutes to respond for large origin ASes (e.g. AS3356 /
 // Lumen), so the timeout is configurable and defaults to a generous value. Fall back to the
-// built-in defaults when the RipeStat section is absent — the provider still serves ad-hoc
-// lookups, and its retry handles transient failures (timeouts, 429/5xx).
+// built-in defaults when the RipeStat section is absent.
+// #104: resilience is now provided by Microsoft.Extensions.Http.Resilience (Polly v8) on the named
+// client — the provider's hand-rolled retry loop + IsTransient classification were removed. The
+// HttpRetryStrategyOptions.ShouldHandle defaults cover 429/5xx/timeouts/network failures.
 var ripeStatConfig = config.RipeStat ?? new RipeStatConfig();
 builder.Services.AddHttpClient(RipeStatProvider.ClientName, c =>
 {
     c.Timeout = TimeSpan.FromSeconds(ripeStatConfig.TimeoutSeconds);
     c.DefaultRequestHeaders.UserAgent.ParseAdd("BGPLite/1.0");
-});
+})
+.AddResilienceHandler("ripestat", pipelineBuilder => ConfigureRipeStatResilience(pipelineBuilder, ripeStatConfig));
 builder.Services.AddSingleton(sp => new RipeStatProvider(
     sp.GetRequiredService<IHttpClientFactory>(),
     sp.GetRequiredService<ILogger<RipeStatProvider>>(),
@@ -228,6 +237,51 @@ foreach (var (source, prefixes) in await sourceSvc.LoadAllAsync())
 }
 
 logger.LogInformation("Loaded routes: {RouteCount}", routeTable.Count);
+
+// #104 / #107: resilience pipelines for the http and ripestat named clients. Uses
+// Microsoft.Extensions.Http.Resilience (Polly v8 integrated) — the .NET 8+ standard — instead of
+// hand-rolled retry loops. The HttpRetryStrategyOptions.ShouldHandle defaults cover 429/5xx/timeouts
+// and network failures, so no bespoke IsTransient classification is needed.
+void ConfigureDefaultHttpResilience(ResiliencePipelineBuilder<HttpResponseMessage> pipelineBuilder) =>
+    pipelineBuilder
+        .AddRetry(new HttpRetryStrategyOptions
+        {
+            // Sensible defaults for a CIDR-list fetch: 3 attempts, exponential backoff with jitter
+            // (the options' default BackoffType is Exponential, jitter is built-in), max 2s delay.
+            MaxRetryAttempts = 2,
+            Delay = TimeSpan.FromMilliseconds(500),
+            MaxDelay = TimeSpan.FromSeconds(2),
+        })
+        .AddCircuitBreaker(new HttpCircuitBreakerStrategyOptions
+        {
+            // Open after 10 consecutive failures, stay open 30s — stops a flapping source from
+            // generating a retry storm. The next caller after the break gets a BrokenCircuitException
+            // (caught upstream by PrefixSourceService's stale-on-failure / negative cache).
+            SamplingDuration = TimeSpan.FromSeconds(10),
+            FailureRatio = 0.5,
+            MinimumThroughput = 10,
+            BreakDuration = TimeSpan.FromSeconds(30),
+        })
+        .AddTimeout(TimeSpan.FromSeconds(5));
+
+void ConfigureRipeStatResilience(ResiliencePipelineBuilder<HttpResponseMessage> pipelineBuilder, RipeStatConfig cfg) =>
+    pipelineBuilder
+        .AddRetry(new HttpRetryStrategyOptions
+        {
+            // RIPEstat's ris-prefixes endpoint is slow + rate-limited — map the operator config to
+            // the Polly retry options. Backoff base matches the prior hand-rolled loop, with jitter.
+            MaxRetryAttempts = Math.Max(0, cfg.RetryAttempts),
+            Delay = TimeSpan.FromSeconds(Math.Max(0, cfg.RetryDelaySeconds)),
+            MaxDelay = TimeSpan.FromSeconds(60),
+            UseJitter = true,
+        })
+        .AddCircuitBreaker(new HttpCircuitBreakerStrategyOptions
+        {
+            SamplingDuration = TimeSpan.FromSeconds(30),
+            FailureRatio = 0.5,
+            MinimumThroughput = 8,
+            BreakDuration = TimeSpan.FromSeconds(30),
+        });
 
 await host.RunAsync();
 return;
