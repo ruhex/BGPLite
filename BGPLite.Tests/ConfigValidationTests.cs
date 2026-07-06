@@ -110,6 +110,30 @@ public class ConfigValidationTests
         Assert.Contains("MaxRequestBodyBytes", ex.Message);
     }
 
+    // --- #90: ApiListen — secure-by-default loopback bind ---
+
+    [Fact]
+    public void ApiListen_DefaultsToNull_Loopback()
+    {
+        // Default (unset) → null → ManagementApi binds to 127.0.0.1 (secure-by-default).
+        var config = new AppConfig { Bgp = Bgp() };
+        Assert.Null(config.ApiListen);
+    }
+
+    [Theory]
+    [InlineData("127.0.0.1")]
+    [InlineData("0.0.0.0")]
+    [InlineData("localhost")]
+    [InlineData("::1")]
+    public void Validate_AcceptsAnyApiListen(string listen)
+    {
+        // ApiListen is a free-form bind address — any valid string is accepted (HttpListener will
+        // fail at runtime if it can't bind). Validate does not restrict it; the secure-by-default
+        // is the null → loopback mapping, not a validation constraint.
+        var config = new AppConfig { Bgp = Bgp(), ApiListen = listen };
+        config.Validate();
+    }
+
     [Fact]
     public void Validate_AcceptsDefaultMaxRequestBodyBytes()
     {

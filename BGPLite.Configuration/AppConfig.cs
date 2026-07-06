@@ -15,6 +15,16 @@ public sealed class AppConfig
     [YamlMember(Alias = "ApiPort")]
     public int ApiPort { get; init; } = 5001;
 
+    /// <summary>
+    /// The IP address the management API binds to (#90). Default <c>null</c> → loopback
+    /// (<c>127.0.0.1</c>) — the API is reachable ONLY from the same host, so an operator who wants
+    /// to expose it MUST put an authenticated reverse proxy (Caddy/nginx with TLS + auth) in front
+    /// and set this to <c>"0.0.0.0"</c> (or a specific interface). This is secure-by-default: the
+    /// previous <c>http://+:port</c> bind exposed the unauthenticated control plane on every interface.
+    /// </summary>
+    [YamlMember(Alias = "ApiListen")]
+    public string? ApiListen { get; init; }
+
     [YamlMember(Alias = "RipeStat")]
     public RipeStatConfig? RipeStat { get; init; }
 

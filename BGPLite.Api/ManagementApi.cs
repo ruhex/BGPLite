@@ -33,6 +33,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
     private readonly ISessionManager? _sessionManager;
     private readonly ILogger<ManagementApi> _logger;
     private readonly int _port;
+    private readonly string _listenAddress;  // #90: bind address — loopback by default
     private HttpListener? _listener;
     private Task? _listenTask;
     private CancellationTokenSource _cts = new();
@@ -56,6 +57,9 @@ public sealed class ManagementApi : IHostedService, IDisposable
         _sessionManager = sessionManager;
         _logger = logger;
         _port = config.ApiPort;
+        // #90: secure-by-default — bind to loopback unless the operator explicitly sets ApiListen.
+        // The previous "http://+:port" exposed the unauthenticated control plane on every interface.
+        _listenAddress = string.IsNullOrWhiteSpace(config.ApiListen) ? "127.0.0.1" : config.ApiListen!;
         _trustedProxyNetworks = ParseTrustedProxies(config.TrustedProxies);
         // Opt-in (#116): no rate limiting unless an ApiRateLimit section is configured, so the live
         // service's behavior is unchanged until the operator enables it.
@@ -132,10 +136,18 @@ public sealed class ManagementApi : IHostedService, IDisposable
     public Task StartAsync(CancellationToken cancellationToken)
     {
         _listener = new HttpListener();
-        _listener.Prefixes.Add($"http://+:{_port}/");
+        _listener.Prefixes.Add($"http://{_listenAddress}:{_port}/");
         _listener.Start();
 
-        _logger.LogInformation("Management API listening on http://+:{Port}/", _port);
+        _logger.LogInformation("Management API listening on http://{Address}:{Port}/", _listenAddress, _port);
+        // Warn if the operator explicitly exposed the API without a trusted-proxy gate (#90).
+        if (_listenAddress is not "127.0.0.1" and not "localhost")
+        {
+            _logger.LogWarning(
+                "Management API is bound to {Address} (non-loopback) — ensure an authenticated reverse " +
+                "proxy (Caddy/nginx with TLS + auth) is in front, or the unauthenticated control plane " +
+                "is reachable from the network", _listenAddress);
+        }
         _listenTask = ListenAsync(_cts.Token);
         return Task.CompletedTask;
     }

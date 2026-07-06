@@ -64,6 +64,13 @@ DefaultPrefixSource: ru
 # CustomPrefixCommunity: "65444:100"
 # CustomAsnCommunity: "65444:200"
 
+# Management API — bind address (#90). Secure-by-default: loopback only.
+# The API is an unauthenticated control plane (create/delete peers, read routes, ...).
+# Leave this unset (default 127.0.0.1) and put an authenticated reverse proxy (Caddy/nginx
+# with TLS + auth) in front. Set to "0.0.0.0" ONLY if you have auth at the proxy layer —
+# the app logs a warning on startup when bound to a non-loopback address.
+# ApiListen: "127.0.0.1"   # default: loopback. Set "0.0.0.0" to expose (auth required!).
+
 # Management API — client-IP resolution behind a reverse proxy (#91).
 # X-Forwarded-For / X-Real-IP are honored ONLY when the immediate TCP peer is one of these trusted
 # CIDRs; otherwise the direct RemoteEndPoint is used and any client-supplied forwarding header is

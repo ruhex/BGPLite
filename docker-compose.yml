@@ -7,6 +7,11 @@
 # (simplest for peering). If you prefer bridge networking, drop `network_mode: host`,
 # map `ports: ["179:179","5000:5000"]`, and add `cap_add: [NET_BIND_SERVICE]`
 # (port 179 < 1024) or run a reverse-proxy/port-remapper.
+#
+# SECURITY (#90): the management API binds to 127.0.0.1 by default (loopback only).
+# With `network_mode: host`, it is reachable only from the same host — put an authenticated
+# reverse proxy (Caddy/nginx with TLS + auth) in front. To expose it directly, set
+# `ApiListen: "0.0.0.0"` in appsettings.yml — but you MUST provide auth at the proxy layer.
 services:
   bgplite:
     image: ghcr.io/ruhex/bgplite:latest
