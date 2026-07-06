@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.4.3](https://github.com/ruhex/BGPLite/compare/v1.4.2...v1.4.3) (2026-07-06)
+
+
+### Bug Fixes
+
+* **server:** refresh only the matching (Ip, Asn) session on shared IPs ([#200](https://github.com/ruhex/BGPLite/issues/200)) ([9141285](https://github.com/ruhex/BGPLite/commit/91412850caa6b6b023ff3eaba6281c320adee97e))
+
 ## [1.4.2](https://github.com/ruhex/BGPLite/compare/v1.4.1...v1.4.2) (2026-07-06)
 
 
