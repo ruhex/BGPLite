@@ -1,5 +1,39 @@
 # Changelog
 
+## [1.4.0](https://github.com/ruhex/BGPLite/compare/v1.3.0...v1.4.0) (2026-07-06)
+
+
+### Features
+
+* **api:** PeerCustomSource entity + PeerStore CRUD + REST API ([#146](https://github.com/ruhex/BGPLite/issues/146)) ([42662c5](https://github.com/ruhex/BGPLite/commit/42662c5a33d51ffd60ac9782e4883079587732a5))
+* **server:** fetch and advertise per-peer user URL sources ([#147](https://github.com/ruhex/BGPLite/issues/147)) ([#149](https://github.com/ruhex/BGPLite/issues/149)) ([0bb045a](https://github.com/ruhex/BGPLite/commit/0bb045a3796451d7f20d0b428d147b2bb3d8b2a5))
+
+
+### Bug Fixes
+
+* **api:** /api/me always returns peers array, disambiguate by ?asn= ([#23](https://github.com/ruhex/BGPLite/issues/23)) ([335d67f](https://github.com/ruhex/BGPLite/commit/335d67f1bf40d1de924e79e4203aa79b963fb44f))
+* **api:** cap request body size — defend against OOM DoS ([#171](https://github.com/ruhex/BGPLite/issues/171)) ([85963b6](https://github.com/ruhex/BGPLite/commit/85963b6a509cdb9ab0286bf2e9ebb5df825fbba8))
+* **api:** make ManagementApi.Dispose() idempotent ([#141](https://github.com/ruhex/BGPLite/issues/141)) ([7f862fe](https://github.com/ruhex/BGPLite/commit/7f862fe36c75aca839cce4132e8ef6b2b1ca699b))
+* **api:** stop leaking raw exception messages in 500 responses ([#172](https://github.com/ruhex/BGPLite/issues/172)) ([bf0b204](https://github.com/ruhex/BGPLite/commit/bf0b204d1f601acaca80747a50b6f9fb82986e74))
+* **protocol:** correct AGGREGATOR (6B) and AS4_AGGREGATOR (8B) lengths — regression of [#31](https://github.com/ruhex/BGPLite/issues/31) ([#169](https://github.com/ruhex/BGPLite/issues/169)) ([4519d13](https://github.com/ruhex/BGPLite/commit/4519d132efdcdb7b4e1ea9789cf8388048281594))
+* **providers:** block IPv4-embedding IPv6 forms + restrict ports in SSRF defense ([#173](https://github.com/ruhex/BGPLite/issues/173)) ([96656bd](https://github.com/ruhex/BGPLite/commit/96656bd148c59ec1d173436c8a4c46e8ce082e47))
+* **providers:** connect SSRF-validated hosts IPv4-first, fall through on failure ([#151](https://github.com/ruhex/BGPLite/issues/151)) ([#153](https://github.com/ruhex/BGPLite/issues/153)) ([6d98aed](https://github.com/ruhex/BGPLite/commit/6d98aedc58c77cf62c90140cc93ca2c685662c43))
+* **providers:** reject /0 + /33+ and mask host bits in PrefixListParser ([#162](https://github.com/ruhex/BGPLite/issues/162)) ([873d339](https://github.com/ruhex/BGPLite/commit/873d339ccb7261875568b2a3ce86c7c6753cd370))
+* **providers:** RIPEstat resilience — stale-on-failure, per-ASN gate, bounded cache ([#163](https://github.com/ruhex/BGPLite/issues/163), [#164](https://github.com/ruhex/BGPLite/issues/164), [#165](https://github.com/ruhex/BGPLite/issues/165)) ([6a5a6ea](https://github.com/ruhex/BGPLite/commit/6a5a6eafb211a51c69b1c6bf98607b9d5a73bb79))
+* **providers:** send per-source headers/timeout per-request, not via client mutation ([#155](https://github.com/ruhex/BGPLite/issues/155)) ([#170](https://github.com/ruhex/BGPLite/issues/170)) ([ef71e3c](https://github.com/ruhex/BGPLite/commit/ef71e3cba768e1e0e40b2dc776a58954800fef67))
+* **server:** cancel _advertisedPrefixesLock + add SendTimeout backstop ([#175](https://github.com/ruhex/BGPLite/issues/175)) ([255e51d](https://github.com/ruhex/BGPLite/commit/255e51d69a2467dcb880144d65361bf2e75e9982))
+* **server:** honor CancellationToken in StopAsync and NotifyCeaseAsync ([#161](https://github.com/ruhex/BGPLite/issues/161)) ([a46c07f](https://github.com/ruhex/BGPLite/commit/a46c07f3e4ebf1607f94d01b3dd4c034a5aaec7c))
+* **server:** make ConfigCommunityResolver._parsed thread-safe ([#159](https://github.com/ruhex/BGPLite/issues/159)) ([#174](https://github.com/ruhex/BGPLite/issues/174)) ([c987ea2](https://github.com/ruhex/BGPLite/commit/c987ea231613fcdd42f484f8f29a49b977a73659))
+* **server:** serialize IpAcceptThrottle dict mutations with a coarse lock ([#133](https://github.com/ruhex/BGPLite/issues/133)) ([b8fa475](https://github.com/ruhex/BGPLite/commit/b8fa475f18df7fbc393339774288df1b9d99bf3b))
+
+
+### Performance Improvements
+
+* **api:** suppress MultipleCollectionIncludeWarning ([#138](https://github.com/ruhex/BGPLite/issues/138)) ([6d8a704](https://github.com/ruhex/BGPLite/commit/6d8a704ce9a3bedbef7238b51218e173ab91bb86))
+* **providers:** URL-keyed TTL cache for per-peer user-source fetches ([#150](https://github.com/ruhex/BGPLite/issues/150)) ([#152](https://github.com/ruhex/BGPLite/issues/152)) ([7a3d742](https://github.com/ruhex/BGPLite/commit/7a3d742af0b97e638b561cc034c4ca5a474687cf))
+* remaining hot-path allocation reductions ([#85](https://github.com/ruhex/BGPLite/issues/85)) ([a20b470](https://github.com/ruhex/BGPLite/commit/a20b4700aec702c41b56038d9e80086d3f576e5b))
+* **routing:** replace GroupBy with manual partition in ExactUnionPrefixAggregator ([#82](https://github.com/ruhex/BGPLite/issues/82)) ([0c7e0cf](https://github.com/ruhex/BGPLite/commit/0c7e0cf9238bd60db97df3058c108a26de78d36e))
+
 ## [1.3.0](https://github.com/ruhex/BGPLite/compare/v1.2.0...v1.3.0) (2026-07-04)
 
 
