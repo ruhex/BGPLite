@@ -47,17 +47,18 @@ public class HttpPrefixProviderTests
         }
     }
 
-    /// <summary>Records the URL + Authorization header of every incoming request (thread-safe).</summary>
+    /// <summary>Records the URL, Authorization, X-API-Key headers + the per-request state of every
+    /// incoming request (thread-safe). Used to assert per-source headers land on the REQUEST message
+    /// and never mutate the shared client's DefaultRequestHeaders (#155).</summary>
     private sealed class RecordingHandler : HttpMessageHandler
     {
-        public ConcurrentQueue<(string Url, string? Auth)> Seen { get; } = new();
+        public ConcurrentQueue<HttpRequestMessage> Seen { get; } = new();
         public string? LastUserAgent { get; private set; }
 
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
         {
-            var auth = request.Headers.Authorization is { } h ? $"{h.Scheme} {h.Parameter}" : null;
             LastUserAgent = request.Headers.UserAgent.ToString();
-            Seen.Enqueue((request.RequestUri!.ToString(), auth));
+            Seen.Enqueue(request);
             return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
             {
                 Content = new StringContent("1.2.3.0/24\n")
@@ -93,22 +94,29 @@ public class HttpPrefixProviderTests
     }
 
     [Fact]
-    public async Task AppliesPerSourceTimeout()
+    public async Task AppliesPerSourceTimeout_DoesNotMutateSharedClient()
     {
+        // #155: per-source timeout must NOT mutate http.Timeout (the named client is pooled). A slow
+        // source that times out must do so via a linked CTS, leaving the client's Timeout untouched
+        // for the next caller.
         var factory = new StubFactory(new StubHandler(HttpStatusCode.OK, "1.2.3.0/24\n"));
         var provider = new HttpPrefixProvider(factory, NullLogger<HttpPrefixProvider>.Instance);
 
         await provider.LoadAsync(new PrefixSourceConfig { Name = "t", Kind = "http", Url = "https://example.com/x.txt", Timeout = 7 });
 
         Assert.NotNull(factory.LastClient);
-        Assert.Equal(TimeSpan.FromSeconds(7), factory.LastClient!.Timeout);
+        // The client's own Timeout is the default (100s) — NOT mutated to 7s by LoadAsync.
+        Assert.Equal(TimeSpan.FromSeconds(100), factory.LastClient!.Timeout);
     }
 
     [Fact]
-    public async Task AppliesPerSourceHeaders()
+    public async Task AppliesPerSourceHeaders_OnRequestMessage()
     {
-        var factory = new StubFactory(new StubHandler(HttpStatusCode.OK, "1.2.3.0/24\n"));
-        var provider = new HttpPrefixProvider(factory, NullLogger<HttpPrefixProvider>.Instance);
+        // #155: per-source headers must land on the REQUEST message, never on
+        // http.DefaultRequestHeaders (the named client is pooled — mutating it leaks credentials
+        // across sources). RecordingHandler captures the actual request that reached the handler.
+        var handler = new RecordingHandler();
+        var provider = new HttpPrefixProvider(new StubFactory(handler), NullLogger<HttpPrefixProvider>.Instance);
 
         await provider.LoadAsync(new PrefixSourceConfig
         {
@@ -118,9 +126,31 @@ public class HttpPrefixProviderTests
             Headers = new() { ["Authorization"] = "Bearer secret", ["X-API-Key"] = "k" }
         });
 
-        var headers = factory.LastClient!.DefaultRequestHeaders;
-        Assert.Equal("Bearer secret", headers.GetValues("Authorization").First());
-        Assert.Equal("k", headers.GetValues("X-API-Key").First());
+        var request = Assert.Single(handler.Seen);
+        Assert.Equal("Bearer secret", request.Headers.GetValues("Authorization").First());
+        Assert.Equal("k", request.Headers.GetValues("X-API-Key").First());
+    }
+
+    [Fact]
+    public async Task PerSourceHeaders_DoNotLeakOntoNextRequest()
+    {
+        // #155 regression: source A's Authorization must NOT appear on source B's request when they
+        // reuse the same named client. The prior code mutated DefaultRequestHeaders, so source A's
+        // credentials bled onto source B.
+        var handler = new RecordingHandler();
+        var provider = new HttpPrefixProvider(new StubFactory(handler), NullLogger<HttpPrefixProvider>.Instance);
+
+        var srcA = new PrefixSourceConfig { Name = "a", Kind = "http", Url = "https://a.example/x.txt", Headers = new() { ["Authorization"] = "Bearer AAA" } };
+        var srcB = new PrefixSourceConfig { Name = "b", Kind = "http", Url = "https://b.example/x.txt" };
+
+        await provider.LoadAsync(srcA);
+        await provider.LoadAsync(srcB);
+
+        var requests = handler.Seen.ToList();
+        Assert.Equal(2, requests.Count);
+        Assert.Equal("Bearer AAA", requests[0].Headers.GetValues("Authorization").First());
+        // Source B must carry NO Authorization header — A's credentials did not leak.
+        Assert.False(requests[1].Headers.Contains("Authorization"));
     }
 
     [Fact]
@@ -138,8 +168,8 @@ public class HttpPrefixProviderTests
 
         var seen = handler.Seen.ToList();
         Assert.Equal(40, seen.Count);
-        Assert.All(seen.Where(x => x.Url.Contains("a.example")), x => Assert.Equal("Bearer AAA", x.Auth));
-        Assert.All(seen.Where(x => x.Url.Contains("b.example")), x => Assert.Equal("Bearer BBB", x.Auth));
+        Assert.All(seen.Where(r => r.RequestUri!.ToString().Contains("a.example")), r => Assert.Equal("Bearer AAA", r.Headers.GetValues("Authorization").First()));
+        Assert.All(seen.Where(r => r.RequestUri!.ToString().Contains("b.example")), r => Assert.Equal("Bearer BBB", r.Headers.GetValues("Authorization").First()));
     }
 
     [Fact]

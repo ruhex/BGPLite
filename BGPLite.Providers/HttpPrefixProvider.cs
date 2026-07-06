@@ -31,46 +31,69 @@ public sealed class HttpPrefixProvider(
         if (string.IsNullOrWhiteSpace(source.Url))
             throw new InvalidOperationException($"Prefix source '{source.Name}': Kind=http requires a Url.");
 
-        var url = source.Url;
         var http = httpFactory.CreateClient(ClientName);
+
+        // Per-source timeout: link the caller's token with a CancelAfter so a slow peer URL can't pin
+        // the fetch past its configured budget. We do NOT mutate http.Timeout (#155 regression): the
+        // named client is pooled by IHttpClientFactory, and mutating it leaks the per-source timeout
+        // onto the next caller that reuses the same client within the handler-lifetime window.
+        CancellationTokenSource? timeoutCts = null;
+        CancellationToken linkedToken;
         if (source.Timeout is int seconds && seconds > 0)
-            http.Timeout = TimeSpan.FromSeconds(seconds);
-        if (source.Headers is { Count: > 0 } headers)
-            foreach (var (key, value) in headers)
-            {
-                if (key.Equals("User-Agent", StringComparison.OrdinalIgnoreCase))
-                    http.DefaultRequestHeaders.Remove(key);
-                if (!http.DefaultRequestHeaders.TryAddWithoutValidation(key, value))
-                    logger.LogWarning("Source '{Name}': could not add request header '{Header}'.", source.Name, key);
-            }
-
-        // Stream-read with size cap (#144): ResponseHeadersRead gets headers first (fast Content-Length
-        // check), then stream the body with a hard cap to prevent OOM. SSRF validation is at the
-        // handler level (SocketsHttpHandler.ConnectCallback in Program.cs) — no pre-resolve here.
-        using var response = await http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, ct);
-        response.EnsureSuccessStatusCode();
-
-        if (response.Content.Headers.ContentLength is long contentLength && contentLength > MaxResponseBytes)
-            throw new InvalidOperationException(
-                $"Prefix source '{source.Name}': response too large ({contentLength} bytes, max {MaxResponseBytes}).");
-
-        using var stream = await response.Content.ReadAsStreamAsync(ct);
-        using var ms = new MemoryStream();
-        var buffer = new byte[8192];
-        int read;
-        while ((read = await stream.ReadAsync(buffer, ct)) > 0)
         {
-            ms.Write(buffer, 0, read);
-            if (ms.Length > MaxResponseBytes)
-                throw new InvalidOperationException(
-                    $"Prefix source '{source.Name}': response exceeded {MaxResponseBytes} bytes during stream.");
+            timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            timeoutCts.CancelAfter(TimeSpan.FromSeconds(seconds));
+            linkedToken = timeoutCts.Token;
+        }
+        else
+        {
+            linkedToken = ct;
         }
 
-        var text = Encoding.UTF8.GetString(ms.GetBuffer(), 0, (int)ms.Length);
-        var prefixes = PrefixListParser.Parse(text);
-        // Log only the source Name (the operator/peer-supplied identifier), never the URL — peer URLs
-        // (#147) may carry tokens in the query string that must not reach application logs.
-        logger.LogInformation("Source '{Name}' (http): loaded {Count} prefixes", source.Name, prefixes.Count);
-        return prefixes;
+        // Per-source headers go on the REQUEST message, never on http.DefaultRequestHeaders (#155):
+        // the named client is pooled and shared, so mutating its default headers leaks source A's
+        // Authorization / X-API-Key onto source B's next request. Per-message headers merge with the
+        // client's configured defaults (User-Agent: BGPLite/1.0) and override per-source.
+        using var request = new HttpRequestMessage(HttpMethod.Get, source.Url);
+        if (source.Headers is { Count: > 0 } headers)
+            foreach (var (key, value) in headers)
+                if (!request.Headers.TryAddWithoutValidation(key, value))
+                    logger.LogWarning("Source '{Name}': could not add request header '{Header}'.", source.Name, key);
+
+        try
+        {
+            // Stream-read with size cap (#144): ResponseHeadersRead gets headers first (fast Content-Length
+            // check), then stream the body with a hard cap to prevent OOM. SSRF validation is at the
+            // handler level (SocketsHttpHandler.ConnectCallback in Program.cs) — no pre-resolve here.
+            using var response = await http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, linkedToken);
+            response.EnsureSuccessStatusCode();
+
+            if (response.Content.Headers.ContentLength is long contentLength && contentLength > MaxResponseBytes)
+                throw new InvalidOperationException(
+                    $"Prefix source '{source.Name}': response too large ({contentLength} bytes, max {MaxResponseBytes}).");
+
+            using var stream = await response.Content.ReadAsStreamAsync(linkedToken);
+            using var ms = new MemoryStream();
+            var buffer = new byte[8192];
+            int read;
+            while ((read = await stream.ReadAsync(buffer, linkedToken)) > 0)
+            {
+                ms.Write(buffer, 0, read);
+                if (ms.Length > MaxResponseBytes)
+                    throw new InvalidOperationException(
+                        $"Prefix source '{source.Name}': response exceeded {MaxResponseBytes} bytes during stream.");
+            }
+
+            var text = Encoding.UTF8.GetString(ms.GetBuffer(), 0, (int)ms.Length);
+            var prefixes = PrefixListParser.Parse(text);
+            // Log only the source Name (the operator/peer-supplied identifier), never the URL — peer URLs
+            // (#147) may carry tokens in the query string that must not reach application logs.
+            logger.LogInformation("Source '{Name}' (http): loaded {Count} prefixes", source.Name, prefixes.Count);
+            return prefixes;
+        }
+        finally
+        {
+            timeoutCts?.Dispose();
+        }
     }
 }
