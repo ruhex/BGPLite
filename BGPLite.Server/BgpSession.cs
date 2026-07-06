@@ -67,7 +67,7 @@ public sealed class BgpSession : IDisposable
     public PeerConfig Peer => _peerConfig;
     public bool IsEstablished => _state == BgpFsmState.Established;
 
-    public async Task RefreshRoutesAsync()
+    public async Task RefreshRoutesAsync(CancellationToken ct = default)
     {
         if (!IsEstablished) return;
 
@@ -76,20 +76,37 @@ public sealed class BgpSession : IDisposable
         // initial-send, which mutates the same list concurrently. We do NOT hold _sendLock across
         // the whole pair: a HoldTimer expiry or peer NOTIFICATION that arrives between them would
         // otherwise deadlock waiting for the refresh to finish before it can send Cease/HoldTimerExpired.
-        await _advertisedPrefixesLock.WaitAsync();
+        // The token (default: the session's own _cts) bounds how long a management-API caller
+        // (RefreshPeerAsync) blocks here — a prior send stuck on a slow peer previously pinned the
+        // HTTP request thread indefinitely (#160).
+        try
+        {
+            await _advertisedPrefixesLock.WaitAsync(ct);
+        }
+        catch (OperationCanceledException) { return; }
+        catch (ObjectDisposedException)
+        {
+            // Session disposed while we were queued on the lock — mirror SendMessageAsync's handling
+            // and unwind cleanly instead of letting ODE escape to the API caller (#160).
+            return;
+        }
+
         try
         {
             _logger.LogInformation("Refreshing routes for {Peer}", _peer);
             await WithdrawAllAsync();
             await SendAllRoutesAsync();
         }
+        catch (OperationCanceledException) { /* shutdown / caller cancel — best effort */ }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Failed to refresh routes for {Peer}", _peer);
         }
         finally
         {
-            _advertisedPrefixesLock.Release();
+            try { _advertisedPrefixesLock.Release(); }
+            catch (ObjectDisposedException) { /* session disposed — fine */ }
+            catch (SemaphoreFullException) { /* double-release guard, shouldn't happen */ }
         }
     }
 
@@ -435,7 +452,7 @@ public sealed class BgpSession : IDisposable
                         // Another refresh raced ahead of us; the winning call will do the work.
                         break;
                     }
-                    await RefreshRoutesAsync();
+                    await RefreshRoutesAsync(cancellationToken);
                     break;
             }
         }
