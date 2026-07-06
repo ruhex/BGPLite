@@ -187,17 +187,12 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
 
                 _logger.LogInformation("Incoming connection from {Peer} ({Key})", peerAddress, key);
 
-                // SendTimeout backstop (#160): a peer that stops reading (TCP receive window full)
-                // blocks WriteAsync on the kernel send buffer until the OS TCP retransmission timeout
-                // (minutes). The per-send CancellationToken (passed in SendMessageAsync) is the primary
-                // bound, but SendTimeout is a kernel-level backstop that fires even if the app-level
-                // token is somehow not threaded into a future send path. 60s matches the per-send budget.
-                socket.SendTimeout = 60_000;
-
+                // #96: the transport seam — SocketBgpConnection owns the socket (and the 60s
+                // SendTimeout backstop from #160), so BgpSession no longer touches Socket directly.
                 var peerConfig = new PeerConfig { Address = peerAddress, Port = remoteEndpoint.Port };
 
                 var session = new BgpSession(
-                    socket, peerConfig, _config.Bgp, _routeTable,
+                    new SocketBgpConnection(socket), peerConfig, _config.Bgp, _routeTable,
                     _routeFilter, _metrics, _sessionLogger,
                     _onPeerIdentified,
                     _peerStore, _prefixService, _config, _prefixAggregator, _communityResolver);

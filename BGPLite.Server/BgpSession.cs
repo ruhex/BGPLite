@@ -10,8 +10,14 @@ namespace BGPLite.Server;
 
 public sealed class BgpSession : IDisposable
 {
-    private readonly Socket _socket;
-    private readonly NetworkStream _stream;
+    // #96: transport seam — the concrete Socket/NetworkStream are owned by IBgpConnection
+    // (SocketBgpConnection in production, a fake in unit tests). Replaces the prior _socket/_stream
+    // pair. The send serialization (_sendLock) stays here — it's a BGP-framing concern, not transport.
+    private readonly IBgpConnection _connection;
+    // #96: time seam — TimeProvider replaces direct DateTime.UtcNow reads so the hold-timer expiry,
+    // keepalive interval, and ROUTE_REFRESH debounce are deterministic-testable. Defaults to
+    // TimeProvider.System (wall-clock) in production; tests inject a FakeTimeProvider.
+    private readonly TimeProvider _timeProvider;
     private readonly PeerConfig _peerConfig;
     // "ip:port" label for session logs so the several peers that may share one source IP (behind a
     // NAT/VPN) can be told apart (issue #18). Peer-store lookups use _peerConfig.Address (IP only);
@@ -134,7 +140,7 @@ public sealed class BgpSession : IDisposable
     }
 
     public BgpSession(
-        Socket socket,
+        IBgpConnection connection,
         PeerConfig peerConfig,
         BgpConfig bgpConfig,
         RouteTable routeTable,
@@ -146,10 +152,11 @@ public sealed class BgpSession : IDisposable
         IPrefixService? prefixService = null,
         AppConfig? appConfig = null,
         IPrefixAggregator? prefixAggregator = null,
-        ICommunityResolver? communityResolver = null)
+        ICommunityResolver? communityResolver = null,
+        TimeProvider? timeProvider = null)
     {
-        _socket = socket;
-        _stream = new NetworkStream(socket, ownsSocket: true);
+        _connection = connection;
+        _timeProvider = timeProvider ?? TimeProvider.System;
         _peerConfig = peerConfig;
         _peer = peerConfig.ToString();
         _bgpConfig = bgpConfig;
@@ -358,9 +365,9 @@ public sealed class BgpSession : IDisposable
             return;
         }
 
-        Interlocked.Exchange(ref _lastReceivedTicks, DateTime.UtcNow.Ticks);
+        Interlocked.Exchange(ref _lastReceivedTicks, _timeProvider.GetUtcNow().Ticks);
 
-        using var keepaliveTimer = new PeriodicTimer(_keepAliveInterval);
+        using var keepaliveTimer = new PeriodicTimer(_keepAliveInterval, _timeProvider);
         var readTask = ReadLoopAsync(cancellationToken);
         var keepaliveTask = HoldTimerLoopAsync(keepaliveTimer, cancellationToken);
 
@@ -383,7 +390,7 @@ public sealed class BgpSession : IDisposable
         while (!cancellationToken.IsCancellationRequested)
         {
             var message = await ReceiveMessageAsync(cancellationToken);
-            Interlocked.Exchange(ref _lastReceivedTicks, DateTime.UtcNow.Ticks);
+            Interlocked.Exchange(ref _lastReceivedTicks, _timeProvider.GetUtcNow().Ticks);
 
             switch (message)
             {
@@ -439,7 +446,7 @@ public sealed class BgpSession : IDisposable
                     // concurrent route refreshes from the peer can't all slip through and trigger
                     // N full re-announcements. First caller wins; the rest see a non-zero
                     // previous-timestamp and bail out cheaply with a debug log.
-                    var nowTicks = DateTime.UtcNow.Ticks;
+                    var nowTicks = _timeProvider.GetUtcNow().Ticks;
                     var prevTicks = Interlocked.Read(ref _lastRouteRefreshTicks);
                     if (prevTicks != 0 && new TimeSpan(nowTicks - prevTicks) < MinRouteRefreshInterval)
                     {
@@ -469,7 +476,7 @@ public sealed class BgpSession : IDisposable
             // latch in a finally (matching the catch-block pattern) means a partial/failed write still
             // counts as the one NOTIFICATION for this teardown (RFC 4271 §8.1), so the finally-block
             // never double-emits a Cease.
-            if (DateTime.UtcNow.Ticks - Interlocked.Read(ref _lastReceivedTicks) >= holdTime.Ticks)
+            if (_timeProvider.GetUtcNow().Ticks - Interlocked.Read(ref _lastReceivedTicks) >= holdTime.Ticks)
             {
                 _logger.LogWarning("Hold timer expired for {Peer} (no message for {Hold}s)",
                     _peer, _negotiatedHoldTime);
@@ -1280,7 +1287,7 @@ public sealed class BgpSession : IDisposable
             try
             {
                 var written = BgpMessageWriter.WriteMessage(message, buffer);
-                await _stream.WriteAsync(buffer.AsMemory(0, written), ct);
+                await _connection.WriteAsync(buffer.AsMemory(0, written), ct);
                 return true;
             }
             catch (OperationCanceledException)
@@ -1305,17 +1312,10 @@ public sealed class BgpSession : IDisposable
         }
     }
 
-    private async Task ReadExactAsync(Memory<byte> buffer, CancellationToken cancellationToken)
-    {
-        var totalRead = 0;
-        while (totalRead < buffer.Length)
-        {
-            var read = await _stream.ReadAsync(buffer[totalRead..], cancellationToken);
-            if (read == 0)
-                throw new IOException("Connection closed by peer");
-            totalRead += read;
-        }
-    }
+    // #96: delegates to the transport seam. The loop-to-fill + EOF→IOException semantics now live
+    // in IBgpConnection (SocketBgpConnection / fakes), preserving the exact contract the FSM relies on.
+    private Task ReadExactAsync(Memory<byte> buffer, CancellationToken cancellationToken)
+        => _connection.ReadExactAsync(buffer, cancellationToken).AsTask();
 
     #endregion
 
@@ -1588,8 +1588,7 @@ public sealed class BgpSession : IDisposable
             return;
 
         _cts.Cancel();
-        _stream.Dispose();
-        _socket.Dispose();
+        _connection.Dispose();   // owns the socket (SocketBgpConnection wraps NetworkStream ownsSocket:true)
         _cts.Dispose();
         _sendLock.Dispose();
         _advertisedPrefixesLock.Dispose();

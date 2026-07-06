@@ -32,7 +32,7 @@ public class BgpSessionShutdownTests
     }
 
     private static BgpSession NewSession(Socket server) => new(
-        server,
+        new SocketBgpConnection(server),
         new PeerConfig { Address = "127.0.0.1" },
         new BgpConfig { Asn = 65001, RouterId = "127.0.0.1" },
         new RouteTable(),
@@ -101,7 +101,7 @@ public class BgpSessionShutdownTests
         using var clientSock = client;
         var bgpConfig = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1", HoldTime = 0, KeepAlive = 0 };
         using var session = new BgpSession(
-            server,
+            new SocketBgpConnection(server),
             new PeerConfig { Address = "127.0.0.1" },
             bgpConfig,
             new RouteTable(),
@@ -138,7 +138,7 @@ public class BgpSessionShutdownTests
         var (server, client) = ConnectedPair();
         using var clientSock = client;
         using var session = new BgpSession(
-            server,
+            new SocketBgpConnection(server),
             new PeerConfig { Address = "127.0.0.1" },
             // HoldTime/KeepAlive: minimum allowed by RFC 4271 (≥3 for HoldTime). keepalive=1s,
             // hold=3s — checks expiry every 1s; expect NOTIFICATION within ~4s.
@@ -319,7 +319,7 @@ public class BgpSessionShutdownTests
         using var clientSock = client;
         var bgpConfig = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1", HoldTime = 0, KeepAlive = 0 };
         using var session = new BgpSession(
-            server,
+            new SocketBgpConnection(server),
             new PeerConfig { Address = "127.0.0.1" },
             bgpConfig,
             new RouteTable(),
@@ -365,7 +365,7 @@ public class BgpSessionShutdownTests
         var bgpConfig = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1", HoldTime = 0, KeepAlive = 0 };
         var metrics = new BgpMetrics();
         using var session = new BgpSession(
-            server,
+            new SocketBgpConnection(server),
             new PeerConfig { Address = "127.0.0.1" },
             bgpConfig,
             new RouteTable(),
@@ -412,7 +412,7 @@ public class BgpSessionShutdownTests
         using var clientSock = client;
         var bgpConfig = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1", HoldTime = 0, KeepAlive = 0 };
         using var session = new BgpSession(
-            server,
+            new SocketBgpConnection(server),
             new PeerConfig { Address = "127.0.0.1" },
             bgpConfig,
             new RouteTable(),
@@ -451,7 +451,7 @@ public class BgpSessionShutdownTests
         using var clientSock = client;
         var bgpConfig = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1", HoldTime = 0, KeepAlive = 0 };
         using var session = new BgpSession(
-            server,
+            new SocketBgpConnection(server),
             new PeerConfig { Address = "127.0.0.1" },
             bgpConfig,
             new RouteTable(),
@@ -528,7 +528,7 @@ public class BgpSessionShutdownTests
         using var clientSock = client;
         var bgpConfig = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1", HoldTime = 0, KeepAlive = 0 };
         using var session = new BgpSession(
-            server,
+            new SocketBgpConnection(server),
             new PeerConfig { Address = "127.0.0.1" },
             bgpConfig,
             new RouteTable(),
@@ -575,7 +575,7 @@ public class BgpSessionShutdownTests
             OpenTimeoutSeconds = 1
         };
         using var session = new BgpSession(
-            server,
+            new SocketBgpConnection(server),
             new PeerConfig { Address = "127.0.0.1" },
             bgpConfig,
             new RouteTable(),
@@ -618,7 +618,7 @@ public class BgpSessionShutdownTests
             OpenTimeoutSeconds = 10
         };
         using var session = new BgpSession(
-            server,
+            new SocketBgpConnection(server),
             new PeerConfig { Address = "127.0.0.1" },
             bgpConfig,
             new RouteTable(),
@@ -667,7 +667,7 @@ public class BgpSessionShutdownTests
         using var clientSock = client;
         var bgpConfig = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1", HoldTime = 0, KeepAlive = 0 };
         using var session = new BgpSession(
-            server, new PeerConfig { Address = "127.0.0.1" }, bgpConfig,
+            new SocketBgpConnection(server), new PeerConfig { Address = "127.0.0.1" }, bgpConfig,
             new RouteTable(), AllowAllFilter.Instance, new BgpMetrics(), new NopLogger<BgpSession>());
 
         using var cts = new CancellationTokenSource();
@@ -695,7 +695,7 @@ public class BgpSessionShutdownTests
         using var clientSock = client;
         var bgpConfig = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1", HoldTime = 0, KeepAlive = 0 };
         using var session = new BgpSession(
-            server, new PeerConfig { Address = "127.0.0.1" }, bgpConfig,
+            new SocketBgpConnection(server), new PeerConfig { Address = "127.0.0.1" }, bgpConfig,
             new RouteTable(), AllowAllFilter.Instance, new BgpMetrics(), new NopLogger<BgpSession>());
 
         using var cts = new CancellationTokenSource();
