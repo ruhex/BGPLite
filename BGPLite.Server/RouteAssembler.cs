@@ -67,7 +67,12 @@ internal sealed class RouteAssembler
 
         if (_peerStore is not null && _prefixService is not null && _appConfig is not null)
         {
-            var peer = _peerStore.LoadPeerRoutingView(peerIp, remoteAsn);
+            // Capture non-null locals so the compiler tracks the null-guard through the nested
+            // branches without null-forgiving operators (#105 nullable).
+            var peerStore = _peerStore;
+            var prefixService = _prefixService;
+            var appConfig = _appConfig;
+            var peer = peerStore.LoadPeerRoutingView(peerIp, remoteAsn);
             if (peer is not null)
             {
                 var subscriptionIds = peer.Subscriptions;
@@ -82,7 +87,7 @@ internal sealed class RouteAssembler
                     _logger.LogInformation("Unconfigured peer {Peer}, sending RU defaults", _peer);
                     try
                     {
-                        var ruPrefixes = await _prefixService.GetRuPrefixesAsync(ct);
+                        var ruPrefixes = await prefixService.GetRuPrefixesAsync(ct);
                         foreach (var (prefix, length, _) in ruPrefixes)
                             routes.Add(MakeRoute(prefix, length, nextHop, null, defaultComms));
                         _logger.LogInformation("Sent {Count} RU prefixes to unconfigured peer {Peer}",
@@ -98,7 +103,7 @@ internal sealed class RouteAssembler
 
                 _logger.LogInformation("Peer {Peer} subscriptions: [{Subs}]", _peer, string.Join(", ", subscriptionIds));
 
-                var subscribedLists = _appConfig?.RipeStat?.AsnLists
+                var subscribedLists = appConfig.RipeStat?.AsnLists
                     .Where(l => subscriptionIds.Contains(l.Name))
                     .ToList() ?? [];
 
@@ -117,7 +122,7 @@ internal sealed class RouteAssembler
                         {
                             var comms = _communityResolver.Resolve(
                                 new CommunitySource(CommunitySourceKind.AsnList, list.Name));
-                            var prefixes = await _prefixService.GetPrefixesForAsns(list.Asns, ct);
+                            var prefixes = await prefixService.GetPrefixesForAsns(list.Asns, ct);
                             foreach (var (prefix, length, asn) in prefixes)
                                 routes.Add(MakeRoute(prefix, length, nextHop, [asn], comms));
                         }
@@ -138,7 +143,7 @@ internal sealed class RouteAssembler
                     {
                         var comms = _communityResolver.Resolve(
                             new CommunitySource(CommunitySourceKind.Country, countryLists[0].Name));
-                        var ruPrefixes = await _prefixService.GetRuPrefixesAsync(ct);
+                        var ruPrefixes = await prefixService.GetRuPrefixesAsync(ct);
                         foreach (var (prefix, length, _) in ruPrefixes)
                             routes.Add(MakeRoute(prefix, length, nextHop, null, comms));
                         _logger.LogInformation("Fetched {Count} RU prefixes for {Peer}", ruPrefixes.Count, _peer);
@@ -151,7 +156,7 @@ internal sealed class RouteAssembler
 
                 // Prefix-source subscriptions: subscribed names that match a configured PrefixSource.
                 var resolvedAsRipe = subscribedLists.Select(l => l.Name).ToHashSet();
-                var prefixSources = _appConfig.PrefixSources;  // safe: we're inside the _appConfig is not null guard
+                var prefixSources = appConfig.PrefixSources;  // safe: we're inside the _appConfig is not null guard
                 var sourceNames = subscriptionIds
                     .Where(n => !resolvedAsRipe.Contains(n) && prefixSources.Any(s => s.Name == n))
                     .ToList();
@@ -160,7 +165,7 @@ internal sealed class RouteAssembler
                     try
                     {
                         var comms = _communityResolver.Resolve(new CommunitySource(CommunitySourceKind.PrefixSource, name));
-                        var srcPrefixes = await _prefixService.GetSourcePrefixesAsync(name, ct);
+                        var srcPrefixes = await prefixService.GetSourcePrefixesAsync(name, ct);
                         foreach (var (prefix, length) in srcPrefixes)
                             routes.Add(MakeRoute(prefix, length, nextHop, null, comms));
                         _logger.LogInformation("Fetched {Count} prefixes from source '{Source}' for {Peer}",
@@ -192,7 +197,7 @@ internal sealed class RouteAssembler
                     try
                     {
                         var customAsnComms = _communityResolver.Resolve(new CommunitySource(CommunitySourceKind.CustomAsn));
-                        var asnPrefixes = await _prefixService.GetPrefixesForAsns(customAsns, ct);
+                        var asnPrefixes = await prefixService.GetPrefixesForAsns(customAsns, ct);
                         foreach (var (prefix, length, asn) in asnPrefixes)
                             routes.Add(MakeRoute(prefix, length, nextHop, [asn], customAsnComms));
                         _logger.LogInformation("Peer {Peer} custom AS: {Asns} -> {Count} prefixes",
@@ -208,7 +213,7 @@ internal sealed class RouteAssembler
                 foreach (var source in peer.UserSources)
                 {
                     await AddUserSourceRoutesAsync(
-                        routes, source, nextHop, _prefixService!, _communityResolver, _logger, _peer, ct);
+                        routes, source, nextHop, prefixService, _communityResolver, _logger, _peer, ct);
                 }
 
                 _logger.LogInformation("Sending {Count} total routes to {Peer}", routes.Count, _peer);
@@ -219,7 +224,7 @@ internal sealed class RouteAssembler
                     _logger.LogInformation("Peer {Peer} resolved 0 prefixes, falling back to RU defaults", _peer);
                     try
                     {
-                        var ruPrefixes = await _prefixService.GetRuPrefixesAsync(ct);
+                        var ruPrefixes = await prefixService.GetRuPrefixesAsync(ct);
                         foreach (var (prefix, length, _) in ruPrefixes)
                             routes.Add(MakeRoute(prefix, length, nextHop, null, defaultComms));
                     }
@@ -235,11 +240,11 @@ internal sealed class RouteAssembler
             {
                 // Unknown peer — auto-register and send default RU list.
                 _logger.LogInformation("Unknown peer {Ip}, auto-registering with RU defaults", _peer);
-                _peerStore.CreatePeer(peerIp, remoteAsn, null);
+                peerStore.CreatePeer(peerIp, remoteAsn, null);
 
                 try
                 {
-                    var ruPrefixes = await _prefixService.GetRuPrefixesAsync(ct);
+                    var ruPrefixes = await prefixService.GetRuPrefixesAsync(ct);
                     foreach (var (prefix, length, _) in ruPrefixes)
                         routes.Add(MakeRoute(prefix, length, nextHop, null, defaultComms));
                     _logger.LogInformation("Fetched {Count} RU prefixes for unknown peer {Peer}",
