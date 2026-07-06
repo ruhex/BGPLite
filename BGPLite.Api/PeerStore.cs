@@ -87,6 +87,21 @@ public sealed class PeerStore : IPeerStore
     }
 
     /// <summary>
+    /// Returns ALL peers at the given IP (#23). When several peers share one source IP (NAT/VPN),
+    /// each is a distinct record with its own Id, subscriptions, and communities. Used by /api/me
+    /// to return a multi-peer array when disambiguation is needed.
+    /// </summary>
+    public List<PeerInfo> GetPeersByIp(string ip)
+    {
+        using var db = _dbFactory.CreateDbContext();
+        return db.Peers.AsNoTracking()
+            .Include(p => p.Communities)
+            .Where(p => p.Ip == ip)
+            .Select(p => MapToInfo(p))
+            .ToList();
+    }
+
+    /// <summary>
     /// Resolves a peer by its durable identity <c>(Ip, Asn)</c> — the form a BGP session knows once
     /// it has parsed the peer's OPEN (issue #19). Several peers may share a source IP with distinct
     /// AS; this returns the specific one, unlike the Ip-only <see cref="GetPeerByIp"/>.

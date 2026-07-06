@@ -476,63 +476,60 @@ public sealed class ManagementApi : IHostedService, IDisposable
     {
         var clientIp = GetClientIp(ctx);
 
-        // #23: when several peers share one source IP (NAT/VPN), /api/me by IP alone returns an
-        // arbitrary one. Accept an optional ?asn= query param to disambiguate via the composite
-        // (Ip, Asn) key (GetPeer(ip, asn), added in #19). Without ?asn=, falls back to the Ip-only
-        // lookup for backward compatibility (single-peer-per-IP is the common case).
+        // #23: /api/me always returns a `peers` array. When several peers share one source IP
+        // (NAT/VPN), each is a distinct record (composite (Ip, Asn) key, #19).
+        //
+        // - ?asn=64512 → resolve that specific peer via GetPeer(ip, asn). Malformed → 400.
+        // - No ?asn= → return ALL peers at this IP.
+        // - Always `peers: [...]` (array), even for a single peer.
+
         var asnQuery = ctx.Request.QueryString["asn"];
-        PeerInfo? peerInfo;
-        if (asnQuery is null)
+        List<PeerInfo> peerInfos;
+        if (asnQuery is not null)
         {
-            // No ?asn= — backward-compatible Ip-only lookup.
-            peerInfo = _store.GetPeerByIp(clientIp);
-        }
-        else if (!uint.TryParse(asnQuery, out var asn))
-        {
-            // ?asn= present but malformed — explicit 400 so a typo doesn't silently fall back to
-            // the ambiguous Ip-only lookup (CodeRabbit #186).
-            return ApiResponse.Error($"Invalid 'asn' query parameter: '{asnQuery}'. Must be a non-negative integer.", 400);
+            if (!uint.TryParse(asnQuery, out var asn))
+                return ApiResponse.Error($"Invalid 'asn' query parameter: '{asnQuery}'. Must be a non-negative integer.", 400);
+            var single = _store.GetPeer(clientIp, asn);
+            peerInfos = single is null ? [] : [single];
         }
         else
         {
-            peerInfo = _store.GetPeer(clientIp, asn);
+            peerInfos = _store.GetPeersByIp(clientIp);
         }
 
-        if (peerInfo is null)
-            return ApiResponse.Ok(new { ip = clientIp, peer = (object?)null });
+        var details = peerInfos.Select(p => BuildPeerDetail(p.Id)).Where(d => d is not null).ToList()!;
+        return ApiResponse.Ok(new { ip = clientIp, peers = details });
+    }
 
-        var peer = _store.GetDbPeerById(peerInfo.Id);
-        if (peer is null)
-            return ApiResponse.Ok(new { ip = clientIp, peer = (object?)null });
+    /// <summary>Builds the peer-detail anonymous object for /api/me. Returns null if the peer vanished.</summary>
+    private object? BuildPeerDetail(string peerId)
+    {
+        var peer = _store.GetDbPeerById(peerId);
+        if (peer is null) return null;
 
         var subscriptions = _store.GetSubscriptions(peer.Id);
         var customPrefixes = _store.GetCustomPrefixes(peer.Id);
         var customAsns = _store.GetCustomAsns(peer.Id);
-        // #23: communities are per-peer (keyed by PeerId), not per-IP — use the composite lookup
-        // so peers sharing an IP don't see each other's communities.
+        // #23: communities are per-peer (keyed by (Ip, Asn)), not per-IP.
         var communities = peer.Asn.HasValue
             ? _store.GetCommunities(peer.Ip, peer.Asn.Value)
-            : _store.GetCommunitiesByIp(clientIp);
+            : _store.GetCommunitiesByIp(peer.Ip);
 
-        return ApiResponse.Ok(new
+        return new
         {
-            ip = clientIp,
-            peer = new
-            {
-                id = peer.Id,
-                ip = peer.Ip,
-                asn = peer.Asn,
-                description = peer.Description,
-                status = peer.Status,
-                createdAt = peer.CreatedAt,
-                lastSessionAt = peer.LastSessionAt,
-                lists = subscriptions,
-                customPrefixes,
-                customAsns,
-                communities = communities.Select(CommunityCodec.Format),
-                allRoutes = communities.Count == 0
-            }
-        });
+            id = peer.Id,
+            ip = peer.Ip,
+            asn = peer.Asn,
+            description = peer.Description,
+            status = peer.Status,
+            createdAt = peer.CreatedAt,
+            lastSessionAt = peer.LastSessionAt,
+            lists = subscriptions,
+            customPrefixes,
+            customAsns,
+            communities = communities.Select(CommunityCodec.Format),
+            allRoutes = communities.Count == 0
+        };
     }
 
     #endregion
