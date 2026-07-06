@@ -32,6 +32,9 @@ public sealed class ConfigCommunityResolver : ICommunityResolver
     private readonly uint[] _customAsnComms;
     // Local ASN, captured for UserSource auto-generation (<Asn>:5XX).
     private readonly uint _asn;
+    // #85: pre-built name→community lookups (replaces per-Resolve linear FirstOrDefault scans).
+    private readonly Dictionary<string, string?> _asnListCommunities;
+    private readonly Dictionary<string, string?> _prefixSourceCommunities;
 
     public ConfigCommunityResolver(AppConfig config, BgpConfig bgpConfig, ILogger<ConfigCommunityResolver>? logger = null)
     {
@@ -40,6 +43,11 @@ public sealed class ConfigCommunityResolver : ICommunityResolver
         _asn = bgpConfig.Asn;
         _customPrefixComms = ResolveStaticCommunity(config.CustomPrefixCommunity, bgpConfig.Asn, 100, nameof(config.CustomPrefixCommunity));
         _customAsnComms = ResolveStaticCommunity(config.CustomAsnCommunity, bgpConfig.Asn, 200, nameof(config.CustomAsnCommunity));
+        // Build name→community dictionaries once in the ctor (the config is immutable).
+        _asnListCommunities = (config.RipeStat?.AsnLists ?? [])
+            .ToDictionary(l => l.Name, l => l.Community);
+        _prefixSourceCommunities = config.PrefixSources
+            .ToDictionary(s => s.Name, s => s.Community);
     }
 
     public uint[] Resolve(CommunitySource source) => source.Kind switch
@@ -80,10 +88,10 @@ public sealed class ConfigCommunityResolver : ICommunityResolver
     }
 
     private string? FindAsnListCommunity(string? name) =>
-        name is null ? null : _config.RipeStat?.AsnLists.FirstOrDefault(l => l.Name == name)?.Community;
+        name is null ? null : _asnListCommunities.TryGetValue(name, out var c) ? c : null;
 
     private string? FindPrefixSourceCommunity(string? name) =>
-        name is null ? null : _config.PrefixSources.FirstOrDefault(s => s.Name == name)?.Community;
+        name is null ? null : _prefixSourceCommunities.TryGetValue(name, out var c) ? c : null;
 
     /// <summary>
     /// Static category community: the config override if set and valid, otherwise the hardcoded

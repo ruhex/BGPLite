@@ -18,6 +18,8 @@ public sealed class PrefixSourceService : IPrefixSourceService
     private readonly TimeSpan _cacheTtl;
     private readonly TimeSpan _negativeTtl;
     private readonly TimeProvider _timeProvider;
+    // #85: pre-built name→source lookup (replaces per-call FirstOrDefault linear scan).
+    private readonly Dictionary<string, PrefixSourceConfig> _sourcesByName;
 
     // Name → (a prefix list, cached at, is negative). Negative entries (failed loads) use _negativeTtl.
     private readonly ConcurrentDictionary<string, (IReadOnlyList<(uint Prefix, byte Length)> List, DateTime CachedAt, bool Negative)> _cache = new();
@@ -45,12 +47,13 @@ public sealed class PrefixSourceService : IPrefixSourceService
         _cacheTtl = cacheTtl ?? TimeSpan.FromHours(1);
         _negativeTtl = negativeTtl ?? TimeSpan.FromSeconds(30);
         _timeProvider = timeProvider ?? TimeProvider.System;
+        // #85: pre-build a name→source lookup (the ctor already iterates for duplicate detection).
+        _sourcesByName = config.PrefixSources.ToDictionary(s => s.Name);
     }
 
     public async Task<IReadOnlyList<(uint Prefix, byte Length)>> GetAsync(string name, CancellationToken ct = default)
     {
-        var source = _config.PrefixSources.FirstOrDefault(s => s.Name == name);
-        if (source is null)
+        if (!_sourcesByName.TryGetValue(name, out var source))
         {
             _logger.LogWarning("Prefix source '{Name}' not found in configuration.", name);
             return [];
@@ -71,8 +74,7 @@ public sealed class PrefixSourceService : IPrefixSourceService
         if (string.IsNullOrWhiteSpace(defaultName))
             return [];
 
-        var source = _config.PrefixSources.FirstOrDefault(s => s.Name == defaultName);
-        if (source is null)
+        if (!_sourcesByName.TryGetValue(defaultName, out var source))
         {
             _logger.LogWarning("DefaultPrefixSource '{Name}' does not match any configured source.", defaultName);
             return [];

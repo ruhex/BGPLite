@@ -123,8 +123,11 @@ internal sealed class RouteAssembler
                             var comms = _communityResolver.Resolve(
                                 new CommunitySource(CommunitySourceKind.AsnList, list.Name));
                             var prefixes = await prefixService.GetPrefixesForAsns(list.Asns, ct);
-                            foreach (var (prefix, length, asn) in prefixes)
-                                routes.Add(MakeRoute(prefix, length, nextHop, [asn], comms));
+                            foreach (var (prefix, length, _) in prefixes)
+                                // #85: AsPath is overwritten by the local ASN in the outbound codec
+                                // (BuildUpdateAttributes), so the per-prefix asn value is never used
+                                // on the wire — pass null instead of allocating [asn] per prefix.
+                                routes.Add(MakeRoute(prefix, length, nextHop, null, comms));
                         }
                         catch (Exception ex)
                         {
@@ -198,8 +201,8 @@ internal sealed class RouteAssembler
                     {
                         var customAsnComms = _communityResolver.Resolve(new CommunitySource(CommunitySourceKind.CustomAsn));
                         var asnPrefixes = await prefixService.GetPrefixesForAsns(customAsns, ct);
-                        foreach (var (prefix, length, asn) in asnPrefixes)
-                            routes.Add(MakeRoute(prefix, length, nextHop, [asn], customAsnComms));
+                        foreach (var (prefix, length, _) in asnPrefixes)
+                            routes.Add(MakeRoute(prefix, length, nextHop, null, customAsnComms));
                         _logger.LogInformation("Peer {Peer} custom AS: {Asns} -> {Count} prefixes",
                             _peer, string.Join(",", customAsns), asnPrefixes.Count);
                     }

@@ -10,11 +10,15 @@ public sealed class RouteTable
 
     public bool AddOrUpdate(Route route)
     {
-        var added = false;
-        _routes.AddOrUpdate(route.Key,
-            _ => { added = true; return route; },
-            (_, _) => route);
-        return added;
+        // #85: avoid ConcurrentDictionary.AddOrUpdate's closure allocations (two delegate lambdas
+        // per call). The try-pattern is allocation-free and equivalent: TryAdd for the new-key
+        // case, indexer for the update case.
+        if (!_routes.TryAdd(route.Key, route))
+        {
+            _routes[route.Key] = route;
+            return false;
+        }
+        return true;
     }
 
     public bool Remove(uint prefix, byte length) =>

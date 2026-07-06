@@ -126,9 +126,14 @@ public sealed class BgpSession : IDisposable
         if (count == 0) return;
 
         const int maxPerUpdate = 100;
+        // #85: reuse a single batch list instead of GetRange (which allocates a new List per batch).
+        var batch = new List<IpPrefix>(Math.Min(maxPerUpdate, count));
         for (var i = 0; i < count; i += maxPerUpdate)
         {
-            var batch = _advertisedPrefixes.GetRange(i, Math.Min(maxPerUpdate, count - i));
+            batch.Clear();
+            var end = Math.Min(i + maxPerUpdate, count);
+            for (var j = i; j < end; j++)
+                batch.Add(_advertisedPrefixes[j]);
             var update = new BgpUpdateMessage
             {
                 WithdrawnRoutes = batch,
@@ -591,7 +596,10 @@ public sealed class BgpSession : IDisposable
                     if (_routeFilter.AcceptIncoming(route, filterPeerConfig))
                     {
                         _routeTable.AddOrUpdate(route);
-                        _logger.LogDebug("Route added: {Prefix} via {NextHop}", nlri, BgpConstants.UintToIPAddress(nextHop));
+                        // #85: guard the UintToIPAddress allocation behind IsEnabled — LogDebug
+                        // evaluates the arg eagerly even when Debug is filtered out.
+                        if (_logger.IsEnabled(LogLevel.Debug))
+                            _logger.LogDebug("Route added: {Prefix} via {NextHop}", nlri, BgpConstants.UintToIPAddress(nextHop));
                     }
                 }
             }
