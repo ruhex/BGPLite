@@ -33,7 +33,9 @@ public sealed class ExactUnionPrefixAggregator : IPrefixAggregator
         // pass with the same semantics and less intermediate allocation. The groups preserve
         // encounter order (Dictionary maintains insertion order in .NET), matching GroupBy's
         // documented behavior for same-key elements.
-        var groups = new Dictionary<AttributeKey, List<Route>>(source.Count);
+        // Capacity is the expected number of DISTINCT community sets, not route count.
+        // A typical send carries 1-5 community sets even with tens of thousands of routes.
+        var groups = new Dictionary<AttributeKey, List<Route>>(4);
         foreach (var route in source)
         {
             var key = AttributeKey.From(route);
