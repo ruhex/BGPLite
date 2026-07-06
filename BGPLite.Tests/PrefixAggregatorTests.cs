@@ -230,7 +230,7 @@ public class PrefixAggregatorTests
             R(0xC0A80300, 24, [0xC1u]),
         };
 
-        var groups = BgpSession.GroupByCommunitySet(routes);
+        var groups = RouteAssembler.GroupByCommunitySet(routes);
 
         Assert.Equal(2, groups.Count);
         foreach (var g in groups)
@@ -256,7 +256,7 @@ public class PrefixAggregatorTests
             R(0xC0A80300, 24, [0xC1u, 0xC2u]),
         };
 
-        var groups = BgpSession.GroupByCommunitySet(routes);
+        var groups = RouteAssembler.GroupByCommunitySet(routes);
 
         var group = Assert.Single(groups);
         Assert.Equal(3, group.Count);
@@ -277,7 +277,7 @@ public class PrefixAggregatorTests
             R(0x0A000200, 24),
         };
 
-        var groups = BgpSession.GroupByCommunitySet(routes);
+        var groups = RouteAssembler.GroupByCommunitySet(routes);
 
         var group = Assert.Single(groups);
         Assert.Equal(2, group.Count);
@@ -296,7 +296,7 @@ public class PrefixAggregatorTests
             R(0xC0A80300, 24, [0xC1u]),
         };
 
-        var groups = BgpSession.GroupByCommunitySet(routes);
+        var groups = RouteAssembler.GroupByCommunitySet(routes);
 
         Assert.Equal(2, groups.Count);
         Assert.Equal([0xC1u], groups[0][0].Communities);
@@ -308,7 +308,7 @@ public class PrefixAggregatorTests
     [Fact]
     public void GroupByCommunitySet_EmptyBatch_ReturnsNoGroups()
     {
-        Assert.Empty(BgpSession.GroupByCommunitySet([]));
+        Assert.Empty(RouteAssembler.GroupByCommunitySet([]));
     }
 
     [Fact]
@@ -363,7 +363,7 @@ public class PrefixAggregatorTests
             R(0xC0A80300, 24, [0xC1u], [(1u, 1u, 1u)]),
         };
 
-        var groups = BgpSession.GroupByCommunitySet(routes);
+        var groups = RouteAssembler.GroupByCommunitySet(routes);
 
         Assert.Equal(2, groups.Count);
         foreach (var g in groups)
@@ -386,7 +386,7 @@ public class PrefixAggregatorTests
             R(0xC0A80200, 24, [0xC1u], [(1u, 1u, 1u)]),
         };
 
-        var group = Assert.Single(BgpSession.GroupByCommunitySet(routes));
+        var group = Assert.Single(RouteAssembler.GroupByCommunitySet(routes));
         Assert.Equal(2, group.Count);
         Assert.All(group, r => Assert.Equal([(1u, 1u, 1u)], r.LargeCommunities));
     }

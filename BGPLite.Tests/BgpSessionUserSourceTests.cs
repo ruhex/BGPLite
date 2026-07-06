@@ -9,7 +9,7 @@ namespace BGPLite.Tests;
 
 /// <summary>
 /// Unit coverage for the per-peer user-source send path added in #147 (epic #143). Exercises
-/// <see cref="BgpSession.AddUserSourceRoutesAsync"/> directly with fakes — no live BgpSession/socket —
+/// <see cref="RouteAssembler.AddUserSourceRoutesAsync"/> directly with fakes — no live BgpSession/socket —
 /// mirroring the static-helper convention used by the other BgpSession tests.
 /// </summary>
 public class BgpSessionUserSourceTests
@@ -61,7 +61,7 @@ public class BgpSessionUserSourceTests
         var resolver = new StubResolver();
         var routes = new List<Route>();
 
-        await BgpSession.AddUserSourceRoutesAsync(
+        await RouteAssembler.AddUserSourceRoutesAsync(
             routes, new CustomSourceView("msft", "https://example.com/x.txt", "65000:42"),
             0x01020304u, svc, resolver, NullLogger.Instance, "peer", CancellationToken.None);
 
@@ -84,9 +84,9 @@ public class BgpSessionUserSourceTests
         var throwSvc = new StubPrefixService { Throw = new InvalidOperationException("boom") };
         var okSvc = new StubPrefixService { Result = [(0x0A000000u, (byte)8)] };
 
-        await BgpSession.AddUserSourceRoutesAsync(
+        await RouteAssembler.AddUserSourceRoutesAsync(
             routes, new CustomSourceView("bad", "https://x/b", null), 1, throwSvc, new StubResolver(), NullLogger.Instance, "peer", CancellationToken.None);
-        await BgpSession.AddUserSourceRoutesAsync(
+        await RouteAssembler.AddUserSourceRoutesAsync(
             routes, new CustomSourceView("good", "https://x/g", null), 1, okSvc, new StubResolver(), NullLogger.Instance, "peer", CancellationToken.None);
 
         Assert.Single(routes);                       // only the second source's prefix made it
@@ -99,7 +99,7 @@ public class BgpSessionUserSourceTests
         var svc = new StubPrefixService { Throw = new OperationCanceledException() };
         var routes = new List<Route>();
 
-        await Assert.ThrowsAsync<OperationCanceledException>(() => BgpSession.AddUserSourceRoutesAsync(
+        await Assert.ThrowsAsync<OperationCanceledException>(() => RouteAssembler.AddUserSourceRoutesAsync(
             routes, new CustomSourceView("c", "https://x/c", null), 1, svc, new StubResolver(),
             NullLogger.Instance, "peer", CancellationToken.None));
     }
@@ -110,7 +110,7 @@ public class BgpSessionUserSourceTests
         var svc = new StubPrefixService { Result = [] };
         var routes = new List<Route>();
 
-        await BgpSession.AddUserSourceRoutesAsync(
+        await RouteAssembler.AddUserSourceRoutesAsync(
             routes, new CustomSourceView("empty", "https://x/e", null), 1, svc, new StubResolver(),
             NullLogger.Instance, "peer", CancellationToken.None);
 

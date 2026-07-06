@@ -96,7 +96,7 @@ public class CommunityResolverTests
     [Fact]
     public void MakeRoute_StampsCommunitiesAndAsPath()
     {
-        var route = BgpSession.MakeRoute(0xC0A80000, 24, 0x01020304, [65000u], [CommunityCodec.Parse("65000:100")]);
+        var route = RouteAssembler.MakeRoute(0xC0A80000, 24, 0x01020304, [65000u], [CommunityCodec.Parse("65000:100")]);
         Assert.Equal(0xC0A80000u, route.Prefix);
         Assert.Equal((byte)24, route.PrefixLength);
         Assert.Equal(0x01020304u, route.NextHop);
@@ -107,7 +107,7 @@ public class CommunityResolverTests
     [Fact]
     public void MakeRoute_NullAsPath_DefaultsEmpty()
     {
-        var route = BgpSession.MakeRoute(0x0A000000, 8, 0, null, []);
+        var route = RouteAssembler.MakeRoute(0x0A000000, 8, 0, null, []);
         Assert.Empty(route.AsPath);
         Assert.Empty(route.Communities);
     }
