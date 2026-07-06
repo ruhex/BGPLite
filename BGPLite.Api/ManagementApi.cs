@@ -707,7 +707,8 @@ public sealed class ManagementApi : IHostedService, IDisposable
 
     private async Task<ApiResponse> HandleAddSource(string peerId, HttpListenerContext ctx)
     {
-        if (_store.GetDbPeerById(peerId) is null)
+        var peer = _store.GetDbPeerById(peerId);
+        if (peer is null)
             return ApiResponse.Error("Peer not found", 404);
 
         var (body, bodyError) = await ReadBodyAsync(ctx);
@@ -722,6 +723,10 @@ public sealed class ManagementApi : IHostedService, IDisposable
 
         var source = _store.AddCustomSource(peerId, data.Name, data.Url, data.Community);
 
+        // Trigger refresh so the peer receives the new source's prefixes immediately —
+        // same pattern as CreatePeer/UpdatePeer (lines 586/679).
+        _ = _sessionManager.RefreshPeerAsync(peer.Ip);
+
         _logger.LogInformation("Added source '{Name}' ({Url}) to peer {PeerId}",
             SanitizeForLog(data.Name), SanitizeForLog(data.Url), SanitizeForLog(peerId));
         return ApiResponse.Ok(new { id = source.Id, name = source.Name, url = source.Url, community = source.Community, active = source.Active });
@@ -729,11 +734,15 @@ public sealed class ManagementApi : IHostedService, IDisposable
 
     private ApiResponse HandleDeleteSource(string peerId, string sourceId)
     {
-        if (_store.GetDbPeerById(peerId) is null)
+        var peer = _store.GetDbPeerById(peerId);
+        if (peer is null)
             return ApiResponse.Error("Peer not found", 404);
 
         if (!_store.DeleteCustomSource(peerId, sourceId))
             return ApiResponse.Error($"Source '{sourceId}' not found", 404);
+
+        // Trigger refresh so the source's prefixes are withdrawn immediately.
+        _ = _sessionManager.RefreshPeerAsync(peer.Ip);
 
         _logger.LogInformation("Deleted source {SourceId} from peer {PeerId}", SanitizeForLog(sourceId), SanitizeForLog(peerId));
         return ApiResponse.Ok(new { id = sourceId, deleted = true });
@@ -741,7 +750,8 @@ public sealed class ManagementApi : IHostedService, IDisposable
 
     private async Task<ApiResponse> HandlePatchSource(string peerId, string sourceId, HttpListenerContext ctx)
     {
-        if (_store.GetDbPeerById(peerId) is null)
+        var peer = _store.GetDbPeerById(peerId);
+        if (peer is null)
             return ApiResponse.Error("Peer not found", 404);
 
         var (body, bodyError) = await ReadBodyAsync(ctx);
@@ -753,6 +763,9 @@ public sealed class ManagementApi : IHostedService, IDisposable
 
         if (!_store.SetSourceActive(peerId, sourceId, data.Active.Value))
             return ApiResponse.Error($"Source '{sourceId}' not found", 404);
+
+        // Trigger refresh so toggling active/inactive takes effect immediately.
+        _ = _sessionManager.RefreshPeerAsync(peer.Ip);
 
         _logger.LogInformation("Source {SourceId} active={Active}", SanitizeForLog(sourceId), data.Active.Value);
         return ApiResponse.Ok(new { id = sourceId, active = data.Active.Value });
