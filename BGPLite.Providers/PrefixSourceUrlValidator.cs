@@ -15,6 +15,7 @@ public static class PrefixSourceUrlValidator
 {
     private static readonly IPNetwork[] BlockedRanges =
     [
+        // IPv4 non-public ranges.
         IPNetwork.Parse("0.0.0.0/8"),           // unspecified / current-network
         IPNetwork.Parse("10.0.0.0/8"),          // private (RFC 1918)
         IPNetwork.Parse("100.64.0.0/10"),       // CGNAT (RFC 6598)
@@ -25,10 +26,17 @@ public static class PrefixSourceUrlValidator
         IPNetwork.Parse("198.18.0.0/15"),       // benchmarking (RFC 2544)
         IPNetwork.Parse("224.0.0.0/4"),         // multicast
         IPNetwork.Parse("240.0.0.0/4"),         // reserved (future use)
+        // IPv6 non-public ranges.
         IPNetwork.Parse("::1/128"),             // IPv6 loopback
         IPNetwork.Parse("::/128"),              // IPv6 unspecified
         IPNetwork.Parse("fc00::/7"),            // IPv6 unique-local
         IPNetwork.Parse("fe80::/10"),           // IPv6 link-local
+        // IPv6 forms that EMBED a non-public IPv4 address (#158) — without these, an attacker
+        // controlling DNS can return an IPv6 address whose embedded IPv4 reaches an internal host:
+        IPNetwork.Parse("2002::/16"),           // 6to4 — last 32 bits encode an IPv4 (e.g. 2002:ac10:1:: → 172.16.0.1)
+        IPNetwork.Parse("2001::/32"),           // Teredo — can embed private IPv4 in the last 32 bits
+        IPNetwork.Parse("::ffff:0:0/96"),       // IPv4-mapped (also caught by IsIPv4MappedToIPv6, defense in depth)
+        IPNetwork.Parse("::/96"),               // IPv4-compatible (deprecated ::a.b.c.d form)
     ];
 
     /// <summary>Per-address connect budget so one blackholed candidate can't consume the whole
@@ -136,6 +144,15 @@ public static class PrefixSourceUrlValidator
 
         if (uri.Scheme is not ("http" or "https"))
             return (false, $"URL scheme must be http or https: '{url}'.");
+
+        // Port restriction (#158): a peer could otherwise fetch http://internal-host:9000/... and
+        // reach internal services on non-standard ports. Restrict to the scheme default ports (and
+        // their explicit forms) — the ConnectCallback validates the IP, but the port was attacker-
+        // controlled. Allowlist 80/443 (+ explicit :80/:443) only.
+        var port = uri.Port == -1 ? (uri.Scheme == "https" ? 443 : 80) : uri.Port;
+        if (port is not (80 or 443))
+            return (false, $"URL port must be 80 or 443 (got {port}): '{url}'.");
+
 
         var host = uri.Host;
         var resolver = dnsResolver ?? DefaultDnsResolver;

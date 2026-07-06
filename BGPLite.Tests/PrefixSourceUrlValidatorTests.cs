@@ -130,4 +130,48 @@ public class PrefixSourceUrlValidatorTests
     [Fact]
     public void OrderForConnect_Empty_Returns_Empty()
         => Assert.Empty(PrefixSourceUrlValidator.OrderForConnect([]).ToArray());
+
+    // --- #158: IPv6 forms that embed a non-public IPv4 must be blocked ---
+
+    [Theory]
+    [InlineData("2002:ac10:0001::")]    // 6to4 encoding 172.16.0.1 (RFC 1918 private)
+    [InlineData("2002:7f00:0001::")]    // 6to4 encoding 127.0.0.1 (loopback)
+    [InlineData("2002:a9fe:0001::")]    // 6to4 encoding 169.254.0.1 (link-local / metadata)
+    [InlineData("2001:0:5ef5:79fd:d8c6:e8e9:ac10:0001")] // Teredo-style embedding 172.16.0.1
+    [InlineData("::192.168.1.1")]       // IPv4-compatible (deprecated ::a.b.c.d form)
+    [InlineData("::ffff:10.0.0.1")]     // IPv4-mapped private (also caught by normalize, defense in depth)
+    public void IsBlockedAddress_Rejects_IPv4EmbeddingForms(string ip)
+    {
+        // Without the #158 ranges, an attacker controlling DNS returns one of these IPv6 addresses
+        // for a peer-supplied URL and reaches an internal IPv4 host via the embedding.
+        Assert.True(PrefixSourceUrlValidator.IsBlockedAddress(IPAddress.Parse(ip)));
+    }
+
+    [Fact]
+    public async Task ValidateUrlAsync_Rejects_NonStandardPort()
+    {
+        // #158: a peer could otherwise fetch http://internal-host:9000/... and reach internal
+        // services on non-standard ports. The ConnectCallback validates the IP, but the port was
+        // attacker-controlled. Allowlist 80/443 only.
+        var (isValid, error) = await PrefixSourceUrlValidator.ValidateUrlAsync(
+            "http://example.com:9000/x.txt",
+            dnsResolver: (_, _) => ValueTask.FromResult(new[] { IPAddress.Parse("93.184.216.34") }));
+
+        Assert.False(isValid);
+        Assert.Contains("port", error, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Theory]
+    [InlineData("http://example.com/x.txt")]       // implicit port 80
+    [InlineData("http://example.com:80/x.txt")]    // explicit port 80
+    [InlineData("https://example.com/x.txt")]      // implicit port 443
+    [InlineData("https://example.com:443/x.txt")]  // explicit port 443
+    public async Task ValidateUrlAsync_Accepts_StandardPorts(string url)
+    {
+        var (isValid, _) = await PrefixSourceUrlValidator.ValidateUrlAsync(
+            url,
+            dnsResolver: (_, _) => ValueTask.FromResult(new[] { IPAddress.Parse("93.184.216.34") }));
+
+        Assert.True(isValid);
+    }
 }
