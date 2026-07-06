@@ -53,6 +53,15 @@ public static class PrefixSourceUrlValidator
     }
 
     /// <summary>
+    /// True if the port is on the SSRF allowlist (#158). Shared by <see cref="CreateValidatedConnectionAsync"/>
+    /// (live fetch path) and <see cref="ValidateUrlAsync"/> (API-submission-time) so the check is
+    /// enforced at both layers. A peer URL on a non-standard port (http://internal-host:9000/...)
+    /// could otherwise reach internal services — the ConnectCallback validates the IP, but the port
+    /// was attacker-controlled.
+    /// </summary>
+    internal static bool IsAllowedPort(int port) => port is 80 or 443;
+
+    /// <summary>
     /// SocketsHttpHandler.ConnectCallback: resolves DNS, validates ALL resolved IPs are public,
     /// then connects with a matching-family socket per address (IPv4 preferred) until one succeeds.
     /// No TOCTOU — every address is validated above and the connected IP is one of them.
@@ -63,6 +72,13 @@ public static class PrefixSourceUrlValidator
     {
         var host = context.DnsEndPoint.Host;
         var port = context.DnsEndPoint.Port;
+
+        // Port allowlist (#158): enforce at the live connect path too, not just in ValidateUrlAsync.
+        // Without this, a peer URL on a non-standard port (http://internal-host:9000/...) reaches
+        // internal services — the ConnectCallback validates the IP, but the port was attacker-controlled.
+        if (!IsAllowedPort(port))
+            throw new InvalidOperationException(
+                $"SSRF blocked: '{host}' uses non-standard port {port} (only 80/443 allowed).");
 
         IPAddress[] addresses;
         try
@@ -148,9 +164,10 @@ public static class PrefixSourceUrlValidator
         // Port restriction (#158): a peer could otherwise fetch http://internal-host:9000/... and
         // reach internal services on non-standard ports. Restrict to the scheme default ports (and
         // their explicit forms) — the ConnectCallback validates the IP, but the port was attacker-
-        // controlled. Allowlist 80/443 (+ explicit :80/:443) only.
+        // controlled. Allowlist 80/443 (+ explicit :80/:443) only. IsAllowedPort is shared with the
+        // live connect path (CreateValidatedConnectionAsync) so the check is enforced at both layers.
         var port = uri.Port == -1 ? (uri.Scheme == "https" ? 443 : 80) : uri.Port;
-        if (port is not (80 or 443))
+        if (!IsAllowedPort(port))
             return (false, $"URL port must be 80 or 443 (got {port}): '{url}'.");
 
 

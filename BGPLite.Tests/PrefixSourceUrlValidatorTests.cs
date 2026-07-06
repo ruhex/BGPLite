@@ -174,4 +174,19 @@ public class PrefixSourceUrlValidatorTests
 
         Assert.True(isValid);
     }
+
+    [Theory]
+    [InlineData(80, true)]
+    [InlineData(443, true)]
+    [InlineData(8080, false)]
+    [InlineData(9000, false)]
+    [InlineData(8443, false)]
+    [InlineData(22, false)]
+    public void IsAllowedPort_MatchesConnectPathAllowlist(int port, bool expected)
+    {
+        // #158: the port allowlist is shared between ValidateUrlAsync (API submission) and
+        // CreateValidatedConnectionAsync (live fetch) via IsAllowedPort. Pin the exact allowlist
+        // (80/443 only) so the two layers cannot drift.
+        Assert.Equal(expected, PrefixSourceUrlValidator.IsAllowedPort(port));
+    }
 }
