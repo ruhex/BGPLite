@@ -18,12 +18,12 @@ public class BgpSessionBuildUpdateAttributesTests
     {
         // Distinct array instances holding the same community values — the cache must treat them
         // as one key and hand back the already-built list (reference-equal).
-        var cache = BgpSession.CreateUpdateAttributeCache();
+        var cache = UpdateCodec.CreateUpdateAttributeCache();
         var communitiesA = new uint[] { 1234u, 5678u };
         var communitiesB = new uint[] { 1234u, 5678u };
 
-        var first = BgpSession.GetCachedUpdateAttributes(Asn, localFourByteAsn: true, NextHop, communitiesA, cache);
-        var second = BgpSession.GetCachedUpdateAttributes(Asn, localFourByteAsn: true, NextHop, communitiesB, cache);
+        var first = UpdateCodec.GetCachedUpdateAttributes(Asn, localFourByteAsn: true, NextHop, communitiesA, cache);
+        var second = UpdateCodec.GetCachedUpdateAttributes(Asn, localFourByteAsn: true, NextHop, communitiesB, cache);
 
         Assert.Same(first, second);
         Assert.Single(cache);
@@ -32,11 +32,11 @@ public class BgpSessionBuildUpdateAttributesTests
     [Fact]
     public void GetCachedUpdateAttributes_DistinctCommunitySets_BuildsOnceEach()
     {
-        var cache = BgpSession.CreateUpdateAttributeCache();
+        var cache = UpdateCodec.CreateUpdateAttributeCache();
 
-        var withComms = BgpSession.GetCachedUpdateAttributes(Asn, localFourByteAsn: true, NextHop, [1234u], cache);
-        var noComms = BgpSession.GetCachedUpdateAttributes(Asn, localFourByteAsn: true, NextHop, [], cache);
-        var withCommsAgain = BgpSession.GetCachedUpdateAttributes(Asn, localFourByteAsn: true, NextHop, [1234u], cache);
+        var withComms = UpdateCodec.GetCachedUpdateAttributes(Asn, localFourByteAsn: true, NextHop, [1234u], cache);
+        var noComms = UpdateCodec.GetCachedUpdateAttributes(Asn, localFourByteAsn: true, NextHop, [], cache);
+        var withCommsAgain = UpdateCodec.GetCachedUpdateAttributes(Asn, localFourByteAsn: true, NextHop, [1234u], cache);
 
         Assert.NotSame(withComms, noComms);
         Assert.Same(withComms, withCommsAgain);
@@ -48,11 +48,11 @@ public class BgpSessionBuildUpdateAttributesTests
     {
         // The cached list is reused across batches; assert it serializes byte-identically to a
         // fresh BuildUpdateAttributes call so caching introduces no behavior change (#87).
-        var cache = BgpSession.CreateUpdateAttributeCache();
+        var cache = UpdateCodec.CreateUpdateAttributeCache();
         var communities = new uint[] { 1234u, 5678u };
 
-        var cached = BgpSession.GetCachedUpdateAttributes(Asn, localFourByteAsn: false, NextHop, communities, cache);
-        var fresh = BgpSession.BuildUpdateAttributes(Asn, localFourByteAsn: false, NextHop, communities);
+        var cached = UpdateCodec.GetCachedUpdateAttributes(Asn, localFourByteAsn: false, NextHop, communities, cache);
+        var fresh = UpdateCodec.BuildUpdateAttributes(Asn, localFourByteAsn: false, NextHop, communities);
 
         Assert.Equal(SerializeAttributes(fresh), SerializeAttributes(cached));
     }
@@ -65,15 +65,15 @@ public class BgpSessionBuildUpdateAttributesTests
         // Models the real send path: many sequential lookups for the same community set, as the
         // 100-NLRI batches of one send would issue. Every result must be the same instance and
         // keep serializing to the original bytes.
-        var cache = BgpSession.CreateUpdateAttributeCache();
+        var cache = UpdateCodec.CreateUpdateAttributeCache();
         var communities = new uint[] { 999u };
 
-        var first = BgpSession.GetCachedUpdateAttributes(Asn, localFourByteAsn, NextHop, communities, cache);
+        var first = UpdateCodec.GetCachedUpdateAttributes(Asn, localFourByteAsn, NextHop, communities, cache);
         var firstBytes = SerializeAttributes(first);
 
         for (var i = 0; i < 50; i++)
         {
-            var again = BgpSession.GetCachedUpdateAttributes(Asn, localFourByteAsn, NextHop, new uint[] { 999u }, cache);
+            var again = UpdateCodec.GetCachedUpdateAttributes(Asn, localFourByteAsn, NextHop, new uint[] { 999u }, cache);
             Assert.Same(first, again);
             Assert.Equal(firstBytes, SerializeAttributes(again));
         }

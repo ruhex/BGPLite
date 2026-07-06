@@ -96,9 +96,9 @@ public class LargeCommunityCodecTests
     [Fact]
     public void WithLargeCommunityAttribute_Empty_ReturnsBaseInstance()
     {
-        var baseAttrs = BgpSession.BuildUpdateAttributes(200000u, localFourByteAsn: true, 0x0A000001u, [1234u]);
+        var baseAttrs = UpdateCodec.BuildUpdateAttributes(200000u, localFourByteAsn: true, 0x0A000001u, [1234u]);
 
-        var result = BgpSession.WithLargeCommunityAttribute(baseAttrs, []);
+        var result = UpdateCodec.WithLargeCommunityAttribute(baseAttrs, []);
 
         Assert.Same(baseAttrs, result);
     }
@@ -106,11 +106,11 @@ public class LargeCommunityCodecTests
     [Fact]
     public void WithLargeCommunityAttribute_NonEmpty_AppendsWithoutMutatingBase()
     {
-        var baseAttrs = BgpSession.BuildUpdateAttributes(200000u, localFourByteAsn: true, 0x0A000001u, [1234u]);
+        var baseAttrs = UpdateCodec.BuildUpdateAttributes(200000u, localFourByteAsn: true, 0x0A000001u, [1234u]);
         var baseCount = baseAttrs.Count;
         var large = new (uint, uint, uint)[] { (2914u, 1u, 2u), (65000u, 9u, 9u) };
 
-        var result = BgpSession.WithLargeCommunityAttribute(baseAttrs, large);
+        var result = UpdateCodec.WithLargeCommunityAttribute(baseAttrs, large);
 
         Assert.NotSame(baseAttrs, result);
         Assert.Equal(baseCount + 1, result.Count);
@@ -127,13 +127,13 @@ public class LargeCommunityCodecTests
         // Models the send path: the #87 cache hands out ONE base list for a regular-community
         // set, used by several batches that each carry a DIFFERENT large-community set. Each
         // batch must observe the un-augmented base, never the previous batch's appended attr.
-        var cache = BgpSession.CreateUpdateAttributeCache();
+        var cache = UpdateCodec.CreateUpdateAttributeCache();
         var communities = new uint[] { 1234u };
 
-        var baseAttrs = BgpSession.GetCachedUpdateAttributes(200000u, localFourByteAsn: true, 0x0A000001u, communities, cache);
+        var baseAttrs = UpdateCodec.GetCachedUpdateAttributes(200000u, localFourByteAsn: true, 0x0A000001u, communities, cache);
 
-        var firstWithLarge = BgpSession.WithLargeCommunityAttribute(baseAttrs, [(1u, 1u, 1u)]);
-        var secondWithLarge = BgpSession.WithLargeCommunityAttribute(baseAttrs, [(2u, 2u, 2u)]);
+        var firstWithLarge = UpdateCodec.WithLargeCommunityAttribute(baseAttrs, [(1u, 1u, 1u)]);
+        var secondWithLarge = UpdateCodec.WithLargeCommunityAttribute(baseAttrs, [(2u, 2u, 2u)]);
 
         // The cache entry itself never gained a LARGE_COMMUNITY attribute.
         Assert.DoesNotContain(baseAttrs, a => a.TypeCode == BgpConstants.Attribute.LargeCommunity);
