@@ -221,8 +221,17 @@ public class BgpSessionHoldTimerTests
         var runTask = Task.Run(() => session.RunAsync(CancellationToken.None));
 
         // Give the session time to enter the OPEN-receive (it builds the linked CTS + timer CTS,
-        // then awaits ReceiveMessageAsync which blocks on the fake connection's channel).
-        await Task.Delay(50);
+        // then awaits ReceiveMessageAsync which blocks on the fake connection's channel). Poll
+        // until the connection sees its first read attempt, then advance the clock — avoids a
+        // fixed delay that's too short on slow CI runners.
+        for (var i = 0; i < 100 && !conn.Disposed; i++)
+        {
+            await Task.Delay(10);
+            // The session has entered OPEN-receive when it's not Established (handshake started
+            // but not completed since we sent no OPEN).
+            if (!session.IsEstablished && session.State != BgpFsmState.Idle)
+                break;
+        }
 
         // DO NOT send OPEN — the peer is silent (Slowloris). Advance the fake clock past the timeout.
         // The session's OPEN receive loop is cancelled by the timer CTS; the FSM unwinds to Idle.
