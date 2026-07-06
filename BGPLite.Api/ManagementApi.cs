@@ -314,6 +314,50 @@ public sealed class ManagementApi : IHostedService, IDisposable
 
     #endregion
 
+    #region Request body reader
+
+    /// <summary>
+    /// Reads the request body with a hard size cap (#156): rejects bodies larger than
+    /// <see cref="AppConfig.MaxRequestBodyBytes"/> with <c>413 Payload Too Large</c> BEFORE
+    /// deserialization. <c>HttpListener</c> has no default body limit, so without this a single
+    /// client could stream gigabytes into the process. The cap also covers chunked-transfer bodies
+    /// (no Content-Length) via the read-loop's running byte count.
+    /// </summary>
+    private async Task<(string? Body, ApiResponse? Error)> ReadBodyAsync(HttpListenerContext ctx)
+    {
+        var maxBytes = _config.MaxRequestBodyBytes;
+
+        // Fast path: Content-Length present and already over the cap → reject without reading.
+        if (ctx.Request.ContentLength64 > maxBytes)
+            return (null, ApiResponse.Error(
+                $"Request body too large ({ctx.Request.ContentLength64} bytes, max {maxBytes}).", 413));
+
+        return await ReadBoundedBodyAsync(ctx.Request.InputStream, maxBytes);
+    }
+
+    /// <summary>
+    /// Pure body reader with a hard byte cap — extracted for unit testing (#156). Returns
+    /// <c>(null, 413-error)</c> when the stream yields more than <paramref name="maxBytes"/> bytes,
+    /// otherwise the full body decoded as UTF-8. Covers both sized and chunked/streaming bodies.
+    /// </summary>
+    internal static async Task<(string? Body, ApiResponse? Error)> ReadBoundedBodyAsync(Stream input, long maxBytes)
+    {
+        using var ms = new MemoryStream();
+        var buffer = new byte[8192];
+        int read;
+        while ((read = await input.ReadAsync(buffer, 0, buffer.Length)) > 0)
+        {
+            ms.Write(buffer, 0, read);
+            if (ms.Length > maxBytes)
+                return (null, ApiResponse.Error(
+                    $"Request body too large (over {maxBytes} bytes).", 413));
+        }
+
+        return (Encoding.UTF8.GetString(ms.GetBuffer(), 0, (int)ms.Length), null);
+    }
+
+    #endregion
+
     #region GET /api/server
 
     private ApiResponse HandleGetServer()
@@ -423,8 +467,8 @@ public sealed class ManagementApi : IHostedService, IDisposable
 
     private async Task<ApiResponse> HandleCreatePeer(HttpListenerContext ctx)
     {
-        using var reader = new StreamReader(ctx.Request.InputStream, Encoding.UTF8);
-        var body = await reader.ReadToEndAsync();
+        var (body, bodyError) = await ReadBodyAsync(ctx);
+        if (bodyError is not null) return bodyError;
         var data = JsonSerializer.Deserialize<CreatePeerRequest>(body, _jsonOpts);
 
         if (data is null)
@@ -511,8 +555,8 @@ public sealed class ManagementApi : IHostedService, IDisposable
         if (peer is null)
             return ApiResponse.Error("Peer not found", 404);
 
-        using var reader = new StreamReader(ctx.Request.InputStream, Encoding.UTF8);
-        var body = await reader.ReadToEndAsync();
+        var (body, bodyError) = await ReadBodyAsync(ctx);
+        if (bodyError is not null) return bodyError;
         var data = JsonSerializer.Deserialize<UpdatePeerRequest>(body, _jsonOpts);
 
         if (data is null)
@@ -586,8 +630,8 @@ public sealed class ManagementApi : IHostedService, IDisposable
         if (_store.GetDbPeerById(peerId) is null)
             return ApiResponse.Error("Peer not found", 404);
 
-        using var reader = new StreamReader(ctx.Request.InputStream, Encoding.UTF8);
-        var body = await reader.ReadToEndAsync();
+        var (body, bodyError) = await ReadBodyAsync(ctx);
+        if (bodyError is not null) return bodyError;
         var data = JsonSerializer.Deserialize<AddSourceRequest>(body, _jsonOpts);
 
         if (data is null || string.IsNullOrWhiteSpace(data.Name) || string.IsNullOrWhiteSpace(data.Url))
@@ -620,8 +664,8 @@ public sealed class ManagementApi : IHostedService, IDisposable
         if (_store.GetDbPeerById(peerId) is null)
             return ApiResponse.Error("Peer not found", 404);
 
-        using var reader = new StreamReader(ctx.Request.InputStream, Encoding.UTF8);
-        var body = await reader.ReadToEndAsync();
+        var (body, bodyError) = await ReadBodyAsync(ctx);
+        if (bodyError is not null) return bodyError;
         var data = JsonSerializer.Deserialize<PatchSourceRequest>(body, _jsonOpts);
 
         if (data is null || data.Active is null)
@@ -1086,7 +1130,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
     private record AddSourceRequest(string Name, string Url, string? Community);
     private record PatchSourceRequest([property: JsonPropertyName("active")] bool? Active);
 
-    private record ApiResponse(object? Body, int StatusCode = 200)
+    internal record ApiResponse(object? Body, int StatusCode = 200)
     {
         public static ApiResponse Ok(object data) => new(data);
         public static ApiResponse Error(string message, int code) => new(new { error = message }, code);
