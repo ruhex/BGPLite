@@ -36,7 +36,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
     private readonly string _listenAddress;  // #90: bind address — loopback by default
     private HttpListener? _listener;
     private Task? _listenTask;
-    private CancellationTokenSource _cts = new();
+    private readonly CancellationTokenSource _cts = new();
 
     public ManagementApi(
         PeerStore store,
@@ -772,7 +772,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
                 foreach (var (prefix, length, _) in fetched)
                     prefixes.Add($"{BgpConstants.UintToIPAddress(prefix)}/{length}");
             }
-            catch { }
+            catch (Exception ex) { _logger.LogWarning(ex, "CollectPeerPrefixes: ASN fetch failed"); }
         }
 
         // Country-based lists
@@ -784,7 +784,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
                 foreach (var (prefix, length, _) in ruPrefixes)
                     prefixes.Add($"{BgpConstants.UintToIPAddress(prefix)}/{length}");
             }
-            catch { }
+            catch (Exception ex) { _logger.LogWarning(ex, "CollectPeerPrefixes: RU prefix fetch failed"); }
         }
 
         return prefixes.Distinct().OrderBy(p => p).ToList();
@@ -1114,11 +1114,13 @@ public sealed class ManagementApi : IHostedService, IDisposable
         return nets;
     }
 
-    private static async Task WriteResponse(HttpListenerContext ctx, ApiResponse response)
+    private async Task WriteResponse(HttpListenerContext ctx, ApiResponse response)
     {
         ctx.Response.StatusCode = response.StatusCode;
         ctx.Response.ContentType = "application/json";
-        var json = JsonSerializer.Serialize(response.Body);
+        // Pass the cached JsonSerializerOptions (#105 aot/perf) — without it, Serialize falls back to
+        // default per-call options (reflection + no caching), a perf regression on every response.
+        var json = JsonSerializer.Serialize(response.Body, _jsonOpts);
         var bytes = Encoding.UTF8.GetBytes(json);
         await ctx.Response.OutputStream.WriteAsync(bytes);
         ctx.Response.Close();

@@ -360,6 +360,7 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
         Volatile.Write(ref _acceptingConnections, 0);
         _listener?.Close();
         _cts.Cancel();
+        _cts.Dispose();  // #105: dispose the CTS (StopAsync's graceful path doesn't reach here)
         foreach (var session in _sessions.Values)
             session.Dispose();
     }

@@ -41,12 +41,10 @@ public static class BgpMessageReader
 
     private static void ValidateMarker(ReadOnlySpan<byte> marker)
     {
-        var expected = BgpConstants.Marker;
-        for (var i = 0; i < BgpConstants.MarkerSize; i++)
-        {
-            if (marker[i] != expected[i])
-                throw new BgpParseException("Invalid BGP marker");
-        }
+        // #105: SequenceEqual over ReadOnlySpan<byte> replaces the hand-rolled byte-by-byte loop —
+        // idiomatic, vectorizable by the JIT, and the same semantics.
+        if (!marker.SequenceEqual(BgpConstants.Marker))
+            throw new BgpParseException("Invalid BGP marker");
     }
 
     #region OPEN

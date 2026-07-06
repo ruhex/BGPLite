@@ -151,8 +151,9 @@ internal sealed class RouteAssembler
 
                 // Prefix-source subscriptions: subscribed names that match a configured PrefixSource.
                 var resolvedAsRipe = subscribedLists.Select(l => l.Name).ToHashSet();
+                var prefixSources = _appConfig.PrefixSources;  // safe: we're inside the _appConfig is not null guard
                 var sourceNames = subscriptionIds
-                    .Where(n => !resolvedAsRipe.Contains(n) && _appConfig!.PrefixSources.Any(s => s.Name == n))
+                    .Where(n => !resolvedAsRipe.Contains(n) && prefixSources.Any(s => s.Name == n))
                     .ToList();
                 foreach (var name in sourceNames)
                 {

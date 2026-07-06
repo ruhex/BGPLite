@@ -13,7 +13,7 @@ public static class BgpMessageWriter
             BgpUpdateMessage update => WriteUpdate(update, buffer),
             BgpNotificationMessage notification => WriteNotification(notification, buffer),
             BgpRouteRefreshMessage refresh => WriteRouteRefresh(refresh, buffer),
-            _ => throw new ArgumentException($"Unknown message type: {message.Type}")
+            _ => throw new NotSupportedException($"Unknown BGP message type: {message.Type}")
         };
     }
 
@@ -26,7 +26,7 @@ public static class BgpMessageWriter
             BgpUpdateMessage update => BgpConstants.MessageHeaderSize + GetUpdatePayloadSize(update),
             BgpNotificationMessage n => BgpConstants.MessageHeaderSize + 2 + (n.Data?.Length ?? 0),
             BgpRouteRefreshMessage => BgpConstants.MessageHeaderSize + 4,
-            _ => throw new ArgumentException($"Unknown message type: {message.Type}")
+            _ => throw new NotSupportedException($"Unknown BGP message type: {message.Type}")
         };
     }
 
