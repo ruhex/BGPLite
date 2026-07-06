@@ -44,8 +44,11 @@ public sealed class ConfigCommunityResolver : ICommunityResolver
         _customPrefixComms = ResolveStaticCommunity(config.CustomPrefixCommunity, bgpConfig.Asn, 100, nameof(config.CustomPrefixCommunity));
         _customAsnComms = ResolveStaticCommunity(config.CustomAsnCommunity, bgpConfig.Asn, 200, nameof(config.CustomAsnCommunity));
         // Build name→community dictionaries once in the ctor (the config is immutable).
+        // PrefixSources duplicate names are rejected by PrefixSourceService's ctor; AsnLists have
+        // no such check, so use ToDictionary with a last-wins resolver to avoid a throw on dups.
         _asnListCommunities = (config.RipeStat?.AsnLists ?? [])
-            .ToDictionary(l => l.Name, l => l.Community);
+            .GroupBy(l => l.Name)
+            .ToDictionary(g => g.Key, g => g.Last().Community);
         _prefixSourceCommunities = config.PrefixSources
             .ToDictionary(s => s.Name, s => s.Community);
     }
