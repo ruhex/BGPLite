@@ -21,7 +21,7 @@ internal sealed class SocketBgpConnection : IBgpConnection
 
     private readonly Socket _socket;
     private readonly NetworkStream _stream;
-    private volatile bool _disposed;
+    private int _disposed; // 0 = not disposed, 1 = disposed. Atomic CAS (matches BgpSession.Dispose).
 
     public SocketBgpConnection(Socket socket)
     {
@@ -51,8 +51,11 @@ internal sealed class SocketBgpConnection : IBgpConnection
 
     public void Dispose()
     {
-        if (_disposed) return;
-        _disposed = true;
+        // Atomic test-and-set (CodeRabbit #178): a volatile bool check-then-set races under
+        // concurrent Dispose() — two callers can both pass the check before either writes,
+        // double-disposing _stream/_socket. Interlocked.Exchange makes the first caller win and
+        // the rest no-op, matching BgpSession.Dispose's pattern.
+        if (Interlocked.Exchange(ref _disposed, 1) == 1) return;
         // Disposing the NetworkStream (ownsSocket:true) closes the socket transitively. The extra
         // _socket.Dispose() is redundant-but-harmless (matches the prior BgpSession.Dispose pattern).
         _stream.Dispose();
