@@ -98,6 +98,27 @@ public class ConfigValidationTests
     }
 
     [Theory]
+    [InlineData(0)]            // nonsensical — rejects every body
+    [InlineData(-1)]
+    [InlineData(512)]          // below the 1 KiB floor — too small for a minimal peer payload
+    [InlineData(64 * 1024 * 1024 + 1)]  // above the 64 MiB ceiling — weakens the DoS cap to nothing
+    public void Validate_RejectsBadMaxRequestBodyBytes(long bytes)
+    {
+        var config = new AppConfig { Bgp = Bgp(), MaxRequestBodyBytes = bytes };
+
+        var ex = Assert.Throws<InvalidOperationException>(() => config.Validate());
+        Assert.Contains("MaxRequestBodyBytes", ex.Message);
+    }
+
+    [Fact]
+    public void Validate_AcceptsDefaultMaxRequestBodyBytes()
+    {
+        // The default (1 MiB) must pass validation — guards against an accidentally-too-tight range.
+        var config = new AppConfig { Bgp = Bgp() };
+        config.Validate();
+    }
+
+    [Theory]
     [InlineData("not-an-ip")]
     [InlineData("::1")]
     public void Validate_RejectsBadPeerAddress(string address)

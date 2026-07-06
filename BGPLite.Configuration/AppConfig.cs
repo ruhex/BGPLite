@@ -86,6 +86,15 @@ public sealed class AppConfig
             throw new InvalidOperationException(
                 $"Invalid configuration: ApiPort must be between 1 and 65535 (got {ApiPort}).");
 
+        // MaxRequestBodyBytes is a security boundary (#156 DoS cap); reject nonsensical values at
+        // startup so a bad YAML cannot break all mutating API requests (<= 0) or weaken the cap to
+        // nothing (impractically large). 1 KiB lower bound leaves room for a minimal peer payload;
+        // 64 MiB upper bound is far beyond any legitimate peer-config write.
+        if (MaxRequestBodyBytes is < 1024 or > 64 * 1024 * 1024)
+            throw new InvalidOperationException(
+                $"Invalid configuration: MaxRequestBodyBytes must be between 1024 and 67108864 bytes " +
+                $"(got {MaxRequestBodyBytes}).");
+
         for (var i = 0; i < Peers.Count; i++)
         {
             var peer = Peers[i];
