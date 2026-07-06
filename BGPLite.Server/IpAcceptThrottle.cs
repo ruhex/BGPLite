@@ -25,6 +25,14 @@ internal sealed class IpAcceptThrottle
     private readonly ConcurrentDictionary<string, Window> _byIp = new(StringComparer.Ordinal);
     private readonly Func<long> _nowTicks;
     private int _callsSinceSweep;
+    // Coarse throttle-level lock (#133): serializes the dictionary-mutation parts of TryAccept and
+    // SweepStale so a sweep cannot TryRemove a Window that a concurrent TryAccept just refreshed.
+    // The prior per-Window lock checked staleness under the Window lock but called _byIp.TryRemove
+    // OUTSIDE any dictionary-level atomicity — a racing TryAccept could GetOrAdd the same Window,
+    // record a fresh accept, and then have that entry removed by the sweep, orphaning the
+    // just-recorded accept and effectively resetting the IP's limit. The accept path tolerates
+    // serialization (it is the throttle itself — not a hot path).
+    private readonly object _dictLock = new();
 
     public IpAcceptThrottle(int maxPerMinute, Func<long>? nowTicks = null)
     {
@@ -81,10 +89,13 @@ internal sealed class IpAcceptThrottle
         if (_maxPerMinute <= 0) return true;
 
         var nowTicks = _nowTicks();
-        var window = _byIp.GetOrAdd(ip, _ => new Window());
         bool allowed;
-        lock (window)
+        // Hold _dictLock across GetOrAdd + Decide + store so SweepStale cannot remove this Window
+        // between the refresh and the store (#133). The Decide computation is cheap (small list),
+        // so the critical section is short.
+        lock (_dictLock)
         {
+            var window = _byIp.GetOrAdd(ip, _ => new Window());
             allowed = Decide(window.Timestamps, nowTicks, _windowTicks, _maxPerMinute, out var updated);
             window.Timestamps = updated;
         }
@@ -103,13 +114,18 @@ internal sealed class IpAcceptThrottle
     internal void SweepStale(long nowTicks)
     {
         var cutoff = nowTicks - _windowTicks;
-        foreach (var (ip, window) in _byIp)
+        // Hold _dictLock across the whole sweep so TryAccept cannot refresh a Window we are about to
+        // remove. The snapshot enumeration is safe under lock (no concurrent writers); removing while
+        // iterating ConcurrentDictionary is supported, but the lock makes the staleness-check + remove
+        // atomic against a racing TryAccept (#133).
+        lock (_dictLock)
         {
-            bool stale;
-            lock (window)
-                stale = window.Timestamps.Count == 0 || IsAllStale(window.Timestamps, cutoff);
-            if (stale)
-                _byIp.TryRemove(ip, out _);
+            foreach (var (ip, window) in _byIp)
+            {
+                var stale = window.Timestamps.Count == 0 || IsAllStale(window.Timestamps, cutoff);
+                if (stale)
+                    _byIp.TryRemove(ip, out _);
+            }
         }
     }
 
