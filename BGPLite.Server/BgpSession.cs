@@ -842,17 +842,19 @@ public sealed class BgpSession : IDisposable
             capabilities.Add(BgpCapabilityInfo.RouteRefresh());
 
         // Advertise Graceful Restart (RFC 4724) so GR-capable peers retain our routes across our
-        // restart. R=1: every app start is treated as a restart (harmless on first connect, reduces
-        // churn on transient reconnects; proper restart detection would need a persisted generation
-        // counter — future work). F reflects whether forwarding state is preserved and is configurable
-        // (the peer keeps stale routes only while F=1, RFC 4724 §4.2). Restart Time is clamped to
-        // <= HoldTime here and to the 12-bit field max in the codec. Advertised unconditionally when
-        // enabled (RFC 4724 §4 recommends it; non-GR peers safely ignore it per RFC 5492).
+        // Graceful Restart capability (RFC 4724 §2). R=0 on a fresh session — the R bit means
+        // "I am restarting, please retain my routes" and must NOT be set on the initial session
+        // establishment. It would only be set if BGPLite were recovering from a crash/restart and
+        // wanted peers to re-send their routes. BGPLite always re-advertises its full route set on
+        // reconnect, so R=0 is correct (#203). Restart Time tells peers how long to retain stale
+        // routes if BGPLite disappears (silent TCP close during docker stop). F reflects whether
+        // forwarding state is preserved (configurable, default false). Advertised unconditionally
+        // when enabled (RFC 4724 §4; non-GR peers safely ignore it per RFC 5492).
         if (_bgpConfig.GracefulRestart)
         {
-            var restartTime = (ushort)Math.Min(_bgpConfig.RestartTime, _bgpConfig.HoldTime);
+            var restartTime = (ushort)Math.Min(_bgpConfig.RestartTime, _negotiatedHoldTime > 0 ? _negotiatedHoldTime : 120);
             capabilities.Add(BgpCapabilityInfo.GracefulRestart(
-                restartState: true, restartTime, forwardingState: _bgpConfig.GracefulRestartForwardingState));
+                restartState: false, restartTime, forwardingState: _bgpConfig.GracefulRestartForwardingState));
         }
 
         var asn16 = _bgpConfig.Asn > ushort.MaxValue ? (ushort)BgpConstants.AsPath.AsTrans : (ushort)_bgpConfig.Asn;
