@@ -54,13 +54,7 @@ public sealed class ExactUnionPrefixAggregator : IPrefixAggregator
         foreach (var (key, group) in groups)
         {
             var template = group[0];
-            // #82: AggregatePrefixes takes the prefix tuples directly from the group list,
-            // avoiding the Select(r => (r.Prefix, r.PrefixLength)) LINQ allocation.
-            var prefixPairs = new List<(uint Prefix, byte Length)>(group.Count);
-            foreach (var r in group)
-                prefixPairs.Add((r.Prefix, r.PrefixLength));
-
-            foreach (var (prefix, length) in AggregatePrefixes(prefixPairs))
+            foreach (var (prefix, length) in AggregatePrefixes(group))
             {
                 result.Add(new Route
                 {
@@ -76,13 +70,15 @@ public sealed class ExactUnionPrefixAggregator : IPrefixAggregator
         return result;
     }
 
-    /// <summary>Exact-union CIDR merge of raw (prefix, length) pairs.</summary>
-    private static List<(uint Prefix, byte Length)> AggregatePrefixes(IEnumerable<(uint Prefix, byte Length)> prefixes)
+    /// <summary>Exact-union CIDR merge of the prefixes carried by a group of routes.</summary>
+    private static List<(uint Prefix, byte Length)> AggregatePrefixes(IReadOnlyList<Route> routes)
     {
         // 1. Mask host bits and build inclusive [start, end] intervals. ulong so a /0 fits.
-        var intervals = new List<(ulong Start, ulong End)>();
-        foreach (var (prefix, length) in prefixes)
+        var intervals = new List<(ulong Start, ulong End)>(routes.Count);
+        for (var i = 0; i < routes.Count; i++)
         {
+            var prefix = routes[i].Prefix;
+            var length = routes[i].PrefixLength;
             if (length > 32) continue; // defensive: skip malformed prefixes
             var mask = length == 0 ? 0u : (0xFFFFFFFFu << (32 - length));
             var start = (ulong)(prefix & mask);
