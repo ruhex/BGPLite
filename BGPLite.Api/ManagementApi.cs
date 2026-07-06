@@ -136,9 +136,18 @@ public sealed class ManagementApi : IHostedService, IDisposable
     public Task StartAsync(CancellationToken cancellationToken)
     {
         _listener = new HttpListener();
-        // IPv6 literals (e.g. "::1") must be bracketed in a URI: http://[::1]:5001/, not http://::1:5001/.
-        // IPv4 and hostnames ("127.0.0.1", "localhost", "0.0.0.0") go through as-is (CodeRabbit #181).
-        var host = _listenAddress.Contains(':') ? $"[{_listenAddress}]" : _listenAddress;
+        // HttpListener prefix normalization:
+        // - "0.0.0.0" must be mapped to "+" — HttpListener on Linux does NOT accept 0.0.0.0
+        //   (throws HttpListenerException "The request is not supported"), only the "+" wildcard (#195).
+        // - IPv6 literals (e.g. "::1") must be bracketed: http://[::1]:5001/ (CodeRabbit #181).
+        // - IPv4 ("127.0.0.1") and hostnames ("localhost") go through as-is.
+        string host;
+        if (_listenAddress == "0.0.0.0")
+            host = "+";
+        else if (_listenAddress.Contains(':'))
+            host = $"[{_listenAddress}]";
+        else
+            host = _listenAddress;
         _listener.Prefixes.Add($"http://{host}:{_port}/");
         _listener.Start();
 
