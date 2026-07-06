@@ -81,7 +81,10 @@ builder.Services.AddSingleton(new BgpMetrics());
 // and registering it here.
 builder.Services.AddHttpClient(HttpPrefixProvider.ClientName, c =>
 {
-    c.Timeout = TimeSpan.FromSeconds(30);
+    // HttpClient.Timeout MUST be InfiniteTimeSpan when a Polly resilience pipeline is attached —
+    // otherwise the client's own timeout fires prematurely across retries and cancels the whole
+    // pipeline (CodeRabbit #177). The per-attempt timeout is enforced by the pipeline's AddTimeout.
+    c.Timeout = Timeout.InfiniteTimeSpan;
     c.DefaultRequestHeaders.UserAgent.ParseAdd("BGPLite/1.0");
 })
 .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
@@ -113,7 +116,11 @@ builder.Services.AddSingleton<IPrefixSourceService>(sp => sp.GetRequiredService<
 var ripeStatConfig = config.RipeStat ?? new RipeStatConfig();
 builder.Services.AddHttpClient(RipeStatProvider.ClientName, c =>
 {
-    c.Timeout = TimeSpan.FromSeconds(ripeStatConfig.TimeoutSeconds);
+    // HttpClient.Timeout MUST be InfiniteTimeSpan when a Polly resilience pipeline is attached —
+    // otherwise the client's own timeout (180s default) fires prematurely across retries and cancels
+    // the whole pipeline (CodeRabbit #177). The per-attempt timeout is enforced by the pipeline's
+    // AddTimeout (60s), and the ris-prefixes endpoint's long generation time is honored per attempt.
+    c.Timeout = Timeout.InfiniteTimeSpan;
     c.DefaultRequestHeaders.UserAgent.ParseAdd("BGPLite/1.0");
 })
 .AddResilienceHandler("ripestat", pipelineBuilder => ConfigureRipeStatResilience(pipelineBuilder, ripeStatConfig));
@@ -281,7 +288,11 @@ void ConfigureRipeStatResilience(ResiliencePipelineBuilder<HttpResponseMessage> 
             FailureRatio = 0.5,
             MinimumThroughput = 8,
             BreakDuration = TimeSpan.FromSeconds(30),
-        });
+        })
+        // Per-attempt timeout: the ris-prefixes endpoint can take minutes for large origin ASes
+        // (e.g. AS3356). TimeoutSeconds maps here (default 180s) — HttpClient.Timeout is now
+        // InfiniteTimeSpan so it does not fire across retries (CodeRabbit #177).
+        .AddTimeout(TimeSpan.FromSeconds(Math.Max(10, cfg.TimeoutSeconds)));
 
 await host.RunAsync();
 return;
