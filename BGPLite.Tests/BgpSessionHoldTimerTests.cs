@@ -194,4 +194,47 @@ public class BgpSessionHoldTimerTests
         session.MarkSilentClose();
         try { await runTask.WaitAsync(TimeSpan.FromSeconds(5)); } catch { /* best effort */ }
     }
+
+    /// <summary>
+    /// Proof of concept: a peer that connects but never sends OPEN is dropped when the OPEN timeout
+    /// fires — the timer CTS uses the TimeProvider, so the fake clock advances instantly instead of
+    /// waiting wall-clock seconds. No real socket, no multi-second wait.
+    /// </summary>
+    [Fact]
+    public async Task OpenTimeout_DropsPeer_WhenClockAdvancesPastWindow()
+    {
+        var time = new FakeTimeProvider();
+        var conn = new FakeBgpConnection();
+        // OpenTimeoutSeconds=5 — small but realistic. FakeTimeProvider advances instantly.
+        var bgpConfig = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1", HoldTime = 9, KeepAlive = 3, OpenTimeoutSeconds = 5 };
+        using var session = new BgpSession(
+            conn,
+            new PeerConfig { Address = "127.0.0.1" },
+            bgpConfig,
+            new RouteTable(),
+            AllowAllFilter.Instance,
+            new BgpMetrics(),
+            new NopLogger<BgpSession>(),
+            timeProvider: time);
+
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        var runTask = Task.Run(() => session.RunAsync(CancellationToken.None));
+
+        // Give the session time to enter the OPEN-receive (it builds the linked CTS + timer CTS,
+        // then awaits ReceiveMessageAsync which blocks on the fake connection's channel).
+        await Task.Delay(50);
+
+        // DO NOT send OPEN — the peer is silent (Slowloris). Advance the fake clock past the timeout.
+        // The session's OPEN receive loop is cancelled by the timer CTS; the FSM unwinds to Idle.
+        time.Advance(TimeSpan.FromSeconds(6));
+        try { await runTask.WaitAsync(TimeSpan.FromSeconds(5)); } catch { /* best effort */ }
+        sw.Stop();
+
+        Assert.False(session.IsEstablished, "a silent peer must not reach Established");
+        // The session ran and exited the handshake — it took milliseconds, not the configured 5s.
+        Assert.True(sw.Elapsed < TimeSpan.FromSeconds(3),
+            $"OpenTimeout test took {sw.ElapsedMilliseconds}ms — FakeTimeProvider not honored");
+
+        conn.Dispose();
+    }
 }
