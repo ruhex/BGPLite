@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.4.2](https://github.com/ruhex/BGPLite/compare/v1.4.1...v1.4.2) (2026-07-06)
+
+
+### Bug Fixes
+
+* **api:** trigger peer refresh on source add/delete/toggle ([#197](https://github.com/ruhex/BGPLite/issues/197)) ([139c150](https://github.com/ruhex/BGPLite/commit/139c150e3955ec18688080be9621c3a354687a1c))
+
 ## [1.4.1](https://github.com/ruhex/BGPLite/compare/v1.4.0...v1.4.1) (2026-07-06)
 
 
