@@ -142,7 +142,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
         // - IPv6 literals (e.g. "::1") must be bracketed: http://[::1]:5001/ (CodeRabbit #181).
         // - IPv4 ("127.0.0.1") and hostnames ("localhost") go through as-is.
         string host;
-        if (_listenAddress == "0.0.0.0")
+        if (_listenAddress is "0.0.0.0" or "::")
             host = "+";
         else if (_listenAddress.Contains(':'))
             host = $"[{_listenAddress}]";
