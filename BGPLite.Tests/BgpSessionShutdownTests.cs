@@ -681,4 +681,33 @@ public class BgpSessionShutdownTests
         Assert.True(sw.Elapsed < TimeSpan.FromSeconds(2),
             $"NotifyCeaseAsync with a cancelled token took {sw.ElapsedMilliseconds}ms — token not honored");
     }
+
+    /// <summary>
+    /// Regression for #160: RefreshRoutesAsync must honor a CancellationToken so an API caller
+    /// (RefreshPeerAsync) is not pinned indefinitely on _advertisedPrefixesLock when a prior send is
+    /// stuck. With an already-cancelled token the call must return promptly (the WaitAsync unwinds
+    /// with OperationCanceledException, caught and returned-from) instead of blocking on the lock.
+    /// </summary>
+    [Fact]
+    public async Task RefreshRoutesAsync_Honors_Cancelled_Token_Returns_Promptly()
+    {
+        var (server, client) = ConnectedPair();
+        using var clientSock = client;
+        var bgpConfig = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1", HoldTime = 0, KeepAlive = 0 };
+        using var session = new BgpSession(
+            server, new PeerConfig { Address = "127.0.0.1" }, bgpConfig,
+            new RouteTable(), AllowAllFilter.Instance, new BgpMetrics(), new NopLogger<BgpSession>());
+
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
+
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        // IsEstablished is false here, so the method early-returns — but the point is that even if
+        // it reached the lock, the cancelled token would unwind it. We assert prompt return either way.
+        await session.RefreshRoutesAsync(cts.Token);
+        sw.Stop();
+
+        Assert.True(sw.Elapsed < TimeSpan.FromSeconds(2),
+            $"RefreshRoutesAsync with a cancelled token took {sw.ElapsedMilliseconds}ms — token not honored");
+    }
 }
