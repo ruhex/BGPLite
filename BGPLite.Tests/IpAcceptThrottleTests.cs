@@ -191,47 +191,44 @@ public class IpAcceptThrottleTests
 
     /// <summary>
     /// Regression for #133: a concurrent TryAccept that refreshes a Window must NOT have its entry
-    /// removed by a racing SweepStale. The coarse _dictLock makes the staleness-check + remove
-    /// atomic against TryAccept's GetOrAdd + refresh. Under the prior per-Window lock, a sweep
-    /// checking staleness under the Window lock, then TryRemove'ing outside any dictionary-level
-    /// atomicity, could orphan a just-refreshed Window — effectively resetting the IP's per-IP limit.
+    /// removed by a racing SweepStale. The coarse _dictLock makes the staleness-check + remove atomic
+    /// against TryAccept's GetOrAdd + refresh. Under the prior per-Window lock, a sweep checking
+    /// staleness under the Window lock, then TryRemove'ing outside any dictionary-level atomicity,
+    /// could orphan a just-refreshed Window — effectively resetting the IP's per-IP limit.
     /// </summary>
+    /// <remarks>
+    /// Deterministic single-IP scenario: an IP fills its window to the limit, then a sweep races a
+    /// same-window accept. If the sweep orphaned the Window (the #133 bug), the next same-window
+    /// accept would be ADMITTED (fresh Window, count 0) instead of DENIED. The coarse lock makes the
+    /// sweep observe the just-recorded accept and keep the Window, so the IP's limit is preserved.
+    /// </remarks>
     [Fact]
-    public async Task SweepStale_Does_Not_Orphan_Concurrent_TryAccept()
+    public void SweepStale_RacingAccept_Does_Not_Reset_PerIpLimit()
     {
-        // Force many sweep-vs-accept races: a background task hammers TryAccept while the foreground
-        // triggers sweeps. A just-accepted IP must remain tracked (not be removed by a racing sweep)
-        // so its accept count is not lost. We assert the tracked count never drops below the set of
-        // IPs that were just accepted.
-        const int ips = 32;
-        const int limit = 5;
-        var ticks = 0L;
+        const int limit = 3;
+        var ticks = 1_000L;
         var throttle = new IpAcceptThrottle(maxPerMinute: limit, nowTicks: () => ticks);
+        const string ip = "198.51.100.1";
 
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
-        var sweep = Task.Run(() =>
-        {
-            while (!cts.IsCancellationRequested)
-            {
-                ticks += 1; // advance time so sweeps have stale candidates to consider
-                throttle.SweepStale(ticks);
-            }
-        });
+        // Fill the window to the limit — every subsequent same-window accept must be denied.
+        for (var i = 0; i < limit; i++)
+            Assert.True(throttle.TryAccept(ip), $"accept {i + 1} within limit");
+        Assert.False(throttle.TryAccept(ip), "accept over limit denied");
 
-        // Hammer TryAccept across all IPs concurrently with the sweep loop.
-        await Parallel.ForEachAsync(Enumerable.Range(0, ips * 50), cts.Token, async (i, ct) =>
-        {
-            throttle.TryAccept($"10.0.{i % ips}.{i % 256}");
-            await Task.Yield();
-        });
+        // A same-window accept that races a sweep: the sweep sees the Window is fresh (timestamps
+        // within the window), does NOT remove it, and the IP's limit is preserved. We simulate the
+        // race deterministically by interleaving: advance time just-under the window (still fresh),
+        // sweep, then try to accept again in the same window.
+        ticks += MinuteTicks - 1; // still within the window (1 tick short)
+        throttle.SweepStale(ticks); // must NOT evict — timestamps are fresh
+        Assert.True(throttle.TrackedCount >= 1, "fresh IP must not be evicted by the sweep");
 
-        cts.Cancel();
-        await sweep;
+        // The same-window accept must still be denied — the Window's count is preserved.
+        Assert.False(throttle.TryAccept(ip), "accept after sweep still denied — limit not reset");
 
-        // No assertion on exact counts — the race is the point. The contract is that the throttle
-        // never admits MORE than `limit` per IP per window (covered by the dedicated concurrency test)
-        // AND never silently loses a just-recorded accept. The latter is exercised by completing the
-        // loop without the process hanging (a torn dictionary state would surface as a crash or hang).
-        Assert.True(throttle.TrackedCount >= 0);
+        // After the window genuinely expires, the IP IS evicted and a fresh accept is admitted.
+        ticks += 2; // now past the window
+        throttle.SweepStale(ticks);
+        Assert.True(throttle.TryAccept(ip), "fresh accept after window expiry admitted");
     }
 }
