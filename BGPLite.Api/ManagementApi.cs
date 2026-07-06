@@ -481,9 +481,22 @@ public sealed class ManagementApi : IHostedService, IDisposable
         // (Ip, Asn) key (GetPeer(ip, asn), added in #19). Without ?asn=, falls back to the Ip-only
         // lookup for backward compatibility (single-peer-per-IP is the common case).
         var asnQuery = ctx.Request.QueryString["asn"];
-        PeerInfo? peerInfo = uint.TryParse(asnQuery, out var asn)
-            ? _store.GetPeer(clientIp, asn)
-            : _store.GetPeerByIp(clientIp);
+        PeerInfo? peerInfo;
+        if (asnQuery is null)
+        {
+            // No ?asn= — backward-compatible Ip-only lookup.
+            peerInfo = _store.GetPeerByIp(clientIp);
+        }
+        else if (!uint.TryParse(asnQuery, out var asn))
+        {
+            // ?asn= present but malformed — explicit 400 so a typo doesn't silently fall back to
+            // the ambiguous Ip-only lookup (CodeRabbit #186).
+            return ApiResponse.Error($"Invalid 'asn' query parameter: '{asnQuery}'. Must be a non-negative integer.", 400);
+        }
+        else
+        {
+            peerInfo = _store.GetPeer(clientIp, asn);
+        }
 
         if (peerInfo is null)
             return ApiResponse.Ok(new { ip = clientIp, peer = (object?)null });
