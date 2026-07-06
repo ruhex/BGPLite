@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.4.4](https://github.com/ruhex/BGPLite/compare/v1.4.3...v1.4.4) (2026-07-06)
+
+
+### Bug Fixes
+
+* **protocol:** Graceful Restart R bit false on fresh session + correct restartTime ([#203](https://github.com/ruhex/BGPLite/issues/203)) ([b716350](https://github.com/ruhex/BGPLite/commit/b71635044241302af7222c151cabc18ea8ff2886))
+
 ## [1.4.3](https://github.com/ruhex/BGPLite/compare/v1.4.2...v1.4.3) (2026-07-06)
 
 
