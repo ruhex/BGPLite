@@ -476,7 +476,15 @@ public sealed class ManagementApi : IHostedService, IDisposable
     {
         var clientIp = GetClientIp(ctx);
 
-        var peerInfo = _store.GetPeerByIp(clientIp);
+        // #23: when several peers share one source IP (NAT/VPN), /api/me by IP alone returns an
+        // arbitrary one. Accept an optional ?asn= query param to disambiguate via the composite
+        // (Ip, Asn) key (GetPeer(ip, asn), added in #19). Without ?asn=, falls back to the Ip-only
+        // lookup for backward compatibility (single-peer-per-IP is the common case).
+        var asnQuery = ctx.Request.QueryString["asn"];
+        PeerInfo? peerInfo = uint.TryParse(asnQuery, out var asn)
+            ? _store.GetPeer(clientIp, asn)
+            : _store.GetPeerByIp(clientIp);
+
         if (peerInfo is null)
             return ApiResponse.Ok(new { ip = clientIp, peer = (object?)null });
 
@@ -487,7 +495,11 @@ public sealed class ManagementApi : IHostedService, IDisposable
         var subscriptions = _store.GetSubscriptions(peer.Id);
         var customPrefixes = _store.GetCustomPrefixes(peer.Id);
         var customAsns = _store.GetCustomAsns(peer.Id);
-        var communities = _store.GetCommunitiesByIp(clientIp);
+        // #23: communities are per-peer (keyed by PeerId), not per-IP — use the composite lookup
+        // so peers sharing an IP don't see each other's communities.
+        var communities = peer.Asn.HasValue
+            ? _store.GetCommunities(peer.Ip, peer.Asn.Value)
+            : _store.GetCommunitiesByIp(clientIp);
 
         return ApiResponse.Ok(new
         {
