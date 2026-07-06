@@ -25,9 +25,10 @@ public sealed class PrefixService : IPrefixService
     // default does not constrain real deployments.
     private readonly int _maxCacheEntries;
     private readonly ILogger<PrefixService>? _logger;
+    private readonly TimeProvider _timeProvider;
     private readonly UserSourceCache _userSourceCache;
 
-    public PrefixService(AppConfig config, RipeStatProvider? ripeStat, IPrefixSourceService prefixSources, HttpPrefixProvider? httpProvider = null, TimeSpan? cacheTtl = null, ILogger<PrefixService>? logger = null, TimeSpan? negativeTtl = null, int? maxCacheEntries = null)
+    public PrefixService(AppConfig config, RipeStatProvider? ripeStat, IPrefixSourceService prefixSources, HttpPrefixProvider? httpProvider = null, TimeSpan? cacheTtl = null, ILogger<PrefixService>? logger = null, TimeSpan? negativeTtl = null, int? maxCacheEntries = null, TimeProvider? timeProvider = null)
     {
         _config = config;
         _ripeStat = ripeStat;
@@ -40,7 +41,8 @@ public sealed class PrefixService : IPrefixService
         // churn traffic, not normal operation.
         _maxCacheEntries = maxCacheEntries ?? 4096;
         _logger = logger;
-        _userSourceCache = new UserSourceCache(logger: logger);
+        _timeProvider = timeProvider ?? TimeProvider.System;
+        _userSourceCache = new UserSourceCache(logger: logger, timeProvider: _timeProvider);
     }
 
     /// <summary>
@@ -104,12 +106,12 @@ public sealed class PrefixService : IPrefixService
 
                 // No cached copy: remember the failure briefly so repeated calls don't hammer RIPEstat.
                 EvictIfAtCapacity(asn);
-                _cache[asn] = ([], DateTime.UtcNow, Negative: true);
+                _cache[asn] = ([], _timeProvider.GetUtcNow().UtcDateTime, Negative: true);
                 throw;
             }
 
             EvictIfAtCapacity(asn);
-            _cache[asn] = (prefixes, DateTime.UtcNow, Negative: false);
+            _cache[asn] = (prefixes, _timeProvider.GetUtcNow().UtcDateTime, Negative: false);
             return prefixes;
         }
         finally
@@ -126,7 +128,7 @@ public sealed class PrefixService : IPrefixService
         if (!_cache.TryGetValue(asn, out var entry)) return false;
 
         var ttl = entry.Negative ? _negativeTtl : _cacheTtl;
-        if (DateTime.UtcNow - entry.CachedAt < ttl)
+        if (_timeProvider.GetUtcNow().UtcDateTime - entry.CachedAt < ttl)
         {
             data = entry.Data;
             return true;
@@ -145,7 +147,7 @@ public sealed class PrefixService : IPrefixService
         if (_cache.ContainsKey(insertingKey)) return; // already present, no insert coming
 
         // Snapshot, drop expired entries first (cheapest eviction), then by oldest CachedAt.
-        var now = DateTime.UtcNow;
+        var now = _timeProvider.GetUtcNow().UtcDateTime;
         var toEvict = new List<uint>();
         foreach (var (key, entry) in _cache)
         {
@@ -244,12 +246,12 @@ public sealed class PrefixService : IPrefixService
 
     public async Task<List<(uint Prefix, byte Length, uint Asn)>> GetRuPrefixesAsync(CancellationToken ct = default)
     {
-        if (_ruProjected is not null && DateTime.UtcNow - _ruCachedAt < _cacheTtl)
+        if (_ruProjected is not null && _timeProvider.GetUtcNow().UtcDateTime - _ruCachedAt < _cacheTtl)
             return _ruProjected;
 
         var prefixes = await _prefixSources.GetDefaultAsync(ct);
         _ruProjected = prefixes.Select(p => (p.Prefix, p.Length, 0u)).ToList();
-        _ruCachedAt = DateTime.UtcNow;
+        _ruCachedAt = _timeProvider.GetUtcNow().UtcDateTime;
         return _ruProjected;
     }
 

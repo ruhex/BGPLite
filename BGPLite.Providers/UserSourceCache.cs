@@ -26,17 +26,19 @@ internal sealed class UserSourceCache
     private readonly TimeSpan _positiveTtl;
     private readonly TimeSpan _negativeTtl;
     private readonly ILogger? _logger;
+    private readonly TimeProvider _timeProvider;
 
     // url → (list, cached at, is negative). Negative entries (failed loads) use _negativeTtl.
     private readonly ConcurrentDictionary<string, (IReadOnlyList<(uint Prefix, byte Length)> List, DateTime CachedAt, bool Negative)> _cache = new();
     // url → gate serializing the cache-miss fetch path (prevents thundering herd on cold/expired keys).
     private readonly ConcurrentDictionary<string, SemaphoreSlim> _locks = new();
 
-    public UserSourceCache(TimeSpan? positiveTtl = null, TimeSpan? negativeTtl = null, ILogger? logger = null)
+    public UserSourceCache(TimeSpan? positiveTtl = null, TimeSpan? negativeTtl = null, ILogger? logger = null, TimeProvider? timeProvider = null)
     {
         _positiveTtl = positiveTtl ?? TimeSpan.FromHours(1);
         _negativeTtl = negativeTtl ?? TimeSpan.FromSeconds(30);
         _logger = logger;
+        _timeProvider = timeProvider ?? TimeProvider.System;
     }
 
     /// <param name="url">Cache key (the source URL — dedupes across peers).</param>
@@ -78,13 +80,13 @@ internal sealed class UserSourceCache
                 }
 
                 // Otherwise remember the failure briefly so repeated calls don't hammer the fetcher.
-                _cache[url] = ([], DateTime.UtcNow, Negative: true);
+                _cache[url] = ([], _timeProvider.GetUtcNow().UtcDateTime, Negative: true);
                 _logger?.LogWarning(ex, "User-source '{Name}' load failed (no cached copy); negative-cached for {Seconds}s.",
                     logLabel, (int)_negativeTtl.TotalSeconds);
                 throw;
             }
 
-            _cache[url] = (prefixes, DateTime.UtcNow, Negative: false);
+            _cache[url] = (prefixes, _timeProvider.GetUtcNow().UtcDateTime, Negative: false);
             return prefixes;
         }
         finally
@@ -99,7 +101,7 @@ internal sealed class UserSourceCache
         if (!_cache.TryGetValue(url, out var entry)) return false;
 
         var ttl = entry.Negative ? _negativeTtl : _positiveTtl;
-        if (DateTime.UtcNow - entry.CachedAt < ttl)
+        if (_timeProvider.GetUtcNow().UtcDateTime - entry.CachedAt < ttl)
         {
             list = entry.List;
             return true;

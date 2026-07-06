@@ -17,6 +17,7 @@ public sealed class PrefixSourceService : IPrefixSourceService
     private readonly ILogger<PrefixSourceService> _logger;
     private readonly TimeSpan _cacheTtl;
     private readonly TimeSpan _negativeTtl;
+    private readonly TimeProvider _timeProvider;
 
     // Name → (a prefix list, cached at, is negative). Negative entries (failed loads) use _negativeTtl.
     private readonly ConcurrentDictionary<string, (IReadOnlyList<(uint Prefix, byte Length)> List, DateTime CachedAt, bool Negative)> _cache = new();
@@ -28,7 +29,8 @@ public sealed class PrefixSourceService : IPrefixSourceService
         PrefixSourceProviderFactory factory,
         ILogger<PrefixSourceService> logger,
         TimeSpan? cacheTtl = null,
-        TimeSpan? negativeTtl = null)
+        TimeSpan? negativeTtl = null,
+        TimeProvider? timeProvider = null)
     {
         var duplicate = config.PrefixSources
             .GroupBy(s => s.Name)
@@ -42,6 +44,7 @@ public sealed class PrefixSourceService : IPrefixSourceService
         _logger = logger;
         _cacheTtl = cacheTtl ?? TimeSpan.FromHours(1);
         _negativeTtl = negativeTtl ?? TimeSpan.FromSeconds(30);
+        _timeProvider = timeProvider ?? TimeProvider.System;
     }
 
     public async Task<IReadOnlyList<(uint Prefix, byte Length)>> GetAsync(string name, CancellationToken ct = default)
@@ -139,11 +142,11 @@ public sealed class PrefixSourceService : IPrefixSourceService
                 }
 
                 // Otherwise remember the failure briefly, so repeated calls don't hammer the provider.
-                _cache[source.Name] = ([], DateTime.UtcNow, Negative: true);
+                _cache[source.Name] = ([], _timeProvider.GetUtcNow().UtcDateTime, Negative: true);
                 throw;
             }
 
-            _cache[source.Name] = (prefixes, DateTime.UtcNow, Negative: false);
+            _cache[source.Name] = (prefixes, _timeProvider.GetUtcNow().UtcDateTime, Negative: false);
             return prefixes;
         }
         finally
@@ -158,7 +161,7 @@ public sealed class PrefixSourceService : IPrefixSourceService
         if (!_cache.TryGetValue(name, out var entry)) return false;
 
         var ttl = entry.Negative ? _negativeTtl : _cacheTtl;
-        if (DateTime.UtcNow - entry.CachedAt < ttl)
+        if (_timeProvider.GetUtcNow().UtcDateTime - entry.CachedAt < ttl)
         {
             list = entry.List;
             return true;
