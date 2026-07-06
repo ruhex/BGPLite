@@ -610,7 +610,9 @@ public sealed class ManagementApi : IHostedService, IDisposable
         var customPrefixes = _store.GetCustomPrefixes(peer.Id);
         var customAsns = _store.GetCustomAsns(peer.Id);
         var customSources = _store.GetCustomSources(peer.Id);
-        var communities = _store.GetCommunitiesByIp(peer.Ip);
+        var communities = peer.Asn.HasValue
+            ? _store.GetCommunities(peer.Ip, peer.Asn.Value)
+            : new HashSet<uint>();
 
         return ApiResponse.Ok(new
         {
@@ -726,7 +728,8 @@ public sealed class ManagementApi : IHostedService, IDisposable
 
         // Trigger refresh so the peer receives the new source's prefixes immediately —
         // same pattern as CreatePeer/UpdatePeer. Pass ASN so shared-IP peers aren't refreshed (#200).
-        _ = _sessionManager.RefreshPeerAsync(peer.Ip, peer.Asn ?? 0);
+        if (_sessionManager is not null)
+            _ = _sessionManager.RefreshPeerAsync(peer.Ip, peer.Asn ?? 0);
 
         _logger.LogInformation("Added source '{Name}' ({Url}) to peer {PeerId}",
             SanitizeForLog(data.Name), SanitizeForLog(data.Url), SanitizeForLog(peerId));
@@ -743,7 +746,8 @@ public sealed class ManagementApi : IHostedService, IDisposable
             return ApiResponse.Error($"Source '{sourceId}' not found", 404);
 
         // Trigger refresh so the source's prefixes are withdrawn immediately (#200: ASN-scoped).
-        _ = _sessionManager.RefreshPeerAsync(peer.Ip, peer.Asn ?? 0);
+        if (_sessionManager is not null)
+            _ = _sessionManager.RefreshPeerAsync(peer.Ip, peer.Asn ?? 0);
 
         _logger.LogInformation("Deleted source {SourceId} from peer {PeerId}", SanitizeForLog(sourceId), SanitizeForLog(peerId));
         return ApiResponse.Ok(new { id = sourceId, deleted = true });
@@ -766,7 +770,8 @@ public sealed class ManagementApi : IHostedService, IDisposable
             return ApiResponse.Error($"Source '{sourceId}' not found", 404);
 
         // Trigger refresh so toggling active/inactive takes effect immediately (#200: ASN-scoped).
-        _ = _sessionManager.RefreshPeerAsync(peer.Ip, peer.Asn ?? 0);
+        if (_sessionManager is not null)
+            _ = _sessionManager.RefreshPeerAsync(peer.Ip, peer.Asn ?? 0);
 
         _logger.LogInformation("Source {SourceId} active={Active}", SanitizeForLog(sourceId), data.Active.Value);
         return ApiResponse.Ok(new { id = sourceId, active = data.Active.Value });
