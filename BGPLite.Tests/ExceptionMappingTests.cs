@@ -68,4 +68,22 @@ public class ExceptionMappingTests
         Assert.Equal(500, status);
         Assert.Equal("Internal server error", message);
     }
+
+    /// <summary>
+    /// CodeRabbit #172 follow-up: cancellation is never an error. The HandleAsync catch-all filters
+    /// OperationCanceledException out (via `when (ex is not OperationCanceledException)`), so it
+    /// propagates to the host's cancellation handling instead of being mapped to a 500. This test
+    /// documents the contract: MapExceptionToResponse itself would return 500 for an OCE (it does
+    /// not special-case it), so the catch-site filter is what enforces "cancellation is not an error".
+    /// </summary>
+    [Fact]
+    public void MapExceptionToResponse_DoesNotSpecialCaseCancellation_CatchSiteFilters_It()
+    {
+        // The mapping itself returns 500 for an OCE — the catch-site `when` filter is what prevents
+        // it from ever being called with one. Pin this so the contract is explicit: callers MUST
+        // filter OCE before calling MapExceptionToResponse.
+        var (message, status) = ManagementApi.MapExceptionToResponse(new OperationCanceledException());
+        Assert.Equal(500, status);
+        Assert.Equal("Internal server error", message);
+    }
 }

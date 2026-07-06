@@ -225,13 +225,15 @@ public sealed class ManagementApi : IHostedService, IDisposable
             var response = await RouteAsync(method, segments, ctx);
             await WriteResponse(ctx, response);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             // Log the full exception detail server-side (sanitized), then map to a stable client
             // response. Raw exception text (EF Core / SQLite / JSON internals — table names,
             // constraint text, file paths) must NOT reach the client: it is reconnaissance surface
             // for an attacker and is misleading (JsonException surfacing as 500 instead of 400, a
             // unique-constraint race as 500 instead of 409) — #157.
+            // Cancellation (client disconnect / shutdown) is NOT an error — let it propagate so the
+            // host's cancellation handling unwinds cleanly instead of surfacing as a 500.
             _logger.LogError(ex, "API error {Method} {Path}: {Message}",
                 SanitizeForLog(method), SanitizeForLog(path), SanitizeForLog(ex.Message));
             var (message, status) = MapExceptionToResponse(ex);
@@ -865,11 +867,11 @@ public sealed class ManagementApi : IHostedService, IDisposable
                 var count = await _prefixService.GetPrefixCountAsync(asn);
                 return ApiResponse.Ok(new { asn, prefixCount = count });
             }
-            catch (Exception ex)
+            catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 // #157: log the real detail server-side; return a generic message so RIPEstat /
-                // provider internals do not reach the client. Cancellation is expected when the
-                // client disconnects mid-fetch — surface it as such, not as a 500.
+                // provider internals do not reach the client. Cancellation (client disconnect /
+                // shutdown) is NOT an error — let it propagate instead of surfacing as a 500.
                 _logger.LogWarning(ex, "GetAsnPrefixes failed for AS{Asn}", asn);
                 var (message, status) = MapExceptionToResponse(ex);
                 return ApiResponse.Error(message, status);
