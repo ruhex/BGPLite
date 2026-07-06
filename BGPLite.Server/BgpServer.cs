@@ -315,10 +315,10 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
         }
     }
 
-    public async Task RefreshPeerAsync(string peerIp)
+    public async Task RefreshPeerAsync(string peerIp, uint asn)
     {
-        // Several peers may share one source IP (distinct source ports — keyed by SessionKey, see
-        // issue #18), so refresh every established session for that IP rather than a single slot.
+        // #200: filter by BOTH IP and ASN so a refresh for one peer on a shared IP (NAT/VPN)
+        // does not refresh sibling sessions with a different ASN.
         if (!IPAddress.TryParse(peerIp, out var ip))
         {
             _logger.LogWarning("RefreshPeer: invalid IP {Ip}", peerIp);
@@ -326,14 +326,14 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
         }
 
         var sessions = _sessions
-            .Where(kvp => kvp.Key.Address.Equals(ip))
+            .Where(kvp => kvp.Key.Address.Equals(ip) && kvp.Value.Peer.RemoteAsn == asn)
             .Select(kvp => kvp.Value)
             .ToList();
 
         if (sessions.Count == 0)
         {
-            _logger.LogWarning("RefreshPeer: no session for {Ip} (active: [{Peers}])",
-                peerIp, string.Join(", ", _sessions.Keys));
+            _logger.LogWarning("RefreshPeer: no session for {Ip} AS{Asn} (active: [{Peers}])",
+                peerIp, asn, string.Join(", ", _sessions.Keys));
             return;
         }
 

@@ -519,10 +519,11 @@ public sealed class ManagementApi : IHostedService, IDisposable
         var subscriptions = _store.GetSubscriptions(peer.Id);
         var customPrefixes = _store.GetCustomPrefixes(peer.Id);
         var customAsns = _store.GetCustomAsns(peer.Id);
-        // #23: communities are per-peer (keyed by (Ip, Asn)), not per-IP.
+        // #200: communities are per-peer (keyed by (Ip, Asn)), not per-IP.
+        // peer.Asn is always set for established BGP peers; fallback to empty for safety.
         var communities = peer.Asn.HasValue
             ? _store.GetCommunities(peer.Ip, peer.Asn.Value)
-            : _store.GetCommunitiesByIp(peer.Ip);
+            : new HashSet<uint>();
 
         return new
         {
@@ -583,7 +584,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
             data.Ip, data.Asn, id, asnLists.Count, customPrefixes.Count, data.CustomAsns?.Count ?? 0);
 
         if (_sessionManager is not null)
-            _ = _sessionManager.RefreshPeerAsync(data.Ip);
+            _ = _sessionManager.RefreshPeerAsync(data.Ip, data.Asn);
 
         return ApiResponse.Ok(new
         {
@@ -676,7 +677,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
         _logger.LogInformation("Updated peer {Id}", SanitizeForLog(peerId));
 
         if (_sessionManager is not null)
-            _ = _sessionManager.RefreshPeerAsync(peer.Ip);
+            _ = _sessionManager.RefreshPeerAsync(peer.Ip, peer.Asn ?? 0);
 
         return HandleGetPeer(peerId);
     }
@@ -724,8 +725,8 @@ public sealed class ManagementApi : IHostedService, IDisposable
         var source = _store.AddCustomSource(peerId, data.Name, data.Url, data.Community);
 
         // Trigger refresh so the peer receives the new source's prefixes immediately —
-        // same pattern as CreatePeer/UpdatePeer (lines 586/679).
-        _ = _sessionManager.RefreshPeerAsync(peer.Ip);
+        // same pattern as CreatePeer/UpdatePeer. Pass ASN so shared-IP peers aren't refreshed (#200).
+        _ = _sessionManager.RefreshPeerAsync(peer.Ip, peer.Asn ?? 0);
 
         _logger.LogInformation("Added source '{Name}' ({Url}) to peer {PeerId}",
             SanitizeForLog(data.Name), SanitizeForLog(data.Url), SanitizeForLog(peerId));
@@ -741,8 +742,8 @@ public sealed class ManagementApi : IHostedService, IDisposable
         if (!_store.DeleteCustomSource(peerId, sourceId))
             return ApiResponse.Error($"Source '{sourceId}' not found", 404);
 
-        // Trigger refresh so the source's prefixes are withdrawn immediately.
-        _ = _sessionManager.RefreshPeerAsync(peer.Ip);
+        // Trigger refresh so the source's prefixes are withdrawn immediately (#200: ASN-scoped).
+        _ = _sessionManager.RefreshPeerAsync(peer.Ip, peer.Asn ?? 0);
 
         _logger.LogInformation("Deleted source {SourceId} from peer {PeerId}", SanitizeForLog(sourceId), SanitizeForLog(peerId));
         return ApiResponse.Ok(new { id = sourceId, deleted = true });
@@ -764,8 +765,8 @@ public sealed class ManagementApi : IHostedService, IDisposable
         if (!_store.SetSourceActive(peerId, sourceId, data.Active.Value))
             return ApiResponse.Error($"Source '{sourceId}' not found", 404);
 
-        // Trigger refresh so toggling active/inactive takes effect immediately.
-        _ = _sessionManager.RefreshPeerAsync(peer.Ip);
+        // Trigger refresh so toggling active/inactive takes effect immediately (#200: ASN-scoped).
+        _ = _sessionManager.RefreshPeerAsync(peer.Ip, peer.Asn ?? 0);
 
         _logger.LogInformation("Source {SourceId} active={Active}", SanitizeForLog(sourceId), data.Active.Value);
         return ApiResponse.Ok(new { id = sourceId, active = data.Active.Value });
