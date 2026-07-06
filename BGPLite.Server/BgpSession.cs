@@ -193,8 +193,13 @@ public sealed class BgpSession : IDisposable
             BgpMessage openMessage;
             if (openTimeoutSeconds > 0)
             {
-                using var openCts = CancellationTokenSource.CreateLinkedTokenSource(linkedCts.Token);
-                openCts.CancelAfter(TimeSpan.FromSeconds(openTimeoutSeconds));
+                // OPEN timeout: cancel if the peer doesn't send OPEN within the configured window.
+                // The timeout CTS uses _timeProvider (#96) so tests can advance the clock instead of
+                // waiting wall-clock seconds. CancellationTokenSource(TimeSpan, TimeProvider) ctor is
+                // the .NET 8+ TimeProvider-aware path (there is no CancelAfter(TimeSpan, TimeProvider)
+                // instance overload, so we bake the timeout into the timer CTS directly).
+                using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(openTimeoutSeconds), _timeProvider);
+                using var openCts = CancellationTokenSource.CreateLinkedTokenSource(linkedCts.Token, timeoutCts.Token);
                 try
                 {
                     openMessage = await ReceiveMessageAsync(openCts.Token);
