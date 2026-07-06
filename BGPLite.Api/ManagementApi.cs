@@ -136,12 +136,16 @@ public sealed class ManagementApi : IHostedService, IDisposable
     public Task StartAsync(CancellationToken cancellationToken)
     {
         _listener = new HttpListener();
-        _listener.Prefixes.Add($"http://{_listenAddress}:{_port}/");
+        // IPv6 literals (e.g. "::1") must be bracketed in a URI: http://[::1]:5001/, not http://::1:5001/.
+        // IPv4 and hostnames ("127.0.0.1", "localhost", "0.0.0.0") go through as-is (CodeRabbit #181).
+        var host = _listenAddress.Contains(':') ? $"[{_listenAddress}]" : _listenAddress;
+        _listener.Prefixes.Add($"http://{host}:{_port}/");
         _listener.Start();
 
         _logger.LogInformation("Management API listening on http://{Address}:{Port}/", _listenAddress, _port);
         // Warn if the operator explicitly exposed the API without a trusted-proxy gate (#90).
-        if (_listenAddress is not "127.0.0.1" and not "localhost")
+        // Both IPv4 and IPv6 loopback are recognized as secure.
+        if (_listenAddress is not "127.0.0.1" and not "localhost" and not "::1")
         {
             _logger.LogWarning(
                 "Management API is bound to {Address} (non-loopback) — ensure an authenticated reverse " +
