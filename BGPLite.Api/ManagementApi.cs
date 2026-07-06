@@ -518,7 +518,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
     {
         var (body, bodyError) = await ReadBodyAsync(ctx);
         if (bodyError is not null) return bodyError;
-        var data = JsonSerializer.Deserialize<CreatePeerRequest>(body, _jsonOpts);
+        var data = JsonSerializer.Deserialize<CreatePeerRequest>(body!, _jsonOpts);
 
         if (data is null)
             return ApiResponse.Error("Invalid request body", 400);
@@ -606,7 +606,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
 
         var (body, bodyError) = await ReadBodyAsync(ctx);
         if (bodyError is not null) return bodyError;
-        var data = JsonSerializer.Deserialize<UpdatePeerRequest>(body, _jsonOpts);
+        var data = JsonSerializer.Deserialize<UpdatePeerRequest>(body!, _jsonOpts);
 
         if (data is null)
             return ApiResponse.Error("Invalid request body", 400);
@@ -681,7 +681,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
 
         var (body, bodyError) = await ReadBodyAsync(ctx);
         if (bodyError is not null) return bodyError;
-        var data = JsonSerializer.Deserialize<AddSourceRequest>(body, _jsonOpts);
+        var data = JsonSerializer.Deserialize<AddSourceRequest>(body!, _jsonOpts);
 
         if (data is null || string.IsNullOrWhiteSpace(data.Name) || string.IsNullOrWhiteSpace(data.Url))
             return ApiResponse.Error("Name and Url are required", 400);
@@ -715,7 +715,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
 
         var (body, bodyError) = await ReadBodyAsync(ctx);
         if (bodyError is not null) return bodyError;
-        var data = JsonSerializer.Deserialize<PatchSourceRequest>(body, _jsonOpts);
+        var data = JsonSerializer.Deserialize<PatchSourceRequest>(body!, _jsonOpts);
 
         if (data is null || data.Active is null)
             return ApiResponse.Error("PATCH body must contain { \"active\": true/false }", 400);
