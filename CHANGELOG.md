@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.4.1](https://github.com/ruhex/BGPLite/compare/v1.4.0...v1.4.1) (2026-07-06)
+
+
+### Bug Fixes
+
+* **api:** map 0.0.0.0 and :: to + wildcard for HttpListener on Linux ([#195](https://github.com/ruhex/BGPLite/issues/195)) ([4ac0979](https://github.com/ruhex/BGPLite/commit/4ac09790c63175039de768554b308c6c90555b41))
+* **api:** map 0.0.0.0 to + for HttpListener on Linux ([58bd106](https://github.com/ruhex/BGPLite/commit/58bd1068719942b3a2a414750588a58dafab60e8))
+
 ## [1.4.0](https://github.com/ruhex/BGPLite/compare/v1.3.0...v1.4.0) (2026-07-06)
 
 
