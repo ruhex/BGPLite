@@ -227,9 +227,15 @@ public sealed class ManagementApi : IHostedService, IDisposable
         }
         catch (Exception ex)
         {
+            // Log the full exception detail server-side (sanitized), then map to a stable client
+            // response. Raw exception text (EF Core / SQLite / JSON internals — table names,
+            // constraint text, file paths) must NOT reach the client: it is reconnaissance surface
+            // for an attacker and is misleading (JsonException surfacing as 500 instead of 400, a
+            // unique-constraint race as 500 instead of 409) — #157.
             _logger.LogError(ex, "API error {Method} {Path}: {Message}",
                 SanitizeForLog(method), SanitizeForLog(path), SanitizeForLog(ex.Message));
-            await WriteResponse(ctx, ApiResponse.Error(ex.InnerException?.Message ?? ex.Message, 500));
+            var (message, status) = MapExceptionToResponse(ex);
+            await WriteResponse(ctx, ApiResponse.Error(message, status));
         }
         finally
         {
@@ -237,6 +243,31 @@ public sealed class ManagementApi : IHostedService, IDisposable
             // lease is held exactly for the request duration.
             concurrencyLease?.Dispose();
         }
+    }
+
+    /// <summary>
+    /// Maps an unhandled exception to a stable, non-revealing client response (#157):
+    /// <list type="bullet">
+    /// <item><c>JsonException</c> → 400 (malformed JSON body is the client's fault, not a server error).</item>
+    /// <item>EF Core unique-constraint violation → 409 (peer already exists — a concurrent duplicate
+    /// CreatePeer/UpsertPeer race, not a 500).</item>
+    /// <item>Everything else → 500 with a generic message (full detail stays in the server log).</item>
+    /// </list>
+    /// Extracted as a pure function so the mapping is unit-testable without a live listener.
+    /// </summary>
+    internal static (string Message, int Status) MapExceptionToResponse(Exception ex)
+    {
+        // Malformed JSON body — the client's fault.
+        if (ex is JsonException)
+            return ("Malformed JSON body", 400);
+
+        // EF Core unique-constraint violation (concurrent duplicate insert). SQLite's message
+        // contains "UNIQUE constraint failed"; EF wraps it in DbUpdateException. Treat as 409.
+        if (ex is Microsoft.EntityFrameworkCore.DbUpdateException)
+            return ("The resource already exists or conflicts with the current state", 409);
+
+        // Anything else: generic message, full detail logged server-side.
+        return ("Internal server error", 500);
     }
 
     private async Task<ApiResponse> RouteAsync(string method, string[] segments, HttpListenerContext ctx)
@@ -836,7 +867,12 @@ public sealed class ManagementApi : IHostedService, IDisposable
             }
             catch (Exception ex)
             {
-                return ApiResponse.Error(ex.Message, 500);
+                // #157: log the real detail server-side; return a generic message so RIPEstat /
+                // provider internals do not reach the client. Cancellation is expected when the
+                // client disconnects mid-fetch — surface it as such, not as a 500.
+                _logger.LogWarning(ex, "GetAsnPrefixes failed for AS{Asn}", asn);
+                var (message, status) = MapExceptionToResponse(ex);
+                return ApiResponse.Error(message, status);
             }
         }
 
