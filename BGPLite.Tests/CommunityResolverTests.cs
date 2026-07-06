@@ -231,4 +231,40 @@ public class CommunityResolverTests
         Assert.Equal([CommunityCodec.Parse("65000:42")],
             r.Resolve(new CommunitySource(CommunitySourceKind.UserSource, "list-a", "65000:42")));
     }
+
+    /// <summary>
+    /// Regression for #159: ConfigCommunityResolver is a DI singleton shared by every BgpSession,
+    /// and Resolve() runs on every SendAllRoutesAsync. Under ≥2 concurrently-establishing peers,
+    /// the cache must be thread-safe — a plain Dictionary.TryAdd/indexer-set races and can corrupt
+    /// the bucket chain (IndexOutOfRange / NullReferenceException / torn reads). ConcurrentDictionary
+    /// + GetOrAdd makes it safe.
+    /// </summary>
+    [Fact]
+    public async Task Resolve_ConcurrentCallsAcrossManySessions_DoNotCorrupt()
+    {
+        // Many distinct communities + many concurrent callers — a stress that would trip a plain
+        // Dictionary within milliseconds. The run completing without exception is the assertion.
+        var cfg = ConfigWith(asnLists: Enumerable.Range(0, 32)
+            .Select(i => new AsnList { Name = $"list-{i}", Asns = [], Community = $"65000:{100 + i}" }));
+        var resolver = Resolver(cfg);
+
+        var sources = Enumerable.Range(0, 32)
+            .Select(i => new CommunitySource(CommunitySourceKind.AsnList, $"list-{i}"))
+            .ToArray();
+
+        // 200 concurrent Resolve calls across the 32 distinct communities, repeatedly, from
+        // multiple parallel tasks. If the cache were a plain Dictionary, this would throw or hang.
+        var tasks = Enumerable.Range(0, 200).Select(i =>
+            Task.Run(() => resolver.Resolve(sources[i % sources.Length])));
+        var results = await Task.WhenAll(tasks);
+
+        // Every result must be the expected single community — no torn reads returned a wrong value.
+        foreach (var (result, i) in results.Select((r, i) => (r, i)))
+        {
+            var expected = sources[i % sources.Length];
+            var expectedComm = CommunityCodec.Parse($"65000:{100 + (i % sources.Length)}");
+            Assert.Single(result);
+            Assert.Equal(expectedComm, result[0]);
+        }
+    }
 }

@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Text;
 using BGPLite.Configuration;
 using BGPLite.Protocol;
@@ -18,7 +19,12 @@ public sealed class ConfigCommunityResolver : ICommunityResolver
 {
     private readonly AppConfig _config;
     private readonly ILogger<ConfigCommunityResolver>? _logger;
-    private readonly Dictionary<string, uint[]> _parsed = new();
+    // #159: ConfigCommunityResolver is a DI singleton shared by every BgpSession. Resolve() →
+    // ParseCached() runs on every SendAllRoutesAsync, so ≥2 concurrently-establishing peers race a
+    // plain Dictionary on TryGetValue + indexer-set — torn bucket-chain reads can crash or corrupt.
+    // ConcurrentDictionary + GetOrAdd makes the cache thread-safe; the value factory is pure
+    // (CommunityCodec.Parse is deterministic), so a rare duplicate parse under contention is harmless.
+    private readonly ConcurrentDictionary<string, uint[]> _parsed = new();
     private static readonly uint[] Empty = [];
 
     // Static communities for the per-peer custom categories, resolved once in the ctor.
@@ -106,17 +112,19 @@ public sealed class ConfigCommunityResolver : ICommunityResolver
 
     private uint[] ParseCached(string community)
     {
-        if (_parsed.TryGetValue(community, out var cached)) return cached;
-        uint[] result;
-        try { result = [CommunityCodec.Parse(community)]; }
-        catch (FormatException ex)
+        // GetOrAdd is thread-safe: under concurrent first-access for the same key, multiple callers
+        // may run the factory, but only one value is published — no torn writes. The factory is pure,
+        // so duplicate work is harmless (a redundant parse + log on an invalid community at worst).
+        return _parsed.GetOrAdd(community, key =>
         {
-            _logger?.LogWarning(ex,
-                "Invalid community '{Community}' in config; prefixes from this list will be advertised untagged.",
-                community);
-            result = Empty;
-        }
-        _parsed[community] = result;
-        return result;
+            try { return [CommunityCodec.Parse(key)]; }
+            catch (FormatException ex)
+            {
+                _logger?.LogWarning(ex,
+                    "Invalid community '{Community}' in config; prefixes from this list will be advertised untagged.",
+                    key);
+                return Empty;
+            }
+        });
     }
 }
