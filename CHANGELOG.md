@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.4.5](https://github.com/ruhex/BGPLite/compare/v1.4.4...v1.4.5) (2026-07-08)
+
+
+### Bug Fixes
+
+* **server:** expose RemoteAsn on BgpSession for ASN-scoped refresh ([#206](https://github.com/ruhex/BGPLite/issues/206)) ([35d762f](https://github.com/ruhex/BGPLite/commit/35d762f2117ac801f81ed943c0a67b55eae81881))
+
 ## [1.4.4](https://github.com/ruhex/BGPLite/compare/v1.4.3...v1.4.4) (2026-07-06)
 
 
