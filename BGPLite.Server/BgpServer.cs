@@ -363,7 +363,7 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
     {
         if (!IPAddress.TryParse(peerIp, out var ip)) return 0;
         return _sessions
-            .Where(kvp => kvp.Key.Address.Equals(ip) && kvp.Value.RemoteAsn == asn)
+            .Where(kvp => kvp.Key.Address.Equals(ip) && kvp.Value.RemoteAsn == asn && kvp.Value.IsEstablished)
             .Select(kvp => kvp.Value.AdvertisedPrefixCount)
             .FirstOrDefault();
     }
