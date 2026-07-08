@@ -636,10 +636,18 @@ public sealed class BgpSession : IDisposable
         // exact set (no extra IPs). Choke point for both initial send and RefreshRoutesAsync,
         // so _advertisedPrefixes stays consistent with what we later withdraw.
         var aggregated = _prefixAggregator.Aggregate(routes);
-        if (_logger.IsEnabled(LogLevel.Information) && aggregated.Count != routes.Count)
-            _logger.LogInformation("Aggregated {Before} -> {After} prefixes for {Peer}",
-                routes.Count, aggregated.Count, _peer);
-        routes = aggregated as List<Route> ?? aggregated.ToList();
+
+        // #209: merge duplicate NLRI across community groups. When the same prefix appears in
+        // multiple sources (e.g. AWS and Cloudflare both announce it), the aggregator keeps them
+        // separate (different community sets). A standard BGP router keeps one best path per NLRI,
+        // so the second UPDATE for the same prefix is silently discarded — the peer loses the
+        // community from the other source. Union the communities of duplicate prefixes into a
+        // single route so the peer sees one UPDATE with ALL source communities.
+        var deduped = MergeDuplicatePrefixes(aggregated);
+        if (_logger.IsEnabled(LogLevel.Information) && (aggregated.Count != routes.Count || deduped.Count != aggregated.Count))
+            _logger.LogInformation("Aggregated {Before} -> {Agg} -> {After} prefixes for {Peer}",
+                routes.Count, aggregated.Count, deduped.Count, _peer);
+        routes = deduped;
 
         const int maxNlriPerUpdate = 100;
         _advertisedPrefixes.EnsureCapacity(_advertisedPrefixes.Count + routes.Count);
@@ -672,6 +680,45 @@ public sealed class BgpSession : IDisposable
         }
 
         _logger.LogInformation("UpdateSent {Count} routes to {Peer}", sent, _peer);
+    }
+
+    /// <summary>
+    /// Merges routes that share the same (Prefix, PrefixLength) by unioning their communities and
+    /// large communities into a single route (#209). Without this, a prefix present in two sources
+    /// (e.g. AWS and Cloudflare) is sent as two separate UPDATEs with different communities — but a
+    /// BGP router keeps only one best path per NLRI, silently discarding the second UPDATE and its
+    /// community. After merging, the peer sees one UPDATE per prefix with ALL source communities.
+    /// </summary>
+    private static List<Route> MergeDuplicatePrefixes(IReadOnlyList<Route> routes)
+    {
+        if (routes.Count <= 1) return routes as List<Route> ?? routes.ToList();
+
+        var merged = new Dictionary<(uint Prefix, byte Length), Route>(routes.Count);
+        foreach (var route in routes)
+        {
+            var key = (route.Prefix, route.PrefixLength);
+            if (merged.TryGetValue(key, out var existing))
+            {
+                // Union communities — keep both source tags so the peer can filter by either.
+                var comms = existing.Communities.Concat(route.Communities).Distinct().OrderBy(c => c).ToArray();
+                var large = existing.LargeCommunities.Concat(route.LargeCommunities).Distinct().ToArray();
+                // Route is a class (init-only props), not a record — mutate via reassignment.
+                merged[key] = new Route
+                {
+                    Prefix = existing.Prefix,
+                    PrefixLength = existing.PrefixLength,
+                    NextHop = existing.NextHop,
+                    AsPath = existing.AsPath,
+                    Communities = comms,
+                    LargeCommunities = large
+                };
+            }
+            else
+            {
+                merged[key] = route;
+            }
+        }
+        return [.. merged.Values];
     }
 
     private async Task SendRouteBatchAsync(uint nextHop, List<Route> routes, Dictionary<uint[], List<PathAttribute>> attrCache)
