@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.5.0](https://github.com/ruhex/BGPLite/compare/v1.4.5...v1.5.0) (2026-07-08)
+
+
+### Features
+
+* **api:** show actual advertised prefix count (post-aggregation) in API ([#212](https://github.com/ruhex/BGPLite/issues/212)) ([970af4d](https://github.com/ruhex/BGPLite/commit/970af4d50a80c58688b70709561a8057e330f7cf))
+
+
+### Bug Fixes
+
+* **server:** merge duplicate NLRI — union communities for shared prefixes ([#209](https://github.com/ruhex/BGPLite/issues/209)) ([67bf44b](https://github.com/ruhex/BGPLite/commit/67bf44b9e192cb66bf4bedd8432ad9e45f197e6d))
+
 ## [1.4.5](https://github.com/ruhex/BGPLite/compare/v1.4.4...v1.4.5) (2026-07-08)
 
 
