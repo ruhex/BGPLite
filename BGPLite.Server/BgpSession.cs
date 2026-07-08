@@ -75,6 +75,9 @@ public sealed class BgpSession : IDisposable
 
     public BgpFsmState State => _state;
     public PeerConfig Peer => _peerConfig;
+    /// <summary>The remote ASN negotiated from the peer's OPEN (#206). Set after ValidateOpen; used by
+    /// BgpServer.RefreshPeerAsync to filter sessions by (Ip, Asn) on shared IPs.</summary>
+    public uint RemoteAsn => _remoteAsn;
     public bool IsEstablished => _state == BgpFsmState.Established;
 
     public async Task RefreshRoutesAsync(CancellationToken ct = default)

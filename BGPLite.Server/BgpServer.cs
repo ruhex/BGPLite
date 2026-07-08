@@ -326,7 +326,7 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
         }
 
         var sessions = _sessions
-            .Where(kvp => kvp.Key.Address.Equals(ip) && kvp.Value.Peer.RemoteAsn == asn)
+            .Where(kvp => kvp.Key.Address.Equals(ip) && kvp.Value.RemoteAsn == asn)
             .Select(kvp => kvp.Value)
             .ToList();
 
