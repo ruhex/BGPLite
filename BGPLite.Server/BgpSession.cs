@@ -62,6 +62,10 @@ public sealed class BgpSession : IDisposable
     private bool _localFourByteAsn; // derived from negotiated OPEN capability (RFC 6793)
     private ushort _negotiatedHoldTime;
     private List<IpPrefix> _advertisedPrefixes = [];
+    // #212: actual count sent on the wire (after aggregation + dedup). Updated at the end of
+    // SendRoutesAsync. Read via AdvertisedPrefixCount for the management API/UI so operators see
+    // the real number their peer's router receives, not the raw pre-aggregation count.
+    private int _advertisedCount;
     private TimeSpan _keepAliveInterval;
     private long _lastReceivedTicks; // UTC ticks of last received message; drives the HoldTimer (Interlocked)
     // Debounce ROUTE_REFRESH (RFC 2918): rate-limit per-session route re-announcements to avoid
@@ -78,6 +82,8 @@ public sealed class BgpSession : IDisposable
     /// <summary>The remote ASN negotiated from the peer's OPEN (#206). Set after ValidateOpen; used by
     /// BgpServer.RefreshPeerAsync to filter sessions by (Ip, Asn) on shared IPs.</summary>
     public uint RemoteAsn => _remoteAsn;
+    /// <summary>Actual prefix count sent on the wire (post-aggregation, post-dedup). 0 = never sent.</summary>
+    public int AdvertisedPrefixCount => Volatile.Read(ref _advertisedCount);
     public bool IsEstablished => _state == BgpFsmState.Established;
 
     public async Task RefreshRoutesAsync(CancellationToken ct = default)
@@ -149,6 +155,7 @@ public sealed class BgpSession : IDisposable
 
         _logger.LogInformation("Withdrawn {Count} routes from {Peer}", count, _peer);
         _advertisedPrefixes.Clear();
+        Volatile.Write(ref _advertisedCount, 0); // #212: routes withdrawn — no longer advertised
     }
 
     public BgpSession(
@@ -680,6 +687,8 @@ public sealed class BgpSession : IDisposable
         }
 
         _logger.LogInformation("UpdateSent {Count} routes to {Peer}", sent, _peer);
+        // #212: cache the actual wire count for the API/UI.
+        Volatile.Write(ref _advertisedCount, sent);
     }
 
     /// <summary>

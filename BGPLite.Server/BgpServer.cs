@@ -355,6 +355,19 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
                  .Distinct()
                  .ToList();
 
+    /// <summary>
+    /// Returns the actual advertised prefix count (post-aggregation, post-dedup) for the given
+    /// peer (Ip, Asn), or 0 if no session is established (#212).
+    /// </summary>
+    public int GetAdvertisedPrefixCount(string peerIp, uint asn)
+    {
+        if (!IPAddress.TryParse(peerIp, out var ip)) return 0;
+        return _sessions
+            .Where(kvp => kvp.Key.Address.Equals(ip) && kvp.Value.RemoteAsn == asn)
+            .Select(kvp => kvp.Value.AdvertisedPrefixCount)
+            .FirstOrDefault();
+    }
+
     public void Dispose()
     {
         Volatile.Write(ref _acceptingConnections, 0);

@@ -525,6 +525,11 @@ public sealed class ManagementApi : IHostedService, IDisposable
             ? _store.GetCommunities(peer.Ip, peer.Asn.Value)
             : new HashSet<uint>();
 
+        // #212: actual advertised count from the live session (post-aggregation, post-dedup).
+        var advertisedCount = peer.Asn.HasValue
+            ? _sessionManager?.GetAdvertisedPrefixCount(peer.Ip, peer.Asn.Value) ?? 0
+            : 0;
+
         return new
         {
             id = peer.Id,
@@ -538,7 +543,10 @@ public sealed class ManagementApi : IHostedService, IDisposable
             customPrefixes,
             customAsns,
             communities = communities.Select(CommunityCodec.Format),
-            allRoutes = communities.Count == 0
+            allRoutes = communities.Count == 0,
+            // #212: the actual number of prefixes on the wire (after aggregation + duplicate NLRI
+            // merge). 0 = session not established or no routes sent yet.
+            advertisedPrefixCount = advertisedCount
         };
     }
 

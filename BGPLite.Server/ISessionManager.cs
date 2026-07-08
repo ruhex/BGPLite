@@ -8,4 +8,6 @@ public interface ISessionManager
     /// </summary>
     Task RefreshPeerAsync(string peerIp, uint asn);
     List<string> GetActivePeerIps();
+    /// <summary>Actual advertised prefix count (post-aggregation, post-dedup), or 0 (#212).</summary>
+    int GetAdvertisedPrefixCount(string peerIp, uint asn);
 }
