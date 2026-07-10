@@ -9,8 +9,8 @@ public class PrefixSourceProviderFactoryTests
     {
         public string Kind { get; }
         public StubProvider(string kind) => Kind = kind;
-        public Task<IReadOnlyList<(uint Prefix, byte Length)>> LoadAsync(PrefixSourceConfig source, CancellationToken ct = default)
-            => Task.FromResult<IReadOnlyList<(uint, byte)>>([]);
+        public Task<SourceLoadResult> LoadAsync(PrefixSourceConfig source, string? etag = null, DateTimeOffset? lastModified = null, CancellationToken ct = default)
+            => Task.FromResult(SourceLoadResult.Ok([]));
     }
 
     [Fact]

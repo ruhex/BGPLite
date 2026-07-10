@@ -9,6 +9,7 @@ namespace BGPLite.Providers;
 /// keeping results in an in-memory TTL cache. Per-source failures fall back to a stale cached
 /// copy (if any) or a short-lived negative entry, never breaking startup. The source named by
 /// <see cref="AppConfig.DefaultPrefixSource"/> is exposed as the RU/default set.
+/// <para>#214: stores ETag/Last-Modified per source for conditional re-fetches (304 Not Modified).</para>
 /// </summary>
 public sealed class PrefixSourceService : IPrefixSourceService
 {
@@ -21,8 +22,9 @@ public sealed class PrefixSourceService : IPrefixSourceService
     // #85: pre-built name→source lookup (replaces per-call FirstOrDefault linear scan).
     private readonly Dictionary<string, PrefixSourceConfig> _sourcesByName;
 
-    // Name → (a prefix list, cached at, is negative). Negative entries (failed loads) use _negativeTtl.
-    private readonly ConcurrentDictionary<string, (IReadOnlyList<(uint Prefix, byte Length)> List, DateTime CachedAt, bool Negative)> _cache = new();
+    // Name → (prefix list, cached at, is negative, ETag, LastModified). Negative entries use _negativeTtl.
+    // #214: ETag/LastModified enable conditional re-fetches (If-None-Match / If-Modified-Since → 304).
+    private readonly ConcurrentDictionary<string, CacheEntry> _cache = new();
     // Name → gate serializing the cache-miss fetch path (prevents thundering-herd on cold/expired keys).
     private readonly ConcurrentDictionary<string, SemaphoreSlim> _locks = new();
 
@@ -47,7 +49,6 @@ public sealed class PrefixSourceService : IPrefixSourceService
         _cacheTtl = cacheTtl ?? TimeSpan.FromHours(1);
         _negativeTtl = negativeTtl ?? TimeSpan.FromSeconds(30);
         _timeProvider = timeProvider ?? TimeProvider.System;
-        // #85: pre-build a name→source lookup (the ctor already iterates for duplicate detection).
         _sourcesByName = config.PrefixSources.ToDictionary(s => s.Name);
     }
 
@@ -113,43 +114,95 @@ public sealed class PrefixSourceService : IPrefixSourceService
             Console.WriteLine($"  WarmUp: source '{source.Name}' — {prefixes.Count} prefixes");
     }
 
-    private async Task<IReadOnlyList<(uint Prefix, byte Length)>> LoadCachedAsync(PrefixSourceConfig source, CancellationToken ct)
+    /// <summary>
+    /// #214: Force-refresh all configured sources, bypassing the TTL. Used by the auto-refresh timer.
+    /// Returns the set of source names whose content actually changed (for selective peer refresh).
+    /// </summary>
+    public async Task<HashSet<string>> RefreshAllAsync(CancellationToken ct = default)
     {
-        if (TryGetFresh(source.Name, out var fresh))
+        var changed = new HashSet<string>();
+        foreach (var source in _config.PrefixSources)
+        {
+            try
+            {
+                var before = _cache.TryGetValue(source.Name, out var entry) ? entry : null;
+                await LoadCachedAsync(source, ct, forceRefresh: true);
+                if (_cache.TryGetValue(source.Name, out var after) && after.List is not null)
+                {
+                    if (before is null || before.List is null || !before.List.SequenceEqual(after.List))
+                        changed.Add(source.Name);
+                }
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                _logger.LogWarning(ex, "Auto-refresh: failed to reload source '{Name}'.", source.Name);
+            }
+        }
+        return changed;
+    }
+
+    private async Task<IReadOnlyList<(uint Prefix, byte Length)>> LoadCachedAsync(PrefixSourceConfig source, CancellationToken ct, bool forceRefresh = false)
+    {
+        if (!forceRefresh && TryGetFresh(source.Name, out var fresh))
             return fresh;
 
-        // Serialize per-key so concurrent callers share a single fetch (no thundering herd).
         var gate = _locks.GetOrAdd(source.Name, _ => new SemaphoreSlim(1, 1));
         await gate.WaitAsync(ct);
         try
         {
-            if (TryGetFresh(source.Name, out var rechecked))
+            if (!forceRefresh && TryGetFresh(source.Name, out var rechecked))
                 return rechecked;
 
-            IReadOnlyList<(uint Prefix, byte Length)> prefixes;
+            // #214: read stale validators for conditional request.
+            string? etag = null;
+            DateTimeOffset? lastModified = null;
+            if (_cache.TryGetValue(source.Name, out var stale) && !stale.Negative)
+            {
+                etag = stale.ETag;
+                lastModified = stale.LastModified;
+            }
+
+            SourceLoadResult result;
             try
             {
                 var provider = _factory.Get(source.Kind);
-                prefixes = await provider.LoadAsync(source, ct);
+                result = await provider.LoadAsync(source, etag, lastModified, ct);
             }
             catch (OperationCanceledException) { throw; }
             catch
             {
-                // Serve the last good copy if we have one (regardless of its age).
-                if (_cache.TryGetValue(source.Name, out var stale) && !stale.Negative)
+                if (_cache.TryGetValue(source.Name, out var staleCopy) && !staleCopy.Negative)
                 {
                     _logger.LogWarning("Source '{Name}' load failed; serving cached copy ({Count} prefixes).",
-                        source.Name, stale.List.Count);
-                    return stale.List;
+                        source.Name, staleCopy.List.Count);
+                    return staleCopy.List;
                 }
-
-                // Otherwise remember the failure briefly, so repeated calls don't hammer the provider.
-                _cache[source.Name] = ([], _timeProvider.GetUtcNow().UtcDateTime, Negative: true);
+                _cache[source.Name] = new CacheEntry([], _timeProvider.GetUtcNow().UtcDateTime, true);
                 throw;
             }
 
-            _cache[source.Name] = (prefixes, _timeProvider.GetUtcNow().UtcDateTime, Negative: false);
-            return prefixes;
+            // #214: 304 Not Modified — keep existing data, just refresh the timestamp + validators.
+            if (result.NotModified)
+            {
+                if (_cache.TryGetValue(source.Name, out var existing) && !existing.Negative)
+                {
+                    _cache[source.Name] = existing with
+                    {
+                        CachedAt = _timeProvider.GetUtcNow().UtcDateTime,
+                        ETag = result.ETag ?? existing.ETag,
+                        LastModified = result.LastModified ?? existing.LastModified
+                    };
+                    return existing.List;
+                }
+                // No prior data (first load got 304?) — treat as empty.
+                _cache[source.Name] = new CacheEntry([], _timeProvider.GetUtcNow().UtcDateTime, false,
+                    result.ETag, result.LastModified);
+                return [];
+            }
+
+            var now = _timeProvider.GetUtcNow().UtcDateTime;
+            _cache[source.Name] = new CacheEntry(result.Prefixes, now, false, result.ETag, result.LastModified);
+            return result.Prefixes;
         }
         finally
         {
@@ -168,7 +221,14 @@ public sealed class PrefixSourceService : IPrefixSourceService
             list = entry.List;
             return true;
         }
-
         return false;
     }
+
+    /// <summary>#214: Cache entry with ETag/Last-Modified for conditional re-fetches.</summary>
+    private sealed record CacheEntry(
+        IReadOnlyList<(uint Prefix, byte Length)> List,
+        DateTime CachedAt,
+        bool Negative,
+        string? ETag = null,
+        DateTimeOffset? LastModified = null);
 }

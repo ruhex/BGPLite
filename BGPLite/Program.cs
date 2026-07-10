@@ -178,6 +178,14 @@ builder.Services.AddHostedService(sp => new ConfigReloader(
     sp.GetRequiredService<ManagementApi>(),
     sp.GetRequiredService<ILogger<ConfigReloader>>()));
 
+// #214: periodic auto-refresh — checks prefix sources for changes via conditional requests (304).
+// Only enabled when AutoRefresh.Enabled = true in config.
+builder.Services.AddHostedService(sp => new PrefixAutoRefreshService(
+    sp.GetRequiredService<IPrefixSourceService>(),
+    sp.GetRequiredService<ISessionManager>(),
+    config,
+    sp.GetRequiredService<ILogger<PrefixAutoRefreshService>>()));
+
 if (config.RipeStat is { AsnLists.Count: > 0 })
 {
     foreach (var list in config.RipeStat.AsnLists)

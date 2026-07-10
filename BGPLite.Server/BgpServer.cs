@@ -368,6 +368,17 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
             .FirstOrDefault();
     }
 
+    /// <summary>#214: Refresh ALL established sessions — used by the auto-refresh timer.</summary>
+    public async Task RefreshAllEstablishedAsync()
+    {
+        var established = _sessions.Values.Where(s => s.IsEstablished).ToList();
+        if (established.Count == 0) return;
+
+        _logger.LogInformation("Auto-refresh: refreshing {Count} established sessions", established.Count);
+        foreach (var session in established)
+            await session.RefreshRoutesAsync();
+    }
+
     public void Dispose()
     {
         Volatile.Write(ref _acceptingConnections, 0);

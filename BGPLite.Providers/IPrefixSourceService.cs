@@ -20,4 +20,10 @@ public interface IPrefixSourceService
 
     /// <summary>Prime the in-memory cache for all sources.</summary>
     Task WarmUpAsync(CancellationToken ct = default);
+
+    /// <summary>
+    /// #214: Force-refresh all sources (bypass TTL), returning the names of sources whose content
+    /// actually changed. Used by the auto-refresh timer for selective peer refresh.
+    /// </summary>
+    Task<HashSet<string>> RefreshAllAsync(CancellationToken ct = default);
 }

@@ -13,17 +13,17 @@ public class PrefixSourceServiceTests
         private readonly IReadOnlyList<(uint, byte)> _list;
         public CountingProvider(IReadOnlyList<(uint, byte)> list) => _list = list;
 
-        public Task<IReadOnlyList<(uint Prefix, byte Length)>> LoadAsync(PrefixSourceConfig source, CancellationToken ct = default)
+        public Task<SourceLoadResult> LoadAsync(PrefixSourceConfig source, string? etag = null, DateTimeOffset? lastModified = null, CancellationToken ct = default)
         {
             Calls++;
-            return Task.FromResult(_list);
+            return Task.FromResult(SourceLoadResult.Ok(_list));
         }
     }
 
     private sealed class ThrowingProvider : IPrefixSourceProvider
     {
         public string Kind => "stub";
-        public Task<IReadOnlyList<(uint Prefix, byte Length)>> LoadAsync(PrefixSourceConfig source, CancellationToken ct = default)
+        public Task<SourceLoadResult> LoadAsync(PrefixSourceConfig source, string? etag = null, DateTimeOffset? lastModified = null, CancellationToken ct = default)
             => throw new InvalidOperationException("boom");
     }
 
@@ -139,11 +139,11 @@ public class PrefixSourceServiceTests
         private readonly IReadOnlyList<(uint, byte)> _first;
         public ToggleProvider(IReadOnlyList<(uint, byte)> first) => _first = first;
 
-        public Task<IReadOnlyList<(uint Prefix, byte Length)>> LoadAsync(PrefixSourceConfig source, CancellationToken ct = default)
+        public Task<SourceLoadResult> LoadAsync(PrefixSourceConfig source, string? etag = null, DateTimeOffset? lastModified = null, CancellationToken ct = default)
         {
             _calls++;
             return _calls == 1
-                ? Task.FromResult(_first)
+                ? Task.FromResult(SourceLoadResult.Ok(_first))
                 : throw new InvalidOperationException("boom");
         }
     }

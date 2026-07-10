@@ -81,6 +81,14 @@ public sealed class AppConfig
     public List<string>? CorsAllowedOrigins { get; init; }
 
     /// <summary>
+    /// Periodic auto-refresh (#214): a background timer checks all prefix sources for changes using
+    /// conditional requests (ETag/Last-Modified → 304). Only changed sources trigger peer refreshes.
+    /// Null/absent (default) = disabled — sources are only refreshed on peer connect/ROUTE_REFRESH.
+    /// </summary>
+    [YamlMember(Alias = "AutoRefresh")]
+    public AutoRefreshConfig? AutoRefresh { get; init; }
+
+    /// <summary>
     /// Validates the whole configuration, throwing <see cref="InvalidOperationException"/> with a
     /// clear message on the first violation (fail-loud). Called from Program.cs right after the YAML
     /// is loaded and before the host is built, so invalid config (bad ASN, RouterId=0.0.0.0,

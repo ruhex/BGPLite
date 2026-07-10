@@ -13,6 +13,15 @@ public interface IPrefixSourceProvider
     /// <summary>Discriminator matched against <see cref="PrefixSourceConfig.Kind"/>.</summary>
     string Kind { get; }
 
-    /// <summary>Fetch and parse the CIDR list described by <paramref name="source"/>.</summary>
-    Task<IReadOnlyList<(uint Prefix, byte Length)>> LoadAsync(PrefixSourceConfig source, CancellationToken ct = default);
+    /// <summary>
+    /// Fetch and parse the CIDR list described by <paramref name="source"/>. When
+    /// <paramref name="etag"/> / <paramref name="lastModified"/> are provided (from a prior load),
+    /// the provider SHOULD send a conditional request (If-None-Match / If-Modified-Since) and
+    /// return <see cref="SourceLoadResult.NotModified"/> = true on a 304 (#214).
+    /// </summary>
+    Task<SourceLoadResult> LoadAsync(
+        PrefixSourceConfig source,
+        string? etag = null,
+        DateTimeOffset? lastModified = null,
+        CancellationToken ct = default);
 }

@@ -15,7 +15,7 @@ public class FilePrefixProviderTests
         {
             var provider = new FilePrefixProvider(NullLogger<FilePrefixProvider>.Instance);
             var result = await provider.LoadAsync(new PrefixSourceConfig { Name = "t", Kind = "file", Path = path });
-            Assert.Equal(2, result.Count);
+            Assert.Equal(2, result.Prefixes.Count);
         }
         finally { File.Delete(path); }
     }
