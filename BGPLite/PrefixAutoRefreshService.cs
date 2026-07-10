@@ -47,14 +47,18 @@ internal sealed class PrefixAutoRefreshService : IHostedService, IDisposable
             return Task.CompletedTask;
         }
 
-        // Sources without ETag (RIPEstat) are checked less often — use the longer interval.
-        // The timer fires at the shorter interval (IntervalSeconds); the loop decides per-source
-        // whether to check based on whether the source has an ETag or not.
+        // Guard: Enabled must be true AND IntervalSeconds must be > 0 (CodeRabbit #215).
+        if (_config.IntervalSeconds <= 0)
+        {
+            _logger.LogWarning("Auto-refresh: Enabled=true but IntervalSeconds={Sec} — disabled", _config.IntervalSeconds);
+            return Task.CompletedTask;
+        }
+
         var interval = TimeSpan.FromSeconds(Math.Max(60, _config.IntervalSeconds));
         _timer = new PeriodicTimer(interval, _timeProvider);
         _loopTask = Task.Run(() => LoopAsync(_cts.Token), cancellationToken);
-        _logger.LogInformation("Auto-refresh: enabled, checking every {Interval} min (no-ETag sources every {NoEtag} min)",
-            interval.TotalMinutes, _config.NoEtagIntervalSeconds / 60.0);
+        _logger.LogInformation("Auto-refresh: enabled, checking every {Interval} min",
+            interval.TotalMinutes);
         return Task.CompletedTask;
     }
 

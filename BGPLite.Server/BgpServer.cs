@@ -368,15 +368,26 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
             .FirstOrDefault();
     }
 
-    /// <summary>#214: Refresh ALL established sessions — used by the auto-refresh timer.</summary>
+    /// <summary>#214: Refresh ALL established sessions — used by the auto-refresh timer.
+    /// Each session is refreshed independently so a hung/slow peer doesn't block the rest.</summary>
     public async Task RefreshAllEstablishedAsync()
     {
         var established = _sessions.Values.Where(s => s.IsEstablished).ToList();
         if (established.Count == 0) return;
 
         _logger.LogInformation("Auto-refresh: refreshing {Count} established sessions", established.Count);
+        var failures = 0;
         foreach (var session in established)
-            await session.RefreshRoutesAsync();
+        {
+            try { await session.RefreshRoutesAsync(); }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                failures++;
+                _logger.LogWarning(ex, "Auto-refresh: failed to refresh session {Peer}", session.Peer);
+            }
+        }
+        if (failures > 0)
+            _logger.LogWarning("Auto-refresh: {Failed}/{Total} sessions failed to refresh", failures, established.Count);
     }
 
     public void Dispose()
