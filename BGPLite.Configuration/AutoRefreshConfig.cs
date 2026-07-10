@@ -19,10 +19,12 @@ public sealed class AutoRefreshConfig
     [YamlMember(Alias = "IntervalSeconds")]
     public int IntervalSeconds { get; init; } = 600;
 
-    /// <summary>How often to check sources WITHOUT ETag support (e.g. RIPEstat). These require a
-    /// full re-fetch + hash comparison, so a longer interval (default 1 hour) reduces load.</summary>
+    /// <summary>How often to check sources WITHOUT ETag support (e.g. RIPEstat ASN lookups).
+    /// These require a full re-fetch + hash comparison. RIPEstat prefix data changes rarely
+    /// (prefixes are added/withdrawn gradually), so a long interval reduces unnecessary load.
+    /// Default 7 days (604800 seconds).</summary>
     [YamlMember(Alias = "NoEtagIntervalSeconds")]
-    public int NoEtagIntervalSeconds { get; init; } = 3600;
+    public int NoEtagIntervalSeconds { get; init; } = 604800;
 
     /// <summary>Max random delay (ms) between individual source checks within one cycle. Prevents
     /// burst of conditional requests to the same host (GitHub rate limits: 60 req/min unauthenticated).
