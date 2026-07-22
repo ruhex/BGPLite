@@ -98,6 +98,26 @@ public class BgpSessionHoldTimerTests
         }
     }
 
+    /// <summary>A minimal <see cref="ILogger{TCategoryName}"/> that records entries for assertions (#216).</summary>
+    private sealed class CapturingLogger<T> : ILogger<T>
+    {
+        public List<(LogLevel Level, string Message)> Entries { get; } = [];
+
+        public IDisposable BeginScope<TState>(TState state) where TState : notnull => NullScope.Instance;
+        public bool IsEnabled(LogLevel logLevel) => true;
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception,
+            Func<TState, Exception?, string> formatter)
+        {
+            lock (Entries) Entries.Add((logLevel, formatter(state, exception)));
+        }
+
+        private sealed class NullScope : IDisposable
+        {
+            public static readonly NullScope Instance = new();
+            public void Dispose() { }
+        }
+    }
+
     /// <summary>
     /// Drives the full OPEN/KEEPALIVE handshake against the session through the fake connection,
     /// returning the background RunAsync task. Mirrors <c>EstablishSessionAsync</c> from the socket
@@ -243,6 +263,58 @@ public class BgpSessionHoldTimerTests
         // The session ran and exited the handshake — it took milliseconds, not the configured 5s.
         Assert.True(sw.Elapsed < TimeSpan.FromSeconds(3),
             $"OpenTimeout test took {sw.ElapsedMilliseconds}ms — FakeTimeProvider not honored");
+
+        conn.Dispose();
+    }
+
+    /// <summary>
+    /// #216: a peer that closes the TCP connection before sending OPEN produces an explicit
+    /// "closed the TCP connection before sending OPEN" Warning — NOT the generic "Session error"
+    /// Error + stack trace. FakeBgpConnection.Complete() makes the read return EOF (throws
+    /// IOException "Connection closed by peer"), exactly mirroring SocketBgpConnection.ReadExactAsync.
+    /// </summary>
+    [Fact]
+    public async Task PeerCloseBeforeOpen_LogsExplicitCause_NotGenericSessionError()
+    {
+        var time = new FakeTimeProvider();
+        var conn = new FakeBgpConnection();
+        var bgpConfig = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1", HoldTime = 9, KeepAlive = 3, OpenTimeoutSeconds = 5 };
+        var logger = new CapturingLogger<BgpSession>();
+        using var session = new BgpSession(
+            conn,
+            new PeerConfig { Address = "127.0.0.1" },
+            bgpConfig,
+            new RouteTable(),
+            AllowAllFilter.Instance,
+            new BgpMetrics(),
+            logger,
+            timeProvider: time);
+
+        var runTask = Task.Run(() => session.RunAsync(CancellationToken.None));
+
+        // Wait until the session has entered the OPEN-receive (blocks on the connection's channel),
+        // then close the channel — the next read throws IOException "Connection closed by peer",
+        // mirroring a peer that drops the socket immediately after connect.
+        for (var i = 0; i < 100; i++)
+        {
+            await Task.Delay(10);
+            if (!session.IsEstablished && session.State != BgpFsmState.Idle)
+                break;
+        }
+        conn.Complete(); // EOF → IOException "Connection closed by peer"
+
+        try { await runTask.WaitAsync(TimeSpan.FromSeconds(5)); } catch { /* best effort */ }
+
+        Assert.False(session.IsEstablished, "a peer that closed pre-OPEN must not reach Established");
+
+        string[] messages;
+        lock (logger.Entries) messages = logger.Entries.Select(e => e.Message).ToArray();
+
+        // The explicit cause is logged at Warning…
+        Assert.Contains(messages, m => m.Contains("closed the TCP connection") && m.Contains("before sending OPEN"));
+        Assert.Contains(logger.Entries, e => e.Level == LogLevel.Warning && e.Message.Contains("closed the TCP connection"));
+        // …and the generic Error + stack trace is NOT emitted for a plain TCP close.
+        Assert.DoesNotContain(messages, m => m.Contains("Session error"));
 
         conn.Dispose();
     }

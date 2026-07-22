@@ -339,6 +339,33 @@ public sealed class BgpSession : IDisposable
                 catch { /* best-effort */ }
             }
         }
+        catch (IOException ex)
+        {
+            // Peer closed the TCP connection (EOF) — the single most common teardown cause. State the
+            // FSM phase explicitly so the operator sees WHY the session never established: a peer that
+            // connects and drops the socket before sending OPEN otherwise surfaces as a generic Error
+            // with a stack trace, hiding the (peer-side) root cause. Warning, not Error: a network
+            // close is a normal event, not a server fault (AGENTS.md: "treat partial failure as normal
+            // for network operations"). Stack trace demoted to Debug. _state is volatile, safe to read
+            // here. Established-phase closes arrive via AwaitLoopTaskAsync, not here.
+            var phase = _state switch
+            {
+                BgpFsmState.Connect => "before sending OPEN",
+                BgpFsmState.OpenSent => "while waiting for peer OPEN (OpenSent)",
+                BgpFsmState.OpenConfirm => "during OPEN/KEEPALIVE handshake (OpenConfirm)",
+                _ => $"in state {_state}"
+            };
+            _logger.LogWarning("Peer {Peer} closed the TCP connection {Phase}", _peer, phase);
+            _logger.LogDebug(ex, "IOException details for {Peer}", _peer);
+            // Best-effort Cease so the peer sees a clean close instead of a bare TCP RST.
+            // CAS from None: if a concurrent silent close / peer NOTIFICATION already claimed the
+            // teardown, do NOT emit a NOTIFICATION (RFC 4724 §4 / RFC 4271 §6.3 / §8.1).
+            if (Interlocked.CompareExchange(ref _teardownReason, (int)TeardownReason.LocalCease, (int)TeardownReason.None) == (int)TeardownReason.None)
+            {
+                try { await SendNotificationAsync(BgpConstants.Error.Cease, BgpConstants.SubError.Unspecific); }
+                catch { /* best-effort */ }
+            }
+        }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Session error with {Peer}", _peer);
@@ -409,6 +436,12 @@ public sealed class BgpSession : IDisposable
     {
         try { await task; }
         catch (OperationCanceledException) { }
+        catch (IOException) when (label == "read")
+        {
+            // Read-loop EOF: peer closed the TCP connection mid-session. Normal network close, not a
+            // fault — match the handshake-phase message in RunAsync for a consistent diagnostic line.
+            _logger.LogWarning("Peer {Peer} closed the TCP connection during Established", _peer);
+        }
         catch (Exception ex) { _logger.LogWarning(ex, "{Label} loop faulted for {Peer}", label, _peer); }
     }
 
