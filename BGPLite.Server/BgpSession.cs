@@ -351,7 +351,7 @@ public sealed class BgpSession : IDisposable
             var phase = _state switch
             {
                 BgpFsmState.Connect => "before sending OPEN",
-                BgpFsmState.OpenSent => "while waiting for peer OPEN (OpenSent)",
+                BgpFsmState.OpenSent => "while sending local OPEN/KEEPALIVE (OpenSent)",
                 BgpFsmState.OpenConfirm => "during OPEN/KEEPALIVE handshake (OpenConfirm)",
                 _ => $"in state {_state}"
             };
@@ -436,11 +436,12 @@ public sealed class BgpSession : IDisposable
     {
         try { await task; }
         catch (OperationCanceledException) { }
-        catch (IOException) when (label == "read")
+        catch (IOException ex) when (label == "read")
         {
             // Read-loop EOF: peer closed the TCP connection mid-session. Normal network close, not a
             // fault — match the handshake-phase message in RunAsync for a consistent diagnostic line.
             _logger.LogWarning("Peer {Peer} closed the TCP connection during Established", _peer);
+            _logger.LogDebug(ex, "IOException details for {Peer}", _peer);
         }
         catch (Exception ex) { _logger.LogWarning(ex, "{Label} loop faulted for {Peer}", label, _peer); }
     }

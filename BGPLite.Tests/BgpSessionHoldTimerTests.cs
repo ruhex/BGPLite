@@ -101,14 +101,15 @@ public class BgpSessionHoldTimerTests
     /// <summary>A minimal <see cref="ILogger{TCategoryName}"/> that records entries for assertions (#216).</summary>
     private sealed class CapturingLogger<T> : ILogger<T>
     {
-        public List<(LogLevel Level, string Message)> Entries { get; } = [];
+        // Retain the Exception? alongside level/message so Debug stack-trace logging is assertable.
+        public List<(LogLevel Level, string Message, Exception? Exception)> Entries { get; } = [];
 
         public IDisposable BeginScope<TState>(TState state) where TState : notnull => NullScope.Instance;
         public bool IsEnabled(LogLevel logLevel) => true;
         public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception,
             Func<TState, Exception?, string> formatter)
         {
-            lock (Entries) Entries.Add((logLevel, formatter(state, exception)));
+            lock (Entries) Entries.Add((logLevel, formatter(state, exception), exception));
         }
 
         private sealed class NullScope : IDisposable
@@ -315,6 +316,51 @@ public class BgpSessionHoldTimerTests
         Assert.Contains(logger.Entries, e => e.Level == LogLevel.Warning && e.Message.Contains("closed the TCP connection"));
         // …and the generic Error + stack trace is NOT emitted for a plain TCP close.
         Assert.DoesNotContain(messages, m => m.Contains("Session error"));
+
+        conn.Dispose();
+    }
+
+    /// <summary>
+    /// #216: a peer that closes the TCP connection mid-session (in Established) produces the explicit
+    /// "closed the TCP connection during Established" Warning + a Debug stack-trace entry — NOT the
+    /// generic "read loop faulted" Warning with a stack trace. Establishes the session via
+    /// EstablishAsync, then Complete()s the connection to drive the read-loop EOF.
+    /// </summary>
+    [Fact]
+    public async Task PeerCloseInEstablished_LogsExplicitCause_NotGenericLoopFault()
+    {
+        var time = new FakeTimeProvider();
+        var conn = new FakeBgpConnection();
+        var bgpConfig = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1", HoldTime = 9, KeepAlive = 3 };
+        var logger = new CapturingLogger<BgpSession>();
+        using var session = new BgpSession(
+            conn,
+            new PeerConfig { Address = "127.0.0.1" },
+            bgpConfig,
+            new RouteTable(),
+            AllowAllFilter.Instance,
+            new BgpMetrics(),
+            logger,
+            timeProvider: time);
+
+        var runTask = await EstablishAsync(session, conn, bgpConfig, time);
+        Assert.True(session.IsEstablished, "session must reach Established before the close");
+
+        // Peer drops the socket mid-session: the read loop's next ReceiveMessageAsync throws
+        // IOException "Connection closed by peer", routed through AwaitLoopTaskAsync.
+        conn.Complete();
+        try { await runTask.WaitAsync(TimeSpan.FromSeconds(5)); } catch { /* best effort */ }
+
+        List<(LogLevel Level, string Message, Exception? Exception)> snapshot;
+        lock (logger.Entries) snapshot = logger.Entries.ToList();
+        var messages = snapshot.Select(e => e.Message).ToArray();
+
+        // The explicit Established-phase cause is logged at Warning…
+        Assert.Contains(messages, m => m.Contains("closed the TCP connection") && m.Contains("during Established"));
+        // …with a Debug-level IOException stack-trace entry (symmetry with the handshake path).
+        Assert.Contains(snapshot, e => e.Level == LogLevel.Debug && e.Exception is IOException);
+        // …and the generic "read loop faulted" Warning is NOT emitted for a plain TCP close.
+        Assert.DoesNotContain(messages, m => m.Contains("loop faulted"));
 
         conn.Dispose();
     }
