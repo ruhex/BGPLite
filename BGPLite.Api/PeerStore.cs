@@ -198,6 +198,47 @@ public sealed class PeerStore : IPeerStore
                 .ToList());
     }
 
+    /// <summary>
+    /// Single-DbContext replacement for the <c>GetDbPeerById</c> + <c>GetSubscriptions</c> +
+    /// <c>GetCustomPrefixes</c> + <c>GetCustomAsns</c> + <c>GetCustomSources</c> +
+    /// <c>GetCommunities</c> sequence the management API's GET endpoints used to issue as 5–6
+    /// separate <c>DbContext</c> instances (each opening its own SQLite connection + running the
+    /// PRAGMA trio) — issue #228. Loads the peer and ALL its child collections through ONE
+    /// read-only <c>DbContext</c> via an EF Core projection. EF auto-splits the collection
+    /// subqueries inside a projection (one SELECT per collection + one for the peer row, all on the
+    /// same connection), so there is no Cartesian-product row explosion that an Include-based load
+    /// would produce. Read-only (<c>AsNoTracking</c>); unlike <see cref="LoadPeerRoutingView"/> it
+    /// does NOT fold a status update (the GET path does not mutate). Returns null if the peer does
+    /// not exist. Field shapes match the prior standalone getters byte-for-byte.
+    /// </summary>
+    public PeerDetailDto? GetPeerDetail(string peerId)
+    {
+        using var db = _dbFactory.CreateDbContext();
+        // Project straight into the DTO — EF Core applies collection-splitting automatically inside
+        // a projection, so the four collection subqueries each run as a separate SELECT filtered by
+        // the peer's Id (no N×M×K Cartesian row explosion that an Include-based load would produce).
+        return db.Peers.AsNoTracking()
+            .Where(p => p.Id == peerId)
+            .Select(p => new PeerDetailDto(
+                p.Id,
+                p.Ip,
+                p.Asn,
+                p.Description,
+                p.Status,
+                p.CreatedAt,
+                p.LastSessionAt,
+                p.Subscriptions.Select(s => s.AsnListName).ToList(),
+                p.CustomPrefixes.Select(c => c.Prefix + "/" + c.PrefixLength).ToList(),
+                p.CustomAsns.Select(c => c.Asn).ToList(),
+                // CustomSources carries ALL sources (incl. inactive) so the API can show the toggle.
+                p.CustomSources
+                    .Select(c => new PeerSourceView(c.Id, c.Name, c.Url, c.Community, c.Active))
+                    .ToList(),
+                // Communities stored as long (PeerCommunity.Community); the API formats to "ASN:VAL".
+                p.Communities.Select(c => c.Community).ToList()))
+            .FirstOrDefault();
+    }
+
     public void SetDescription(string id, string description)
     {
         using var db = _dbFactory.CreateDbContext();

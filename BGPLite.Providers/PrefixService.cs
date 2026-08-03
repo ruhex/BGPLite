@@ -27,6 +27,11 @@ public sealed class PrefixService : IPrefixService
     private readonly ILogger<PrefixService>? _logger;
     private readonly TimeProvider _timeProvider;
     private readonly UserSourceCache _userSourceCache;
+    // #229: gate serializing the RU/default-prefix cache-miss fetch path. The RU set is a single
+    // shared cache (unlike the per-ASN _cache), so a single SemaphoreSlim is enough — it prevents a
+    // thundering herd of N concurrent sessions from all re-fetching the ~11k-prefix default list
+    // when the TTL elapses. Mirrors the per-ASN gate pattern in GetPrefixesAsync.
+    private readonly SemaphoreSlim _ruGate = new(1, 1);
 
     public PrefixService(AppConfig config, RipeStatProvider? ripeStat, IPrefixSourceService prefixSources, HttpPrefixProvider? httpProvider = null, TimeSpan? cacheTtl = null, ILogger<PrefixService>? logger = null, TimeSpan? negativeTtl = null, int? maxCacheEntries = null, TimeProvider? timeProvider = null)
     {
@@ -260,19 +265,69 @@ public sealed class PrefixService : IPrefixService
 
     /// <summary>The RU/default prefix set — backed by the configured default prefix source.
     /// The projection is cached for one TTL so repeated calls (multiple sessions / refreshes)
-    /// don't re-allocate the same ~11k-entry list.</summary>
-    private List<(uint Prefix, byte Length, uint Asn)>? _ruProjected;
-    private DateTime _ruCachedAt;
+    /// don't re-allocate the same ~11k-entry list.
+    /// <para>
+    /// #229: the cache is a single immutable <see cref="RuCacheEntry"/> reference swapped atomically
+    /// via <see cref="Interlocked.Exchange(ref RuCacheEntry?, RuCacheEntry?)"/>, so a reader always
+    /// observes a consistent (projection, timestamp) pair — no torn read where the new projection
+    /// is paired with the old timestamp. A <see cref="SemaphoreSlim"/> gate serializes the cache-miss
+    /// fetch so concurrent callers share one default-source load (thundering-herd defense), and
+    /// stale-on-failure serves the last good copy on a transient fetch error (#163 parity).
+    /// </para>
+    /// </summary>
+    private sealed record RuCacheEntry(List<(uint Prefix, byte Length, uint Asn)> Projected, long CachedAtTicks);
+    private RuCacheEntry? _ruCache;
 
     public async Task<List<(uint Prefix, byte Length, uint Asn)>> GetRuPrefixesAsync(CancellationToken ct = default)
     {
-        if (_ruProjected is not null && _timeProvider.GetUtcNow().UtcDateTime - _ruCachedAt < _cacheTtl)
-            return _ruProjected;
+        // Fast path: fresh entry. A single Volatile.Read of the immutable entry reference gives a
+        // consistent (projection, ticks) snapshot — no two-field torn read.
+        var cached = Volatile.Read(ref _ruCache);
+        if (cached is not null && _timeProvider.GetUtcNow().UtcDateTime.Ticks - cached.CachedAtTicks < _cacheTtl.Ticks)
+            return cached.Projected;
 
-        var prefixes = await _prefixSources.GetDefaultAsync(ct);
-        _ruProjected = prefixes.Select(p => (p.Prefix, p.Length, 0u)).ToList();
-        _ruCachedAt = _timeProvider.GetUtcNow().UtcDateTime;
-        return _ruProjected;
+        // Serialize the cache-miss fetch so concurrent callers share one default-source fetch
+        // (thundering-herd defense — #229). Mirrors the per-ASN gate in GetPrefixesAsync.
+        await _ruGate.WaitAsync(ct);
+        try
+        {
+            // Re-check under the lock: another caller may have just populated the entry.
+            cached = Volatile.Read(ref _ruCache);
+            if (cached is not null && _timeProvider.GetUtcNow().UtcDateTime.Ticks - cached.CachedAtTicks < _cacheTtl.Ticks)
+                return cached.Projected;
+
+            List<(uint Prefix, byte Length, uint Asn)> projected;
+            try
+            {
+                var prefixes = await _prefixSources.GetDefaultAsync(ct);
+                projected = prefixes.Select(p => (p.Prefix, p.Length, 0u)).ToList();
+            }
+            catch (OperationCanceledException) { throw; }
+            catch (Exception ex)
+            {
+                // Stale-on-failure (#163 parity): serve the last good copy regardless of its age so
+                // a transient default-source outage does not drop the RU/default routes the instant
+                // the TTL elapses. Asymmetric with the no-cache path — previously the throw
+                // propagated and unconfigured/unknown peers lost their RU routes.
+                var stale = Volatile.Read(ref _ruCache);
+                if (stale is not null)
+                {
+                    _logger?.LogWarning(ex,
+                        "RU/default prefix source fetch failed; serving cached copy ({Count} prefixes).", stale.Projected.Count);
+                    return stale.Projected;
+                }
+                throw;
+            }
+
+            // Swap the whole entry atomically — projection and timestamp move together, so a reader
+            // can never observe a mismatched (new projection, old timestamp) pair.
+            Interlocked.Exchange(ref _ruCache, new RuCacheEntry(projected, _timeProvider.GetUtcNow().UtcDateTime.Ticks));
+            return projected;
+        }
+        finally
+        {
+            _ruGate.Release();
+        }
     }
 
     /// <summary>Prefixes of a configured source by name (cache-through).</summary>

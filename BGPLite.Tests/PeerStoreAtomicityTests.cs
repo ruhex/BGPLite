@@ -230,4 +230,62 @@ public class PeerStoreAtomicityTests
         // No-op for a peer that does not exist — must not throw.
         store.UpdateSessionStatus("203.0.113.99", 99999, active: true);
     }
+
+    // ---- #228: single-roundtrip GetPeerDetail equivalence ----
+
+    /// <summary>
+    /// #228: GetPeerDetail loads the peer and ALL child collections in one DbContext roundtrip and
+    /// returns field shapes identical to the standalone getters it replaces. Drives the equivalence
+    /// directly: seed a peer with every collection populated, then assert GetPeerDetail's fields
+    /// equal what the standalone GetSubscriptions/GetCustomPrefixes/GetCustomAsns/GetCustomSources/
+    /// GetCommunities calls returned. This is the contract BuildPeerDetail/HandleGetPeer now rely on.
+    /// </summary>
+    [Fact]
+    public void GetPeerDetail_Matches_Standalone_Getters()
+    {
+        var (store, connection) = NewStore();
+        using var conn = connection;
+        var peerId = store.CreatePeer(Ip, Asn, "test peer");
+        store.SetSubscriptions(peerId, ["list-a", "list-b"]);
+        store.SetCustomPrefixes(peerId, [("10.0.0.0", (byte)24), ("172.16.0.0", (byte)12)]);
+        store.SetCustomAsns(peerId, [64512u, 64513u]);
+        store.SetCommunities(peerId, [0x65001000u]);
+        store.AddCustomSource(peerId, "src-1", "https://example.com/list.txt", "65000:100");
+
+        var detail = store.GetPeerDetail(peerId);
+        Assert.NotNull(detail);
+
+        // Scalar fields match the row.
+        Assert.Equal(peerId, detail!.Id);
+        Assert.Equal(Ip, detail.Ip);
+        Assert.Equal(Asn, detail.Asn);
+        Assert.Equal("test peer", detail.Description);
+
+        // Collection fields match the standalone getters exactly.
+        Assert.Equal(store.GetSubscriptions(peerId), detail.Subscriptions);
+        Assert.Equal(store.GetCustomPrefixes(peerId), detail.CustomPrefixes);
+        Assert.Equal(store.GetCustomAsns(peerId), detail.CustomAsns);
+        Assert.Equal(store.GetCommunities(peerId).Select(c => (long)c), detail.Communities);
+
+        // CustomSources carries ALL fields (incl. Active) — matches GetCustomSources.
+        var standalone = store.GetCustomSources(peerId);
+        Assert.Equal(standalone.Count, detail.CustomSources.Count);
+        Assert.Equal(standalone[0].Id, detail.CustomSources[0].Id);
+        Assert.Equal(standalone[0].Name, detail.CustomSources[0].Name);
+        Assert.Equal(standalone[0].Url, detail.CustomSources[0].Url);
+        Assert.Equal(standalone[0].Community, detail.CustomSources[0].Community);
+        Assert.Equal(standalone[0].Active, detail.CustomSources[0].Active);
+    }
+
+    /// <summary>
+    /// #228: GetPeerDetail returns null for a peer that does not exist (preserves the 404 contract
+    /// of HandleGetPeer / the null-fallback of BuildPeerDetail).
+    /// </summary>
+    [Fact]
+    public void GetPeerDetail_Returns_Null_For_Missing_Peer()
+    {
+        var (store, connection) = NewStore();
+        using var conn = connection;
+        Assert.Null(store.GetPeerDetail("does-not-exist"));
+    }
 }
