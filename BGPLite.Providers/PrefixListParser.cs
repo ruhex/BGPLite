@@ -1,5 +1,3 @@
-using System.Net;
-using System.Net.Sockets;
 using BGPLite.Protocol;
 
 namespace BGPLite.Providers;
@@ -10,12 +8,11 @@ namespace BGPLite.Providers;
 /// lines are skipped silently (the route table only stores IPv4 <c>(uint, byte)</c> keys).
 /// </summary>
 /// <remarks>
-/// <b>Length and host-bit handling (#162).</b> Prefix length is constrained to the valid IPv4 range
-/// 1..32 — a stray <c>0.0.0.0/0</c> line would otherwise advertise the entire IPv4 space (a
-/// catastrophic route leak from a peer-supplied URL list, #147). Length 0 is rejected: a route
-/// server should not originate a default. Host bits are masked to the network address so that
-/// <c>10.0.0.5/24</c> normalizes to <c>10.0.0.0/24</c> — without this, the same network submitted
-/// with different host bits is stored as distinct rows and breaks dedup / longest-prefix-match.
+/// <b>Length and host-bit handling (#162 / #236).</b> Validation, host-bit masking, and the IPv4-only
+/// constraint now live in the single canonical <see cref="PrefixCidr"/> parser — every CIDR input
+/// path (file, API, DB-load) routes through it so the policy is defined exactly once. <c>/0</c> is
+/// rejected (a route server must not originate a default route from a peer-supplied URL list, #147);
+/// host bits are masked so <c>10.0.0.5/24</c> normalizes to <c>10.0.0.0/24</c> and dedups correctly.
 /// </remarks>
 public static class PrefixListParser
 {
@@ -34,19 +31,11 @@ public static class PrefixListParser
             var line = raw.Trim();
             if (line.Length == 0 || line[0] == '#') continue;
 
-            var slash = line.IndexOf('/');
-            if (slash < 0) continue;
-            if (!IPAddress.TryParse(line[..slash], out var ip)) continue;
-            if (!byte.TryParse(line[(slash + 1)..], out var length)) continue;
-            if (ip.AddressFamily != AddressFamily.InterNetwork) continue; // IPv4 only
-            // Reject 0 (default route — a route server should not originate one) and > 32 (nonsensical
-            // IPv4 length that byte.TryParse accepted). Length 1..32 only.
-            if (length is 0 or > 32) continue;
-
-            // Mask host bits to the network address so equivalent prefixes normalize to one key.
-            var packed = BgpConstants.IPAddressToUint(ip);
-            var masked = packed & (0xFFFFFFFFu << (32 - length));
-            result.Add((masked, length));
+            // Delegate to the canonical parser (#236): host-bit masking, /0 rejection, IPv4-only,
+            // range 1..32 — one policy, shared with the API and the BGP send path.
+            if (!PrefixCidr.TryParse(line, out var prefix, out var length))
+                continue;
+            result.Add((prefix, length));
         }
 
         return result;

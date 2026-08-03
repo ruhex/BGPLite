@@ -1060,33 +1060,21 @@ public sealed class ManagementApi : IHostedService, IDisposable
 
     /// <summary>
     /// Parses a single user-supplied custom prefix CIDR ("<prefix>/<length>") into a validated
-    /// (prefix, mask length) tuple. Splitting is done on the first '/', requiring exactly two
-    /// parts. The prefix is validated with <see cref="IPAddress.TryParse"/> (IPv4 only — IPv6 is
-    /// rejected); the length must parse as a byte in 0..32. Returns null on any failure so callers
-    /// can reject the whole request with a 400 before touching the store (no partial mutation).
-    /// Extracted as a pure helper for unit tests (#100).
+    /// (prefix, mask length) tuple, delegating to the canonical <see cref="PrefixCidr"/> parser
+    /// (#236). Host bits are masked to the network address (so <c>10.0.0.5/24</c> normalizes to
+    /// <c>10.0.0.0/24</c> and dedups against the same network submitted via a file source); <c>/0</c>
+    /// (the default route) is rejected — a route server must not originate a default from the API.
+    /// Returns null on any failure so callers can reject the whole request with a 400 before touching
+    /// the store (no partial mutation). Extracted as a pure helper for unit tests (#100).
     /// </summary>
     internal static (string Prefix, byte Length)? ParseCustomPrefix(string? cidr)
     {
-        if (string.IsNullOrWhiteSpace(cidr))
+        if (!PrefixCidr.TryParse(cidr, out var prefix, out var length))
             return null;
 
-        var parts = cidr.Split('/');
-        if (parts.Length != 2)
-            return null;
-
-        var prefix = parts[0];
-        var lengthStr = parts[1];
-
-        // IPv4 only: reject IPv6 (and any non-IP string).
-        if (!IPAddress.TryParse(prefix, out var addr) || addr.AddressFamily != AddressFamily.InterNetwork)
-            return null;
-
-        // Length must be a byte in the valid IPv4 range 0..32 (rejects 33..255, negatives, non-numeric).
-        if (!byte.TryParse(lengthStr, out byte length) || length > 32)
-            return null;
-
-        return (prefix, length);
+        // Return the masked network address in dotted-quad form (matches how it is stored in the DB
+        // and re-parsed by the BGP send path, so the round-trip is byte-identical).
+        return (BgpConstants.UintToIPAddress(prefix).ToString(), length);
     }
 
     private string GetClientIp(HttpListenerContext ctx) =>
