@@ -35,4 +35,20 @@ public interface IBgpConnection : IDisposable
     /// <paramref name="cancellationToken"/>.
     /// </summary>
     ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Non-blocking peek that reports whether the peer has closed the connection (graceful FIN or
+    /// RST received) — <b>without</b> attempting a read. Used by the read loop to disambiguate an
+    /// <see cref="OperationCanceledException"/> that masks an EOF under the EOF↔cancel race (#217):
+    /// when a FIN and a token cancellation race, <c>ReadAsync</c> may surface
+    /// <c>OperationCanceledException</c> even though the kernel has already processed the FIN
+    /// (dotnet/runtime #16025). After such an exception the loop probes this property to decide
+    /// whether the close was a peer TCP close (log the explicit cause) or a pure cancellation.
+    /// <para>
+    /// Limitations: returns <c>false</c> for abrupt disconnects that produced no FIN/RST yet
+    /// (broken cable, ungraceful kill) — those are detected only by a subsequent send/receive.
+    /// May return <c>true</c> after <see cref="IDisposable.Dispose"/> (treated as closed).
+    /// </para>
+    /// </summary>
+    bool IsPeerClosed { get; }
 }

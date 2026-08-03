@@ -49,6 +49,30 @@ internal sealed class SocketBgpConnection : IBgpConnection
     public ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken cancellationToken)
         => _stream.WriteAsync(buffer, cancellationToken);
 
+    public bool IsPeerClosed
+    {
+        get
+        {
+            // Disposed ⇒ treat as closed (avoids ObjectDisposedException from Poll/Available).
+            if (Volatile.Read(ref _disposed) == 1) return true;
+            try
+            {
+                // Non-blocking EOF peek: Poll(SelectRead) returns true for {data, FIN, RST, terminated};
+                // Available==0 rules out data-available, leaving closed/reset/terminated. This mirrors
+                // the standard select()+FIONREAD pattern for read-readiness on a POSIX socket.
+                // Dotnet docs note Poll cannot detect abrupt disconnects (broken cable, ungraceful
+                // kill) — those surface only via a subsequent send/recv; that limitation is acceptable
+                // here because the probe runs only AFTER a read returned OCE/IOException.
+                return _socket.Poll(0, SelectMode.SelectRead) && _socket.Available == 0;
+            }
+            catch (ObjectDisposedException)
+            {
+                // Dispose raced between the _disposed check above and the Poll call. Treat as closed.
+                return true;
+            }
+        }
+    }
+
     public void Dispose()
     {
         // Atomic test-and-set (CodeRabbit #178): a volatile bool check-then-set races under

@@ -434,23 +434,64 @@ public sealed class BgpSession : IDisposable
 
     private async Task AwaitLoopTaskAsync(Task task, string label)
     {
+        // Read-loop IOException is now logged and swallowed inside ReadLoopAsync (#217), so it never
+        // surfaces here as a faulting task; only genuine loop faults reach the generic catch.
         try { await task; }
         catch (OperationCanceledException) { }
-        catch (IOException ex) when (label == "read")
-        {
-            // Read-loop EOF: peer closed the TCP connection mid-session. Normal network close, not a
-            // fault — match the handshake-phase message in RunAsync for a consistent diagnostic line.
-            _logger.LogWarning("Peer {Peer} closed the TCP connection during Established", _peer);
-            _logger.LogDebug(ex, "IOException details for {Peer}", _peer);
-        }
         catch (Exception ex) { _logger.LogWarning(ex, "{Label} loop faulted for {Peer}", label, _peer); }
+    }
+
+    /// <summary>
+    /// Logs the explicit Established-phase TCP-close diagnostic. Used from <see cref="ReadLoopAsync"/>
+    /// both on a direct <see cref="IOException"/> (EOF) and on an
+    /// <see cref="OperationCanceledException"/> that masks an EOF under the EOF↔cancel race (#217,
+    /// dotnet/runtime #16025). Centralised so the message is byte-identical in both branches.
+    /// Warning, not Error: a network close is a normal event, not a server fault (AGENTS.md:
+    /// "treat partial failure as normal for network operations"). The stack trace, when present,
+    /// is demoted to Debug.
+    /// </summary>
+    private void LogPeerClosedEstablished(Exception? ioException)
+    {
+        _logger.LogWarning("Peer {Peer} closed the TCP connection during Established", _peer);
+        if (ioException is not null)
+            _logger.LogDebug(ioException, "IOException details for {Peer}", _peer);
     }
 
     private async Task ReadLoopAsync(CancellationToken cancellationToken)
     {
         while (!cancellationToken.IsCancellationRequested)
         {
-            var message = await ReceiveMessageAsync(cancellationToken);
+            BgpMessage message;
+            try
+            {
+                message = await ReceiveMessageAsync(cancellationToken);
+            }
+            catch (OperationCanceledException)
+            {
+                // Cancellation can be (a) pure cancel — hold-timer expiry / external shutdown / graceful
+                // teardown — while the peer is still connected, OR (b) the EOF↔cancel race where the
+                // peer closed the TCP connection in the same window the token was cancelled. Under the
+                // race, .NET may surface OperationCanceledException even though the kernel has already
+                // processed the FIN (dotnet/runtime #16025, non-deterministic). Probe the transport to
+                // tell them apart: if the peer closed, log the explicit Established-phase cause here
+                // (the only deterministic place — AwaitLoopTaskAsync sees only the masked OCE). #217.
+                if (_connection.IsPeerClosed)
+                    LogPeerClosedEstablished(null);
+                throw;
+            }
+            catch (IOException ex)
+            {
+                // Direct EOF read (no concurrent cancellation): explicit cause + Debug stack. This is
+                // the deterministic path; the OCE-branch above covers the race. #217.
+                // Return (not throw): the explicit cause is already logged here, and RunEstablishedAsync
+                // routes hold-time>0 reads through AwaitLoopTaskAsync, but hold-time==0 (RFC 4271 §4.2/§6.5)
+                // awaits ReadLoopAsync directly — a re-thrown IOException would propagate to RunAsync's
+                // catch(IOException) and produce a SECOND, generic "in state Established" line. Returning
+                // exits the loop cleanly so the finally-block Cease runs exactly once and the diagnostic
+                // is emitted exactly once, for both hold-time paths.
+                LogPeerClosedEstablished(ex);
+                return;
+            }
             Interlocked.Exchange(ref _lastReceivedTicks, _timeProvider.GetUtcNow().Ticks);
 
             switch (message)
