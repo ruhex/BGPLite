@@ -442,8 +442,15 @@ public sealed class BgpSession : IDisposable
     {
         // Read-loop IOException is now logged and swallowed inside ReadLoopAsync (#217), so it never
         // surfaces here as a faulting task; only genuine loop faults reach the generic catch.
+        // #223: a fixed-header BgpParseException (ErrorCode == null — invalid marker/length/type)
+        // MUST propagate to RunAsync's catch(BgpParseException) so the right NOTIFICATION
+        // (MessageHeaderError) is emitted before teardown. Without this rethrow the generic catch
+        // below would swallow it and the finally-block would send a generic Cease(6,0) instead —
+        // a regression of #223 for the HoldTime > 0 path (HoldTime == 0 awaits ReadLoopAsync
+        // directly and already propagates).
         try { await task; }
         catch (OperationCanceledException) { }
+        catch (BgpParseException) { throw; }
         catch (Exception ex) { _logger.LogWarning(ex, "{Label} loop faulted for {Peer}", label, _peer); }
     }
 

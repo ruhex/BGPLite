@@ -136,13 +136,21 @@ public class MalformedUpdateResilienceTests
     /// <c>ErrorCode is not null</c>, so fixed-header failures propagate to RunAsync. This test guards
     /// against a regression where that filter is dropped (which would also desync the byte stream:
     /// the payload of the bad frame would be read as the next header).
+    /// <para>
+    /// Parameterized over HoldTime: <c>0</c> takes the direct <c>ReadLoopAsync</c> path in
+    /// <c>RunEstablishedAsync</c>; <c>60</c> takes the <c>Task.WhenAny</c>/<c>AwaitLoopTaskAsync</c>
+    /// path. The latter has its own propagation gap (AwaitLoopTaskAsync's generic catch used to swallow
+    /// the BgpParseException and fall back to the finally-block Cease), so both paths are covered.
+    /// </para>
     /// </summary>
-    [Fact]
-    public async Task InvalidHeaderLength_OnWire_TearsDownSession_With_MessageHeaderError()
+    [Theory]
+    [InlineData(0)]   // holdTime=0: ReadLoopAsync awaited directly → propagates
+    [InlineData(60)]  // holdTime>0: Task.WhenAny → AwaitLoopTaskAsync → must rethrow BgpParseException
+    public async Task InvalidHeaderLength_OnWire_TearsDownSession_With_MessageHeaderError(int holdTime)
     {
         var (server, client) = ConnectedPair();
         using var clientSock = client;
-        var bgpConfig = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1", HoldTime = 0, KeepAlive = 0 };
+        var bgpConfig = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1", HoldTime = holdTime, KeepAlive = Math.Max(1, holdTime / 3) };
         using var session = new BgpSession(
             new SocketBgpConnection(server),
             new PeerConfig { Address = "127.0.0.1" },
@@ -168,7 +176,8 @@ public class MalformedUpdateResilienceTests
             await Task.Delay(TimeSpan.FromMilliseconds(50));
         Assert.False(session.IsEstablished, "session must tear down on a fixed-header error (RFC 4271 §6.1)");
 
-        // And a MessageHeaderError NOTIFICATION must be on the wire.
+        // And a MessageHeaderError NOTIFICATION must be on the wire (not a generic Cease — that would
+        // indicate AwaitLoopTaskAsync swallowed the BgpParseException and the finally-block fired).
         var sent = await DrainAsync(client, TimeSpan.FromSeconds(2));
         var notif = sent.OfType<BgpNotificationMessage>().SingleOrDefault();
         Assert.NotNull(notif);
