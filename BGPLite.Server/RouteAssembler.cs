@@ -184,13 +184,18 @@ internal sealed class RouteAssembler
                     _peer, routes.Count, customPrefixes.Count);
 
                 // Custom prefixes carry the static "custom prefix" community (<Asn>:100).
+                // #236: parse via the canonical PrefixCidr parser — host-bit masking + range check +
+                // IPv4-only, shared with the API and file sources. Custom prefixes are validated at
+                // write time (ParseCustomPrefix), but a corrupt row or a write path that bypassed the
+                // API must not throw a FormatException out of the BGP send path — skip + log instead.
                 var customPrefixComms = _communityResolver.Resolve(new CommunitySource(CommunitySourceKind.Custom));
                 foreach (var cidr in customPrefixes)
                 {
-                    var slash = cidr.IndexOf('/');
-                    var ip = IPAddress.Parse(cidr[..slash]);
-                    var length = byte.Parse(cidr[(slash + 1)..]);
-                    var prefix = BgpConstants.IPAddressToUint(ip);
+                    if (!PrefixCidr.TryParse(cidr, out var prefix, out var length))
+                    {
+                        _logger.LogWarning("Skipping malformed custom prefix '{Cidr}' for {Peer}", cidr, _peer);
+                        continue;
+                    }
                     routes.Add(MakeRoute(prefix, length, nextHop, null, customPrefixComms));
                 }
 
