@@ -42,6 +42,21 @@ public class BgpSessionHoldTimerTests
         public void Enqueue(byte[] message) => _inbound.Writer.TryWrite(message);
         public void Complete() => _inbound.Writer.TryComplete();
 
+        // EOF signal for IsPeerClosed: the channel writer completed and nothing is left in the
+        // running read buffer — equivalent to the kernel having delivered the FIN.
+        // _finReceived: a FIN has "arrived at the kernel" (IsPeerClosed reports true) WITHOUT the
+        // channel writer being completed. This lets a test reproduce the EOF↔cancel race (#217,
+        // dotnet/runtime #16025): the pending reader stays blocked until the token is cancelled,
+        // then throws OperationCanceledException — exactly the non-deterministic .NET timing where
+        // cancel can win over an already-arrived FIN. Channel otherwise resolves completion
+        // synchronously and this path can't be exercised.
+        private volatile bool _finReceived;
+        public void SimulateFinReceived() => _finReceived = true;
+
+        public bool IsPeerClosed => Disposed
+            || _finReceived
+            || (_inbound.Reader.Completion.IsCompleted && _readBuffer.Count == 0);
+
         public async ValueTask ReadExactAsync(Memory<byte> buffer, CancellationToken cancellationToken)
         {
             var offset = 0;
@@ -94,6 +109,27 @@ public class BgpSessionHoldTimerTests
         private sealed class NopDisposable : IDisposable
         {
             public static readonly NopDisposable Instance = new();
+            public void Dispose() { }
+        }
+    }
+
+    /// <summary>A minimal <see cref="ILogger{TCategoryName}"/> that records entries for assertions (#216).</summary>
+    private sealed class CapturingLogger<T> : ILogger<T>
+    {
+        // Retain the Exception? alongside level/message so Debug stack-trace logging is assertable.
+        public List<(LogLevel Level, string Message, Exception? Exception)> Entries { get; } = [];
+
+        public IDisposable BeginScope<TState>(TState state) where TState : notnull => NullScope.Instance;
+        public bool IsEnabled(LogLevel logLevel) => true;
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception,
+            Func<TState, Exception?, string> formatter)
+        {
+            lock (Entries) Entries.Add((logLevel, formatter(state, exception), exception));
+        }
+
+        private sealed class NullScope : IDisposable
+        {
+            public static readonly NullScope Instance = new();
             public void Dispose() { }
         }
     }
@@ -243,6 +279,216 @@ public class BgpSessionHoldTimerTests
         // The session ran and exited the handshake — it took milliseconds, not the configured 5s.
         Assert.True(sw.Elapsed < TimeSpan.FromSeconds(3),
             $"OpenTimeout test took {sw.ElapsedMilliseconds}ms — FakeTimeProvider not honored");
+
+        conn.Dispose();
+    }
+
+    /// <summary>
+    /// #216: a peer that closes the TCP connection before sending OPEN produces an explicit
+    /// "closed the TCP connection before sending OPEN" Warning — NOT the generic "Session error"
+    /// Error + stack trace. FakeBgpConnection.Complete() makes the read return EOF (throws
+    /// IOException "Connection closed by peer"), exactly mirroring SocketBgpConnection.ReadExactAsync.
+    /// </summary>
+    [Fact]
+    public async Task PeerCloseBeforeOpen_LogsExplicitCause_NotGenericSessionError()
+    {
+        var time = new FakeTimeProvider();
+        var conn = new FakeBgpConnection();
+        var bgpConfig = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1", HoldTime = 9, KeepAlive = 3, OpenTimeoutSeconds = 5 };
+        var logger = new CapturingLogger<BgpSession>();
+        using var session = new BgpSession(
+            conn,
+            new PeerConfig { Address = "127.0.0.1" },
+            bgpConfig,
+            new RouteTable(),
+            AllowAllFilter.Instance,
+            new BgpMetrics(),
+            logger,
+            timeProvider: time);
+
+        var runTask = Task.Run(() => session.RunAsync(CancellationToken.None));
+
+        // Wait until the session has entered the OPEN-receive (blocks on the connection's channel),
+        // then close the channel — the next read throws IOException "Connection closed by peer",
+        // mirroring a peer that drops the socket immediately after connect.
+        for (var i = 0; i < 100; i++)
+        {
+            await Task.Delay(10);
+            if (!session.IsEstablished && session.State != BgpFsmState.Idle)
+                break;
+        }
+        conn.Complete(); // EOF → IOException "Connection closed by peer"
+
+        try { await runTask.WaitAsync(TimeSpan.FromSeconds(5)); } catch { /* best effort */ }
+
+        Assert.False(session.IsEstablished, "a peer that closed pre-OPEN must not reach Established");
+
+        string[] messages;
+        lock (logger.Entries) messages = logger.Entries.Select(e => e.Message).ToArray();
+
+        // The explicit cause is logged at Warning…
+        Assert.Contains(messages, m => m.Contains("closed the TCP connection") && m.Contains("before sending OPEN"));
+        Assert.Contains(logger.Entries, e => e.Level == LogLevel.Warning && e.Message.Contains("closed the TCP connection"));
+        // …and the generic Error + stack trace is NOT emitted for a plain TCP close.
+        Assert.DoesNotContain(messages, m => m.Contains("Session error"));
+
+        conn.Dispose();
+    }
+
+    /// <summary>
+    /// #216: a peer that closes the TCP connection mid-session (in Established) produces the explicit
+    /// "closed the TCP connection during Established" Warning + a Debug stack-trace entry — NOT the
+    /// generic "read loop faulted" Warning with a stack trace. Establishes the session via
+    /// EstablishAsync, then Complete()s the connection to drive the read-loop EOF.
+    /// </summary>
+    [Fact]
+    public async Task PeerCloseInEstablished_LogsExplicitCause_NotGenericLoopFault()
+    {
+        var time = new FakeTimeProvider();
+        var conn = new FakeBgpConnection();
+        var bgpConfig = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1", HoldTime = 9, KeepAlive = 3 };
+        var logger = new CapturingLogger<BgpSession>();
+        using var session = new BgpSession(
+            conn,
+            new PeerConfig { Address = "127.0.0.1" },
+            bgpConfig,
+            new RouteTable(),
+            AllowAllFilter.Instance,
+            new BgpMetrics(),
+            logger,
+            timeProvider: time);
+
+        var runTask = await EstablishAsync(session, conn, bgpConfig, time);
+        Assert.True(session.IsEstablished, "session must reach Established before the close");
+
+        // Peer drops the socket mid-session: the read loop's next ReceiveMessageAsync throws
+        // IOException "Connection closed by peer", routed through AwaitLoopTaskAsync.
+        conn.Complete();
+        try { await runTask.WaitAsync(TimeSpan.FromSeconds(5)); } catch { /* best effort */ }
+
+        List<(LogLevel Level, string Message, Exception? Exception)> snapshot;
+        lock (logger.Entries) snapshot = logger.Entries.ToList();
+        var messages = snapshot.Select(e => e.Message).ToArray();
+
+        // The explicit Established-phase cause is logged at Warning…
+        Assert.Contains(messages, m => m.Contains("closed the TCP connection") && m.Contains("during Established"));
+        // …with a Debug-level IOException stack-trace entry (symmetry with the handshake path).
+        Assert.Contains(snapshot, e => e.Level == LogLevel.Debug && e.Exception is IOException);
+        // …and the generic "read loop faulted" Warning is NOT emitted for a plain TCP close.
+        Assert.DoesNotContain(messages, m => m.Contains("loop faulted"));
+
+        conn.Dispose();
+    }
+
+    /// <summary>
+    /// #217 regression: the EOF↔cancel race in Established. The peer closed the TCP connection
+    /// (FIN delivered to the kernel), but .NET surfaced OperationCanceledException instead of
+    /// IOException because the hold-timer-expiry cancellation raced ahead of the FIN completion
+    /// (dotnet/runtime #16025, non-deterministic in production). Without the transport probe,
+    /// read-loop's <c>catch (OperationCanceledException)</c> would swallow this without the
+    /// explicit Established-phase diagnostic — the operator would see only "Hold timer expired",
+    /// not "peer closed the TCP connection during Established".
+    /// <para>
+    /// Reproduction: <c>SimulateFinReceived()</c> marks the FIN as kernel-delivered (so
+    /// <see cref="IBgpConnection.IsPeerClosed"/> returns true) WITHOUT completing the channel — the
+    /// reader stays blocked until the hold-timer cancels the token. The resulting OCE is then
+    /// disambiguated by the transport probe, asserting the explicit cause is logged.
+    /// </para>
+    /// </summary>
+    [Fact]
+    public async Task PeerCloseInEstablished_RaceWithHoldTimer_LogsExplicitCause()
+    {
+        var time = new FakeTimeProvider();
+        var conn = new FakeBgpConnection();
+        var bgpConfig = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1", HoldTime = 9, KeepAlive = 3 };
+        var logger = new CapturingLogger<BgpSession>();
+        using var session = new BgpSession(
+            conn,
+            new PeerConfig { Address = "127.0.0.1" },
+            bgpConfig,
+            new RouteTable(),
+            AllowAllFilter.Instance,
+            new BgpMetrics(),
+            logger,
+            timeProvider: time);
+
+        var runTask = await EstablishAsync(session, conn, bgpConfig, time);
+        Assert.True(session.IsEstablished, "session must reach Established before the race");
+
+        // The read loop is now blocked on ReceiveMessageAsync (no inbound messages). Mark the FIN
+        // as kernel-delivered WITHOUT completing the channel — the reader stays pending, but the
+        // transport probe now reports the peer as closed.
+        conn.SimulateFinReceived();
+        Assert.True(conn.IsPeerClosed, "test setup: FIN received but channel still pending");
+
+        // Advance the fake clock past the hold window — the hold timer fires NOTIFICATION and the
+        // session cancels its token (RunEstablishedAsync: Task.WhenAny → _cts.CancelAsync). The
+        // blocked reader throws OperationCanceledException, masking the FIN. Read-loop's catch(OCE)
+        // must probe IsPeerClosed and log the explicit Established-phase cause.
+        for (var i = 0; i < 5; i++)
+        {
+            time.Advance(TimeSpan.FromSeconds(3));
+            await Task.Delay(5); // let the timer loop tick
+        }
+
+        try { await runTask.WaitAsync(TimeSpan.FromSeconds(5)); } catch { /* best effort */ }
+
+        List<(LogLevel Level, string Message, Exception? Exception)> snapshot;
+        lock (logger.Entries) snapshot = logger.Entries.ToList();
+        var messages = snapshot.Select(e => e.Message).ToArray();
+
+        // The race must surface the explicit TCP-close cause (NOT just the hold-timer line):
+        Assert.Contains(messages, m => m.Contains("closed the TCP connection") && m.Contains("during Established"));
+        Assert.Contains(snapshot, e => e.Level == LogLevel.Warning && e.Message.Contains("closed the TCP connection"));
+        // The generic "read loop faulted" and "Session error" are NOT emitted for this path.
+        Assert.DoesNotContain(messages, m => m.Contains("loop faulted"));
+        Assert.DoesNotContain(messages, m => m.Contains("Session error"));
+
+        conn.Dispose();
+    }
+
+    /// <summary>
+    /// #217 regression: HoldTime=0 (RFC 4271 §4.2/§6.5 — KEEPALIVE/Hold-Timer disabled) routes
+    /// <c>ReadLoopAsync</c> directly through <c>RunEstablishedAsync</c> WITHOUT
+    /// <c>AwaitLoopTaskAsync</c>. A re-thrown IOException would propagate to <c>RunAsync</c>'s
+    /// <c>catch(IOException)</c> and log a SECOND, generic "in state Established" line — duplicating
+    /// the explicit "during Established" diagnostic emitted inside the read loop. This test pins the
+    /// exactly-once invariant: one explicit Established-phase line, no generic duplicate.
+    /// </summary>
+    [Fact]
+    public async Task PeerCloseInEstablished_HoldTimeZero_LogsExplicitCause_Once()
+    {
+        var time = new FakeTimeProvider();
+        var conn = new FakeBgpConnection();
+        var bgpConfig = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1", HoldTime = 0, KeepAlive = 0 };
+        var logger = new CapturingLogger<BgpSession>();
+        using var session = new BgpSession(
+            conn,
+            new PeerConfig { Address = "127.0.0.1" },
+            bgpConfig,
+            new RouteTable(),
+            AllowAllFilter.Instance,
+            new BgpMetrics(),
+            logger,
+            timeProvider: time);
+
+        var runTask = await EstablishAsync(session, conn, bgpConfig, time);
+        Assert.True(session.IsEstablished, "session must reach Established before the close");
+
+        // Peer drops the socket mid-session. With HoldTime=0 this runs ReadLoopAsync directly.
+        conn.Complete();
+        try { await runTask.WaitAsync(TimeSpan.FromSeconds(5)); } catch { /* best effort */ }
+
+        List<(LogLevel Level, string Message, Exception? Exception)> snapshot;
+        lock (logger.Entries) snapshot = logger.Entries.ToList();
+        var messages = snapshot.Select(e => e.Message).ToArray();
+
+        // Exactly-once: the explicit "during Established" cause is present…
+        var explicitCount = messages.Count(m => m.Contains("closed the TCP connection") && m.Contains("during Established"));
+        Assert.Equal(1, explicitCount);
+        // …and the generic RunAsync-catch "in state Established" line is NOT emitted (no duplication).
+        Assert.DoesNotContain(messages, m => m.Contains("in state Established"));
+        Assert.DoesNotContain(messages, m => m.Contains("Session error"));
 
         conn.Dispose();
     }
