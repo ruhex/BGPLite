@@ -421,61 +421,81 @@ public sealed class ManagementApi : IHostedService, IDisposable
     private ApiResponse HandleGetServer()
     {
         var bgp = _config.Bgp;
-        var ip = bgp.RouterId;
         return ApiResponse.Ok(new
         {
             asn = bgp.Asn,
-            routerId = ip,
+            routerId = bgp.RouterId,
             bgpPort = 179,
             apiPort = _port,
             holdTime = bgp.HoldTime,
             keepalive = bgp.KeepAlive,
-            setup = new[]
-            {
-                $"router bgp {bgp.Asn}",
-                $" neighbor <YOUR_IP> remote-as {bgp.Asn}",
-                $" neighbor <YOUR_IP> ebgp-multihop 2",
-                $" neighbor <YOUR_IP> update-source <YOUR_INTERFACE>",
-                $" neighbor <YOUR_IP> soft-reconfiguration inbound",
-                $"!",
-                $"address-family ipv4 unicast",
-                $" neighbor <YOUR_IP> activate",
-                $" neighbor <YOUR_IP> route-map BGPLite-IN in",
-                $" neighbor <YOUR_IP> route-map BGPLite-OUT out",
-                $"exit-address-family"
-            },
-            bird = new[]
-            {
-                $"# ---------- FILTER ----------",
-                $"filter bgplite_in {{",
-                $"  gw = <YOUR_GATEWAY>;",
-                $"  accept;",
-                $"}}",
-                $"",
-                $"# ---------- eBGP ----------",
-                $"protocol bgp bgplite {{",
-                $"  local as <YOUR_ASN>;",
-                $"  neighbor {ip} as {bgp.Asn};",
-                $"  source address <YOUR_IP>;",
-                $"  multihop;",
-                $"  hold time {bgp.HoldTime};",
-                $"  ipv4 {{",
-                $"    import filter bgplite_in;",
-                $"    export none;",
-                $"    graceful restart on;",
-                $"  }};",
-                $"}}"
-            },
-            mikrotik = new[]
-            {
-                $"# Apply all lines as-is — full paths => one paste. v7 ties a connection to a BGP instance; output.filter-chain=discard announces nothing back.",
-                $"/routing/bgp/instance/add name=bgplite as=<YOUR_ASN> router-id=<YOUR_ROUTER_ID>",
-                $"/routing/filter/rule/add chain=discard rule=\"reject;\"",
-                $"/routing/filter/rule/add chain=bgplite-in rule=\"set gw <YOUR_GW>; accept;\"",
-                $"/routing/bgp/connection/add name=bgplite instance=bgplite afi=ip remote.address={ip}/32 remote.as={bgp.Asn} local.role=ebgp hold-time={bgp.HoldTime}s output.filter-chain=discard input.filter=bgplite-in"
-            }
+            setup = BuildCiscoSetup(bgp.Asn),
+            bird = BuildBirdSetup(bgp.RouterId, bgp.Asn, bgp.HoldTime),
+            mikrotik = BuildMikrotikSetup(bgp.RouterId, bgp.Asn, bgp.HoldTime)
         });
     }
+
+    /// <summary>
+    /// Cisco IOS peering snippet. Pure (no instance state) so it is directly unit-testable (#218).
+    /// </summary>
+    internal static string[] BuildCiscoSetup(uint asn) =>
+    [
+        $"router bgp {asn}",
+        $" neighbor <YOUR_IP> remote-as {asn}",
+        $" neighbor <YOUR_IP> ebgp-multihop 2",
+        $" neighbor <YOUR_IP> update-source <YOUR_INTERFACE>",
+        $" neighbor <YOUR_IP> soft-reconfiguration inbound",
+        $"!",
+        $"address-family ipv4 unicast",
+        $" neighbor <YOUR_IP> activate",
+        $" neighbor <YOUR_IP> route-map BGPLite-IN in",
+        $" neighbor <YOUR_IP> route-map BGPLite-OUT out",
+        $"exit-address-family"
+    ];
+
+    /// <summary>
+    /// BIRD peering snippet. Pure so it is directly unit-testable (#218).
+    /// </summary>
+    internal static string[] BuildBirdSetup(string routerId, uint asn, int holdTime) =>
+    [
+        $"# ---------- FILTER ----------",
+        $"filter bgplite_in {{",
+        $"  gw = <YOUR_GATEWAY>;",
+        $"  accept;",
+        $"}}",
+        $"",
+        $"# ---------- eBGP ----------",
+        $"protocol bgp bgplite {{",
+        $"  local as <YOUR_ASN>;",
+        $"  neighbor {routerId} as {asn};",
+        $"  source address <YOUR_IP>;",
+        $"  multihop;",
+        $"  hold time {holdTime};",
+        $"  ipv4 {{",
+        $"    import filter bgplite_in;",
+        $"    export none;",
+        $"    graceful restart on;",
+        $"  }};",
+        $"}}"
+    ];
+
+    /// <summary>
+    /// MikroTik RouterOS v7 peering snippet. Pure so it is directly unit-testable (#218).
+    /// <para>
+    /// multihop=yes is mandatory for the common case where the client is NOT directly connected to
+    /// the server (behind NAT / via upstream transit): with the default multihop=no, RouterOS v7
+    /// drops the inbound TCP to port 179 before sending OPEN, so the session never establishes and
+    /// no prefixes are advertised. Cisco (ebgp-multihop 2) and BIRD (multihop) already set this.
+    /// </para>
+    /// </summary>
+    internal static string[] BuildMikrotikSetup(string routerId, uint asn, int holdTime) =>
+    [
+        $"# Apply all lines as-is — full paths => one paste. v7 ties a connection to a BGP instance; output.filter-chain=discard announces nothing back.",
+        $"/routing/bgp/instance/add name=bgplite as=<YOUR_ASN> router-id=<YOUR_ROUTER_ID>",
+        $"/routing/filter/rule/add chain=discard rule=\"reject;\"",
+        $"/routing/filter/rule/add chain=bgplite-in rule=\"set gw <YOUR_GW>; accept;\"",
+        $"/routing/bgp/connection/add name=bgplite instance=bgplite afi=ip remote.address={routerId}/32 remote.as={asn} local.role=ebgp multihop=yes hold-time={holdTime}s output.filter-chain=discard input.filter=bgplite-in"
+    ];
 
     #endregion
 
