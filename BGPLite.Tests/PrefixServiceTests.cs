@@ -129,6 +129,26 @@ public class PrefixServiceTests
         Assert.Empty(result);
     }
 
+    /// <summary>
+    /// Regression for #225: when the cancellation token is cancelled, GetPrefixesForAsns must
+    /// throw OperationCanceledException (or a TaskCanceledException subclass — the OCE family)
+    /// instead of returning a partial list (cancelled ASNs were silently dropped to [] by
+    /// ResolveAsnAsync's bare catch). The cancellation contract — OCE always propagates, never
+    /// swallowed (#114) — must hold here as it does everywhere else. ThrowsAnyAsync accepts the
+    /// TaskCanceledException subclass that the gate.WaitAsync(ct) surfaces when the token is
+    /// already cancelled.
+    /// </summary>
+    [Fact]
+    public async Task GetPrefixesForAsns_CancelledToken_PropagatesOperationCanceledException()
+    {
+        var service = Service(new PerAsnHandler());
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            service.GetPrefixesForAsns([100, 200, 300], cts.Token));
+    }
+
     [Fact]
     public async Task GetPrefixesForAsns_RepeatedAsn_DeduplicatesViaCache()
     {

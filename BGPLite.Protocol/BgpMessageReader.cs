@@ -52,11 +52,13 @@ public static class BgpMessageReader
     private static BgpOpenMessage ParseOpen(ReadOnlySpan<byte> payload)
     {
         if (payload.Length < 10)
-            throw new BgpParseException($"OPEN message too short: {payload.Length}");
+            throw new BgpParseException($"OPEN message too short: {payload.Length}",
+                BgpConstants.Error.OpenMessageError, BgpConstants.SubError.Unspecific);
 
         var version = payload[0];
         if (version != BgpConstants.BgpVersion)
-            throw new BgpParseException($"Unsupported BGP version: {version}");
+            throw new BgpParseException($"Unsupported BGP version: {version}",
+                BgpConstants.Error.OpenMessageError, BgpConstants.SubError.UnsupportedVersion);
 
         var asn = BinaryPrimitives.ReadUInt16BigEndian(payload[1..]);
         var holdTime = BinaryPrimitives.ReadUInt16BigEndian(payload[3..]);
@@ -120,12 +122,19 @@ public static class BgpMessageReader
     private static BgpUpdateMessage ParseUpdate(ReadOnlySpan<byte> payload)
     {
         if (payload.Length < 4)
-            throw new BgpParseException($"UPDATE message too short: {payload.Length}");
+            throw new BgpParseException($"UPDATE message too short: {payload.Length}",
+                BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.Unspecific);
 
         var offset = 0;
 
         var withdrawnLen = BinaryPrimitives.ReadUInt16BigEndian(payload[offset..]);
         offset += 2;
+        // #222: a declared length that runs past the payload is stream-level corruption, not a
+        // per-UPDATE content error — surface it as a parse exception (Update Message Error) so the
+        // caller can treat-as-withdraw instead of throwing ArgumentOutOfRangeException out of Slice.
+        if (offset + withdrawnLen > payload.Length)
+            throw new BgpParseException($"UPDATE withdrawn-routes length {withdrawnLen} exceeds payload",
+                BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.Unspecific);
 
         var withdrawn = new List<IpPrefix>();
         if (withdrawnLen > 0)
@@ -141,6 +150,9 @@ public static class BgpMessageReader
 
         var attrsLen = BinaryPrimitives.ReadUInt16BigEndian(payload[offset..]);
         offset += 2;
+        if (offset + attrsLen > payload.Length)
+            throw new BgpParseException($"UPDATE path-attributes length {attrsLen} exceeds payload",
+                BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.Unspecific);
 
         var attributes = new List<PathAttribute>();
         if (attrsLen > 0)
@@ -172,6 +184,16 @@ public static class BgpMessageReader
 
     private static (PathAttribute attr, int consumed) ParseAttribute(ReadOnlySpan<byte> data)
     {
+        // #222: bounds-check before every indexed read. Previously a truncated TLV (declared length
+        // larger than the buffer, or fewer than 2 header bytes) threw ArgumentOutOfRangeException out
+        // of Span.Slice / indexing, which escaped ReadLoopAsync (it only catches OCE/IOException) and
+        // tore down the session with a generic Cease — a single malformed UPDATE killed the peer.
+        // Now these surface as BgpParseException (Update Message Error) and are handled by the
+        // treat-as-withdraw path. RFC 7606 §2 / RFC 4271 §6.3.
+        if (data.Length < 2)
+            throw new BgpParseException($"Truncated path attribute header: have {data.Length}, need 2",
+                BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.Unspecific);
+
         var flags = data[0];
         var typeCode = data[1];
         var offset = 2;
@@ -179,14 +201,24 @@ public static class BgpMessageReader
         int length;
         if ((flags & BgpConstants.Attribute.FlagExtendedLength) != 0)
         {
+            if (data.Length < offset + 2)
+                throw new BgpParseException($"Truncated extended-length path attribute: have {data.Length}, need {offset + 2}",
+                    BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.Unspecific);
             length = BinaryPrimitives.ReadUInt16BigEndian(data[offset..]);
             offset += 2;
         }
         else
         {
+            if (data.Length < offset + 1)
+                throw new BgpParseException($"Truncated path attribute length byte: have {data.Length}, need {offset + 1}",
+                    BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.Unspecific);
             length = data[offset];
             offset += 1;
         }
+
+        if (offset + length > data.Length)
+            throw new BgpParseException($"Truncated path attribute value: declared {length} at offset {offset}, have {data.Length}",
+                BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.Unspecific);
 
         var attrData = new byte[length];
         data.Slice(offset, length).CopyTo(attrData);
@@ -241,8 +273,31 @@ public static class BgpMessageReader
     #endregion
 }
 
+/// <summary>
+/// Thrown by the BGP message codec when an inbound message is malformed. Carries the
+/// RFC 4271 NOTIFICATION error code/subcode that should be sent to the peer so the session
+/// handler (<c>BgpSession.RunAsync</c>) emits the right NOTIFICATION instead of a generic
+/// Message Header Error (issue #223).
+/// <para>
+/// <see cref="ErrorCode"/>/<see cref="SubErrorCode"/> are nullable: a <c>null</c> error code
+/// means "this was a fixed-header (marker/length/type) parse failure" → Message Header Error
+/// (RFC 4271 §6.1). OPEN-body failures set Open Message Error (§6.2); UPDATE-body failures
+/// set Update Message Error (§6.3). A <c>null</c> sub-error code maps to Unspecific (0).
+/// </para>
+/// </summary>
 public sealed class BgpParseException : Exception
 {
-    public BgpParseException(string message) : base(message) { }
+    public BgpParseException(string message, byte? errorCode = null, byte? subErrorCode = null) : base(message)
+    {
+        ErrorCode = errorCode;
+        SubErrorCode = subErrorCode;
+    }
+
     public BgpParseException(string message, Exception inner) : base(message, inner) { }
+
+    /// <summary>RFC 4271 §6 error code the peer should be notified with, or <c>null</c> for a
+    /// fixed-header failure (Message Header Error).</summary>
+    public byte? ErrorCode { get; }
+    /// <summary>RFC 4271 §6 sub-error code, or <c>null</c> for Unspecific (0).</summary>
+    public byte? SubErrorCode { get; }
 }

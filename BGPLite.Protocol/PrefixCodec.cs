@@ -31,21 +31,31 @@ public static class PrefixCodec
         return 1 + byteCount;
     }
 
+    /// <summary>
+    /// Decodes one NLRI prefix from the head of <paramref name="buffer"/>. Throws
+    /// <see cref="BgpParseException"/> (Update Message Error) on any malformed input — a prefix-length
+    /// byte &gt; 32, or a buffer shorter than the declared prefix bytes — so the caller surfaces it
+    /// through the treat-as-withdraw path instead of the previous <see cref="ArgumentOutOfRangeException"/>
+    /// that escaped the read loop and tore down the session (#222, RFC 4271 §6.3 / RFC 7606 §2).
+    /// </summary>
     public static (IpPrefix prefix, int bytesConsumed) Decode(ReadOnlySpan<byte> buffer)
     {
         if (buffer.IsEmpty)
-            throw new ArgumentOutOfRangeException(nameof(buffer), 0, "Buffer too small to contain a prefix length byte.");
+            throw new BgpParseException("Truncated NLRI: buffer too small to contain a prefix length byte",
+                BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.Unspecific);
 
         var length = buffer[0];
         if (length > 32)
-            throw new ArgumentOutOfRangeException(nameof(buffer), length, "IPv4 prefix length must be in 0..32.");
+            throw new BgpParseException($"Invalid NLRI prefix length: {length} (must be 0..32)",
+                BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.Unspecific);
 
         if (length == 0)
             return (new IpPrefix(0, 0), 1);
 
         var byteCount = (length + 7) / 8;
         if (buffer.Length < 1 + byteCount)
-            throw new ArgumentOutOfRangeException(nameof(buffer), buffer.Length, $"Buffer too small: need {1 + byteCount} bytes for prefix length {length}.");
+            throw new BgpParseException($"Truncated NLRI: need {1 + byteCount} bytes for prefix length {length}, have {buffer.Length}",
+                BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.Unspecific);
         uint addr = 0;
         for (var i = 0; i < byteCount; i++)
             addr |= (uint)buffer[1 + i] << (24 - i * 8);
