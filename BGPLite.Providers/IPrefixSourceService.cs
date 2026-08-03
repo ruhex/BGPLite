@@ -22,8 +22,14 @@ public interface IPrefixSourceService
     Task WarmUpAsync(CancellationToken ct = default);
 
     /// <summary>
-    /// #214: Force-refresh all sources (bypass TTL), returning the names of sources whose content
-    /// actually changed. Used by the auto-refresh timer for selective peer refresh.
+    /// #214: Force-refresh a single source (bypass TTL), returning whether the content actually
+    /// changed. Used by the auto-refresh timer, which polls each source on its own jittered interval.
     /// </summary>
-    Task<HashSet<string>> RefreshAllAsync(CancellationToken ct = default);
+    Task<bool> RefreshAsync(string sourceName, CancellationToken ct = default);
+
+    /// <summary>
+    /// #214: Whether the source supports conditional requests (ETag/Last-Modified). Drives the poll
+    /// interval selection in the auto-refresh timer.
+    /// </summary>
+    bool SourceSupportsConditional(string sourceName);
 }

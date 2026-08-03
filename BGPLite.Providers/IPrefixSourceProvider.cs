@@ -14,6 +14,15 @@ public interface IPrefixSourceProvider
     string Kind { get; }
 
     /// <summary>
+    /// Whether this provider honors conditional requests (#214): when true, <see cref="LoadAsync"/>
+    /// sends <c>If-None-Match</c> / <c>If-Modified-Since</c> (or an equivalent zero-cost check like a
+    /// file mtime) and may return <see cref="SourceLoadResult.NotModified"/> = true. The auto-refresh
+    /// timer uses this to pick the poll interval — sources supporting conditional requests are polled
+    /// at <c>IntervalSeconds</c> (304s are cheap), others at the longer <c>NoEtagIntervalSeconds</c>.
+    /// </summary>
+    bool SupportsConditionalRequests { get; }
+
+    /// <summary>
     /// Fetch and parse the CIDR list described by <paramref name="source"/>. When
     /// <paramref name="etag"/> / <paramref name="lastModified"/> are provided (from a prior load),
     /// the provider SHOULD send a conditional request (If-None-Match / If-Modified-Since) and

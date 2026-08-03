@@ -102,7 +102,19 @@ builder.Services.AddSingleton<FilePrefixProvider>();
 builder.Services.AddSingleton<IPrefixSourceProvider>(sp => sp.GetRequiredService<HttpPrefixProvider>());
 builder.Services.AddSingleton<IPrefixSourceProvider>(sp => sp.GetRequiredService<FilePrefixProvider>());
 builder.Services.AddSingleton<PrefixSourceProviderFactory>();
-builder.Services.AddSingleton<PrefixSourceService>();
+// #214 convergence: when any load detects a content change (connect-path GetAsync OR auto-refresh
+// RefreshAsync), push updated prefixes to all established peers. Resolved lazily inside the callback
+// (ISessionManager is registered later, line ~164) — singletons are constructed on first use.
+builder.Services.AddSingleton(sp => new PrefixSourceService(
+    sp.GetRequiredService<AppConfig>(),
+    sp.GetRequiredService<PrefixSourceProviderFactory>(),
+    sp.GetRequiredService<ILogger<PrefixSourceService>>(),
+    onSourceChanged: async name =>
+    {
+        // Push updated prefixes to all established peers. ISessionManager resolved lazily (registered
+        // later) — singletons are constructed on first use.
+        await sp.GetRequiredService<ISessionManager>().RefreshAllEstablishedAsync();
+    }));
 builder.Services.AddSingleton<IPrefixSourceService>(sp => sp.GetRequiredService<PrefixSourceService>());
 
 // RIPE Stat provider — registered unconditionally so arbitrary ASNs (peer custom ASNs,

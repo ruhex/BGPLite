@@ -31,6 +31,9 @@ public sealed class HttpPrefixProvider(
 
     public string Kind => "http";
 
+    /// <summary>HTTP conditional requests (If-None-Match / If-Modified-Since → 304) are supported (#214).</summary>
+    public bool SupportsConditionalRequests => true;
+
     public async Task<SourceLoadResult> LoadAsync(
         PrefixSourceConfig source,
         string? etag = null,

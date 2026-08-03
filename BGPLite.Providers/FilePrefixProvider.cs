@@ -10,6 +10,9 @@ public sealed class FilePrefixProvider(ILogger<FilePrefixProvider> logger) : IPr
 {
     public string Kind => "file";
 
+    /// <summary>File mtime comparison is a zero-cost conditional check (#214).</summary>
+    public bool SupportsConditionalRequests => true;
+
     public Task<SourceLoadResult> LoadAsync(
         PrefixSourceConfig source,
         string? etag = null,

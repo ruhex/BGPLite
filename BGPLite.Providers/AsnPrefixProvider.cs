@@ -25,6 +25,13 @@ public sealed class AsnPrefixProvider : IPrefixSourceProvider
 
     public string Kind => "asn";
 
+    /// <summary>
+    /// RIPEstat does not support ETag/Last-Modified (#214) — every check re-fetches the full prefix
+    /// list and relies on content-hash comparison. Returns false so the auto-refresh timer polls these
+    /// sources at the longer <c>NoEtagIntervalSeconds</c> to avoid hammering RIPEstat.
+    /// </summary>
+    public bool SupportsConditionalRequests => false;
+
     public async Task<SourceLoadResult> LoadAsync(
         PrefixSourceConfig source,
         string? etag = null,
