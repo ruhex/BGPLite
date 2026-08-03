@@ -8,6 +8,9 @@ namespace BGPLite.Providers;
 /// Requires <see cref="PrefixSourceConfig.Asn"/>. Shares the RIPEstat client, retry, and per-ASN
 /// caching of <see cref="RipeStatProvider"/>/PrefixService, so adding it as a <c>Kind: asn</c>
 /// source under <c>PrefixSources</c> does not multiply RIPEstat traffic.
+/// <para>RIPEstat does not support ETag / Last-Modified — the <paramref name="etag"/> and
+/// <paramref name="lastModified"/> parameters are ignored. Content-change detection for auto-refresh
+/// (#214) is handled by hash comparison in <see cref="PrefixSourceService"/> (the cache layer).</para>
 /// </summary>
 public sealed class AsnPrefixProvider : IPrefixSourceProvider
 {
@@ -22,7 +25,18 @@ public sealed class AsnPrefixProvider : IPrefixSourceProvider
 
     public string Kind => "asn";
 
-    public async Task<IReadOnlyList<(uint Prefix, byte Length)>> LoadAsync(PrefixSourceConfig source, CancellationToken ct = default)
+    /// <summary>
+    /// RIPEstat does not support ETag/Last-Modified (#214) — every check re-fetches the full prefix
+    /// list and relies on content-hash comparison. Returns false so the auto-refresh timer polls these
+    /// sources at the longer <c>NoEtagIntervalSeconds</c> to avoid hammering RIPEstat.
+    /// </summary>
+    public bool SupportsConditionalRequests => false;
+
+    public async Task<SourceLoadResult> LoadAsync(
+        PrefixSourceConfig source,
+        string? etag = null,
+        DateTimeOffset? lastModified = null,
+        CancellationToken ct = default)
     {
         if (!source.Asn.HasValue)
             throw new InvalidOperationException($"Prefix source '{source.Name}': Kind=asn requires an Asn.");
@@ -31,6 +45,6 @@ public sealed class AsnPrefixProvider : IPrefixSourceProvider
         _logger.LogInformation(
             "Source '{Name}' (asn AS{Asn}): loaded {Count} prefixes via RIPEstat",
             source.Name, source.Asn.Value, prefixes.Count);
-        return prefixes.Select(p => (Prefix: p.Prefix, Length: p.PrefixLength)).ToList();
+        return SourceLoadResult.Ok(prefixes.Select(p => (Prefix: p.Prefix, Length: p.PrefixLength)).ToList());
     }
 }

@@ -368,6 +368,32 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
             .FirstOrDefault();
     }
 
+    /// <summary>#214: Refresh ALL established sessions concurrently — used by the auto-refresh timer
+    /// and the onSourceChanged convergence callback. Sessions refresh in parallel so a single slow
+    /// peer (TCP receive window full → WriteAsync blocks) can't stall the rest.</summary>
+    public async Task RefreshAllEstablishedAsync()
+    {
+        var established = _sessions.Values.Where(s => s.IsEstablished).ToList();
+        if (established.Count == 0) return;
+
+        _logger.LogInformation("Auto-refresh: refreshing {Count} established sessions", established.Count);
+        var failures = 0;
+        // Parallel: each session refreshes independently. Per-session try/catch keeps one failure
+        // from faulting the aggregate — collected here for the summary log.
+        var tasks = established.Select(async session =>
+        {
+            try { await session.RefreshRoutesAsync(); }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                Interlocked.Increment(ref failures);
+                _logger.LogWarning(ex, "Auto-refresh: failed to refresh session {Peer}", session.Peer);
+            }
+        }).ToArray();
+        await Task.WhenAll(tasks);
+        if (failures > 0)
+            _logger.LogWarning("Auto-refresh: {Failed}/{Total} sessions failed to refresh", failures, established.Count);
+    }
+
     public void Dispose()
     {
         Volatile.Write(ref _acceptingConnections, 0);

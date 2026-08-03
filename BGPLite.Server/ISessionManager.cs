@@ -10,4 +10,6 @@ public interface ISessionManager
     List<string> GetActivePeerIps();
     /// <summary>Actual advertised prefix count (post-aggregation, post-dedup), or 0 (#212).</summary>
     int GetAdvertisedPrefixCount(string peerIp, uint asn);
+    /// <summary>#214: Refresh ALL established sessions (unsolicited UPDATE to every peer).</summary>
+    Task RefreshAllEstablishedAsync();
 }

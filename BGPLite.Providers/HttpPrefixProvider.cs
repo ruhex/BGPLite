@@ -1,3 +1,5 @@
+using System.Net;
+using System.Net.Http.Headers;
 using System.Text;
 using BGPLite.Configuration;
 using Microsoft.Extensions.Http;
@@ -13,6 +15,9 @@ namespace BGPLite.Providers;
 /// <para>SSRF defense (#144): the named-client's <c>SocketsHttpHandler.ConnectCallback</c> validates
 /// every connection's DNS resolution at the socket level — no TOCTOU race, no redirect bypass.
 /// Response body is capped at <see cref="MaxResponseBytes"/> to prevent OOM.</para>
+/// <para>Conditional requests (#214): when <paramref name="etag"/> / <paramref name="lastModified"/>
+/// are provided from a prior load, sends <c>If-None-Match</c> / <c>If-Modified-Since</c>. A 304
+/// response skips the body download entirely (~1 KB headers-only round-trip).</para>
 /// </summary>
 public sealed class HttpPrefixProvider(
     IHttpClientFactory httpFactory,
@@ -26,7 +31,14 @@ public sealed class HttpPrefixProvider(
 
     public string Kind => "http";
 
-    public async Task<IReadOnlyList<(uint Prefix, byte Length)>> LoadAsync(PrefixSourceConfig source, CancellationToken ct = default)
+    /// <summary>HTTP conditional requests (If-None-Match / If-Modified-Since → 304) are supported (#214).</summary>
+    public bool SupportsConditionalRequests => true;
+
+    public async Task<SourceLoadResult> LoadAsync(
+        PrefixSourceConfig source,
+        string? etag = null,
+        DateTimeOffset? lastModified = null,
+        CancellationToken ct = default)
     {
         if (string.IsNullOrWhiteSpace(source.Url))
             throw new InvalidOperationException($"Prefix source '{source.Name}': Kind=http requires a Url.");
@@ -60,13 +72,36 @@ public sealed class HttpPrefixProvider(
                 if (!request.Headers.TryAddWithoutValidation(key, value))
                     logger.LogWarning("Source '{Name}': could not add request header '{Header}'.", source.Name, key);
 
+        // #214: conditional request — send validators from the prior load. GitHub raw, CDNs, and
+        // most HTTP servers support ETag / Last-Modified and reply 304 Not Modified (no body) when
+        // the content hasn't changed, making the periodic check ~1 KB instead of a full re-download.
+        if (etag is not null)
+            request.Headers.IfNoneMatch.Add(new EntityTagHeaderValue(etag));
+        if (lastModified is not null)
+            request.Headers.IfModifiedSince = lastModified;
+
         try
         {
             // Stream-read with size cap (#144): ResponseHeadersRead gets headers first (fast Content-Length
             // check), then stream the body with a hard cap to prevent OOM. SSRF validation is at the
             // handler level (SocketsHttpHandler.ConnectCallback in Program.cs) — no pre-resolve here.
             using var response = await http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, linkedToken);
+
+            // #214: 304 Not Modified — server confirms data unchanged. No body to parse. Extract any
+            // updated validators the server may have returned (some servers refresh ETag on 304).
+            if (response.StatusCode == HttpStatusCode.NotModified)
+            {
+                logger.LogDebug("Source '{Name}' (http): 304 Not Modified", source.Name);
+                var updatedEtag = response.Headers.ETag?.Tag;
+                var updatedLm = response.Content.Headers.LastModified;
+                return SourceLoadResult.NotModifiedResult(updatedEtag ?? etag, updatedLm ?? lastModified);
+            }
+
             response.EnsureSuccessStatusCode();
+
+            // Extract validators from the 200 response for next time (#214).
+            var newEtag = response.Headers.ETag?.Tag;
+            var newLm = response.Content.Headers.LastModified;
 
             if (response.Content.Headers.ContentLength is long contentLength && contentLength > MaxResponseBytes)
                 throw new InvalidOperationException(
@@ -89,7 +124,7 @@ public sealed class HttpPrefixProvider(
             // Log only the source Name (the operator/peer-supplied identifier), never the URL — peer URLs
             // (#147) may carry tokens in the query string that must not reach application logs.
             logger.LogInformation("Source '{Name}' (http): loaded {Count} prefixes", source.Name, prefixes.Count);
-            return prefixes;
+            return SourceLoadResult.Ok(prefixes, newEtag, newLm);
         }
         finally
         {

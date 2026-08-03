@@ -77,7 +77,7 @@ public class HttpPrefixProviderTests
     {
         var provider = Provider(new StubHandler(HttpStatusCode.OK, "1.2.3.0/24\n5.6.0.0/16\n"));
         var result = await provider.LoadAsync(HttpSource("https://raw.githubusercontent.com/o/r/main/x.txt"));
-        Assert.Equal(2, result.Count);
+        Assert.Equal(2, result.Prefixes.Count);
     }
 
     [Fact]
@@ -89,7 +89,7 @@ public class HttpPrefixProviderTests
 
         var result = await provider.LoadAsync(HttpSource("https://example.com/lists/ru.txt"));
 
-        Assert.Single(result);
+        Assert.Single(result.Prefixes);
         Assert.Equal("https://example.com/lists/ru.txt", handler.LastRequestUri!.ToString());
     }
 

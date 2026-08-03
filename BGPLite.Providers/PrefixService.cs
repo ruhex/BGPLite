@@ -64,7 +64,11 @@ public sealed class PrefixService : IPrefixService
             Url = url,
             Community = community
         };
-        return await _userSourceCache.GetOrLoadAsync(url, name, ct => _httpProvider.LoadAsync(source, ct), ct);
+        return await _userSourceCache.GetOrLoadAsync(url, name, async ct =>
+        {
+            var result = await _httpProvider.LoadAsync(source, ct: ct);
+            return result.Prefixes;
+        }, ct);
     }
 
     public async Task<IReadOnlyList<(uint Prefix, byte Length)>> GetPrefixesAsync(uint asn, CancellationToken ct = default)
