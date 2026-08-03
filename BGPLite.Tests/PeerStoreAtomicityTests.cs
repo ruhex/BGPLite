@@ -230,4 +230,77 @@ public class PeerStoreAtomicityTests
         // No-op for a peer that does not exist — must not throw.
         store.UpdateSessionStatus("203.0.113.99", 99999, active: true);
     }
+
+    // ---- #228: single-roundtrip GetPeerDetail equivalence ----
+
+    /// <summary>
+    /// #228: GetPeerDetail loads the peer and ALL child collections in one DbContext roundtrip and
+    /// returns field shapes identical to the standalone getters it replaces. Drives the equivalence
+    /// directly: seed a peer with every collection populated, then assert GetPeerDetail's fields
+    /// equal what the standalone GetSubscriptions/GetCustomPrefixes/GetCustomAsns/GetCustomSources/
+    /// GetCommunities calls returned. This is the contract BuildPeerDetail/HandleGetPeer now rely on.
+    /// </summary>
+    [Fact]
+    public void GetPeerDetail_Matches_Standalone_Getters()
+    {
+        var (store, connection) = NewStore();
+        using var conn = connection;
+        var peerId = store.CreatePeer(Ip, Asn, "test peer");
+        store.SetSubscriptions(peerId, ["list-a", "list-b"]);
+        store.SetCustomPrefixes(peerId, [("10.0.0.0", (byte)24), ("172.16.0.0", (byte)12)]);
+        store.SetCustomAsns(peerId, [64512u, 64513u]);
+        store.SetCommunities(peerId, [0x65001000u]);
+        // AddCustomSource creates sources inactive by default (Active=false); activate one explicitly
+        // so the test exercises both Active states. GetPeerDetail carries ALL sources regardless of
+        // Active — unlike PeerRoutingView which filters Active at the SQL level.
+        var activeSource = store.AddCustomSource(peerId, "src-active", "https://example.com/list.txt", "65000:100");
+        store.SetSourceActive(peerId, activeSource.Id, active: true);
+        // An inactive source must STILL appear in CustomSources (the API shows the toggle state).
+        store.AddCustomSource(peerId, "src-paused", "https://example.com/other.txt", null);
+
+        var detail = store.GetPeerDetail(peerId);
+        Assert.NotNull(detail);
+
+        // Scalar fields match the row.
+        Assert.Equal(peerId, detail!.Id);
+        Assert.Equal(Ip, detail.Ip);
+        Assert.Equal(Asn, detail.Asn);
+        Assert.Equal("test peer", detail.Description);
+
+        // Collection fields match the standalone getters exactly.
+        Assert.Equal(store.GetSubscriptions(peerId), detail.Subscriptions);
+        Assert.Equal(store.GetCustomPrefixes(peerId), detail.CustomPrefixes);
+        Assert.Equal(store.GetCustomAsns(peerId), detail.CustomAsns);
+        Assert.Equal(store.GetCommunities(peerId).Select(c => (long)c), detail.Communities);
+
+        // CustomSources carries ALL fields (incl. Active) for ALL sources (incl. inactive) — matches
+        // GetCustomSources exactly. Guards against a regression that filters inactive sources.
+        // Compare as a set keyed by Name: the two load paths (EF projection vs GetCustomSources) do
+        // not guarantee the same row order, so an index-based compare would be order-dependent.
+        var standalone = store.GetCustomSources(peerId).ToDictionary(s => s.Name);
+        Assert.Equal(standalone.Count, detail.CustomSources.Count);
+        Assert.Equal(2, detail.CustomSources.Count); // active + inactive both present
+        Assert.Contains(detail.CustomSources, s => s.Name == "src-active" && s.Active);
+        Assert.Contains(detail.CustomSources, s => s.Name == "src-paused" && !s.Active);
+        foreach (var cs in detail.CustomSources)
+        {
+            var s = standalone[cs.Name];
+            Assert.Equal(s.Id, cs.Id);
+            Assert.Equal(s.Url, cs.Url);
+            Assert.Equal(s.Community, cs.Community);
+            Assert.Equal(s.Active, cs.Active);
+        }
+    }
+
+    /// <summary>
+    /// #228: GetPeerDetail returns null for a peer that does not exist (preserves the 404 contract
+    /// of HandleGetPeer / the null-fallback of BuildPeerDetail).
+    /// </summary>
+    [Fact]
+    public void GetPeerDetail_Returns_Null_For_Missing_Peer()
+    {
+        var (store, connection) = NewStore();
+        using var conn = connection;
+        Assert.Null(store.GetPeerDetail("does-not-exist"));
+    }
 }

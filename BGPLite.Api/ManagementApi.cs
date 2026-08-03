@@ -533,17 +533,10 @@ public sealed class ManagementApi : IHostedService, IDisposable
     /// <summary>Builds the peer-detail anonymous object for /api/me. Returns null if the peer vanished.</summary>
     private object? BuildPeerDetail(string peerId)
     {
-        var peer = _store.GetDbPeerById(peerId);
+        // #228: single DbContext roundtrip via PeerStore.GetPeerDetail (was 5 separate DbContexts:
+        // GetDbPeerById + GetSubscriptions + GetCustomPrefixes + GetCustomAsns + GetCommunities).
+        var peer = _store.GetPeerDetail(peerId);
         if (peer is null) return null;
-
-        var subscriptions = _store.GetSubscriptions(peer.Id);
-        var customPrefixes = _store.GetCustomPrefixes(peer.Id);
-        var customAsns = _store.GetCustomAsns(peer.Id);
-        // #200: communities are per-peer (keyed by (Ip, Asn)), not per-IP.
-        // peer.Asn is always set for established BGP peers; fallback to empty for safety.
-        var communities = peer.Asn.HasValue
-            ? _store.GetCommunities(peer.Ip, peer.Asn.Value)
-            : new HashSet<uint>();
 
         // #212: actual advertised count from the live session (post-aggregation, post-dedup).
         var advertisedCount = peer.Asn.HasValue
@@ -559,11 +552,11 @@ public sealed class ManagementApi : IHostedService, IDisposable
             status = peer.Status,
             createdAt = peer.CreatedAt,
             lastSessionAt = peer.LastSessionAt,
-            lists = subscriptions,
-            customPrefixes,
-            customAsns,
-            communities = communities.Select(CommunityCodec.Format),
-            allRoutes = communities.Count == 0,
+            lists = peer.Subscriptions,
+            customPrefixes = peer.CustomPrefixes,
+            customAsns = peer.CustomAsns,
+            communities = peer.Communities.Select(c => CommunityCodec.Format((uint)c)),
+            allRoutes = peer.Communities.Count == 0,
             // #212: the actual number of prefixes on the wire (after aggregation + duplicate NLRI
             // merge). 0 = session not established or no routes sent yet.
             advertisedPrefixCount = advertisedCount
@@ -630,17 +623,10 @@ public sealed class ManagementApi : IHostedService, IDisposable
 
     private ApiResponse HandleGetPeer(string peerId)
     {
-        var peer = _store.GetDbPeerById(peerId);
+        // #228: single DbContext roundtrip via PeerStore.GetPeerDetail (was 6 separate DbContexts).
+        var peer = _store.GetPeerDetail(peerId);
         if (peer is null)
             return ApiResponse.Error("Peer not found", 404);
-
-        var subscriptions = _store.GetSubscriptions(peer.Id);
-        var customPrefixes = _store.GetCustomPrefixes(peer.Id);
-        var customAsns = _store.GetCustomAsns(peer.Id);
-        var customSources = _store.GetCustomSources(peer.Id);
-        var communities = peer.Asn.HasValue
-            ? _store.GetCommunities(peer.Ip, peer.Asn.Value)
-            : new HashSet<uint>();
 
         return ApiResponse.Ok(new
         {
@@ -651,12 +637,12 @@ public sealed class ManagementApi : IHostedService, IDisposable
             status = peer.Status,
             createdAt = peer.CreatedAt,
             lastSessionAt = peer.LastSessionAt,
-            lists = subscriptions,
-            customPrefixes,
-            customAsns,
-            customSources = customSources.Select(s => new { id = s.Id, name = s.Name, url = s.Url, community = s.Community, active = s.Active }),
-            communities = communities.Select(CommunityCodec.Format),
-            allRoutes = communities.Count == 0
+            lists = peer.Subscriptions,
+            customPrefixes = peer.CustomPrefixes,
+            customAsns = peer.CustomAsns,
+            customSources = peer.CustomSources.Select(s => new { id = s.Id, name = s.Name, url = s.Url, community = s.Community, active = s.Active }),
+            communities = peer.Communities.Select(c => CommunityCodec.Format((uint)c)),
+            allRoutes = peer.Communities.Count == 0
         });
     }
 
