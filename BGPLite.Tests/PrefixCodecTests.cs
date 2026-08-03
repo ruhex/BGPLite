@@ -101,9 +101,13 @@ public class PrefixCodecTests
     [InlineData(255)]
     public void Decode_LengthAbove32_Throws(int badLength)
     {
+        // #222: a malformed NLRI prefix-length byte is a wire-level error and now surfaces as
+        // BgpParseException (Update Message Error) so the session can treat-as-withdraw instead of
+        // tearing down. Previously this was ArgumentOutOfRangeException which escaped the read loop.
         var buffer = new byte[8] { (byte)badLength, 0xC0, 0xA8, 0x00, 0x00, 0, 0, 0 };
 
-        Assert.Throws<ArgumentOutOfRangeException>(() => PrefixCodec.Decode(buffer));
+        var ex = Assert.Throws<BgpParseException>(() => PrefixCodec.Decode(buffer));
+        Assert.Equal(BgpConstants.Error.UpdateMessageError, ex.ErrorCode);
     }
 
     [Fact]
@@ -149,12 +153,15 @@ public class PrefixCodecTests
     [Fact]
     public void Decode_EmptyBuffer_Throws()
     {
+        // #222: a truncated NLRI is now BgpParseException (Update Message Error), not
+        // ArgumentOutOfRangeException — so the session treats it as withdraw, not teardown.
         var buffer = Array.Empty<byte>();
-        Assert.Throws<ArgumentOutOfRangeException>(() =>
+        var ex = Assert.Throws<BgpParseException>(() =>
         {
             var span = new ReadOnlySpan<byte>(buffer);
             PrefixCodec.Decode(span);
         });
+        Assert.Equal(BgpConstants.Error.UpdateMessageError, ex.ErrorCode);
     }
 
     [Fact]
@@ -162,8 +169,10 @@ public class PrefixCodecTests
     {
         // /24 needs 4 bytes total (1 length + 3 data). 2-byte buffer is truncated
         // mid-prefix and must be rejected before any read past the length byte.
+        // #222: surfaces as BgpParseException (Update Message Error).
         var buffer = new byte[] { 24, 0xC0 };
 
-        Assert.Throws<ArgumentOutOfRangeException>(() => PrefixCodec.Decode(buffer));
+        var ex = Assert.Throws<BgpParseException>(() => PrefixCodec.Decode(buffer));
+        Assert.Equal(BgpConstants.Error.UpdateMessageError, ex.ErrorCode);
     }
 }

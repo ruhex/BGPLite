@@ -229,9 +229,25 @@ public sealed class PrefixService : IPrefixService
                 gate.Release();
             }
         }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            // #225: when the caller's token is cancelled (shutdown / refresh-with-cancel), the OCE
+            // MUST propagate — otherwise GetPrefixesForAsns silently returns a partial prefix list
+            // (cancelled ASNs dropped to []) instead of throwing. This is the specific shutdown-path
+            // regression #225 fixes; it mirrors the OCP-propagation policy enforced across the rest
+            // of the prefix-sourcing stack (UserSourceCache #114, GetPrefixesAsync:97).
+            //
+            // The `when (ct.IsCancellationRequested)` guard is narrow on purpose: an OCE raised by
+            // something OTHER than the caller's token (e.g. a Polly pipeline internal timeout using
+            // its own linked CTS, surfacing here as OCE) is NOT rethrown — it falls through to the
+            // generic catch below and is treated as a transient per-ASN failure. That is the desired
+            // resilience behavior (one ASN's timeout should not abort the whole fan-out); only true
+            // caller-initiated cancellation propagates.
+            throw;
+        }
         catch
         {
-            // skip failed ASN (incl. cancellation while queued), continue with the others
+            // skip failed ASN (a transient RIPEstat error), continue with the others
             return [];
         }
     }

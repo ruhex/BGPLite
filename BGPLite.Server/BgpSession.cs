@@ -333,9 +333,12 @@ public sealed class BgpSession : IDisposable
         catch (BgpParseException ex)
         {
             _logger.LogError(ex, "Parse error from {Peer}", _peer);
+            // #223: emit the RFC 4271 §6 error code the parser recorded (Open/Update for a body
+            // failure, MessageHeaderError for a fixed-header failure). Defaults to MessageHeaderError
+            // when the parser did not specify one (e.g. marker/length/type validation in ReadMessage).
             if (Interlocked.CompareExchange(ref _teardownReason, (int)TeardownReason.LocalCease, (int)TeardownReason.None) == (int)TeardownReason.None)
             {
-                try { await SendNotificationAsync(BgpConstants.Error.MessageHeaderError, BgpConstants.SubError.Unspecific); }
+                try { await SendNotificationAsync(ex.ErrorCode ?? BgpConstants.Error.MessageHeaderError, ex.SubErrorCode ?? BgpConstants.SubError.Unspecific); }
                 catch { /* best-effort */ }
             }
         }
@@ -439,8 +442,15 @@ public sealed class BgpSession : IDisposable
     {
         // Read-loop IOException is now logged and swallowed inside ReadLoopAsync (#217), so it never
         // surfaces here as a faulting task; only genuine loop faults reach the generic catch.
+        // #223: a fixed-header BgpParseException (ErrorCode == null — invalid marker/length/type)
+        // MUST propagate to RunAsync's catch(BgpParseException) so the right NOTIFICATION
+        // (MessageHeaderError) is emitted before teardown. Without this rethrow the generic catch
+        // below would swallow it and the finally-block would send a generic Cease(6,0) instead —
+        // a regression of #223 for the HoldTime > 0 path (HoldTime == 0 awaits ReadLoopAsync
+        // directly and already propagates).
         try { await task; }
         catch (OperationCanceledException) { }
+        catch (BgpParseException) { throw; }
         catch (Exception ex) { _logger.LogWarning(ex, "{Label} loop faulted for {Peer}", label, _peer); }
     }
 
@@ -494,6 +504,37 @@ public sealed class BgpSession : IDisposable
                 // is emitted exactly once, for both hold-time paths.
                 LogPeerClosedEstablished(ex);
                 return;
+            }
+            catch (BgpParseException ex) when (ex.ErrorCode is not null)
+            {
+                // #222: a malformed message BODY (truncated path attribute, out-of-range NLRI length,
+                // truncated OPEN/UPDATE) is a per-message content error, not stream-level corruption.
+                // RFC 7606 §2 / RFC 4271 §6.3 say: discard the bad message and KEEP THE SESSION up,
+                // reserving teardown for stream-level errors (FSM / message-header). The previous
+                // behavior let the exception escape the read loop → AwaitLoopTaskAsync logged
+                // "read loop faulted" → RunAsync finally sent a generic Cease(6,0), tearing down a
+                // long-lived session over a single bad/adversarial UPDATE.
+                //
+                // The `when (ex.ErrorCode is not null)` filter is critical: only body-parse failures
+                // (ParseOpen → Open Message Error, ParseUpdate/ParseAttribute/PrefixCodec → Update
+                // Message Error) set ErrorCode. Fixed-header failures (invalid marker/length/type from
+                // ReadMessage/ReceiveMessageAsync) leave ErrorCode == null and are NOT caught here —
+                // they propagate to RunAsync, which tears down the session with NOTIFICATION
+                // (MessageHeaderError). This preserves RFC 4271 §6.1 (stream-level corruption MUST
+                // tear down) AND avoids a desync hazard: a length-out-of-range from ReceiveMessageAsync
+                // is thrown AFTER the 19-byte header is read but BEFORE the payload, so continuing here
+                // would read payload bytes as the next header and desync the stream permanently.
+                // (Mirrors the existing treat-as-withdraw catch in HandleUpdateAsync dispatch at :508,
+                //  which only covers BgpNotificationException thrown AFTER successful parsing.)
+                //
+                // No NOTIFICATION is sent: RFC 7606 treat-as-withdraw keeps the session up without
+                // notifying (RFC 4271 §6.3 mandates the receiver of a NOTIFICATION tear down, which
+                // would defeat the point of preserving the session).
+                _metrics.UpdateRejected();
+                _logger.LogWarning(
+                    "Rejected malformed message from {Peer}: {Error}/{SubError} — {Reason}; session stays up",
+                    _peer, ex.ErrorCode, ex.SubErrorCode ?? BgpConstants.SubError.Unspecific, ex.Message);
+                continue;
             }
             Interlocked.Exchange(ref _lastReceivedTicks, _timeProvider.GetUtcNow().Ticks);
 
