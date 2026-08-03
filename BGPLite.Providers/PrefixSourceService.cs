@@ -240,8 +240,12 @@ public sealed class PrefixSourceService : IPrefixSourceService
             // Compute Changed atomically with the cache write: compare the freshly loaded list with the
             // list that was in the cache before this load (captured above as `stale`, re-read here to
             // be safe under the gate — only this task holds the gate, so `stale` is still authoritative).
+            // Order-INDEPENDENT comparison: RIPEstat (and some HTTP sources) may return the same prefix
+            // set in a different order between requests — a SequenceEqual there would report a phantom
+            // change and trigger an unnecessary BGP re-announcement (#214: "no unnecessary BGP churn",
+            // AsnPrefixProvider docs describe the design as content-based, not positional).
             var previousList = (stale is not null && !stale.Negative) ? stale.List : null;
-            changed = previousList is null || !previousList.SequenceEqual(result.Prefixes);
+            changed = previousList is null || !SamePrefixes(previousList, result.Prefixes);
             _cache[source.Name] = new CacheEntry(result.Prefixes, now, false, result.ETag, result.LastModified);
             loaded = result.Prefixes;
         }
@@ -262,6 +266,27 @@ public sealed class PrefixSourceService : IPrefixSourceService
         }
 
         return (loaded, changed);
+    }
+
+    /// <summary>
+    /// Order-independent prefix-list equality (#214): two lists represent the same route set if they
+    /// contain the same (Prefix, Length) tuples regardless of order. RIPEstat and some HTTP sources
+    /// do not guarantee a stable ordering across requests — a positional SequenceEqual there would
+    /// report a phantom change and trigger an unnecessary BGP re-announcement. Sorting both lists
+    /// (O(n log n)) keeps duplicates significant (a repeated prefix stays a difference) and avoids
+    /// the HashSet allocation path on the common unchanged case via the fast count/SequenceEqual
+    /// shortcut when the source already returned a sorted list.
+    /// </summary>
+    private static bool SamePrefixes(IReadOnlyList<(uint Prefix, byte Length)> a, IReadOnlyList<(uint Prefix, byte Length)> b)
+    {
+        if (a.Count != b.Count) return false;
+        // Fast path: if both happen to be in the same order (common — file sources, cached HTTP),
+        // SequenceEqual is O(n) with no allocation.
+        if (a.SequenceEqual(b)) return true;
+        // Slow path: order differs — compare as sorted sequences.
+        var sa = a.OrderBy(x => x.Prefix).ThenBy(x => x.Length).ToArray();
+        var sb = b.OrderBy(x => x.Prefix).ThenBy(x => x.Length).ToArray();
+        return sa.SequenceEqual(sb);
     }
 
     private bool TryGetFresh(string name, out IReadOnlyList<(uint Prefix, byte Length)> list)

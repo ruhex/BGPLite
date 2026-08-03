@@ -344,11 +344,27 @@ public class PrefixSourceServiceTests
     }
 
     /// <summary>
-    /// #214 convergence: when a connect-path load (GetAsync) detects a content change, the
-    /// onSourceChanged callback fires so established peers get the update too — not just the
-    /// auto-refresh path. Without this, a silent cache update via GetAsync masks the change from a
-    /// subsequent RefreshAsync, leaving established peers on stale routes.
+    /// #214 order-independence: RIPEstat and some HTTP sources return the same prefix set in a different
+    /// order between requests. SequenceEqual there would report a phantom change and trigger an
+    /// unnecessary BGP re-announcement. SamePrefixes must treat them as unchanged.
     /// </summary>
+    [Fact]
+    public async Task RefreshAsync_OrderIndependentComparison_NoPhantomChange()
+    {
+        // v1 and v2 contain the SAME prefixes in a DIFFERENT order → must report unchanged.
+        var provider = new SequenceProvider(
+            [(1u, (byte)24), (2u, (byte)16)],   // call 1: [a, b]
+            [(2u, (byte)16), (1u, (byte)24)]);  // call 2: [b, a] — same set, reversed
+        var svc = new PrefixSourceService(
+            ConfigWith("ru"),
+            new PrefixSourceProviderFactory([provider]),
+            NullLogger<PrefixSourceService>.Instance);
+
+        await svc.GetAsync("ru");        // prime with v1
+        var changed = await svc.RefreshAsync("ru");  // v2 = same set, different order
+
+        Assert.False(changed, "a re-ordered prefix set must NOT be reported as a change");
+    }
     [Fact]
     public async Task GetAsync_OnChange_InvokesCallback()
     {
