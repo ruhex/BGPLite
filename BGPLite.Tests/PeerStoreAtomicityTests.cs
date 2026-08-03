@@ -190,13 +190,21 @@ public class PeerStoreAtomicityTests
         Assert.Equal("active", peer!.Status);
         Assert.NotNull(peer.LastSessionAt);
 
-        var firstSessionAt = peer.LastSessionAt;
+        var firstSessionAt = peer.LastSessionAt!;
+        // Sleep so a regression that stamps LastSessionAt with the OLD value (or a fixed value)
+        // would be caught by the comparison below. SQLite stores the timestamp as text in the
+        // round-trip "O" format, which sorts lexicographically = chronologically, so a string
+        // comparison is a valid ordering check.
+        Thread.Sleep(15);
 
         // Second call (update path) — must refresh LastSessionAt, not throw.
         store.UpsertPeer(Ip, Asn);
         var peer2 = store.GetPeer(Ip, Asn);
         Assert.NotNull(peer2);
         Assert.Equal("active", peer2!.Status);
+        Assert.NotNull(peer2.LastSessionAt);
+        Assert.True(string.CompareOrdinal(peer2.LastSessionAt, firstSessionAt) >= 0,
+            $"LastSessionAt must not go backwards: first={firstSessionAt}, second={peer2.LastSessionAt}");
     }
 
     /// <summary>

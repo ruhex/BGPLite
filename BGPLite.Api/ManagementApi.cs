@@ -755,9 +755,34 @@ public sealed class ManagementApi : IHostedService, IDisposable
         // so the caller gets a clear 400 instead of a silently-saved source that fails forever at
         // fetch time. The fetch-time ConnectCallback MUST stay regardless: it is the authoritative
         // layer covering every fetch path and survives any future change to the HTTP handler.
-        var (isValid, validationError) = await PrefixSourceUrlValidator.ValidateUrlAsync(data.Url);
+        //
+        // The validator's raw error text (blocked-IP address, DNS exception message) is logged here
+        // but NOT returned to the client — that would leak internal DNS/address details and bypass
+        // the non-revealing-error policy (#157). The client sees a stable generic message; the
+        // operator sees the cause in the server log.
+        //
+        // The DNS resolution step is bounded by a 5s timeout so a hanging resolver cannot pin the
+        // handler indefinitely — the fetch path is already bounded by Polly, this closes the
+        // save-path gap. HttpListener does NOT expose a client-disconnect CancellationToken
+        // (unlike ASP.NET Core's RequestAborted), so the timeout is purely time-bounded.
+        using var validationCts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        bool isValid;
+        string? validationError;
+        try
+        {
+            (isValid, validationError) = await PrefixSourceUrlValidator.ValidateUrlAsync(data.Url, ct: validationCts.Token);
+        }
+        catch (OperationCanceledException) when (validationCts.IsCancellationRequested)
+        {
+            // DNS-resolution timeout (5s).
+            _logger.LogWarning("Save-time URL validation timed out for '{Url}'", SanitizeForLog(data.Url));
+            return ApiResponse.Error("URL validation timed out (DNS resolution took too long)", 400);
+        }
         if (!isValid)
-            return ApiResponse.Error(validationError ?? $"Invalid URL: {data.Url}", 400);
+        {
+            _logger.LogWarning("Save-time URL validation rejected '{Url}': {Error}", SanitizeForLog(data.Url), validationError);
+            return ApiResponse.Error($"Invalid URL: the host could not be reached or is not allowed", 400);
+        }
 
         var source = _store.AddCustomSource(peerId, data.Name, data.Url, data.Community);
 

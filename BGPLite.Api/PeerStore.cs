@@ -16,40 +16,52 @@ public sealed class PeerStore : IPeerStore
         // #227: atomic SQLite upsert eliminates the read-then-write race on the composite unique
         // index UX_Peers_Ip_Asn. Two concurrent CreatePeer calls for the same (Ip, Asn) previously
         // both observed `existing is null`, both INSERTed, and the second threw DbUpdateException
-        // (UNIQUE constraint failed). Now a single INSERT ... ON CONFLICT DO UPDATE either inserts
-        // or updates the Description atomically, then SELECT returns the Id. Id is generated here
-        // (not by the DB) so the INSERT carries it explicitly.
+        // (UNIQUE constraint failed). Now a single INSERT ... ON CONFLICT DO UPDATE ... RETURNING
+        // is fully atomic: the existence check, the insert-or-update, AND the id read-back happen
+        // in one statement — no TOCTOU window for a concurrent DeletePeer to race against (the
+        // earlier upsert + follow-up SELECT had such a window). RETURNING requires SQLite 3.35+
+        // (Microsoft.Data.Sqlite >= 6) — satisfied by the EF Core Sqlite 10 dependency.
+        //
+        // EF Core's SqlQuery<T> is documented only for SELECT/composable queries, so for a DML
+        // statement with RETURNING we go through the underlying ADO.NET connection (ExecuteScalar)
+        // — the documented path for a single scalar result from non-composable SQL.
         var id = Guid.NewGuid().ToString("N");
         var now = DateTime.UtcNow.ToString("O");
-        db.Database.ExecuteSqlInterpolated($@"
-            INSERT INTO Peers (Id, Ip, Asn, Description, Status, CreatedAt, LastSessionAt)
-            VALUES ({id}, {ip}, {asn}, {description}, 'inactive', {now}, NULL)
-            ON CONFLICT(Ip, Asn) DO UPDATE SET Description = excluded.Description");
-        // Read back the actual Id (ours on insert, the existing row's on conflict) — RETURNING is
-        // available on SQLite 3.35+ (Microsoft.Data.Sqlite >= 6), but a follow-up SELECT keeps the
-        // code path identical across provider versions and avoids interpolating the generated id
-        // into the ON CONFLICT branch where the existing row's id wins.
-        // FirstOrDefault (not First): in the narrow window where a concurrent DeletePeer removes the
-        // row between the upsert and this SELECT, First() would throw InvalidOperationException; we
-        // retry the upsert once instead so CreatePeer either returns a valid id or throws a clear
-        // DbUpdateException (consistent with the caller's MapExceptionToResponse → 409 path).
-        var storedId = db.Peers.AsNoTracking()
-            .Where(p => p.Ip == ip && p.Asn == asn)
-            .Select(p => (string?)p.Id)
-            .FirstOrDefault();
-        if (storedId is not null)
+        var connection = db.Database.GetDbConnection();
+        var closeAfter = false;
+        try
+        {
+            if (connection.State != System.Data.ConnectionState.Open)
+            {
+                db.Database.OpenConnection();
+                closeAfter = true;
+            }
+            using var cmd = connection.CreateCommand();
+            cmd.CommandText =
+                "INSERT INTO Peers (Id, Ip, Asn, Description, Status, CreatedAt, LastSessionAt) " +
+                "VALUES (@id, @ip, @asn, @desc, 'inactive', @now, NULL) " +
+                "ON CONFLICT(Ip, Asn) DO UPDATE SET Description = excluded.Description " +
+                "RETURNING Id";
+            AddParam(cmd, "@id", id);
+            AddParam(cmd, "@ip", ip);
+            AddParam(cmd, "@asn", (long)asn);
+            AddParam(cmd, "@desc", (object?)description ?? DBNull.Value);
+            AddParam(cmd, "@now", now);
+            var storedId = (string)cmd.ExecuteScalar()!;
             return storedId;
+        }
+        finally
+        {
+            if (closeAfter) db.Database.CloseConnection();
+        }
+    }
 
-        // Lost a race with DeletePeer: re-run the upsert (this time it inserts) and read again.
-        var retryId = Guid.NewGuid().ToString("N");
-        db.Database.ExecuteSqlInterpolated($@"
-            INSERT INTO Peers (Id, Ip, Asn, Description, Status, CreatedAt, LastSessionAt)
-            VALUES ({retryId}, {ip}, {asn}, {description}, 'inactive', {now}, NULL)
-            ON CONFLICT(Ip, Asn) DO UPDATE SET Description = excluded.Description");
-        return db.Peers.AsNoTracking()
-            .Where(p => p.Ip == ip && p.Asn == asn)
-            .Select(p => p.Id)
-            .First();
+    private static void AddParam(System.Data.Common.DbCommand cmd, string name, object value)
+    {
+        var p = cmd.CreateParameter();
+        p.ParameterName = name;
+        p.Value = value;
+        cmd.Parameters.Add(p);
     }
 
     public void UpsertPeer(string ip, uint asn)
