@@ -250,7 +250,13 @@ public class PeerStoreAtomicityTests
         store.SetCustomPrefixes(peerId, [("10.0.0.0", (byte)24), ("172.16.0.0", (byte)12)]);
         store.SetCustomAsns(peerId, [64512u, 64513u]);
         store.SetCommunities(peerId, [0x65001000u]);
-        store.AddCustomSource(peerId, "src-1", "https://example.com/list.txt", "65000:100");
+        // AddCustomSource creates sources inactive by default (Active=false); activate one explicitly
+        // so the test exercises both Active states. GetPeerDetail carries ALL sources regardless of
+        // Active — unlike PeerRoutingView which filters Active at the SQL level.
+        var activeSource = store.AddCustomSource(peerId, "src-active", "https://example.com/list.txt", "65000:100");
+        store.SetSourceActive(peerId, activeSource.Id, active: true);
+        // An inactive source must STILL appear in CustomSources (the API shows the toggle state).
+        store.AddCustomSource(peerId, "src-paused", "https://example.com/other.txt", null);
 
         var detail = store.GetPeerDetail(peerId);
         Assert.NotNull(detail);
@@ -267,14 +273,23 @@ public class PeerStoreAtomicityTests
         Assert.Equal(store.GetCustomAsns(peerId), detail.CustomAsns);
         Assert.Equal(store.GetCommunities(peerId).Select(c => (long)c), detail.Communities);
 
-        // CustomSources carries ALL fields (incl. Active) — matches GetCustomSources.
-        var standalone = store.GetCustomSources(peerId);
+        // CustomSources carries ALL fields (incl. Active) for ALL sources (incl. inactive) — matches
+        // GetCustomSources exactly. Guards against a regression that filters inactive sources.
+        // Compare as a set keyed by Name: the two load paths (EF projection vs GetCustomSources) do
+        // not guarantee the same row order, so an index-based compare would be order-dependent.
+        var standalone = store.GetCustomSources(peerId).ToDictionary(s => s.Name);
         Assert.Equal(standalone.Count, detail.CustomSources.Count);
-        Assert.Equal(standalone[0].Id, detail.CustomSources[0].Id);
-        Assert.Equal(standalone[0].Name, detail.CustomSources[0].Name);
-        Assert.Equal(standalone[0].Url, detail.CustomSources[0].Url);
-        Assert.Equal(standalone[0].Community, detail.CustomSources[0].Community);
-        Assert.Equal(standalone[0].Active, detail.CustomSources[0].Active);
+        Assert.Equal(2, detail.CustomSources.Count); // active + inactive both present
+        Assert.Contains(detail.CustomSources, s => s.Name == "src-active" && s.Active);
+        Assert.Contains(detail.CustomSources, s => s.Name == "src-paused" && !s.Active);
+        foreach (var cs in detail.CustomSources)
+        {
+            var s = standalone[cs.Name];
+            Assert.Equal(s.Id, cs.Id);
+            Assert.Equal(s.Url, cs.Url);
+            Assert.Equal(s.Community, cs.Community);
+            Assert.Equal(s.Active, cs.Active);
+        }
     }
 
     /// <summary>

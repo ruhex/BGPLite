@@ -59,10 +59,13 @@ public class PrefixCacheRaceTests
     }
 
     /// <summary>
-    /// #229 stale-on-failure parity with GetPrefixesAsync (#163): when GetDefaultAsync throws AFTER
-    /// a good copy was cached AND the TTL has elapsed, the cached (stale) copy is served instead of
-    /// propagating the exception. A transient default-source outage must not drop the RU/default
-    /// routes the instant the TTL elapses.
+    /// #229 stale-on-failure parity with GetPrefixesAsync (#163): when the default-source fetch
+    /// throws AFTER a good copy was cached AND the TTL has elapsed, the cached (stale) copy is
+    /// served instead of propagating the exception. Note: the production <c>PrefixSourceService.
+    /// GetDefaultAsync</c> swallows non-OCE exceptions and returns <c>[]</c>, so this throw-path is
+    /// defence-in-depth — it covers a future/mock <c>IPrefixSourceService</c> implementation that
+    /// does throw, and keeps <c>GetRuPrefixesAsync</c> resilient regardless of the source service's
+    /// own error handling. The test uses a fake source that throws directly to drive the branch.
     /// </summary>
     [Fact]
     public async Task GetRuPrefixesAsync_FetchFailure_AfterExpiredCache_ServesStaleCopy()
@@ -87,8 +90,10 @@ public class PrefixCacheRaceTests
     }
 
     /// <summary>
-    /// #229: when GetDefaultAsync fails AND there is no cached copy (first-ever call), the exception
-    /// propagates — there is nothing stale to serve. This matches GetPrefixesAsync's no-cache path.
+    /// #229: when the fetch fails AND there is no cached copy (first-ever call), the exception
+    /// propagates — there is nothing stale to serve. Matches GetPrefixesAsync's no-cache path. As
+    /// above, the production source swallows failures; this drives the defence-in-depth branch via
+    /// a fake source that throws.
     /// </summary>
     [Fact]
     public async Task GetRuPrefixesAsync_FetchFailure_NoCache_Throws()
