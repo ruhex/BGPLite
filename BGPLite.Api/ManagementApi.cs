@@ -749,8 +749,15 @@ public sealed class ManagementApi : IHostedService, IDisposable
         if (data is null || string.IsNullOrWhiteSpace(data.Name) || string.IsNullOrWhiteSpace(data.Url))
             return ApiResponse.Error("Name and Url are required", 400);
 
-        if (!Uri.TryCreate(data.Url, UriKind.Absolute, out var uri) || uri.Scheme is not ("http" or "https"))
-            return ApiResponse.Error($"Invalid URL: {data.Url}", 400);
+        // #232: full SSRF validation at save time (defence-in-depth on top of the fetch-time
+        // ConnectCallback). Reject a URL that is malformed, uses a non-http(s) scheme, resolves to
+        // a private/loopback/link-local address, or uses a non-80/443 port — before persisting it,
+        // so the caller gets a clear 400 instead of a silently-saved source that fails forever at
+        // fetch time. The fetch-time ConnectCallback MUST stay regardless: it is the authoritative
+        // layer covering every fetch path and survives any future change to the HTTP handler.
+        var (isValid, validationError) = await PrefixSourceUrlValidator.ValidateUrlAsync(data.Url);
+        if (!isValid)
+            return ApiResponse.Error(validationError ?? $"Invalid URL: {data.Url}", 400);
 
         var source = _store.AddCustomSource(peerId, data.Name, data.Url, data.Community);
 

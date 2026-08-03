@@ -13,45 +13,78 @@ public sealed class PeerStore : IPeerStore
     public string CreatePeer(string ip, uint asn, string? description)
     {
         using var db = _dbFactory.CreateDbContext();
-        var existing = db.Peers.FirstOrDefault(p => p.Ip == ip && p.Asn == asn);
-        if (existing is not null)
-        {
-            existing.Description = description;
-            db.SaveChanges();
-            return existing.Id;
-        }
+        // #227: atomic SQLite upsert eliminates the read-then-write race on the composite unique
+        // index UX_Peers_Ip_Asn. Two concurrent CreatePeer calls for the same (Ip, Asn) previously
+        // both observed `existing is null`, both INSERTed, and the second threw DbUpdateException
+        // (UNIQUE constraint failed). Now a single INSERT ... ON CONFLICT DO UPDATE either inserts
+        // or updates the Description atomically, then SELECT returns the Id. Id is generated here
+        // (not by the DB) so the INSERT carries it explicitly.
+        var id = Guid.NewGuid().ToString("N");
+        var now = DateTime.UtcNow.ToString("O");
+        db.Database.ExecuteSqlInterpolated($@"
+            INSERT INTO Peers (Id, Ip, Asn, Description, Status, CreatedAt, LastSessionAt)
+            VALUES ({id}, {ip}, {asn}, {description}, 'inactive', {now}, NULL)
+            ON CONFLICT(Ip, Asn) DO UPDATE SET Description = excluded.Description");
+        // Read back the actual Id (ours on insert, the existing row's on conflict) — RETURNING is
+        // available on SQLite 3.35+ (Microsoft.Data.Sqlite >= 6), but a follow-up SELECT keeps the
+        // code path identical across provider versions and avoids interpolating the generated id
+        // into the ON CONFLICT branch where the existing row's id wins.
+        // FirstOrDefault (not First): in the narrow window where a concurrent DeletePeer removes the
+        // row between the upsert and this SELECT, First() would throw InvalidOperationException; we
+        // retry the upsert once instead so CreatePeer either returns a valid id or throws a clear
+        // DbUpdateException (consistent with the caller's MapExceptionToResponse → 409 path).
+        var storedId = db.Peers.AsNoTracking()
+            .Where(p => p.Ip == ip && p.Asn == asn)
+            .Select(p => (string?)p.Id)
+            .FirstOrDefault();
+        if (storedId is not null)
+            return storedId;
 
-        var peer = new Peer { Ip = ip, Asn = asn, Description = description };
-        db.Peers.Add(peer);
-        db.SaveChanges();
-        return peer.Id;
+        // Lost a race with DeletePeer: re-run the upsert (this time it inserts) and read again.
+        var retryId = Guid.NewGuid().ToString("N");
+        db.Database.ExecuteSqlInterpolated($@"
+            INSERT INTO Peers (Id, Ip, Asn, Description, Status, CreatedAt, LastSessionAt)
+            VALUES ({retryId}, {ip}, {asn}, {description}, 'inactive', {now}, NULL)
+            ON CONFLICT(Ip, Asn) DO UPDATE SET Description = excluded.Description");
+        return db.Peers.AsNoTracking()
+            .Where(p => p.Ip == ip && p.Asn == asn)
+            .Select(p => p.Id)
+            .First();
     }
 
     public void UpsertPeer(string ip, uint asn)
     {
         using var db = _dbFactory.CreateDbContext();
-        var peer = db.Peers.FirstOrDefault(p => p.Ip == ip && p.Asn == asn);
-        if (peer is null)
-        {
-            db.Peers.Add(new Peer { Ip = ip, Asn = asn, Status = "active", LastSessionAt = DateTime.UtcNow });
-        }
-        else
-        {
-            peer.Status = "active";
-            peer.LastSessionAt = DateTime.UtcNow;
-        }
-        db.SaveChanges();
+        // #227: atomic upsert — see CreatePeer. UpsertPeer is called from the BGP connect path
+        // (Program.cs _onPeerIdentified), where there is no HTTP caller to receive a 409, so the
+        // previous read-then-write race could throw DbUpdateException into the session handler.
+        var id = Guid.NewGuid().ToString("N");
+        var now = DateTime.UtcNow.ToString("O");
+        db.Database.ExecuteSqlInterpolated($@"
+            INSERT INTO Peers (Id, Ip, Asn, Description, Status, CreatedAt, LastSessionAt)
+            VALUES ({id}, {ip}, {asn}, NULL, 'active', {now}, {now})
+            ON CONFLICT(Ip, Asn) DO UPDATE SET Status = 'active', LastSessionAt = {now}");
     }
 
     public void UpdateSessionStatus(string ip, uint asn, bool active)
     {
         using var db = _dbFactory.CreateDbContext();
-        var peer = db.Peers.FirstOrDefault(p => p.Ip == ip && p.Asn == asn);
-        if (peer is null) return;
-
-        peer.Status = active ? "active" : "inactive";
-        if (active) peer.LastSessionAt = DateTime.UtcNow;
-        db.SaveChanges();
+        // #227: single-statement UPDATE avoids the read-then-write race and is a no-op (0 rows
+        // affected) if the peer was concurrently deleted, instead of throwing on a null entity.
+        var status = active ? "active" : "inactive";
+        var now = DateTime.UtcNow.ToString("O");
+        if (active)
+        {
+            db.Database.ExecuteSqlInterpolated($@"
+                UPDATE Peers SET Status = {status}, LastSessionAt = {now}
+                WHERE Ip = {ip} AND Asn = {asn}");
+        }
+        else
+        {
+            db.Database.ExecuteSqlInterpolated($@"
+                UPDATE Peers SET Status = {status}
+                WHERE Ip = {ip} AND Asn = {asn}");
+        }
     }
 
     public void DeletePeer(string id)
@@ -196,10 +229,16 @@ public sealed class PeerStore : IPeerStore
     public void SetCommunities(string peerId, HashSet<uint> communities)
     {
         using var db = _dbFactory.CreateDbContext();
+        // #226: ExecuteDelete runs in its own implicit transaction and AddRange/SaveChanges in
+        // another; without an explicit transaction a failure between them leaves the peer with an
+        // EMPTY collection (delete committed, insert did not). Wrap both in one transaction so the
+        // replace is atomic.
+        using var tx = db.Database.BeginTransaction();
         db.Set<PeerCommunity>().Where(c => c.PeerId == peerId).ExecuteDelete();
         db.Set<PeerCommunity>().AddRange(
             communities.Select(c => new PeerCommunity { PeerId = peerId, Community = c }));
         db.SaveChanges();
+        tx.Commit();
     }
 
     public void ClearCommunities(string peerId)
@@ -221,10 +260,13 @@ public sealed class PeerStore : IPeerStore
     public void SetSubscriptions(string peerId, List<string> asnListNames)
     {
         using var db = _dbFactory.CreateDbContext();
+        // #226: wrap delete+insert in a transaction — see SetCommunities.
+        using var tx = db.Database.BeginTransaction();
         db.Set<PeerSubscription>().Where(s => s.PeerId == peerId).ExecuteDelete();
         db.Set<PeerSubscription>().AddRange(
             asnListNames.Select(n => new PeerSubscription { PeerId = peerId, AsnListName = n }));
         db.SaveChanges();
+        tx.Commit();
     }
 
     // AsNoTracking is a read-only-intent marker here — a no-op for this scalar projection (no entities are materialized to track).
@@ -240,10 +282,13 @@ public sealed class PeerStore : IPeerStore
     public void SetCustomPrefixes(string peerId, List<(string Prefix, byte Length)> prefixes)
     {
         using var db = _dbFactory.CreateDbContext();
+        // #226: wrap delete+insert in a transaction — see SetCommunities.
+        using var tx = db.Database.BeginTransaction();
         db.Set<PeerCustomPrefix>().Where(c => c.PeerId == peerId).ExecuteDelete();
         db.Set<PeerCustomPrefix>().AddRange(
             prefixes.Select(p => new PeerCustomPrefix { PeerId = peerId, Prefix = p.Prefix, PrefixLength = p.Length }));
         db.SaveChanges();
+        tx.Commit();
     }
 
     // AsNoTracking is a read-only-intent marker here — a no-op for this scalar projection (no entities are materialized to track).
@@ -259,10 +304,13 @@ public sealed class PeerStore : IPeerStore
     public void SetCustomAsns(string peerId, List<uint> asns)
     {
         using var db = _dbFactory.CreateDbContext();
+        // #226: wrap delete+insert in a transaction — see SetCommunities.
+        using var tx = db.Database.BeginTransaction();
         db.Set<PeerCustomAsn>().Where(c => c.PeerId == peerId).ExecuteDelete();
         db.Set<PeerCustomAsn>().AddRange(
             asns.Select(a => new PeerCustomAsn { PeerId = peerId, Asn = a }));
         db.SaveChanges();
+        tx.Commit();
     }
 
     /// <summary>
