@@ -1149,7 +1149,7 @@ public sealed class BgpSession : IDisposable
     private void ValidateOpen(BgpOpenMessage open)
     {
         var localRouterId = BgpConstants.IPAddressToUint(_bgpConfig.GetRouterIdAddress());
-        var negotiation = ValidateOpen(open, _peerConfig.RemoteAsn, localRouterId);
+        var negotiation = ValidateOpen(open, _peerConfig.RemoteAsn, localRouterId, _bgpConfig.HoldTime);
 
         _remoteAsn = negotiation.RemoteAsn;
         _remoteFourByteAsn = negotiation.RemoteFourByteAsn;
@@ -1172,7 +1172,7 @@ public sealed class BgpSession : IDisposable
     }
 
     /// <summary>
-    /// Negotiated OPEN parameters produced by <see cref="ValidateOpen(BgpOpenMessage, uint?, uint)"/>.
+    /// Negotiated OPEN parameters produced by <see cref="ValidateOpen(BgpOpenMessage, uint?, uint, int)"/>.
     /// </summary>
     internal sealed record OpenNegotiation(
         uint RemoteAsn,
@@ -1191,9 +1191,25 @@ public sealed class BgpSession : IDisposable
     /// <see cref="BgpNotificationException"/> with the RFC-mandated error/sub-error on rejection.
     /// Extracted as <c>internal static</c> so every branch is unit-testable without a live socket
     /// (mirrors <see cref="GetMalformedFourOctetAsnCapabilityData"/> / MergeAsPathWithAs4Path).
+    /// <para>
+    /// Hold time negotiation (#224, RFC 4271 §6.2.2): the negotiated value is the smaller of the
+    /// locally configured <paramref name="localHoldTime"/> and the peer's <c>open.HoldTime</c>. A
+    /// value of 0 means "timer disabled" (RFC 4271 §4.2) — if either side proposes 0, the negotiated
+    /// hold time is 0 and the keepalive/hold timers are disabled for the session. This matches the
+    /// common practice of major implementations (Cisco/Juniper) and preserves the existing
+    /// HoldTime_Zero_Accepted_WithZeroKeepAlive contract.
+    /// </para>
     /// </summary>
-    internal static OpenNegotiation ValidateOpen(BgpOpenMessage open, uint? expectedRemoteAsn, uint localRouterId)
+    internal static OpenNegotiation ValidateOpen(BgpOpenMessage open, uint? expectedRemoteAsn, uint localRouterId, int localHoldTime)
     {
+        // #224: the local hold time is the locally configured BgpConfig.HoldTime (validated at
+        // config-load: 0 or ≥3). Guard the static entry point defensively so a future caller (or a
+        // unit test) cannot pass an out-of-range value that would silently corrupt the negotiation:
+        // a negative value would survive the Math.Min below and truncate to a bogus ushort.
+        if (localHoldTime != 0 && localHoldTime < 3)
+            throw new ArgumentOutOfRangeException(nameof(localHoldTime), localHoldTime,
+                $"Local hold time must be 0 (disabled) or at least 3 seconds (RFC 4271 §4.2).");
+
         if (open.Version != BgpConstants.BgpVersion)
             throw new BgpNotificationException(BgpConstants.Error.OpenMessageError, BgpConstants.SubError.UnsupportedVersion, $"Unsupported BGP version: {open.Version}");
 
@@ -1214,9 +1230,9 @@ public sealed class BgpSession : IDisposable
         if (expectedRemoteAsn.HasValue && remoteAsn != expectedRemoteAsn.Value)
             throw new BgpNotificationException(BgpConstants.Error.OpenMessageError, BgpConstants.SubError.BadPeerAs, $"Unexpected ASN: expected {expectedRemoteAsn}, got {remoteAsn}");
 
-        var holdTime = open.HoldTime;
-        if (holdTime != 0 && holdTime < 3)
-            throw new BgpNotificationException(BgpConstants.Error.OpenMessageError, BgpConstants.SubError.UnacceptableHoldTime, $"Unacceptable hold time: {holdTime}");
+        var peerHoldTime = open.HoldTime;
+        if (peerHoldTime != 0 && peerHoldTime < 3)
+            throw new BgpNotificationException(BgpConstants.Error.OpenMessageError, BgpConstants.SubError.UnacceptableHoldTime, $"Unacceptable hold time: {peerHoldTime}");
 
         // BGP Identifier must be non-zero and must not collide with our own (RFC 4271 §6.2).
         if (open.RouterId == 0)
@@ -1225,16 +1241,24 @@ public sealed class BgpSession : IDisposable
         if (open.RouterId == localRouterId)
             throw new BgpNotificationException(BgpConstants.Error.OpenMessageError, BgpConstants.SubError.BadBgpIdentifier, "BGP identifier collision with local RouterId");
 
-        var keepAliveInterval = holdTime == 0
+        // #224: negotiate hold time = min(local, peer) per RFC 4271 §6.2.2. A 0 on either side
+        // disables the timer (RFC 4271 §4.2) — Math.Min with 0 yields 0 naturally, so no special
+        // case is needed: either-side-zero → zero, which is exactly the "either side disables"
+        // semantics. The peer's value was already validated above (0 or ≥3); local is validated at
+        // config-load time (BgpConfig), and the argument guard at the top of this method rejects
+        // out-of-range local values before reaching here.
+        var negotiatedHoldTime = (ushort)Math.Min(localHoldTime, peerHoldTime);
+
+        var keepAliveInterval = negotiatedHoldTime == 0
             ? TimeSpan.Zero
-            : TimeSpan.FromSeconds(Math.Max(holdTime / 3, 1));
+            : TimeSpan.FromSeconds(Math.Max(negotiatedHoldTime / 3, 1));
 
         return new OpenNegotiation(
             remoteAsn,
             remoteFourByteAsn,
             remoteFourByteAsn, // RFC 6793 §6: AS_PATH encoding follows the negotiated capability
             remoteRouteRefresh,
-            holdTime,
+            negotiatedHoldTime,
             keepAliveInterval);
     }
 
