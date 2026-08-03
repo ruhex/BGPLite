@@ -65,6 +65,13 @@ internal sealed class SocketBgpConnection : IBgpConnection
                 // here because the probe runs only AFTER a read returned OCE/IOException.
                 return _socket.Poll(0, SelectMode.SelectRead) && _socket.Available == 0;
             }
+            catch (SocketException)
+            {
+                // Poll/Available surfaced a socket-level error, including a connection reset by the
+                // peer — treat as closed so the EOF↔cancel race handling reaches the explicit close
+                // path rather than masking the close as a pure cancellation (#217).
+                return true;
+            }
             catch (ObjectDisposedException)
             {
                 // Dispose raced between the _disposed check above and the Poll call. Treat as closed.

@@ -347,12 +347,15 @@ public sealed class BgpSession : IDisposable
             // with a stack trace, hiding the (peer-side) root cause. Warning, not Error: a network
             // close is a normal event, not a server fault (AGENTS.md: "treat partial failure as normal
             // for network operations"). Stack trace demoted to Debug. _state is volatile, safe to read
-            // here. Established-phase closes arrive via AwaitLoopTaskAsync, not here.
+            // here. The Established case covers the window between TransitionTo(Established) and
+            // RunEstablishedAsync (initial route dump / End-of-RIB); once the read loop is running,
+            // Established-phase closes are logged inside ReadLoopAsync (#217).
             var phase = _state switch
             {
                 BgpFsmState.Connect => "before sending OPEN",
                 BgpFsmState.OpenSent => "while sending local OPEN/KEEPALIVE (OpenSent)",
                 BgpFsmState.OpenConfirm => "during OPEN/KEEPALIVE handshake (OpenConfirm)",
+                BgpFsmState.Established => "while sending initial routes (Established)",
                 _ => $"in state {_state}"
             };
             _logger.LogWarning("Peer {Peer} closed the TCP connection {Phase}", _peer, phase);
