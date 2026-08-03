@@ -147,10 +147,14 @@ public static class PrefixSourceUrlValidator
 
     /// <summary>
     /// Validates that a URL is well-formed, uses http/https, and resolves to a public IP.
-    /// For future API-level validation (when a user submits a URL, validate before storing).
-    /// The actual fetch-time defense is <see cref="CreateValidatedConnectionAsync"/>.
+    /// The actual fetch-time defense is <see cref="CreateValidatedConnectionAsync"/>; this method
+    /// is the save-time / API-submission-time defence-in-depth layer (#232): when a user submits a
+    /// prefix-source URL via the management API, validate before persisting so a bad URL is rejected
+    /// with a clear 400 instead of being saved and failing forever at fetch time. The fetch-time
+    /// <see cref="CreateValidatedConnectionAsync"/> MUST stay regardless — it is the authoritative
+    /// layer that covers every fetch path and survives any future change to the HTTP handler.
     /// </summary>
-    internal static async Task<(bool IsValid, string? Error)> ValidateUrlAsync(
+    public static async Task<(bool IsValid, string? Error)> ValidateUrlAsync(
         string url,
         Func<string, CancellationToken, ValueTask<IPAddress[]>>? dnsResolver = null,
         CancellationToken ct = default)
