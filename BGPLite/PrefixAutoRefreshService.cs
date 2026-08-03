@@ -167,16 +167,28 @@ internal sealed class PrefixAutoRefreshService : IHostedService, IDisposable
                     await Task.Delay(jitter, _timeProvider, ct);
             }
 
-            var isChanged = await _prefixSources.RefreshAsync(name, ct);
-            if (isChanged)
-                changed.Add(name);
-            polledInThisCycle++;
+            // Per-source isolation: a single failing source (RefreshAsync throws unexpectedly, or
+            // SourceSupportsConditional faults on a bad factory lookup) must NOT abort the whole cycle
+            // and skip the remaining due sources. RefreshAsync already swallows per-source load errors
+            // internally (returns false); this guards the rest of the iteration.
+            try
+            {
+                var isChanged = await _prefixSources.RefreshAsync(name, ct);
+                if (isChanged)
+                    changed.Add(name);
+                polledInThisCycle++;
 
-            // Schedule the next check based on whether the source supports conditional requests:
-            // 304-capable sources are cheap → short interval; RIPEstat-style → long interval.
-            var supportsConditional = _prefixSources.SourceSupportsConditional(name);
-            var interval = supportsConditional ? etagInterval : noEtagInterval;
-            _nextCheck[name] = _timeProvider.GetUtcNow() + interval;
+                // Schedule the next check based on whether the source supports conditional requests:
+                // 304-capable sources are cheap → short interval; RIPEstat-style → long interval.
+                var supportsConditional = _prefixSources.SourceSupportsConditional(name);
+                var interval = supportsConditional ? etagInterval : noEtagInterval;
+                _nextCheck[name] = _timeProvider.GetUtcNow() + interval;
+            }
+            catch (OperationCanceledException) { throw; }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Auto-refresh: source '{Name}' check failed; skipping this cycle", name);
+            }
         }
         return changed;
     }
