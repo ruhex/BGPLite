@@ -294,4 +294,131 @@ public class BgpSessionRfc6793Tests
 
         Assert.Equal([BgpConstants.Capability.FourOctetAsn, 2, 0x01, 0x02], UpdateCodec.GetMalformedFourOctetAsnCapabilityData(open));
     }
+
+    /// <summary>
+    /// RFC 7606 §3, which revises RFC 4271 §6.3: "If any other attribute (whether recognized or
+    /// unrecognized) appears more than once in an UPDATE message, then all the occurrences of the
+    /// attribute other than the first one SHALL be discarded and the UPDATE message will continue
+    /// to be processed." The switch in ParseRouteAttributes assigned unconditionally, so the LAST
+    /// occurrence won (#287).
+    /// </summary>
+    [Fact]
+    public void ParseRouteAttributes_DuplicateNextHop_FirstOccurrenceWins()
+    {
+        var update = new BgpUpdateMessage
+        {
+            PathAttributes =
+            [
+                AttributeHelper.WriteOrigin(BgpOrigin.Igp),
+                AttributeHelper.WriteAsPath([65001u], fourByteAsn: true),
+                AttributeHelper.WriteNextHop(0xC0000201), // 192.0.2.1 — the one that must win
+                AttributeHelper.WriteNextHop(0x0A0A0A0A), // 10.10.10.10 — discarded
+            ],
+            Nlri = []
+        };
+
+        var attrs = UpdateCodec.ParseRouteAttributes(update, fourByteAsnSession: true);
+
+        Assert.Equal(0xC0000201u, attrs.NextHop);
+    }
+
+    [Fact]
+    public void ParseRouteAttributes_DuplicateAsPath_FirstOccurrenceWins()
+    {
+        var update = new BgpUpdateMessage
+        {
+            PathAttributes =
+            [
+                AttributeHelper.WriteOrigin(BgpOrigin.Igp),
+                AttributeHelper.WriteAsPath([65001u], fourByteAsn: true),
+                AttributeHelper.WriteAsPath([64512u, 65002u], fourByteAsn: true), // discarded
+                AttributeHelper.WriteNextHop(0x0A000001),
+            ],
+            Nlri = []
+        };
+
+        var attrs = UpdateCodec.ParseRouteAttributes(update, fourByteAsnSession: true);
+
+        Assert.Equal([65001u], attrs.AsPath);
+    }
+
+    [Fact]
+    public void ParseRouteAttributes_DuplicateCommunity_FirstOccurrenceWins()
+    {
+        var update = new BgpUpdateMessage
+        {
+            PathAttributes =
+            [
+                AttributeHelper.WriteOrigin(BgpOrigin.Igp),
+                AttributeHelper.WriteAsPath([65001u], fourByteAsn: true),
+                AttributeHelper.WriteNextHop(0x0A000001),
+                AttributeHelper.WriteCommunities([65000u, 100u]),
+                AttributeHelper.WriteCommunities([65000u, 999u]), // discarded
+            ],
+            Nlri = []
+        };
+
+        var attrs = UpdateCodec.ParseRouteAttributes(update, fourByteAsnSession: true);
+
+        Assert.Equal([65000u, 100u], attrs.Communities);
+    }
+
+    /// <summary>
+    /// A discarded duplicate must not be validated either — RFC 7606 §3 says the later occurrences
+    /// are discarded, not "discarded but still checked". A valid first ORIGIN followed by an invalid
+    /// second one is accepted; before #287 the second was read and threw Invalid ORIGIN (subcode 6).
+    /// </summary>
+    [Fact]
+    public void ParseRouteAttributes_DuplicateOrigin_SecondIsNotValidated()
+    {
+        var update = new BgpUpdateMessage
+        {
+            PathAttributes =
+            [
+                AttributeHelper.WriteOrigin(BgpOrigin.Igp),
+                new PathAttribute
+                {
+                    Flags = BgpConstants.Attribute.FlagTransitive,
+                    TypeCode = BgpConstants.Attribute.Origin,
+                    Data = [7], // out of range (RFC 4271 §5.1.2 defines 0/1/2) — must be discarded
+                },
+                AttributeHelper.WriteAsPath([65001u], fourByteAsn: true),
+                AttributeHelper.WriteNextHop(0x0A000001),
+            ],
+            Nlri = []
+        };
+
+        var attrs = UpdateCodec.ParseRouteAttributes(update, fourByteAsnSession: true);
+
+        Assert.Equal(0x0A000001u, attrs.NextHop);
+    }
+
+    /// <summary>
+    /// The inverse guard: an invalid FIRST occurrence is still rejected. The duplicate rule must not
+    /// become a way to smuggle a malformed attribute past validation by prefixing a valid one.
+    /// </summary>
+    [Fact]
+    public void ParseRouteAttributes_InvalidFirstOrigin_StillRejected()
+    {
+        var update = new BgpUpdateMessage
+        {
+            PathAttributes =
+            [
+                new PathAttribute
+                {
+                    Flags = BgpConstants.Attribute.FlagTransitive,
+                    TypeCode = BgpConstants.Attribute.Origin,
+                    Data = [7],
+                },
+                AttributeHelper.WriteOrigin(BgpOrigin.Igp),
+                AttributeHelper.WriteAsPath([65001u], fourByteAsn: true),
+                AttributeHelper.WriteNextHop(0x0A000001),
+            ],
+            Nlri = []
+        };
+
+        var ex = Assert.Throws<BgpNotificationException>(
+            () => UpdateCodec.ParseRouteAttributes(update, fourByteAsnSession: true));
+        Assert.Equal(BgpConstants.SubError.InvalidOriginAttribute, ex.SubErrorCode);
+    }
 }
