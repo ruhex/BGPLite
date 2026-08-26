@@ -3,6 +3,7 @@ using BGPLite.Configuration;
 using BGPLite.Protocol;
 using BGPLite.Routing;
 using Microsoft.Extensions.Logging;
+using BGPLite.Contracts;
 
 namespace BGPLite.Server;
 

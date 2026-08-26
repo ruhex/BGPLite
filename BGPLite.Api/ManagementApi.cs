@@ -9,9 +9,9 @@ using BGPLite.Configuration;
 using BGPLite.Protocol;
 using BGPLite.Providers;
 using BGPLite.Routing;
-using BGPLite.Server;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using BGPLite.Contracts;
 
 namespace BGPLite.Api;
 

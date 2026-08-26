@@ -16,10 +16,10 @@
   </ItemGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\BGPLite.Contracts\BGPLite.Contracts.csproj" />
     <ProjectReference Include="..\BGPLite.Configuration\BGPLite.Configuration.csproj" />
     <ProjectReference Include="..\BGPLite.Providers\BGPLite.Providers.csproj" />
     <ProjectReference Include="..\BGPLite.Routing\BGPLite.Routing.csproj" />
-    <ProjectReference Include="..\BGPLite.Server\BGPLite.Server.csproj" />
   </ItemGroup>
 
   <ItemGroup>

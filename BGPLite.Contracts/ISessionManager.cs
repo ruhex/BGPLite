@@ -1,4 +1,4 @@
-namespace BGPLite.Server;
+namespace BGPLite.Contracts;
 
 public interface ISessionManager
 {

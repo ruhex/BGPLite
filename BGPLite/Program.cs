@@ -12,6 +12,7 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Http.Resilience;
 using Microsoft.Extensions.Logging;
 using Polly;
+using BGPLite.Contracts;
 
 var builder = Host.CreateApplicationBuilder(args);
 

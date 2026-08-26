@@ -5,6 +5,7 @@ using BGPLite.Protocol;
 using BGPLite.Routing;
 using BGPLite.Server;
 using Microsoft.Extensions.Logging;
+using BGPLite.Contracts;
 
 namespace BGPLite.Tests;
 

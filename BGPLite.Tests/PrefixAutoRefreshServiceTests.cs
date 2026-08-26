@@ -4,6 +4,7 @@ using BGPLite.Server;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Time.Testing;
+using BGPLite.Contracts;
 
 namespace BGPLite.Tests;
 

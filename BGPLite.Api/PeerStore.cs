@@ -1,6 +1,6 @@
 using BGPLite.Api.Entities;
-using BGPLite.Server;
 using Microsoft.EntityFrameworkCore;
+using BGPLite.Contracts;
 
 namespace BGPLite.Api;
 

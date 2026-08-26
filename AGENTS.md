@@ -15,7 +15,7 @@ BGPLite is a lightweight BGP route server with dynamic prefix provisioning via R
 - RIPE Stat integration and prefix provisioning live in `BGPLite.Providers/`.
 - Unit tests live in `BGPLite.Tests/`.
 
-Keep the boundary clear: protocol correctness belongs in `BGPLite.Protocol`; session FSM and TCP handling belong in `BGPLite.Server`; routing and filtering belong in `BGPLite.Routing`; HTTP management and persistence belong in `BGPLite.Api`; prefix sourcing belongs in `BGPLite.Providers`; config loading belongs in `BGPLite.Configuration`.
+Keep the boundary clear: protocol correctness belongs in `BGPLite.Protocol`; shared contracts (interfaces + DTOs used by multiple layers) belong in `BGPLite.Contracts` — a dependency-free leaf; session FSM and TCP handling belong in `BGPLite.Server`; routing and filtering belong in `BGPLite.Routing`; HTTP management and persistence belong in `BGPLite.Api`; prefix sourcing belongs in `BGPLite.Providers`; config loading belongs in `BGPLite.Configuration`.
 
 ## Tech stack
 
@@ -31,8 +31,10 @@ Keep the boundary clear: protocol correctness belongs in `BGPLite.Protocol`; ses
 | Path | What |
 |---|---|
 | `BGPLite/` | application entrypoint and DI wiring |
+| `BGPLite.Contracts/` | shared contracts: IPeerStore, ISessionManager, IPrefixService, peer DTOs, BgpMetrics (dependency-free leaf) |
 | `BGPLite.Protocol/` | BGP message encoding/decoding, FSM states, capabilities, path attributes |
-| `BGPLite.Server/` | TCP listener, BGP session FSM, timers, metrics, service interfaces |
+| `BGPLite.Server/` | TCP listener, BGP session FSM, timers |
+| `BGPLite.Contracts/` | shared service interfaces, peer DTOs, BgpMetrics (see above) |
 | `BGPLite.Routing/` | route table, route filters, community-based filtering |
 | `BGPLite.Configuration/` | YAML config models and loading |
 | `BGPLite.Api/` | HTTP management API endpoints, SQLite peer store, EF Core entities |
