@@ -9,35 +9,61 @@ public class BgpDbContext : DbContext
 
     public BgpDbContext(DbContextOptions<BgpDbContext> options) : base(options) { }
 
+    /// <summary>
+    /// Applies pending EF Migrations and deactivates all peers on startup (#237).
+    /// <para>
+    /// Fresh databases get the full schema via the Init migration. Databases from the
+    /// EnsureCreated + ad-hoc-DDL era (a Peers table but no __EFMigrationsHistory) are stamped
+    /// past Init — their schema predates it in unknown shapes — and the LegacyEnsureCreated
+    /// migration converges any drift (missing tables, the legacy Ip-only index) with guarded
+    /// DDL, preserving data. Each migration runs in its own transaction, so initialization can
+    /// no longer leave a partially-applied schema.
+    /// </para>
+    /// </summary>
     public static void Initialize(BgpDbContext db)
     {
-        db.Database.EnsureCreated();
-        db.Database.ExecuteSqlRaw(
-            "CREATE TABLE IF NOT EXISTS PeerCustomAsns (" +
-            "PeerId TEXT NOT NULL, Asn INTEGER NOT NULL, " +
-            "PRIMARY KEY (PeerId, Asn), " +
-            "FOREIGN KEY (PeerId) REFERENCES Peers(Id) ON DELETE CASCADE)");
+        var connection = db.Database.GetDbConnection();
+        bool TableExists(string name)
+        {
+            using var cmd = connection.CreateCommand();
+            cmd.CommandText = "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = $name";
+            var param = cmd.CreateParameter();
+            param.ParameterName = "$name";
+            param.Value = name;
+            cmd.Parameters.Add(param);
+            return cmd.ExecuteScalar() is not null;
+        }
 
-        db.Database.ExecuteSqlRaw(
-            "CREATE TABLE IF NOT EXISTS PeerCustomSources (" +
-            "Id TEXT NOT NULL PRIMARY KEY, " +
-            "PeerId TEXT NOT NULL, Name TEXT NOT NULL, " +
-            "Url TEXT NOT NULL, Community TEXT, " +
-            "Active INTEGER NOT NULL DEFAULT 0, " +
-            "FOREIGN KEY (PeerId) REFERENCES Peers(Id) ON DELETE CASCADE)");
+        db.Database.OpenConnection();
+        try
+        {
+            if (TableExists("Peers") && !TableExists("__EFMigrationsHistory"))
+            {
+                // Pre-Migrations deployment: create the history table and stamp Init as applied —
+                // LegacyEnsureCreated (not stamped) then converges the residual drift via Migrate.
+                var efVersion = typeof(DbContext).Assembly.GetName().Version!.ToString();
+                db.Database.ExecuteSqlRaw(
+                    "CREATE TABLE __EFMigrationsHistory (" +
+                    "\"MigrationId\" TEXT NOT NULL CONSTRAINT \"PK___EFMigrationsHistory\" PRIMARY KEY, " +
+                    "\"ProductVersion\" TEXT NOT NULL);");
+                db.Database.ExecuteSql(
+                    $"INSERT INTO __EFMigrationsHistory (\"MigrationId\", \"ProductVersion\") VALUES ({InitMigrationId}, {efVersion})");
+            }
+        }
+        finally
+        {
+            db.Database.CloseConnection();
+        }
 
-        // Peer identity is (Ip, Asn), not Ip alone, so several peers behind one source IP (distinct
-        // AS) can coexist as separate rows (issue #19). EnsureCreated does not evolve an existing
-        // schema, so migrate the index idempotently: drop the legacy Ip-only unique index and create
-        // the composite one if it is missing. Existing data is already unique by Ip (the old index
-        // enforced it), so (Ip, Asn) is unique on it as well — the CREATE cannot fail.
-        db.Database.ExecuteSqlRaw("DROP INDEX IF EXISTS IX_Peers_Ip;");
-        db.Database.ExecuteSqlRaw(
-            "CREATE UNIQUE INDEX IF NOT EXISTS UX_Peers_Ip_Asn ON Peers (Ip, Asn);");
+        db.Database.Migrate();
 
+        // Startup deactivation (#204 semantics preserved): sessions do not survive a restart, so
+        // every peer starts inactive. A single ExecuteUpdate is atomic under SQLite.
         db.Peers.Where(p => p.Status == "active").ExecuteUpdate(
             s => s.SetProperty(p => p.Status, "inactive"));
     }
+
+    private const string InitMigrationId = "20260826182256_Init";
 
     protected override void OnModelCreating(ModelBuilder model)
     {

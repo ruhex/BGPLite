@@ -59,7 +59,7 @@ Clients register a subscription through the HTTP management API; on the next BGP
   - Per-source HTTP timeout, custom headers, and community tagging.
   - Extend with your own `IPrefixSourceProvider`.
 - **HTTP management API** for peer/route/session management.
-- **SQLite peer store** via EF Core (`EnsureCreated`, raw-SQL migrations — see [FIXPLAN](FIXPLAN.md) P4).
+- **SQLite peer store** via EF Core (EF Migrations — `dotnet ef migrations add <Name> --project BGPLite.Api`).
 - **First-class ops**: Docker image in GHCR, self-contained binaries (linux-x64/arm64, win-x64), Conventional-Commits releases.
 
 ## 🏗 Architecture
