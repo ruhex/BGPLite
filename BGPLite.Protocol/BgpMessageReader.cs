@@ -170,11 +170,27 @@ public static class BgpMessageReader
             var withdrawnEnd = offset + withdrawnLen;
             while (offset < withdrawnEnd)
             {
-                var (prefix, consumed) = PrefixCodec.Decode(payload[offset..]);
+                // Slice to the declared end of the withdrawn-routes section (not payload end), the
+                // same rule the attribute loop below already follows (#245). Decoding against the
+                // payload let a prefix whose declared value crosses withdrawnEnd consume the bytes
+                // of the next field: either desyncing every subsequent field (a prefix the peer
+                // never withdrew was reported as withdrawn) or, when the overrun reached the end of
+                // the payload, throwing ArgumentOutOfRangeException out of the codec — which is not
+                // a BgpParseException, so ReadLoopAsync's treat-as-withdraw filter never saw it and
+                // a 23-byte UPDATE tore down the session (#284, same failure mode as #222).
+                var (prefix, consumed) = PrefixCodec.Decode(payload[offset..withdrawnEnd]);
                 withdrawn.Add(prefix);
                 offset += consumed;
             }
         }
+
+        // The withdrawn-routes section may end exactly at the payload end, leaving no room for the
+        // Total Path Attribute Length field. The `payload.Length < 4` guard above only covers an
+        // UPDATE with no withdrawn routes, so bounds-check here as well (#284).
+        if (offset + 2 > payload.Length)
+            throw new BgpParseException(
+                $"UPDATE truncated before Total Path Attribute Length: have {payload.Length - offset} bytes at offset {offset}, need 2",
+                BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.MalformedAttributeList);
 
         var attrsLen = BinaryPrimitives.ReadUInt16BigEndian(payload[offset..]);
         offset += 2;

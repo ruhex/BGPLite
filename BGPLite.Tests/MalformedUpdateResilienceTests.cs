@@ -80,6 +80,86 @@ public class MalformedUpdateResilienceTests
         Assert.Equal(BgpConstants.SubError.MalformedAttributeList, ex.SubErrorCode);
     }
 
+    [Theory]
+    // withdrawn-routes section ends exactly at the payload end, so the 2 bytes the sender meant as
+    // the Total Path Attribute Length were consumed as prefix data.
+    [InlineData(new byte[] { 0x00, 0x02, 0x08, 0x0A }, BgpConstants.SubError.MalformedAttributeList)]
+    // a /24 inside a 2-byte section: the declared 3 value bytes cross withdrawnEnd.
+    [InlineData(new byte[] { 0x00, 0x02, 0x18, 0x0A, 0x00, 0x00 }, BgpConstants.SubError.InvalidNetworkField)]
+    // a /32 inside a 2-byte section, with a well-formed attribute section behind it: previously
+    // parsed as "withdraw 10.0.0.1/32" — a prefix the peer never sent — with no error at all.
+    [InlineData(new byte[] { 0x00, 0x02, 0x20, 0x0A, 0x00, 0x00, 0x01, 0x00, 0x04, 0x40, 0x01, 0x01, 0x00 }, BgpConstants.SubError.InvalidNetworkField)]
+    // a 1-byte withdrawn section leaves a single byte where the attribute-length field must be.
+    [InlineData(new byte[] { 0x00, 0x01, 0x00, 0x00 }, BgpConstants.SubError.MalformedAttributeList)]
+    public void ParseUpdate_WithdrawnSectionOverrun_ThrowsBgpParseException_NotAOORE(byte[] payload, byte expectedSubError)
+    {
+        // #284: the withdrawn-routes loop decoded against the payload end instead of the declared
+        // end of its own section, and nothing bounds-checked the Total Path Attribute Length read.
+        // Both escaped as ArgumentOutOfRangeException — not a BgpParseException, so ReadLoopAsync's
+        // treat-as-withdraw filter never caught them and the session was torn down (cf. #222).
+        var ex = Assert.Throws<BgpParseException>(
+            () => BgpMessageReader.ReadMessage(BuildMessage(BgpMessageType.Update, payload)));
+        Assert.Equal(BgpConstants.Error.UpdateMessageError, ex.ErrorCode);
+        Assert.Equal(expectedSubError, ex.SubErrorCode);
+    }
+
+    [Fact]
+    public void ParseUpdate_WithdrawnSectionExactlyConsumed_StillParses()
+    {
+        // Guard the fix from over-rejecting: a well-formed withdrawn section that ends exactly on
+        // its declared boundary must keep parsing (this is the shape the overrun cases mimic).
+        var payload = new byte[] { 0x00, 0x02, 0x08, 0x0A, 0x00, 0x00 };
+
+        var update = Assert.IsType<BgpUpdateMessage>(
+            BgpMessageReader.ReadMessage(BuildMessage(BgpMessageType.Update, payload)));
+
+        var prefix = Assert.Single(update.WithdrawnRoutes);
+        Assert.Equal(0x0A000000u, prefix.Address);
+        Assert.Equal(8, prefix.Length);
+        Assert.Empty(update.PathAttributes);
+        Assert.Empty(update.Nlri);
+    }
+
+    [Fact]
+    public async Task WithdrawnSectionOverrun_OnWire_KeepsSessionEstablished()
+    {
+        // #284 end-to-end: the smallest frame that used to kill an Established session — a 23-byte
+        // UPDATE, the RFC minimum. It must now take the treat-as-withdraw path like any other
+        // malformed-body UPDATE (#222) and leave the session up.
+        var (server, client) = ConnectedPair();
+        using var clientSock = client;
+        var bgpConfig = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1", HoldTime = 0, KeepAlive = 0 };
+        var metrics = new BgpMetrics();
+        using var session = new BgpSession(
+            new SocketBgpConnection(server),
+            new PeerConfig { Address = "127.0.0.1" },
+            bgpConfig,
+            new RouteTable(),
+            AllowAllFilter.Instance,
+            metrics,
+            new NopLogger<BgpSession>());
+
+        var runTask = await EstablishSessionAsync(session, client, bgpConfig);
+
+        // withdrawn_len=2, then a /8 prefix that consumes both remaining bytes — the attribute
+        // length field is gone.
+        var malformedFrame = BuildMessage(BgpMessageType.Update, [0x00, 0x02, 0x08, 0x0A]);
+        Assert.Equal(BgpConstants.MinMessageSize + 4, malformedFrame.Length);
+        client.Send(malformedFrame, 0, malformedFrame.Length, SocketFlags.None);
+
+        for (var i = 0; i < 20 && metrics.UpdatesRejected == 0; i++)
+            await Task.Delay(TimeSpan.FromMilliseconds(50));
+
+        Assert.True(session.IsEstablished, "session must survive a truncated withdrawn-routes section (#284)");
+        Assert.True(metrics.UpdatesRejected >= 1, "the malformed UPDATE must be counted as rejected");
+
+        var sent = await DrainAsync(client, TimeSpan.FromSeconds(2));
+        Assert.DoesNotContain(sent, m => m is BgpNotificationMessage);
+
+        session.MarkSilentClose();
+        await runTask.WaitAsync(TimeSpan.FromSeconds(5));
+    }
+
     [Fact]
     public void ParseUpdate_AttributeValueCrossingAttrsEnd_Rejected()
     {
