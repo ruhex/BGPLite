@@ -148,16 +148,12 @@ public static class BgpMessageWriter
 
         // Path attributes. RFC 4271 §5: well-known attributes MUST be sent ordered by type code
         // (ORIGIN → AS_PATH → NEXT_HOP → MED → LOCAL_PREF — ascending). Producers already emit
-        // ordered (UpdateCodec.BuildUpdateAttributes); a stable sort here makes the writer
-        // guarantee it for any future producer (#272, epic #6).
-        var attrs = msg.PathAttributes;
-        List<PathAttribute>? sorted = null;
-        if (attrs.Count > 1)
-        {
-            sorted = new List<PathAttribute>(attrs);
-            sorted.Sort(static (a, b) => a.TypeCode.CompareTo(b.TypeCode));
-            attrs = sorted;
-        }
+        // ordered (UpdateCodec.BuildUpdateAttributes); an OrderBy here makes the writer guarantee
+        // it for any future producer — LINQ OrderBy is stable, so equal type codes keep their
+        // caller-supplied relative order (#272, epic #6).
+        var attrs = msg.PathAttributes.Count > 1
+            ? [.. msg.PathAttributes.OrderBy(static a => a.TypeCode)]
+            : msg.PathAttributes;
 
         var attrsLen = GetAttributesLength(attrs);
         BinaryPrimitives.WriteUInt16BigEndian(buffer[p..], (ushort)attrsLen);

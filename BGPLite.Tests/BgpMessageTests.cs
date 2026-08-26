@@ -612,6 +612,28 @@ public class BgpMessageTests
         ], typeCodes);
     }
 
+    [Fact]
+    public void Update_Writer_SortIsStable_ForEqualTypeCodes()
+    {
+        // #273 review: equal type codes must keep their caller-supplied relative order — the
+        // sort must be stable (List.Sort is not; OrderBy is).
+        var first = AttributeHelper.WriteCommunities([0x11111111u]);
+        var second = AttributeHelper.WriteCommunities([0x22222222u]);
+        var update = new BgpUpdateMessage
+        {
+            WithdrawnRoutes = [],
+            PathAttributes = [second, AttributeHelper.WriteOrigin(BgpOrigin.Igp), first],
+            Nlri = []
+        };
+
+        var buffer = new byte[512];
+        var written = BgpMessageWriter.WriteMessage(update, buffer);
+        var read = Assert.IsType<BgpUpdateMessage>(BgpMessageReader.ReadMessage(buffer.AsSpan(0, written)));
+
+        Assert.Equal([0x11111111u], AttributeHelper.ReadCommunities(read.PathAttributes[1]));
+        Assert.Equal([0x22222222u], AttributeHelper.ReadCommunities(read.PathAttributes[2]));
+    }
+
     [Theory]
     [InlineData(5)]
     [InlineData(7)]
