@@ -49,7 +49,7 @@ public static class UpdateCodec
     /// Builds outbound UPDATE path attributes in RFC order: ORIGIN, AS_PATH, NEXT_HOP,
     /// COMMUNITY, AS4_PATH.
     /// </summary>
-    public static List<PathAttribute> BuildUpdateAttributes(uint localAsn, bool localFourByteAsn, uint nextHop, uint[] communities)
+    public static List<PathAttribute> BuildUpdateAttributes(uint localAsn, bool localFourByteAsn, uint nextHop, IReadOnlyList<uint> communities)
     {
         var attrs = new List<PathAttribute>(5)
         {
@@ -60,7 +60,7 @@ public static class UpdateCodec
         attrs.Add(asPathAttrs[0]);
         attrs.Add(AttributeHelper.WriteNextHop(nextHop));
 
-        if (communities.Length > 0)
+        if (communities.Count > 0)
             attrs.Add(AttributeHelper.WriteCommunities(communities));
 
         if (asPathAttrs.Count > 1)
@@ -75,7 +75,7 @@ public static class UpdateCodec
     /// whole send, so identical community sets yield byte-identical <see cref="PathAttribute"/>
     /// lists that can be reused across the N 100-NLRI batches (#87).
     /// </summary>
-    public static Dictionary<uint[], List<PathAttribute>> CreateUpdateAttributeCache() =>
+    public static Dictionary<IReadOnlyList<uint>, List<PathAttribute>> CreateUpdateAttributeCache() =>
         new(CommunitySetComparer.Instance);
 
     /// <summary>
@@ -85,8 +85,8 @@ public static class UpdateCodec
     /// every UPDATE emitted for that community set.
     /// </summary>
     public static List<PathAttribute> GetCachedUpdateAttributes(
-        uint localAsn, bool localFourByteAsn, uint nextHop, uint[] communities,
-        Dictionary<uint[], List<PathAttribute>> cache)
+        uint localAsn, bool localFourByteAsn, uint nextHop, IReadOnlyList<uint> communities,
+        Dictionary<IReadOnlyList<uint>, List<PathAttribute>> cache)
     {
         if (cache.TryGetValue(communities, out var cached))
             return cached;
@@ -106,9 +106,9 @@ public static class UpdateCodec
     /// emitted attributes in ascending type-code order (32 sorts after AS4_PATH 17).
     /// </summary>
     public static List<PathAttribute> WithLargeCommunityAttribute(
-        List<PathAttribute> baseAttrs, (uint Global, uint Local1, uint Local2)[] largeCommunities)
+        List<PathAttribute> baseAttrs, IReadOnlyList<(uint Global, uint Local1, uint Local2)> largeCommunities)
     {
-        if (largeCommunities.Length == 0)
+        if (largeCommunities.Count == 0)
             return baseAttrs;
 
         var withLarge = new List<PathAttribute>(baseAttrs.Count + 1);
@@ -196,21 +196,21 @@ public static class UpdateCodec
     }
 }
 
-/// <summary>Sequence equality over a route's community array (set-equivalence within a batch).</summary>
-public sealed class CommunitySetComparer : IEqualityComparer<uint[]>
+/// <summary>Sequence equality over a route's community list (set-equivalence within a batch).</summary>
+public sealed class CommunitySetComparer : IEqualityComparer<IReadOnlyList<uint>>
 {
     public static readonly CommunitySetComparer Instance = new();
 
-    public bool Equals(uint[]? x, uint[]? y)
+    public bool Equals(IReadOnlyList<uint>? x, IReadOnlyList<uint>? y)
     {
         if (ReferenceEquals(x, y)) return true;
-        if (x is null || y is null || x.Length != y.Length) return false;
-        for (var i = 0; i < x.Length; i++)
+        if (x is null || y is null || x.Count != y.Count) return false;
+        for (var i = 0; i < x.Count; i++)
             if (x[i] != y[i]) return false;
         return true;
     }
 
-    public int GetHashCode(uint[] obj)
+    public int GetHashCode(IReadOnlyList<uint> obj)
     {
         var hc = new HashCode();
         foreach (var c in obj) hc.Add(c);
@@ -218,21 +218,21 @@ public sealed class CommunitySetComparer : IEqualityComparer<uint[]>
     }
 }
 
-/// <summary>Sequence equality over a route's Large Community array (RFC 8092 triplets).</summary>
-public sealed class LargeCommunitySetComparer : IEqualityComparer<(uint Global, uint Local1, uint Local2)[]>
+/// <summary>Sequence equality over a route's Large Community list (RFC 8092 triplets).</summary>
+public sealed class LargeCommunitySetComparer : IEqualityComparer<IReadOnlyList<(uint Global, uint Local1, uint Local2)>>
 {
     public static readonly LargeCommunitySetComparer Instance = new();
 
-    public bool Equals((uint Global, uint Local1, uint Local2)[]? x, (uint Global, uint Local1, uint Local2)[]? y)
+    public bool Equals(IReadOnlyList<(uint Global, uint Local1, uint Local2)>? x, IReadOnlyList<(uint Global, uint Local1, uint Local2)>? y)
     {
         if (ReferenceEquals(x, y)) return true;
-        if (x is null || y is null || x.Length != y.Length) return false;
-        for (var i = 0; i < x.Length; i++)
+        if (x is null || y is null || x.Count != y.Count) return false;
+        for (var i = 0; i < x.Count; i++)
             if (x[i] != y[i]) return false;
         return true;
     }
 
-    public int GetHashCode((uint Global, uint Local1, uint Local2)[] obj)
+    public int GetHashCode(IReadOnlyList<(uint Global, uint Local1, uint Local2)> obj)
     {
         var hc = new HashCode();
         foreach (var c in obj) hc.Add(c);
@@ -245,18 +245,18 @@ public sealed class LargeCommunitySetComparer : IEqualityComparer<(uint Global, 
 /// partition a send batch that spans more than one community set.
 /// </summary>
 public sealed class CommunitySetPairComparer
-    : IEqualityComparer<(uint[] Communities, (uint Global, uint Local1, uint Local2)[] LargeCommunities)>
+    : IEqualityComparer<(IReadOnlyList<uint> Communities, IReadOnlyList<(uint Global, uint Local1, uint Local2)> LargeCommunities)>
 {
     public static readonly CommunitySetPairComparer Instance = new();
 
     public bool Equals(
-        (uint[] Communities, (uint Global, uint Local1, uint Local2)[] LargeCommunities) x,
-        (uint[] Communities, (uint Global, uint Local1, uint Local2)[] LargeCommunities) y) =>
+        (IReadOnlyList<uint> Communities, IReadOnlyList<(uint Global, uint Local1, uint Local2)> LargeCommunities) x,
+        (IReadOnlyList<uint> Communities, IReadOnlyList<(uint Global, uint Local1, uint Local2)> LargeCommunities) y) =>
         CommunitySetComparer.Instance.Equals(x.Communities, y.Communities) &&
         LargeCommunitySetComparer.Instance.Equals(x.LargeCommunities, y.LargeCommunities);
 
     public int GetHashCode(
-        (uint[] Communities, (uint Global, uint Local1, uint Local2)[] LargeCommunities) obj)
+        (IReadOnlyList<uint> Communities, IReadOnlyList<(uint Global, uint Local1, uint Local2)> LargeCommunities) obj)
     {
         var hc = new HashCode();
         foreach (var c in obj.Communities) hc.Add(c);

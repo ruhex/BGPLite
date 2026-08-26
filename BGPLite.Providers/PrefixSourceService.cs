@@ -119,7 +119,7 @@ public sealed class PrefixSourceService : IPrefixSourceService
     public async Task WarmUpAsync(CancellationToken ct = default)
     {
         foreach (var (source, prefixes) in await LoadAllAsync(ct))
-            Console.WriteLine($"  WarmUp: source '{source.Name}' — {prefixes.Count} prefixes");
+            _logger.LogInformation("WarmUp: source '{Name}' — {Count} prefixes", source.Name, prefixes.Count);
     }
 
     /// <summary>

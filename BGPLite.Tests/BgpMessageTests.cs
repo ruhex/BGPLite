@@ -530,6 +530,59 @@ public class BgpMessageTests
     }
 
     [Fact]
+    public void AsPath_EmptySegment_Throws()
+    {
+        // RFC 4271 §4.3: a path segment value contains "one or more AS numbers" — a zero-length
+        // segment is malformed (#238).
+        var attr = new PathAttribute
+        {
+            Flags = BgpConstants.Attribute.FlagTransitive,
+            TypeCode = BgpConstants.Attribute.AsPath,
+            Data = new byte[] { BgpConstants.AsPath.AsSequence, 0 }
+        };
+
+        var ex = Assert.Throws<BgpParseException>(() => AttributeHelper.ReadAsPath(attr, fourByteAsn: false));
+        Assert.Equal(BgpConstants.Error.UpdateMessageError, ex.ErrorCode);
+        Assert.Equal(BgpConstants.SubError.MalformedAsPath, ex.SubErrorCode);
+    }
+
+    [Fact]
+    public void As4Path_WithAsTrans_Throws()
+    {
+        // AS_TRANS (23456) is the 2-octet placeholder for a non-mappable 4-octet AS — meaningless
+        // inside the 4-octet-encoded AS4_PATH (#238 defensive check).
+        var attr = new PathAttribute
+        {
+            Flags = BgpConstants.Attribute.FlagOptional | BgpConstants.Attribute.FlagTransitive,
+            TypeCode = BgpConstants.Attribute.As4Path,
+            Data = new byte[] { BgpConstants.AsPath.AsSequence, 1, 0x00, 0x00, 0x5B, 0xA0 } // AS 23456
+        };
+
+        var ex = Assert.Throws<BgpParseException>(() => AttributeHelper.ReadAs4Path(attr));
+        Assert.Equal(BgpConstants.Error.UpdateMessageError, ex.ErrorCode);
+        Assert.Equal(BgpConstants.SubError.MalformedAsPath, ex.SubErrorCode);
+    }
+
+    [Fact]
+    public void AsPath_Empty_RoundtripsAsZeroLengthAttribute()
+    {
+        // RFC 4271 §4.3: an empty path is a ZERO-LENGTH attribute — a zero-length SEGMENT is
+        // malformed. The writer must not emit what the reader rejects (#248 review).
+        var attr = AttributeHelper.WriteAsPath([], fourByteAsn: true);
+
+        Assert.Empty(attr.Data);
+        Assert.Equal([], AttributeHelper.ReadAsPath(attr, fourByteAsn: true));
+    }
+
+    [Fact]
+    public void As4Path_Write_WithAsTrans_Throws()
+    {
+        // Write-side symmetry with the reader's AS_TRANS rejection (#248 review).
+        Assert.Throws<ArgumentOutOfRangeException>(
+            () => AttributeHelper.WriteAs4Path([BgpConstants.AsPath.AsTrans]));
+    }
+
+    [Fact]
     public void AsPath_TrailingByteAfterSegment_Throws()
     {
         // #235: a complete 1-ASN segment followed by one stray byte — offset != data.Length.

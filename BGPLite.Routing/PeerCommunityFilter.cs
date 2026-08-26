@@ -33,7 +33,7 @@ public sealed class PeerCommunityFilter : IRouteFilter
         if (allowSet.Count == 0)
             return true; // no filter = all routes
 
-        if (route.Communities.Length == 0)
+        if (route.Communities.Count == 0)
             return true; // routes without community always pass
 
         foreach (var c in route.Communities)

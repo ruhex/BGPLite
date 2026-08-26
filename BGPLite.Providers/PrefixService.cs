@@ -344,11 +344,11 @@ public sealed class PrefixService : IPrefixService
             try
             {
                 await GetPrefixesAsync(asn, ct);
-                Console.WriteLine($"  WarmUp: AS{asn} cached");
+                _logger?.LogInformation("WarmUp: AS{Asn} cached", asn);
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"  WarmUp: AS{asn} failed — {ex.Message}");
+                _logger?.LogWarning(ex, "WarmUp: AS{Asn} failed", asn);
             }
         }
 

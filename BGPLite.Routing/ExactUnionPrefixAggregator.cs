@@ -147,29 +147,25 @@ public sealed class ExactUnionPrefixAggregator : IPrefixAggregator
 
         public static AttributeKey From(Route route)
         {
-            var c = route.Communities;
-            // Communities are a set: dedup (and sort) so set-equivalent routes key together.
-            var communities = c.Length <= 1 ? c : NormalizeCommunities(c);
-
-            var l = route.LargeCommunities;
-            // Large Communities are likewise a set: dedup and order by (Global,Local1,Local2)
-            // so set-equivalent routes key together. (Value tuples have no IComparable, hence
-            // the explicit Comparison rather than Array.Sort(items).)
-            var large = l.Length <= 1 ? l : NormalizeLargeCommunities(l);
-
-            return new AttributeKey(communities, large);
+            // #238: Route collections are IReadOnlyList now — normalize into privately-owned
+            // arrays so the key never aliases a route's (shared) backing array.
+            return new AttributeKey(NormalizeCommunities(route.Communities), NormalizeLargeCommunities(route.LargeCommunities));
         }
 
-        private static uint[] NormalizeCommunities(uint[] communities)
+        private static uint[] NormalizeCommunities(IReadOnlyList<uint> communities)
         {
+            // Communities are a set: dedup (and sort) so set-equivalent routes key together.
             var sorted = communities.Distinct().ToArray();
             Array.Sort(sorted);
             return sorted;
         }
 
         private static (uint Global, uint Local1, uint Local2)[] NormalizeLargeCommunities(
-            (uint Global, uint Local1, uint Local2)[] large)
+            IReadOnlyList<(uint Global, uint Local1, uint Local2)> large)
         {
+            // Large Communities are likewise a set: dedup and order by (Global,Local1,Local2)
+            // so set-equivalent routes key together. (Value tuples have no IComparable, hence
+            // the explicit Comparison rather than Array.Sort(items).)
             var distinct = large.Distinct().ToArray();
             Array.Sort(distinct, LargeCommunityComparison);
             return distinct;

@@ -46,6 +46,11 @@ public static class AttributeHelper
 
     public static PathAttribute WriteAs4Path(uint[] ases)
     {
+        // Write-side symmetry with ReadAs4Path: AS_TRANS is the 2-octet placeholder and must not
+        // be written into the 4-octet-encoded attribute the reader rejects (#248 review).
+        if (ases.Contains(BgpConstants.AsPath.AsTrans))
+            throw new ArgumentOutOfRangeException(nameof(ases), $"AS4_PATH must not carry AS_TRANS ({BgpConstants.AsPath.AsTrans}).");
+
         return new PathAttribute
         {
             Flags = BgpConstants.Attribute.FlagOptional | BgpConstants.Attribute.FlagTransitive,
@@ -56,7 +61,20 @@ public static class AttributeHelper
 
     public static uint[] ReadAs4Path(PathAttribute attr)
     {
-        return ReadPathData(attr.Data, 4, "AS4_PATH");
+        var ases = ReadPathData(attr.Data, 4, "AS4_PATH");
+
+        // AS_TRANS (23456) is the 2-octet placeholder for a non-mappable 4-octet AS (RFC 6793 §3)
+        // and is meaningless inside AS4_PATH, which is 4-octet-encoded by definition. Defensive
+        // check from the #238 audit (RFC 6793 contains no explicit prohibition — the audit's
+        // "§F.4" citation does not exist in the RFC text).
+        foreach (var asn in ases)
+        {
+            if (asn == BgpConstants.AsPath.AsTrans)
+                throw new BgpParseException($"AS4_PATH must not carry AS_TRANS ({BgpConstants.AsPath.AsTrans})",
+                    BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.MalformedAsPath);
+        }
+
+        return ases;
     }
 
     public static uint ReadNextHop(PathAttribute attr)
@@ -122,10 +140,10 @@ public static class AttributeHelper
         return communities;
     }
 
-    public static PathAttribute WriteCommunities(uint[] communities)
+    public static PathAttribute WriteCommunities(IReadOnlyList<uint> communities)
     {
-        var data = new byte[communities.Length * 4];
-        for (var i = 0; i < communities.Length; i++)
+        var data = new byte[communities.Count * 4];
+        for (var i = 0; i < communities.Count; i++)
             BinaryPrimitives.WriteUInt32BigEndian(data.AsSpan(i * 4), communities[i]);
         return new PathAttribute
         {
@@ -164,10 +182,10 @@ public static class AttributeHelper
     /// Encodes a BGP Large Communities attribute (RFC 8092 §2): 12 bytes per triplet, network
     /// byte order, flags OPTIONAL + TRANSITIVE (0xC0), type code 32.
     /// </summary>
-    public static PathAttribute WriteLargeCommunities((uint Global, uint Local1, uint Local2)[] large)
+    public static PathAttribute WriteLargeCommunities(IReadOnlyList<(uint Global, uint Local1, uint Local2)> large)
     {
-        var data = new byte[large.Length * 12];
-        for (var i = 0; i < large.Length; i++)
+        var data = new byte[large.Count * 12];
+        for (var i = 0; i < large.Count; i++)
         {
             var offset = i * 12;
             BinaryPrimitives.WriteUInt32BigEndian(data.AsSpan(offset), large[i].Global);
@@ -219,6 +237,13 @@ public static class AttributeHelper
                 throw new BgpParseException($"Invalid {attributeName} segment type: {segmentType}",
                     BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.MalformedAsPath);
 
+            // RFC 4271 §4.3: a path segment value contains "one or more AS numbers" — a
+            // zero-length segment is malformed (#238).
+            if (segmentLength == 0)
+                throw new BgpParseException(
+                    $"Invalid {attributeName} segment length 0 (a segment carries one or more AS numbers)",
+                    BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.MalformedAsPath);
+
             var segBytes = segmentLength * asSize;
             if (offset + segBytes > data.Length)
                 throw new BgpParseException($"Truncated {attributeName} segment",
@@ -250,6 +275,11 @@ public static class AttributeHelper
         // multiple segments.
         if (ases.Length > byte.MaxValue)
             throw new ArgumentOutOfRangeException(nameof(ases), $"{attributeName} segment length cannot exceed 255 ASNs.");
+
+        // An empty path is encoded as a zero-length attribute — NOT a zero-length segment, which
+        // RFC 4271 §4.3 forbids ("one or more AS numbers") and ReadPathData rejects (#248 review).
+        if (ases.Length == 0)
+            return [];
 
         var data = new byte[2 + ases.Length * asSize];
         data[0] = BgpConstants.AsPath.AsSequence;
