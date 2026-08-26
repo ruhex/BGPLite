@@ -229,6 +229,11 @@ public static class BgpMessageReader
                 BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.MalformedAttributeList);
 
         var flags = data[0];
+        // RFC 4271 §4.3: flag bit 0x08 is reserved and MUST be zero — an attribute with it set
+        // is malformed (Attribute Flags Error, subcode 4) and is rejected via treat-as-withdraw (#272).
+        if ((flags & BgpConstants.Attribute.FlagReserved) != 0)
+            throw new BgpParseException($"Reserved attribute flag bit 0x08 set (flags=0x{flags:X2})",
+                BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.AttributeFlagsError);
         var typeCode = data[1];
         var offset = 2;
 

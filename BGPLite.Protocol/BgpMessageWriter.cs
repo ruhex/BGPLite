@@ -146,11 +146,19 @@ public static class BgpMessageWriter
         foreach (var w in msg.WithdrawnRoutes)
             p += PrefixCodec.Encode(w, buffer[p..]);
 
-        // Path attributes
-        var attrsLen = GetAttributesLength(msg.PathAttributes);
+        // Path attributes. RFC 4271 §5: well-known attributes MUST be sent ordered by type code
+        // (ORIGIN → AS_PATH → NEXT_HOP → MED → LOCAL_PREF — ascending). Producers already emit
+        // ordered (UpdateCodec.BuildUpdateAttributes); an OrderBy here makes the writer guarantee
+        // it for any future producer — LINQ OrderBy is stable, so equal type codes keep their
+        // caller-supplied relative order (#272, epic #6).
+        var attrs = msg.PathAttributes.Count > 1
+            ? [.. msg.PathAttributes.OrderBy(static a => a.TypeCode)]
+            : msg.PathAttributes;
+
+        var attrsLen = GetAttributesLength(attrs);
         BinaryPrimitives.WriteUInt16BigEndian(buffer[p..], (ushort)attrsLen);
         p += 2;
-        foreach (var attr in msg.PathAttributes)
+        foreach (var attr in attrs)
             p += WriteAttribute(attr, buffer[p..]);
 
         // NLRI
