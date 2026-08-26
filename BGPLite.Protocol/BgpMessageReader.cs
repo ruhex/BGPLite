@@ -132,9 +132,11 @@ public static class BgpMessageReader
         // #222: a declared length that runs past the payload is stream-level corruption, not a
         // per-UPDATE content error — surface it as a parse exception (Update Message Error) so the
         // caller can treat-as-withdraw instead of throwing ArgumentOutOfRangeException out of Slice.
+        // RFC 4271 §6.3: "If the Withdrawn Routes Length or Total Attribute Length is too large
+        // ... the Error Subcode MUST be set to Malformed Attribute List."
         if (offset + withdrawnLen > payload.Length)
             throw new BgpParseException($"UPDATE withdrawn-routes length {withdrawnLen} exceeds payload",
-                BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.Unspecific);
+                BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.MalformedAttributeList);
 
         var withdrawn = new List<IpPrefix>();
         if (withdrawnLen > 0)
@@ -160,7 +162,10 @@ public static class BgpMessageReader
             var attrsEnd = offset + attrsLen;
             while (offset < attrsEnd)
             {
-                var (attr, consumed) = ParseAttribute(payload[offset..]);
+                // Slice to the declared end of the attribute section (not payload end): an
+                // attribute TLV whose declared value crosses attrsEnd must be rejected instead
+                // of silently consuming NLRI bytes as attribute data (#245 review finding).
+                var (attr, consumed) = ParseAttribute(payload.Slice(offset, attrsEnd - offset));
                 attributes.Add(attr);
                 offset += consumed;
             }

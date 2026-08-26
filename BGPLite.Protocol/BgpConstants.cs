@@ -54,7 +54,8 @@ public static class BgpConstants
         public const byte AttributeFlagsError = 4;
         public const byte AttributeLengthError = 5;
         public const byte InvalidOriginAttribute = 6;
-        public const byte AsRoutingLoop = 7;
+        // Subcode 7 (AS Routing Loop) is "[Deprecated - see Appendix A]" in RFC 4271 §4.5 and
+        // is intentionally not defined here.
         public const byte InvalidNextHopAttribute = 8;
         public const byte OptionalAttributeError = 9;
         public const byte InvalidNetworkField = 10;

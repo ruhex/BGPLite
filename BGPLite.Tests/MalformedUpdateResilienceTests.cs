@@ -60,7 +60,32 @@ public class MalformedUpdateResilienceTests
         var frame = BuildMessage(BgpMessageType.Update, payload);
 
         var ex = Assert.Throws<BgpParseException>(() => BgpMessageReader.ReadMessage(frame));
+        // RFC 4271 §6.3: an oversized Withdrawn Routes Length (or Total Attribute Length) MUST
+        // carry subcode 1 (Malformed Attribute List) — #245 review finding.
         Assert.Equal(BgpConstants.Error.UpdateMessageError, ex.ErrorCode);
+        Assert.Equal(BgpConstants.SubError.MalformedAttributeList, ex.SubErrorCode);
+    }
+
+    [Fact]
+    public void ParseUpdate_AttributeValueCrossingAttrsEnd_Rejected()
+    {
+        // #245 review finding: an attribute TLV whose declared value length reaches past the
+        // declared end of the attribute section must be rejected — previously the parser sliced
+        // to the payload end, silently consuming NLRI bytes as attribute data.
+        // Layout: withdrawn_len=0, attrs_len=4, attr TLV [flags=0, type=ORIGIN(1), len=5] with
+        // only 1 byte left in the attrs section, followed by 8 NLRI bytes the old code would eat.
+        var payload = new byte[4 + 4 + 8];
+        BinaryPrimitives.WriteUInt16BigEndian(payload.AsSpan(0, 2), 0); // withdrawn len
+        BinaryPrimitives.WriteUInt16BigEndian(payload.AsSpan(2, 2), 4); // attrs len
+        payload[4] = 0x00; // flags
+        payload[5] = 0x01; // type = ORIGIN
+        payload[6] = 0x05; // declared length 5 — crosses attrsEnd (only 1 byte left there)
+        payload[7] = 0xFF;
+        var frame = BuildMessage(BgpMessageType.Update, payload);
+
+        var ex = Assert.Throws<BgpParseException>(() => BgpMessageReader.ReadMessage(frame));
+        Assert.Equal(BgpConstants.Error.UpdateMessageError, ex.ErrorCode);
+        Assert.Equal(BgpConstants.SubError.AttributeLengthError, ex.SubErrorCode);
     }
 
     [Fact]
