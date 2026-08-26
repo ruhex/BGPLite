@@ -46,6 +46,19 @@ public class MalformedUpdateResilienceTests
         Assert.Equal(BgpConstants.SubError.MalformedAttributeList, ex.SubErrorCode);
     }
 
+    [Theory]
+    [InlineData(0x08)]
+    [InlineData(0x18)] // ExtendedLength | reserved
+    public void ParseAttribute_ReservedFlagBitSet_RejectedWithAttributeFlagsError(byte flags)
+    {
+        // RFC 4271 §4.3: bit 0x08 is reserved and MUST be zero (#272, epic #6).
+        var attrBytes = new byte[] { flags, 0x01, 0x01, 0x00 };
+
+        var ex = Assert.Throws<BgpParseException>(() => BgpMessageReader.ReadMessage(BuildUpdateFrame([.. attrBytes])));
+        Assert.Equal(BgpConstants.Error.UpdateMessageError, ex.ErrorCode);
+        Assert.Equal(BgpConstants.SubError.AttributeFlagsError, ex.SubErrorCode);
+    }
+
     [Fact]
     public void ParseUpdate_WithdrawnLengthExceedsPayload_ThrowsBgpParseException()
     {

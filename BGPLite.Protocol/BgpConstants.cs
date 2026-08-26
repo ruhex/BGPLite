@@ -90,6 +90,8 @@ public static class BgpConstants
         public const byte FlagTransitive = 0x40;
         public const byte FlagPartial = 0x20;
         public const byte FlagExtendedLength = 0x10;
+        /// <summary>RFC 4271 §4.3: bit 0x08 is reserved and MUST be zero on the wire.</summary>
+        public const byte FlagReserved = 0x08;
     }
 
     public static class AsPath

@@ -583,6 +583,55 @@ public class BgpMessageTests
     }
 
     [Fact]
+    public void Update_Writer_SortsAttributesByTypeCode_OnWire()
+    {
+        // #272 / epic #6: RFC 4271 §5 — well-known attributes ordered by type code on the wire,
+        // regardless of the order the caller supplied.
+        var update = new BgpUpdateMessage
+        {
+            WithdrawnRoutes = [],
+            PathAttributes =
+            [
+                AttributeHelper.WriteNextHop(0x0A000001),                  // type 3
+                AttributeHelper.WriteOrigin(BgpOrigin.Igp),                // type 1
+                AttributeHelper.WriteAsPath([65001u], fourByteAsn: false), // type 2
+            ],
+            Nlri = [new IpPrefix(0xC0A80000, 24)]
+        };
+
+        var buffer = new byte[512];
+        var written = BgpMessageWriter.WriteMessage(update, buffer);
+        var read = Assert.IsType<BgpUpdateMessage>(BgpMessageReader.ReadMessage(buffer.AsSpan(0, written)));
+
+        var typeCodes = read.PathAttributes.Select(a => a.TypeCode).ToArray();
+        Assert.Equal(
+        [
+            BgpConstants.Attribute.Origin,
+            BgpConstants.Attribute.AsPath,
+            BgpConstants.Attribute.NextHop
+        ], typeCodes);
+    }
+
+    [Theory]
+    [InlineData(5)]
+    [InlineData(7)]
+    public void Communities_NonMultipleOf4Length_Rejected(int length)
+    {
+        // RFC 1997 §3: every community is exactly 4 octets (#272) — mirrors the % 12 rule of
+        // ReadLargeCommunities.
+        var attr = new PathAttribute
+        {
+            Flags = BgpConstants.Attribute.FlagOptional | BgpConstants.Attribute.FlagTransitive,
+            TypeCode = BgpConstants.Attribute.Community,
+            Data = new byte[length]
+        };
+
+        var ex = Assert.Throws<BgpParseException>(() => AttributeHelper.ReadCommunities(attr));
+        Assert.Equal(BgpConstants.Error.UpdateMessageError, ex.ErrorCode);
+        Assert.Equal(BgpConstants.SubError.OptionalAttributeError, ex.SubErrorCode);
+    }
+
+    [Fact]
     public void AsPath_TrailingByteAfterSegment_Throws()
     {
         // #235: a complete 1-ASN segment followed by one stray byte — offset != data.Length.
