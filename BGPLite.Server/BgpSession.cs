@@ -73,6 +73,12 @@ public sealed class BgpSession : IDisposable
     // DoS where a peer spams type-5 and forces a full re-advertise. Initial 0 = never refreshed.
     // Read/written via Interlocked so RefreshRoutesAsync and ReadLoopAsync can't race.
     private long _lastRouteRefreshTicks;
+    // OpenConfirm bound when the negotiated hold time is 0 (#286). RFC 4271 §4.2 disables the Hold
+    // Timer at 0, but §8.2.2 also gives OpenSent a "large value" initial Hold Time with a suggested
+    // 4 minutes — a handshake that never completes is not the same thing as an established session
+    // that deliberately runs without timers, and leaving it unbounded is the resource hole this
+    // constant closes. The Established phase still honors hold time 0 as "no timer".
+    private static readonly TimeSpan OpenConfirmFallbackHoldTime = TimeSpan.FromMinutes(4);
     // Minimum gap between peer-triggered route refreshes. 1s is a reasonable default:
     // long enough to make flood-DoS impractical, short enough that a legitimate peer retry
     // after a lost UPDATE still gets a fresh advertisement promptly.
@@ -307,8 +313,44 @@ public sealed class BgpSession : IDisposable
 
             TransitionTo(BgpFsmState.OpenConfirm);
 
-            // Receive KEEPALIVE
-            var response = await ReceiveMessageAsync(linkedCts.Token);
+            // Receive KEEPALIVE, bounded by the OpenConfirm hold timer (#286). RFC 4271 §8.2.2 runs
+            // the Hold Timer in OpenSent/OpenConfirm as well, with the negotiated value once the
+            // OPEN exchange has happened. Without it this read was unbounded: #115's
+            // OpenTimeoutSeconds only covers the read that RECEIVES the OPEN, and the keepalive/hold
+            // loop does not start until RunEstablishedAsync — so a peer that sent a well-formed OPEN
+            // and then went silent pinned a session, a socket FD and a task indefinitely, walking
+            // straight past the Slowloris defence (it is not slow; it completes the OPEN and stops).
+            var confirmHoldTime = _negotiatedHoldTime > 0
+                ? TimeSpan.FromSeconds(_negotiatedHoldTime)
+                : OpenConfirmFallbackHoldTime;
+
+            BgpMessage response;
+            using (var confirmTimeoutCts = new CancellationTokenSource(confirmHoldTime, _timeProvider))
+            using (var confirmCts = CancellationTokenSource.CreateLinkedTokenSource(linkedCts.Token, confirmTimeoutCts.Token))
+            {
+                try
+                {
+                    response = await ReceiveMessageAsync(confirmCts.Token);
+                }
+                catch (OperationCanceledException) when (!linkedCts.IsCancellationRequested)
+                {
+                    // Only the OpenConfirm hold timer fired (the external/session token is still
+                    // alive). RFC 4271 §8.2.2, OpenConfirm + HoldTimer_Expires: send a NOTIFICATION
+                    // with Hold Timer Expired, release resources, go to Idle. Unlike the OPEN
+                    // timeout above we DO notify — the peer completed the OPEN exchange, so it is
+                    // reading the socket and the diagnostic reaches its operator.
+                    _logger.LogWarning(
+                        "Hold timer expired for {Peer} in OpenConfirm (no KEEPALIVE within {Hold}s) — closing (#286)",
+                        _peer, confirmHoldTime.TotalSeconds);
+                    if (Interlocked.CompareExchange(ref _teardownReason, (int)TeardownReason.HoldTimerExpired, (int)TeardownReason.None) == (int)TeardownReason.None)
+                    {
+                        try { await SendNotificationAsync(BgpConstants.Error.HoldTimerExpired, BgpConstants.SubError.Unspecific); }
+                        catch { /* best-effort — partial write counts, see RFC 4271 §8.1 */ }
+                    }
+                    return;
+                }
+            }
+
             _logger.LogInformation("Received {Type} from {Peer} in OpenConfirm", response.Type, _peer);
 
             switch (response)
