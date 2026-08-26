@@ -874,4 +874,99 @@ public class BgpMessageTests
         Assert.Throws<ArgumentOutOfRangeException>(() => BgpMessageWriter.WriteMessage(update, buffer));
         Assert.All(buffer, b => Assert.Equal(sentinel, b));
     }
+
+    // ---- #291: Extended Length flag must match the length field actually written ----
+
+    /// <summary>
+    /// RFC 4271 §4.3 lets the Extended Length bit select the length-field width independently of the
+    /// value length — it is required above 255 octets, not forbidden below. The writer emitted the
+    /// caller's flags byte verbatim but derived the field width from <c>Data.Length &gt; 255</c>, so an
+    /// attribute arriving with 0x10 already set and a short value produced a TLV whose flags declared
+    /// a two-octet length followed by a one-octet one — a frame BGPLite's own reader rejects (#291).
+    /// </summary>
+    [Theory]
+    [InlineData(0)]
+    [InlineData(4)]
+    [InlineData(255)]
+    [InlineData(256)]
+    [InlineData(1000)]
+    public void WriteAttribute_CallerSetExtendedLengthFlag_RoundTrips(int dataLength)
+    {
+        var attr = new PathAttribute
+        {
+            Flags = (byte)(BgpConstants.Attribute.FlagOptional
+                         | BgpConstants.Attribute.FlagTransitive
+                         | BgpConstants.Attribute.FlagExtendedLength),
+            TypeCode = BgpConstants.Attribute.Community,
+            Data = new byte[dataLength],
+        };
+        var update = new BgpUpdateMessage { PathAttributes = [attr] };
+
+        var buffer = new byte[BgpMessageWriter.GetBufferSize(update)];
+        var written = BgpMessageWriter.WriteMessage(update, buffer);
+
+        // GetBufferSize must agree with what WriteMessage actually emitted.
+        Assert.Equal(buffer.Length, written);
+
+        var read = Assert.IsType<BgpUpdateMessage>(BgpMessageReader.ReadMessage(buffer.AsSpan(0, written)));
+        var roundTripped = Assert.Single(read.PathAttributes);
+        Assert.Equal(BgpConstants.Attribute.Community, roundTripped.TypeCode);
+        Assert.Equal(dataLength, roundTripped.Data.Length);
+        Assert.NotEqual(0, roundTripped.Flags & BgpConstants.Attribute.FlagExtendedLength);
+    }
+
+    /// <summary>
+    /// The complementary direction: without the flag a short attribute still uses the one-octet
+    /// field, and above 255 octets the writer sets the bit itself even when the caller left it clear.
+    /// </summary>
+    [Theory]
+    [InlineData(4, false)]
+    [InlineData(255, false)]
+    [InlineData(256, true)]
+    public void WriteAttribute_WithoutCallerFlag_PicksFieldWidthByLength(int dataLength, bool expectExtendedBit)
+    {
+        var attr = new PathAttribute
+        {
+            Flags = (byte)(BgpConstants.Attribute.FlagOptional | BgpConstants.Attribute.FlagTransitive),
+            TypeCode = BgpConstants.Attribute.Community,
+            Data = new byte[dataLength],
+        };
+        var update = new BgpUpdateMessage { PathAttributes = [attr] };
+
+        var buffer = new byte[BgpMessageWriter.GetBufferSize(update)];
+        var written = BgpMessageWriter.WriteMessage(update, buffer);
+        Assert.Equal(buffer.Length, written);
+
+        var read = Assert.IsType<BgpUpdateMessage>(BgpMessageReader.ReadMessage(buffer.AsSpan(0, written)));
+        var roundTripped = Assert.Single(read.PathAttributes);
+        Assert.Equal(dataLength, roundTripped.Data.Length);
+        Assert.Equal(expectExtendedBit, (roundTripped.Flags & BgpConstants.Attribute.FlagExtendedLength) != 0);
+    }
+
+    /// <summary>
+    /// The exact frame from #291: flags 0xD0 with a 4-octet COMMUNITY. The reader used to read the
+    /// length as 0x0400 = 1024 and throw Attribute Length Error on the writer's own output.
+    /// </summary>
+    [Fact]
+    public void WriteAttribute_ExtendedFlagShortValue_EmitsTwoOctetLengthField()
+    {
+        var attr = new PathAttribute
+        {
+            Flags = 0xD0,
+            TypeCode = BgpConstants.Attribute.Community,
+            Data = [0x00, 0x00, 0x00, 0x01],
+        };
+        var update = new BgpUpdateMessage { PathAttributes = [attr] };
+
+        var buffer = new byte[BgpMessageWriter.GetBufferSize(update)];
+        var written = BgpMessageWriter.WriteMessage(update, buffer);
+
+        // header(19) + withdrawn-len(2) + attrs-len(2) + flags(1) + type(1) + length(2) + value(4)
+        Assert.Equal(31, written);
+        var attrStart = BgpConstants.MessageHeaderSize + 4;
+        Assert.Equal(0xD0, buffer[attrStart]);
+        Assert.Equal(BgpConstants.Attribute.Community, buffer[attrStart + 1]);
+        Assert.Equal(0x00, buffer[attrStart + 2]); // two-octet length, high byte
+        Assert.Equal(0x04, buffer[attrStart + 3]); // two-octet length, low byte
+    }
 }
