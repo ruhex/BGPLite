@@ -574,6 +574,14 @@ public sealed class BgpSession : IDisposable
                 // No NOTIFICATION is sent: RFC 7606 treat-as-withdraw keeps the session up without
                 // notifying (RFC 4271 §6.3 mandates the receiver of a NOTIFICATION tear down, which
                 // would defeat the point of preserving the session).
+                //
+                // Note this branch cannot apply true treat-as-withdraw and does not claim to: the
+                // frame failed to parse, so the NLRI list is not recoverable and there is nothing to
+                // remove (contrast HandleUpdateAsync, where the NLRI IS known — #288). RFC 7606 §3(j)
+                // says that when the NLRI field cannot be parsed, "the 'session reset' approach ...
+                // MUST be followed"; BGPLite deliberately discards and keeps the session instead,
+                // because resetting on a single malformed frame is precisely the remote-DoS lever
+                // #222/#284 closed. Deviation recorded here rather than silently implied.
                 _metrics.UpdateRejected();
                 _logger.LogWarning(
                     "Rejected malformed message from {Peer}: {Error}/{SubError} — {Reason}; session stays up",
@@ -741,8 +749,37 @@ public sealed class BgpSession : IDisposable
             // #270: the inbound attribute pipeline (per-attribute validation, mandatory set,
             // AS4_PATH reconstruction, aggregator consistency — subcodes 3/6/8/9/11) lives in the
             // protocol library. Its BgpNotificationException propagates to the treat-as-withdraw
-            // catch in the dispatch loop exactly as before.
-            var attrs = UpdateCodec.ParseRouteAttributes(update, _remoteFourByteAsn);
+            // catch in the dispatch loop, which logs and counts it.
+            UpdateCodec.RouteAttributes attrs;
+            try
+            {
+                attrs = UpdateCodec.ParseRouteAttributes(update, _remoteFourByteAsn);
+            }
+            catch (BgpNotificationException ex) when (ex.ErrorCode == BgpConstants.Error.UpdateMessageError)
+            {
+                // RFC 7606 §2, "treat-as-withdraw": "the UPDATE message containing the path
+                // attribute in question MUST be treated as though all contained routes had been
+                // withdrawn just as if they had been listed in the WITHDRAWN ROUTES field ... thus
+                // causing them to be removed from the Adj-RIB-In."
+                //
+                // #288: only the "treat" half was implemented. The UPDATE was discarded and the
+                // session kept, but its NLRI stayed installed carrying the attributes of the
+                // PREVIOUS announcement — so a peer whose route changed in a way we cannot parse
+                // kept its stale next hop indefinitely, with no NOTIFICATION (correctly) and no
+                // removal (incorrectly). Nothing on either end could observe it.
+                //
+                // The withdrawn-routes half of this same UPDATE was already applied above, before
+                // the parse; this closes the asymmetry on the NLRI side.
+                foreach (var nlri in update.Nlri)
+                {
+                    _routeTable.Remove(nlri.Address, nlri.Length);
+                    if (_logger.IsEnabled(LogLevel.Debug))
+                        _logger.LogDebug("Route withdrawn (treat-as-withdraw): {Prefix}", nlri);
+                }
+                _metrics.SetRouteCount(_routeTable.Count);
+                throw;
+            }
+
             var filterPeerConfig = GetFilterPeerConfig();
 
             foreach (var nlri in update.Nlri)
