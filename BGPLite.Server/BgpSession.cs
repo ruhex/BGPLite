@@ -1012,6 +1012,19 @@ public sealed class BgpSession : IDisposable
     // Returns true if the message was fully written; false if the send was cancelled (e.g. the
     // shutdown grace elapsed) or the session was disposed mid-send — callers that need accurate
     // teardown logging (NotifyCeaseAsync) branch on this instead of assuming success.
+    //
+    // INVARIANT (#285): every route-carrying send — WithdrawAllAsync, SendUpdateBatchAsync,
+    // SendEndOfRibAsync — and the OPEN/KEEPALIVE sends pass NO token, so `ct` is None for them and
+    // a per-send budget abort can only surface as IOException, which RefreshCycleAsync turns into a
+    // teardown. NotifyCeaseAsync is the ONLY caller that passes a real token (the host's shutdown
+    // grace), and there BgpServer.StopAsync disposes the session immediately afterwards.
+    //
+    // That matters because SocketBgpConnection latches its send-fault on a caller-cancelled write
+    // too: an aborted socket write is not rolled back regardless of which token fired. If a future
+    // caller threads a cancellable token into a route-carrying send, the `return false` below would
+    // let RefreshCycleAsync finish normally on a poisoned transport — the session would stay
+    // Established with the peer mid-frame. Thread a token here only together with a way for that
+    // failure to reach RefreshCycleAsync.
     private async Task<bool> SendMessageAsync(BgpMessage message, CancellationToken ct = default)
     {
         try
