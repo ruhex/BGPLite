@@ -177,6 +177,17 @@ builder.Services.AddSingleton(sp =>
         prefixService,
         communityResolver: sp.GetRequiredService<ICommunityResolver>());
 });
+// #251: route seeding (sources + RIPEstat warm-up) runs as a BACKGROUND task — the listeners
+// start immediately, the local nets.txt fallback seeds in milliseconds, and established sessions
+// get the full set pushed once warm-up completes. Registered before the BGP server so seeding
+// begins before any session can be accepted (hosted services start in registration order).
+builder.Services.AddHostedService(sp => new RouteSeedingService(
+    sp.GetRequiredService<IPrefixService>(),
+    sp.GetRequiredService<IPrefixSourceService>(),
+    routeTable,
+    config,
+    sp.GetRequiredService<ISessionManager>(),
+    sp.GetRequiredService<ILogger<RouteSeedingService>>()));
 builder.Services.AddHostedService(sp => sp.GetRequiredService<BgpServer>());
 builder.Services.AddSingleton<ISessionManager>(sp => sp.GetRequiredService<BgpServer>());
 
@@ -239,36 +250,6 @@ using (var scope = host.Services.CreateScope())
 var logger = host.Services.GetRequiredService<ILogger<Program>>();
 logger.LogInformation("BGPLite starting — ASN={Asn}, RouterId={RouterId}", config.Bgp.Asn, config.Bgp.RouterId);
 
-// Pre-warm prefix cache before accepting BGP connections (RIPE + all configured sources)
-Console.WriteLine("Warming up prefix cache...");
-var prefixService = host.Services.GetRequiredService<IPrefixService>();
-await prefixService.WarmUpAsync();
-Console.WriteLine("Prefix cache ready");
-
-// Seed the route table from configured prefix sources, attaching each source's community.
-var sourceSvc = host.Services.GetRequiredService<IPrefixSourceService>();
-foreach (var (source, prefixes) in await sourceSvc.LoadAllAsync())
-{
-    var communities = string.IsNullOrEmpty(source.Community)
-        ? Array.Empty<uint>()
-        : new[] { CommunityCodec.Parse(source.Community!) };
-
-    foreach (var (prefix, length) in prefixes)
-    {
-        routeTable.AddOrUpdate(new Route
-        {
-            Prefix = prefix,
-            PrefixLength = length,
-            NextHop = nextHop,
-            Communities = communities
-        });
-    }
-
-    Console.WriteLine($"  Source '{source.Name}': {prefixes.Count} prefixes" +
-                      (source.Community is null ? "" : $" community={source.Community}"));
-}
-
-logger.LogInformation("Loaded routes: {RouteCount}", routeTable.Count);
 
 // #104 / #107: resilience pipelines for the http and ripestat named clients. Uses
 // Microsoft.Extensions.Http.Resilience (Polly v8 integrated) — the .NET 8+ standard — instead of
