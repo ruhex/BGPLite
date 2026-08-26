@@ -545,6 +545,43 @@ public class BgpMessageTests
         Assert.Equal(BgpConstants.SubError.MalformedAsPath, ex.SubErrorCode);
     }
 
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(2)]
+    public void Origin_ValidValues_Accepted(byte value)
+    {
+        // RFC 4271 §5.1.2: IGP (0), EGP (1), INCOMPLETE (2) are the only defined origins.
+        var attr = new PathAttribute
+        {
+            Flags = BgpConstants.Attribute.FlagTransitive,
+            TypeCode = BgpConstants.Attribute.Origin,
+            Data = [value]
+        };
+
+        Assert.Equal((BgpOrigin)value, AttributeHelper.ReadOrigin(attr));
+    }
+
+    [Theory]
+    [InlineData(3)]
+    [InlineData(7)]
+    [InlineData(255)]
+    public void Origin_InvalidValues_Rejected(byte value)
+    {
+        // #233: ORIGIN outside {0,1,2} is a malformed UPDATE — Invalid ORIGIN Attribute (§6.3
+        // subcode 6), surfaced through treat-as-withdraw instead of being silently accepted.
+        var attr = new PathAttribute
+        {
+            Flags = BgpConstants.Attribute.FlagTransitive,
+            TypeCode = BgpConstants.Attribute.Origin,
+            Data = [value]
+        };
+
+        var ex = Assert.Throws<BgpParseException>(() => AttributeHelper.ReadOrigin(attr));
+        Assert.Equal(BgpConstants.Error.UpdateMessageError, ex.ErrorCode);
+        Assert.Equal(BgpConstants.SubError.InvalidOriginAttribute, ex.SubErrorCode);
+    }
+
     [Fact]
     public void AsPath_2Byte_WithAsTrans_Roundtrip()
     {
