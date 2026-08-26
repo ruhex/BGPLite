@@ -61,6 +61,71 @@ public class BgpSessionRfc6793Tests
     }
 
     [Fact]
+    public void ParseRouteAttributes_HappyPath_ParsesAndMerges()
+    {
+        // #270: the inbound pipeline through the public protocol API — 2-byte session with
+        // AS4_PATH reconstruction, communities and large communities.
+        var update = new BgpUpdateMessage
+        {
+            PathAttributes =
+            [
+                AttributeHelper.WriteOrigin(BgpOrigin.Igp),
+                AttributeHelper.WriteAsPath([65010u, BgpConstants.AsPath.AsTrans, 65001u], fourByteAsn: false),
+                AttributeHelper.WriteAs4Path([200000u, 65001u]),
+                AttributeHelper.WriteNextHop(0x0A000001),
+                AttributeHelper.WriteCommunities([65000u, 100u]),
+                AttributeHelper.WriteLargeCommunities([(64512u, 1u, 2u)]),
+            ],
+            Nlri = []
+        };
+
+        var attrs = UpdateCodec.ParseRouteAttributes(update, fourByteAsnSession: false);
+
+        Assert.Equal([65010u, 200000u, 65001u], attrs.AsPath); // AS4_PATH trailing reconstruction
+        Assert.Equal(0x0A000001u, attrs.NextHop);
+        Assert.Equal([65000u, 100u], attrs.Communities);
+        Assert.Equal([(64512u, 1u, 2u)], attrs.LargeCommunities);
+    }
+
+    [Fact]
+    public void ParseRouteAttributes_MissingMandatoryAttribute_ThrowsSubcode3()
+    {
+        // ORIGIN + AS_PATH but no NEXT_HOP.
+        var update = new BgpUpdateMessage
+        {
+            PathAttributes =
+            [
+                AttributeHelper.WriteOrigin(BgpOrigin.Igp),
+                AttributeHelper.WriteAsPath([65001u], fourByteAsn: true),
+            ],
+            Nlri = []
+        };
+
+        var ex = Assert.Throws<BgpNotificationException>(() => UpdateCodec.ParseRouteAttributes(update, fourByteAsnSession: true));
+        Assert.Equal(BgpConstants.Error.UpdateMessageError, ex.ErrorCode);
+        Assert.Equal(BgpConstants.SubError.MissingWellKnownAttribute, ex.SubErrorCode);
+    }
+
+    [Fact]
+    public void ParseRouteAttributes_InvalidOriginValue_ThrowsSubcode6()
+    {
+        var update = new BgpUpdateMessage
+        {
+            PathAttributes =
+            [
+                new PathAttribute { Flags = BgpConstants.Attribute.FlagTransitive, TypeCode = BgpConstants.Attribute.Origin, Data = [7] },
+                AttributeHelper.WriteAsPath([65001u], fourByteAsn: true),
+                AttributeHelper.WriteNextHop(0x0A000001),
+            ],
+            Nlri = []
+        };
+
+        var ex = Assert.Throws<BgpNotificationException>(() => UpdateCodec.ParseRouteAttributes(update, fourByteAsnSession: true));
+        Assert.Equal(BgpConstants.Error.UpdateMessageError, ex.ErrorCode);
+        Assert.Equal(BgpConstants.SubError.InvalidOriginAttribute, ex.SubErrorCode);
+    }
+
+    [Fact]
     public void ValidateAggregatorReconstruction_AsTransWithAs4Aggregator_DoesNotThrow()
     {
         UpdateCodec.ValidateAggregatorReconstruction(BgpConstants.AsPath.AsTrans, 200000u);
