@@ -852,7 +852,7 @@ public sealed class BgpSession : IDisposable
         return [.. merged.Values];
     }
 
-    private async Task SendRouteBatchAsync(uint nextHop, List<Route> routes, Dictionary<uint[], List<PathAttribute>> attrCache)
+    private async Task SendRouteBatchAsync(uint nextHop, List<Route> routes, Dictionary<IReadOnlyList<uint>, List<PathAttribute>> attrCache)
     {
         // The COMMUNITY/LARGE_COMMUNITY path attributes apply to EVERY NLRI in an UPDATE, so
         // partition the batch by (community set, large-community set) and emit one UPDATE per

@@ -34,6 +34,15 @@ public sealed class ManagementApi : IHostedService, IDisposable
     private readonly ILogger<ManagementApi> _logger;
     private readonly int _port;
     private readonly string _listenAddress;  // #90: bind address — loopback by default
+
+    /// <summary>
+    /// #238: default in-flight cap for accepted-but-not-yet-completed requests. The #119
+    /// concurrency limiter is opt-in; without this bound a connection burst spawns unbounded
+    /// fire-and-forget tasks, each potentially doing DB work or RIPEstat fetches. Backpressure
+    /// is applied in the accept loop: at capacity it waits for a slot instead of spawning.
+    /// </summary>
+    private const int DefaultInflightCap = 64;
+    private readonly SemaphoreSlim _inflightCap = new(DefaultInflightCap);
     private HttpListener? _listener;
     private Task? _listenTask;
     private readonly CancellationTokenSource _cts = new();
@@ -183,13 +192,38 @@ public sealed class ManagementApi : IHostedService, IDisposable
             {
                 var ctx = await _listener!.GetContextAsync();
                 if (ct.IsCancellationRequested) break;
-                _ = HandleAsync(ctx);
+                // #238: acquire an in-flight slot before spawning so the default posture is
+                // bounded even when the operator has not enabled the #119 concurrency limiter.
+                await _inflightCap.WaitAsync(ct);
+                _ = HandleWithInflightReleaseAsync(ctx);
             }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { break; }
             catch (HttpListenerException) when (ct.IsCancellationRequested) { break; }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Management API error");
             }
+        }
+    }
+
+    /// <summary>
+    /// Wraps <see cref="HandleAsync"/> so the <see cref="_inflightCap"/> slot acquired by the
+    /// accept loop is released on every exit path (HandleAsync has early returns before its own
+    /// try/finally). Faults are logged here rather than escaping into an unobserved task.
+    /// </summary>
+    private async Task HandleWithInflightReleaseAsync(HttpListenerContext ctx)
+    {
+        try
+        {
+            await HandleAsync(ctx);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Management API request handling faulted");
+        }
+        finally
+        {
+            _inflightCap.Release();
         }
     }
 
@@ -580,7 +614,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
         var customPrefixes = new List<(string Prefix, byte Length)>();
 
         _logger.LogInformation("CreatePeer deserialized: AsnLists={Lists}, CustomPrefixes={Prefixes}, CustomAsns={Asns}",
-            string.Join(",", asnLists), string.Join(",", data.CustomPrefixes ?? []),
+            SanitizeForLog(string.Join(",", asnLists)), string.Join(",", data.CustomPrefixes ?? []),
             string.Join(",", data.CustomAsns ?? []));
 
         if (data.CustomPrefixes is not null)
@@ -993,7 +1027,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
     {
         var routes = _routeTable.GetAll();
         var byCommunity = routes
-            .SelectMany(r => r.Communities.Length == 0
+            .SelectMany(r => r.Communities.Count == 0
                 ? [(community: 0u, route: r)]
                 : r.Communities.Select(c => (community: c, route: r)))
             .GroupBy(x => x.community)
@@ -1262,6 +1296,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
         // (unlike ApplyConfig mid-flight where we leave old ones for GC per #137's CodeRabbit fix).
         Volatile.Read(ref _rateLimiter)?.Dispose();
         Volatile.Read(ref _concurrencyLimiter)?.Dispose();
+        _inflightCap.Dispose();
         _listener?.Close();
     }
 
