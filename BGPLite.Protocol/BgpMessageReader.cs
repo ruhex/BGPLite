@@ -66,7 +66,16 @@ public static class BgpMessageReader
         var optParamsLen = payload[9];
 
         var capabilities = new List<BgpCapabilityInfo>();
-        if (optParamsLen > 0 && payload.Length >= 10 + optParamsLen)
+        // #234: the declared optional-parameters length is authoritative (RFC 4271 §4.2) — it
+        // must match the bytes present exactly, including the zero-length case. Previously a
+        // length running past the message silently skipped parsing (dropping capabilities, e.g.
+        // corrupting a Four-Octet-ASN TLV into a 2-byte-AS session), while surplus trailing
+        // bytes were silently ignored.
+        if (payload.Length != 10 + optParamsLen)
+            throw new BgpParseException(
+                $"OPEN optional-parameters length {optParamsLen} does not match message: have {payload.Length - 10} bytes",
+                BgpConstants.Error.OpenMessageError, BgpConstants.SubError.Unspecific);
+        if (optParamsLen > 0)
             ParseOptParameters(payload[10..][..optParamsLen], capabilities);
 
         return new BgpOpenMessage
@@ -79,16 +88,26 @@ public static class BgpMessageReader
         };
     }
 
+    // #234: a TLV whose declared length runs past the buffer is malformed OPEN content
+    // (RFC 4271 §4.2, RFC 5492 §3) and must reject the message — the previous silent `break`
+    // treated truncation as "capability absent", masking wire corruption (e.g. a truncated
+    // Four-Octet-ASN TLV silently downgraded the session to a 2-byte AS).
     private static void ParseOptParameters(ReadOnlySpan<byte> data, List<BgpCapabilityInfo> capabilities)
     {
         var offset = 0;
         while (offset < data.Length)
         {
-            if (offset + 2 > data.Length) break;
+            if (offset + 2 > data.Length)
+                throw new BgpParseException(
+                    $"Truncated OPEN optional-parameter header at offset {offset}: have {data.Length - offset} bytes, need 2",
+                    BgpConstants.Error.OpenMessageError, BgpConstants.SubError.Unspecific);
             var paramType = data[offset++];
             var paramLen = data[offset++];
 
-            if (offset + paramLen > data.Length) break;
+            if (offset + paramLen > data.Length)
+                throw new BgpParseException(
+                    $"Truncated OPEN optional-parameter value: type {paramType} declares {paramLen} bytes at offset {offset}, have {data.Length - offset}",
+                    BgpConstants.Error.OpenMessageError, BgpConstants.SubError.Unspecific);
 
             if (paramType == 2) // Capability
                 ParseCapabilities(data[offset..][..paramLen], capabilities);
@@ -100,12 +119,19 @@ public static class BgpMessageReader
     private static void ParseCapabilities(ReadOnlySpan<byte> data, List<BgpCapabilityInfo> capabilities)
     {
         var offset = 0;
-        while (offset + 2 <= data.Length)
+        while (offset < data.Length)
         {
+            if (offset + 2 > data.Length)
+                throw new BgpParseException(
+                    $"Truncated capability header at offset {offset}: have {data.Length - offset} bytes, need 2",
+                    BgpConstants.Error.OpenMessageError, BgpConstants.SubError.Unspecific);
             var code = data[offset++];
             var len = data[offset++];
 
-            if (offset + len > data.Length) break;
+            if (offset + len > data.Length)
+                throw new BgpParseException(
+                    $"Truncated capability value: code {code} declares {len} bytes at offset {offset}, have {data.Length - offset}",
+                    BgpConstants.Error.OpenMessageError, BgpConstants.SubError.Unspecific);
 
             var capData = new byte[len];
             data.Slice(offset, len).CopyTo(capData);
