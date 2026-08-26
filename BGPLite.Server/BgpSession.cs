@@ -450,7 +450,10 @@ public sealed class BgpSession : IDisposable
             // when the parser did not specify one (e.g. marker/length/type validation in ReadMessage).
             if (Interlocked.CompareExchange(ref _teardownReason, (int)TeardownReason.LocalCease, (int)TeardownReason.None) == (int)TeardownReason.None)
             {
-                try { await SendNotificationAsync(ex.ErrorCode ?? BgpConstants.Error.MessageHeaderError, ex.SubErrorCode ?? BgpConstants.SubError.Unspecific); }
+                // #300: the parser may also supply the NOTIFICATION Data field — RFC 4271 §6.1
+                // requires the erroneous Length for Bad Message Length and the erroneous Message
+                // Type for Bad Message Type, so the peer's operator sees what was wrong.
+                try { await SendNotificationAsync(ex.ErrorCode ?? BgpConstants.Error.MessageHeaderError, ex.SubErrorCode ?? BgpConstants.SubError.Unspecific, ex.NotificationData); }
                 catch { /* best-effort */ }
             }
         }
@@ -1061,7 +1064,13 @@ public sealed class BgpSession : IDisposable
 
             var length = BgpMessageReader.GetMessageLength(headerBuffer);
             if (length is < BgpConstants.MinMessageSize or > BgpConstants.MaxMessageSize)
-                throw new BgpParseException($"Invalid message length: {length}");
+                // RFC 4271 §6.1: Bad Message Length, with the erroneous Length in the Data field.
+                // ErrorCode stays null so this remains a fixed-header failure — ReadLoopAsync must
+                // NOT treat it as withdraw-able, both per §6.1 and because the payload has not been
+                // read yet, so continuing would desync the stream (#223, #300).
+                throw new BgpParseException($"Invalid message length: {length}",
+                    subErrorCode: BgpConstants.SubError.BadMessageLength,
+                    notificationData: [(byte)(length >> 8), (byte)length]);
 
             var payloadSize = length - BgpConstants.MessageHeaderSize;
             var messageBuffer = ArrayPool<byte>.Shared.Rent(length);

@@ -924,6 +924,111 @@ public class BgpMessageTests
     [InlineData(255, false)]
     [InlineData(256, true)]
     public void WriteAttribute_WithoutCallerFlag_PicksFieldWidthByLength(int dataLength, bool expectExtendedBit)
+
+    // ---- #300: RFC 4271 §6.1 header validation + RFC 7607 AS 0 ----
+
+    /// <summary>
+    /// RFC 4271 §6.1: "if the Length field of a KEEPALIVE message is not equal to 19 ... then the
+    /// Error Subcode MUST be set to Bad Message Length." Type 4 previously mapped straight to the
+    /// singleton, so a padded KEEPALIVE was accepted with its trailing bytes silently ignored.
+    /// </summary>
+    [Theory]
+    [InlineData(20)]
+    [InlineData(23)]
+    [InlineData(100)]
+    public void ReadMessage_KeepaliveWithWrongLength_BadMessageLength(int totalLength)
+    {
+        var frame = new byte[totalLength];
+        BgpConstants.Marker.CopyTo(frame.AsSpan(0, BgpConstants.MarkerSize));
+        BinaryPrimitives.WriteUInt16BigEndian(frame.AsSpan(16, 2), (ushort)totalLength);
+        frame[18] = (byte)BgpMessageType.Keepalive;
+
+        var ex = Assert.Throws<BgpParseException>(() => BgpMessageReader.ReadMessage(frame));
+        Assert.Equal(BgpConstants.SubError.BadMessageLength, ex.SubErrorCode);
+        // ErrorCode stays null: this is a fixed-header failure, which BgpSession.ReadLoopAsync must
+        // propagate (tear down) rather than route to treat-as-withdraw.
+        Assert.Null(ex.ErrorCode);
+        Assert.Equal([(byte)(totalLength >> 8), (byte)totalLength], ex.NotificationData);
+    }
+
+    [Fact]
+    public void ReadMessage_KeepaliveWithExactLength_StillParses()
+    {
+        var frame = new byte[BgpConstants.MessageHeaderSize];
+        BgpConstants.Marker.CopyTo(frame.AsSpan(0, BgpConstants.MarkerSize));
+        BinaryPrimitives.WriteUInt16BigEndian(frame.AsSpan(16, 2), BgpConstants.MessageHeaderSize);
+        frame[18] = (byte)BgpMessageType.Keepalive;
+
+        Assert.IsType<BgpKeepaliveMessage>(BgpMessageReader.ReadMessage(frame));
+    }
+
+    /// <summary>
+    /// RFC 4271 §6.1: an out-of-range Length carries Bad Message Length "and the Data field MUST
+    /// contain the erroneous Length field".
+    /// </summary>
+    [Theory]
+    [InlineData(5)]
+    [InlineData(18)]
+    [InlineData(4097)]
+    [InlineData(65535)]
+    public void ReadMessage_LengthOutOfRange_BadMessageLengthWithData(int declaredLength)
+    {
+        var frame = new byte[BgpConstants.MessageHeaderSize];
+        BgpConstants.Marker.CopyTo(frame.AsSpan(0, BgpConstants.MarkerSize));
+        BinaryPrimitives.WriteUInt16BigEndian(frame.AsSpan(16, 2), (ushort)declaredLength);
+        frame[18] = (byte)BgpMessageType.Keepalive;
+
+        var ex = Assert.Throws<BgpParseException>(() => BgpMessageReader.ReadMessage(frame));
+        Assert.Null(ex.ErrorCode);
+        Assert.Equal(BgpConstants.SubError.BadMessageLength, ex.SubErrorCode);
+        Assert.Equal([(byte)(declaredLength >> 8), (byte)declaredLength], ex.NotificationData);
+    }
+
+    /// <summary>
+    /// RFC 4271 §6.1: "the Error Subcode MUST be set to Bad Message Type. The Data field MUST
+    /// contain the erroneous Message Type field."
+    /// </summary>
+    [Theory]
+    [InlineData((byte)0)]
+    [InlineData((byte)6)]
+    [InlineData((byte)255)]
+    public void ReadMessage_UnknownMessageType_BadMessageTypeWithData(byte type)
+    {
+        var frame = new byte[BgpConstants.MessageHeaderSize];
+        BgpConstants.Marker.CopyTo(frame.AsSpan(0, BgpConstants.MarkerSize));
+        BinaryPrimitives.WriteUInt16BigEndian(frame.AsSpan(16, 2), BgpConstants.MessageHeaderSize);
+        frame[18] = type;
+
+        var ex = Assert.Throws<BgpParseException>(() => BgpMessageReader.ReadMessage(frame));
+        Assert.Null(ex.ErrorCode);
+        Assert.Equal(BgpConstants.SubError.BadMessageType, ex.SubErrorCode);
+        Assert.Equal([type], ex.NotificationData);
+    }
+
+    /// <summary>
+    /// RFC 7607 §2: "An UPDATE message that contains the AS number of zero in the AS_PATH ... MUST
+    /// be considered as malformed and be handled by the procedures specified in [RFC7606]" — i.e.
+    /// treat-as-withdraw via Malformed AS_PATH (RFC 7606 §7.2). Covers AS4_PATH through the same
+    /// shared segment reader.
+    /// </summary>
+    [Fact]
+    public void ReadAsPath_ContainingAsZero_MalformedAsPath()
+    {
+        // AS_SEQUENCE of 2 four-octet ASNs: 100, then 0.
+        var attr = new PathAttribute
+        {
+            Flags = BgpConstants.Attribute.FlagTransitive,
+            TypeCode = BgpConstants.Attribute.AsPath,
+            Data = [0x02, 0x02, 0x00, 0x00, 0x00, 0x64, 0x00, 0x00, 0x00, 0x00],
+        };
+
+        var ex = Assert.Throws<BgpParseException>(() => AttributeHelper.ReadAsPath(attr, fourByteAsn: true));
+        Assert.Equal(BgpConstants.Error.UpdateMessageError, ex.ErrorCode);
+        Assert.Equal(BgpConstants.SubError.MalformedAsPath, ex.SubErrorCode);
+    }
+
+    [Fact]
+    public void ReadAs4Path_ContainingAsZero_MalformedAsPath()
     {
         var attr = new PathAttribute
         {
@@ -1009,5 +1114,33 @@ public class BgpMessageTests
         // attribute region — everything past the fixed UPDATE header — is untouched.
         var attrRegion = BgpConstants.MessageHeaderSize + 4;
         Assert.Equal(canary.AsSpan(attrRegion).ToArray(), buffer.AsSpan(attrRegion).ToArray());
+            TypeCode = BgpConstants.Attribute.As4Path,
+            Data = [0x02, 0x01, 0x00, 0x00, 0x00, 0x00],
+        };
+
+        var ex = Assert.Throws<BgpParseException>(() => AttributeHelper.ReadAs4Path(attr));
+        Assert.Equal(BgpConstants.SubError.MalformedAsPath, ex.SubErrorCode);
+    }
+
+    [Fact]
+    public void ReadAsPath_TwoOctetAsZero_MalformedAsPath()
+    {
+        // The 2-octet encoding path must reject AS 0 too.
+        var attr = new PathAttribute
+        {
+            Flags = BgpConstants.Attribute.FlagTransitive,
+            TypeCode = BgpConstants.Attribute.AsPath,
+            Data = [0x02, 0x02, 0x00, 0x64, 0x00, 0x00],
+        };
+
+        var ex = Assert.Throws<BgpParseException>(() => AttributeHelper.ReadAsPath(attr, fourByteAsn: false));
+        Assert.Equal(BgpConstants.SubError.MalformedAsPath, ex.SubErrorCode);
+    }
+
+    [Fact]
+    public void ReadAsPath_WithoutAsZero_StillParses()
+    {
+        var attr = AttributeHelper.WriteAsPath([65001u, 200000u], fourByteAsn: true);
+        Assert.Equal([65001u, 200000u], AttributeHelper.ReadAsPath(attr, fourByteAsn: true));
     }
 }

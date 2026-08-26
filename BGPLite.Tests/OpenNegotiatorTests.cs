@@ -217,4 +217,64 @@ public class OpenNegotiatorTests
         Assert.Equal(0, n.NegotiatedHoldTime);
         Assert.Equal(TimeSpan.Zero, n.KeepAliveInterval);
     }
+
+    /// <summary>
+    /// RFC 7607 §2: "If a BGP speaker receives zero as the peer AS in an OPEN message, it MUST abort
+    /// the connection and send a NOTIFICATION with Error Code 'OPEN Message Error' and subcode
+    /// 'Bad Peer AS'." Both the declared My Autonomous System field and the effective ASN (the
+    /// 4-octet capability value, which takes precedence per RFC 6793 §4.1) are checked. Because
+    /// BGPLite auto-registers unknown peers, an AS-0 peer previously landed in the PeerStore as a
+    /// real peer (#300).
+    /// </summary>
+    [Fact]
+    public void Validate_MyAsZero_BadPeerAs()
+    {
+        var open = new BgpOpenMessage { Version = 4, Asn = 0, HoldTime = 180, RouterId = 0x0A000002 };
+
+        var ex = Assert.Throws<BgpNotificationException>(
+            () => OpenNegotiator.Validate(open, expectedRemoteAsn: null, localRouterId: 0x0A0A0A0A, localHoldTime: 180));
+        Assert.Equal(BgpConstants.Error.OpenMessageError, ex.ErrorCode);
+        Assert.Equal(BgpConstants.SubError.BadPeerAs, ex.SubErrorCode);
+    }
+
+    [Fact]
+    public void Validate_FourOctetCapabilityCarryingZero_BadPeerAs()
+    {
+        var open = new BgpOpenMessage
+        {
+            Version = 4,
+            Asn = 0,
+            HoldTime = 180,
+            RouterId = 0x0A000002,
+            Capabilities = [BgpCapabilityInfo.FourOctetAsn(0)],
+        };
+
+        var ex = Assert.Throws<BgpNotificationException>(
+            () => OpenNegotiator.Validate(open, expectedRemoteAsn: null, localRouterId: 0x0A0A0A0A, localHoldTime: 180));
+        Assert.Equal(BgpConstants.SubError.BadPeerAs, ex.SubErrorCode);
+    }
+
+    /// <summary>
+    /// The My-AS field disagreeing with the 4-octet capability is NOT an error: RFC 6793 §4.1 says
+    /// the capability value is used "in lieu of" the My Autonomous System field and mandates no
+    /// error handling for a disagreement. Guards against re-adding a check that would reject peers
+    /// the RFC says to accept.
+    /// </summary>
+    [Fact]
+    public void Validate_MyAsDisagreesWithCapability_UsesCapabilityValue()
+    {
+        var open = new BgpOpenMessage
+        {
+            Version = 4,
+            Asn = 65000, // not AS_TRANS, though the capability carries a 4-octet AS
+            HoldTime = 180,
+            RouterId = 0x0A000002,
+            Capabilities = [BgpCapabilityInfo.FourOctetAsn(131072)],
+        };
+
+        var negotiation = OpenNegotiator.Validate(open, expectedRemoteAsn: null, localRouterId: 0x0A0A0A0A, localHoldTime: 180);
+
+        Assert.Equal(131072u, negotiation.RemoteAsn);
+        Assert.True(negotiation.RemoteFourByteAsn);
+    }
 }

@@ -40,6 +40,12 @@ public static class BgpConstants
         // in the former and Missing Well-known Attribute in the latter (RFC 4271 §6.2/§6.3).
         // The dual naming below (BadBgpIdentifier/MissingWellKnownAttribute both = 3) is intentional.
 
+        // Message Header Error subcodes (RFC 4271 §6.1) — used with ErrorCode = MessageHeaderError.
+        // ConnectionNotSynchronized (1) is intentionally absent: the codec surfaces a bad marker as
+        // a generic header failure and never reaches a subcode for it.
+        public const byte BadMessageLength = 2;
+        public const byte BadMessageType = 3;
+
         // Open Message Error subcodes (RFC 4271 §6.2) — used with ErrorCode = OpenMessageError
         public const byte UnsupportedVersion = 1;
         public const byte BadPeerAs = 2;
