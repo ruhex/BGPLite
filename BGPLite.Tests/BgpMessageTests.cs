@@ -630,8 +630,10 @@ public class BgpMessageTests
         var written = BgpMessageWriter.WriteMessage(update, buffer);
         var read = Assert.IsType<BgpUpdateMessage>(BgpMessageReader.ReadMessage(buffer.AsSpan(0, written)));
 
-        Assert.Equal([0x11111111u], AttributeHelper.ReadCommunities(read.PathAttributes[1]));
-        Assert.Equal([0x22222222u], AttributeHelper.ReadCommunities(read.PathAttributes[2]));
+        // Stable: of the two COMMUNITY attributes (equal type code), `second` was supplied
+        // before `first`, so it must remain first among the equals.
+        Assert.Equal([0x22222222u], AttributeHelper.ReadCommunities(read.PathAttributes[1]));
+        Assert.Equal([0x11111111u], AttributeHelper.ReadCommunities(read.PathAttributes[2]));
     }
 
     [Theory]
