@@ -15,6 +15,14 @@ namespace BGPLite.Server;
 /// budget itself with a linked CTS: when the budget fires the pending write is aborted and
 /// surfaced as <see cref="IOException"/> (dead connection), regardless of the caller's token.
 /// </para>
+/// <para>
+/// #285: aborting a write does NOT roll it back. A cancelled socket write delivers whatever the
+/// kernel already accepted and abandons the rest, so the peer's parse position is left inside a
+/// truncated BGP frame. Every write after that point is consumed by the peer as payload of that
+/// frame — permanent stream desync. The connection therefore latches a fault on the first aborted
+/// write and fails every subsequent <see cref="WriteAsync"/> fast, so no send path can append a
+/// well-formed frame behind a truncated one.
+/// </para>
 /// </summary>
 internal sealed class SocketBgpConnection : IBgpConnection
 {
@@ -26,6 +34,9 @@ internal sealed class SocketBgpConnection : IBgpConnection
     private readonly Socket _socket;
     private readonly NetworkStream _stream;
     private int _disposed; // 0 = not disposed, 1 = disposed. Atomic CAS (matches BgpSession.Dispose).
+    // 0 = the outbound stream is intact, 1 = a write was aborted and may have been partially
+    // delivered, so the frame boundary is lost and nothing more may be written (#285).
+    private int _sendFaulted;
 
     public SocketBgpConnection(Socket socket) : this(socket, DefaultSendTimeoutMs) { }
 
@@ -53,6 +64,14 @@ internal sealed class SocketBgpConnection : IBgpConnection
 
     public async ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken cancellationToken)
     {
+        // #285: a previous write was aborted after the kernel had already accepted part of it, so
+        // the peer is mid-frame. Appending another frame does not recover the stream — the peer
+        // reads it as the truncated frame's payload. Fail fast so every send path (refresh,
+        // keepalive, the best-effort Cease in RunAsync's catch/finally) sees a dead connection
+        // instead of quietly making the corruption worse.
+        if (Volatile.Read(ref _sendFaulted) == 1)
+            throw new IOException("Connection is unusable — a previous send was aborted mid-frame");
+
         // #252: Socket.SendTimeout does not bound async writes — enforce the budget here so a
         // non-reading peer can never pin the send lock for minutes. The linked CTS also honors the
         // caller's token; distinguishing "budget fired" from "caller cancelled" keeps the benign
@@ -65,13 +84,18 @@ internal sealed class SocketBgpConnection : IBgpConnection
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
-            throw; // caller-initiated cancel — the send paths treat this as a normal cancelled send
+            // Caller-initiated cancel — the send paths treat this as a normal cancelled send, so
+            // the exception type is preserved. The stream is poisoned all the same: which token
+            // fired does not change that the socket write may have been partially delivered (#285).
+            Volatile.Write(ref _sendFaulted, 1);
+            throw;
         }
         catch (OperationCanceledException)
         {
             // The per-send budget fired: the peer is not reading. Aborting an in-flight socket
             // write leaves the connection unusable — surface it as the dead-connection exception
             // every send path already handles (same as a reset), not as a benign cancellation.
+            Volatile.Write(ref _sendFaulted, 1);
             throw new IOException($"Send timed out after {_sendTimeoutMs} ms — peer is not reading (TCP zero window)");
         }
     }

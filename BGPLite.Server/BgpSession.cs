@@ -156,6 +156,19 @@ public sealed class BgpSession : IDisposable
             await SendAllRoutesAsync();
         }
         catch (OperationCanceledException) { /* shutdown / caller cancel — best effort */ }
+        catch (IOException ex)
+        {
+            // #285: the outbound byte stream is in an unknown state. A send either failed outright
+            // or was aborted by the per-send budget AFTER the kernel had accepted part of the frame,
+            // leaving the peer mid-frame. Swallowing this (the previous generic catch) kept the
+            // session Established on a stream where every later frame is read by the peer as the
+            // truncated frame's payload — silent route corruption with both sides reporting a
+            // healthy session. Tear down instead, matching HoldTimerLoopAsync's handling of a failed
+            // KEEPALIVE send. No NOTIFICATION is attempted: the peer is either not reading or the
+            // stream is already corrupt, so it would only block for another budget window.
+            _logger.LogWarning(ex, "Route refresh to {Peer} failed on the wire — tearing down the session", _peer);
+            FaultSession();
+        }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Failed to refresh routes for {Peer}", _peer);
@@ -166,6 +179,24 @@ public sealed class BgpSession : IDisposable
             catch (ObjectDisposedException) { /* session disposed — fine */ }
             catch (SemaphoreFullException) { /* double-release guard, shouldn't happen */ }
         }
+    }
+
+    /// <summary>
+    /// Tears the session down after an unrecoverable outbound failure (#285). Latches
+    /// <see cref="TeardownReason.LocalCease"/> so the <c>RunAsync</c> finally-block emits no
+    /// NOTIFICATION — RFC 4271 §8.1 allows exactly one per teardown, and here the right number is
+    /// zero because the wire is not usable — then cancels the session CTS so the read/keepalive
+    /// loops unwind promptly instead of waiting on the peer or the hold timer. Unlike
+    /// <see cref="HoldTimerLoopAsync"/>, which can simply return and let
+    /// <see cref="RunEstablishedAsync"/>'s <c>Task.WhenAny</c> cancel, a refresh runs off the
+    /// session's own loops (background ROUTE_REFRESH task or the management API), so the cancel
+    /// must be explicit.
+    /// </summary>
+    private void FaultSession()
+    {
+        Interlocked.CompareExchange(ref _teardownReason, (int)TeardownReason.LocalCease, (int)TeardownReason.None);
+        try { _cts.Cancel(); }
+        catch (ObjectDisposedException) { /* session already disposed — nothing to unwind */ }
     }
 
     private async Task WithdrawAllAsync()
