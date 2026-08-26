@@ -23,6 +23,9 @@ public class RouteRefreshHoldTimerTests
     {
         public volatile bool Armed;
         public readonly ManualResetEventSlim Release = new(false);
+        /// <summary>Completes when a gated Load has actually ENTERED the block — the test waits
+        /// for it before measuring liveness, so a delayed ROUTE_REFRESH cannot pass vacuously.</summary>
+        public readonly TaskCompletionSource Entered = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
         public string CreatePeer(string ip, uint asn, string? description) => "peer";
         public void UpsertPeer(string ip, uint asn) { }
@@ -43,7 +46,10 @@ public class RouteRefreshHoldTimerTests
         public PeerRoutingView? LoadPeerRoutingView(string ip, uint asn)
         {
             if (Armed)
+            {
+                Entered.TrySetResult();
                 Release.Wait(); // the refresh hangs here, mid-flight
+            }
             return new PeerRoutingView("peer", [], [], [], []);
         }
     }
@@ -152,6 +158,11 @@ public class RouteRefreshHoldTimerTests
         var rrBuf = new byte[BgpMessageWriter.GetBufferSize(rr)];
         var rrLen = BgpMessageWriter.WriteMessage(rr, rrBuf);
         client.Send(rrBuf, 0, rrLen, SocketFlags.None);
+
+        // The refresh must actually reach the gate before liveness is measured (CodeRabbit #281):
+        // if ROUTE_REFRESH processing were delayed, the gate would never engage and the KEEPALIVE
+        // assertions would pass without exercising the blocked-refresh path.
+        await store.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
 
         // Keep the session's hold timer fed with KEEPALIVEs while the refresh hangs, and collect
         // everything the session sends back. Hold time is 3s — surviving to 5.5s without a Hold
