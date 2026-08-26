@@ -89,16 +89,54 @@ public sealed class BgpSession : IDisposable
 
     public async Task RefreshRoutesAsync(CancellationToken ct = default)
     {
+        // #254: default(CancellationToken) is CancellationToken.None — NOT "the session's own _cts"
+        // the previous comment claimed. Normalize so every token-less caller (management API
+        // RefreshPeerAsync / RefreshAllEstablishedAsync, onSourceChanged) has its refresh cancelled
+        // at session teardown instead of outliving the session.
+        if (ct == default)
+        {
+            CancellationToken sessionToken;
+            try { sessionToken = _cts.Token; }
+            catch (ObjectDisposedException) { return; } // session disposed — nothing to refresh
+            ct = sessionToken;
+        }
+
         if (!IsEstablished) return;
 
+        // #254 debounce: N stacked triggers must not produce N sequential full withdraw+re-announce
+        // dumps on the wire. One cycle runs; requests arriving mid-cycle set _refreshPending and
+        // return immediately — the runner's do/while coalesces them into a single extra lap, so the
+        // worst case is one in-flight cycle + one pending lap regardless of trigger count.
+        if (Interlocked.CompareExchange(ref _refreshRunning, 1, 0) != 0)
+        {
+            _refreshPending = true;
+            return;
+        }
+
+        try
+        {
+            do
+            {
+                _refreshPending = false;
+                await RefreshCycleAsync(ct);
+            } while (_refreshPending && !ct.IsCancellationRequested);
+        }
+        finally
+        {
+            Interlocked.Exchange(ref _refreshRunning, 0);
+        }
+    }
+
+    private async Task RefreshCycleAsync(CancellationToken ct)
+    {
         // _sendLock is acquired inside SendMessageAsync, so each individual UPDATE is atomic on the
         // wire. _advertisedPrefixesLock serializes the (withdraw + re-announce) pair against the
         // initial-send, which mutates the same list concurrently. We do NOT hold _sendLock across
         // the whole pair: a HoldTimer expiry or peer NOTIFICATION that arrives between them would
         // otherwise deadlock waiting for the refresh to finish before it can send Cease/HoldTimerExpired.
-        // The token (default: the session's own _cts) bounds how long a management-API caller
-        // (RefreshPeerAsync) blocks here — a prior send stuck on a slow peer previously pinned the
-        // HTTP request thread indefinitely (#160).
+        // The token (normalized to the session's own _cts by RefreshRoutesAsync) bounds how long a
+        // management-API caller (RefreshPeerAsync) blocks here — a prior send stuck on a slow peer
+        // previously pinned the HTTP request thread indefinitely (#160).
         try
         {
             await _advertisedPrefixesLock.WaitAsync(ct);
@@ -415,6 +453,11 @@ public sealed class BgpSession : IDisposable
     // Guards mutations of _advertisedPrefixes so initial-send and RefreshRoutesAsync can't interleave.
     // SemaphoreSlim instead of lock{} so it composes correctly with await.
     private readonly SemaphoreSlim _advertisedPrefixesLock = new(1, 1);
+
+    // #254 refresh debounce: 0 = idle, 1 = a refresh cycle is executing; late requesters set
+    // _refreshPending and the running cycle performs one coalesced extra lap for them.
+    private int _refreshRunning;
+    private volatile bool _refreshPending;
 
     private async Task RunEstablishedAsync(CancellationToken cancellationToken)
     {
