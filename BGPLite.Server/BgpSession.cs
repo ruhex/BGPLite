@@ -654,90 +654,33 @@ public sealed class BgpSession : IDisposable
         // Process announcements
         if (update.Nlri.Count > 0)
         {
-            try
+            // #270: the inbound attribute pipeline (per-attribute validation, mandatory set,
+            // AS4_PATH reconstruction, aggregator consistency — subcodes 3/6/8/9/11) lives in the
+            // protocol library. Its BgpNotificationException propagates to the treat-as-withdraw
+            // catch in the dispatch loop exactly as before.
+            var attrs = UpdateCodec.ParseRouteAttributes(update, _remoteFourByteAsn);
+            var filterPeerConfig = GetFilterPeerConfig();
+
+            foreach (var nlri in update.Nlri)
             {
-                var originSeen = false;
-                var asPathSeen = false;
-                var nextHopSeen = false;
-                uint nextHop = 0;
-                uint[] asPath = [];
-                uint[] communities = [];
-                (uint Global, uint Local1, uint Local2)[] largeCommunities = [];
-                uint[] as4Path = [];
-                uint? aggregatorAsn = null;
-                uint? as4AggregatorAsn = null;
-                var filterPeerConfig = GetFilterPeerConfig();
-
-                foreach (var attr in update.PathAttributes)
+                var route = new Route
                 {
-                    switch (attr.TypeCode)
-                    {
-                        case BgpConstants.Attribute.Origin:
-                            if (attr.Data.Length < 1)
-                                throw new BgpNotificationException(BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.InvalidOriginAttribute, "Malformed ORIGIN attribute");
-                            AttributeHelper.ReadOrigin(attr);
-                            originSeen = true;
-                            break;
-                        case BgpConstants.Attribute.AsPath:
-                            asPath = AttributeHelper.ReadAsPath(attr, _remoteFourByteAsn);
-                            asPathSeen = true;
-                            break;
-                        case BgpConstants.Attribute.As4Path when !_remoteFourByteAsn:
-                            as4Path = AttributeHelper.ReadAs4Path(attr);
-                            break;
-                        case BgpConstants.Attribute.NextHop:
-                            if (attr.Data.Length < 4)
-                                throw new BgpNotificationException(BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.InvalidNextHopAttribute, "Malformed NEXT_HOP attribute");
-                            nextHop = AttributeHelper.ReadNextHop(attr);
-                            nextHopSeen = true;
-                            break;
-                        case BgpConstants.Attribute.Community:
-                            communities = AttributeHelper.ReadCommunities(attr);
-                            break;
-                        case BgpConstants.Attribute.LargeCommunity:
-                            largeCommunities = AttributeHelper.ReadLargeCommunities(attr);
-                            break;
-                        case BgpConstants.Attribute.Aggregator:
-                            aggregatorAsn = AttributeHelper.ReadAggregatorAsn(attr, _remoteFourByteAsn);
-                            break;
-                        case BgpConstants.Attribute.As4Aggregator when !_remoteFourByteAsn:
-                            as4AggregatorAsn = AttributeHelper.ReadAs4AggregatorAsn(attr);
-                            break;
-                    }
-                }
+                    Prefix = nlri.Address,
+                    PrefixLength = nlri.Length,
+                    NextHop = attrs.NextHop,
+                    AsPath = attrs.AsPath,
+                    Communities = attrs.Communities,
+                    LargeCommunities = attrs.LargeCommunities
+                };
 
-                UpdateCodec.ValidateMandatoryAttributes(originSeen, asPathSeen, nextHopSeen);
-                asPath = UpdateCodec.MergeAsPathWithAs4Path(asPath, as4Path);
-                UpdateCodec.ValidateAggregatorReconstruction(aggregatorAsn, as4AggregatorAsn);
-
-                foreach (var nlri in update.Nlri)
+                if (_routeFilter.AcceptIncoming(route, filterPeerConfig))
                 {
-                    var route = new Route
-                    {
-                        Prefix = nlri.Address,
-                        PrefixLength = nlri.Length,
-                        NextHop = nextHop,
-                        AsPath = asPath,
-                        Communities = communities,
-                        LargeCommunities = largeCommunities
-                    };
-
-                    if (_routeFilter.AcceptIncoming(route, filterPeerConfig))
-                    {
-                        _routeTable.AddOrUpdate(route);
-                        // #85: guard the UintToIPAddress allocation behind IsEnabled — LogDebug
-                        // evaluates the arg eagerly even when Debug is filtered out.
-                        if (_logger.IsEnabled(LogLevel.Debug))
-                            _logger.LogDebug("Route added: {Prefix} via {NextHop}", nlri, BgpConstants.UintToIPAddress(nextHop));
-                    }
+                    _routeTable.AddOrUpdate(route);
+                    // #85: guard the UintToIPAddress allocation behind IsEnabled — LogDebug
+                    // evaluates the arg eagerly even when Debug is filtered out.
+                    if (_logger.IsEnabled(LogLevel.Debug))
+                        _logger.LogDebug("Route added: {Prefix} via {NextHop}", nlri, BgpConstants.UintToIPAddress(attrs.NextHop));
                 }
-            }
-            catch (BgpParseException ex)
-            {
-                // #235: preserve the RFC 4271 §6.3 subcode the codec recorded (e.g. Malformed AS_PATH
-                // from ReadAsPath, Optional Attribute Error from AGGREGATOR/Large Communities) instead
-                // of flattening it to Unspecific.
-                throw new BgpNotificationException(BgpConstants.Error.UpdateMessageError, ex.SubErrorCode ?? BgpConstants.SubError.Unspecific, ex.Message);
             }
         }
 

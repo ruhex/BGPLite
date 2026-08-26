@@ -183,6 +183,95 @@ public static class UpdateCodec
     /// 4-octet-ASN capability has a wrong length. Scans the OPEN's capabilities for the first
     /// malformed FourOctetAsn entry and returns <c>[code, length, ...data]</c>; empty if none found.
     /// </summary>
+    /// <summary>
+    /// The parsed inbound attribute set of an announcing UPDATE — everything the routing layer
+    /// needs to build a route (#270). Produced by <see cref="ParseRouteAttributes"/>.
+    /// </summary>
+    public sealed record RouteAttributes(
+        uint[] AsPath,
+        uint NextHop,
+        uint[] Communities,
+        (uint Global, uint Local1, uint Local2)[] LargeCommunities);
+
+    /// <summary>
+    /// Parses and validates the path attributes of an announcing UPDATE per RFC 4271 §6.3 /
+    /// RFC 6793 / RFC 8092: per-attribute length and value checks (ORIGIN ∈ {0,1,2}, NEXT_HOP
+    /// 4-octet, COMMUNITY % 4, Large Communities % 12, AS_PATH/AS4_PATH segment rules), the
+    /// mandatory well-known set (ORIGIN/AS_PATH/NEXT_HOP), AS4_PATH trailing-sequence
+    /// reconstruction, and AGGREGATOR/AS4_AGGREGATOR consistency. On a 4-octet session
+    /// (<paramref name="fourByteAsnSession"/>) AS4_PATH/AS4_AGGREGATOR are skipped per RFC 6793 §4.1.
+    /// Throws <see cref="BgpNotificationException"/> carrying the RFC subcode (3/6/8/9/11) so the
+    /// caller can apply treat-as-withdraw (RFC 7606) — the exact pipeline previously inlined in
+    /// BgpSession.HandleUpdateAsync, moved verbatim (#270).
+    /// </summary>
+    public static RouteAttributes ParseRouteAttributes(BgpUpdateMessage update, bool fourByteAsnSession)
+    {
+        try
+        {
+            var originSeen = false;
+            var asPathSeen = false;
+            var nextHopSeen = false;
+            uint nextHop = 0;
+            uint[] asPath = [];
+            uint[] communities = [];
+            (uint Global, uint Local1, uint Local2)[] largeCommunities = [];
+            uint[] as4Path = [];
+            uint? aggregatorAsn = null;
+            uint? as4AggregatorAsn = null;
+
+            foreach (var attr in update.PathAttributes)
+            {
+                switch (attr.TypeCode)
+                {
+                    case BgpConstants.Attribute.Origin:
+                        if (attr.Data.Length < 1)
+                            throw new BgpNotificationException(BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.InvalidOriginAttribute, "Malformed ORIGIN attribute");
+                        AttributeHelper.ReadOrigin(attr);
+                        originSeen = true;
+                        break;
+                    case BgpConstants.Attribute.AsPath:
+                        asPath = AttributeHelper.ReadAsPath(attr, fourByteAsnSession);
+                        asPathSeen = true;
+                        break;
+                    case BgpConstants.Attribute.As4Path when !fourByteAsnSession:
+                        as4Path = AttributeHelper.ReadAs4Path(attr);
+                        break;
+                    case BgpConstants.Attribute.NextHop:
+                        if (attr.Data.Length < 4)
+                            throw new BgpNotificationException(BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.InvalidNextHopAttribute, "Malformed NEXT_HOP attribute");
+                        nextHop = AttributeHelper.ReadNextHop(attr);
+                        nextHopSeen = true;
+                        break;
+                    case BgpConstants.Attribute.Community:
+                        communities = AttributeHelper.ReadCommunities(attr);
+                        break;
+                    case BgpConstants.Attribute.LargeCommunity:
+                        largeCommunities = AttributeHelper.ReadLargeCommunities(attr);
+                        break;
+                    case BgpConstants.Attribute.Aggregator:
+                        aggregatorAsn = AttributeHelper.ReadAggregatorAsn(attr, fourByteAsnSession);
+                        break;
+                    case BgpConstants.Attribute.As4Aggregator when !fourByteAsnSession:
+                        as4AggregatorAsn = AttributeHelper.ReadAs4AggregatorAsn(attr);
+                        break;
+                }
+            }
+
+            ValidateMandatoryAttributes(originSeen, asPathSeen, nextHopSeen);
+            asPath = MergeAsPathWithAs4Path(asPath, as4Path);
+            ValidateAggregatorReconstruction(aggregatorAsn, as4AggregatorAsn);
+
+            return new RouteAttributes(asPath, nextHop, communities, largeCommunities);
+        }
+        catch (BgpParseException ex)
+        {
+            // #235: preserve the RFC 4271 §6.3 subcode the codec recorded (e.g. Malformed AS_PATH
+            // from ReadAsPath, Optional Attribute Error from AGGREGATOR/Large Communities) instead
+            // of flattening it to Unspecific.
+            throw new BgpNotificationException(BgpConstants.Error.UpdateMessageError, ex.SubErrorCode ?? BgpConstants.SubError.Unspecific, ex.Message);
+        }
+    }
+
     public static byte[] GetMalformedFourOctetAsnCapabilityData(BgpOpenMessage open)
     {
         foreach (var cap in open.Capabilities)
