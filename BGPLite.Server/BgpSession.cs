@@ -653,8 +653,10 @@ public sealed class BgpSession : IDisposable
                     // withdraw + re-announce (plus network fetches on a cold TTL cache) — awaiting
                     // it inline starved this loop: the peer's KEEPALIVEs sat unread in the socket
                     // buffer and a completely live session was killed by a false Hold Timer
-                    // Expired. Fire-and-forget: stacking is bounded by the CAS rate-limit above,
-                    // faults are logged instead of tearing down the read loop.
+                    // Expired. Fire-and-forget: stacking is bounded by the CAS rate-limit above
+                    // and coalesced by the RefreshRoutesAsync debounce (one in-flight cycle + one
+                    // pending lap — a refresh slower than the rate-limit window does NOT queue
+                    // further full dumps); faults log instead of tearing down the read loop.
                     _ = Task.Run(() => RefreshInBackgroundAsync(cancellationToken), CancellationToken.None);
                     break;
             }
