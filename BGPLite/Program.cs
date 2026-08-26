@@ -153,14 +153,18 @@ builder.Services.AddSingleton<IPrefixService>(sp =>
     return new PrefixService(config, ripe, sources, sp.GetRequiredService<HttpPrefixProvider>(), logger: sp.GetRequiredService<ILogger<PrefixService>>());
 });
 
-BgpServer? bgpServer = null;
-
-builder.Services.AddHostedService(sp =>
+// BgpServer is registered as a singleton FIRST (same pattern as ManagementApi below): the old
+// wiring created it inside the AddHostedService factory while writing a captured local that the
+// ISessionManager factory read back with `!` — resolution-order-dependent and NRE-prone, since
+// ISessionManager consumers (PrefixAutoRefreshService, PrefixSourceService) can resolve it
+// before the hosted service starts. Now the container owns exactly one instance and every
+// consumer resolves it regardless of order (#231).
+builder.Services.AddSingleton(sp =>
 {
     var store = sp.GetRequiredService<PeerStore>();
     var prefixService = sp.GetRequiredService<IPrefixService>();
 
-    bgpServer = new BgpServer(
+    return new BgpServer(
         sp.GetRequiredService<AppConfig>(),
         sp.GetRequiredService<RouteTable>(),
         sp.GetRequiredService<IRouteFilter>(),
@@ -171,9 +175,9 @@ builder.Services.AddHostedService(sp =>
         store,
         prefixService,
         communityResolver: sp.GetRequiredService<ICommunityResolver>());
-    return bgpServer;
 });
-builder.Services.AddSingleton<ISessionManager>(sp => bgpServer!);
+builder.Services.AddHostedService(sp => sp.GetRequiredService<BgpServer>());
+builder.Services.AddSingleton<ISessionManager>(sp => sp.GetRequiredService<BgpServer>());
 
 // ManagementApi is registered as a singleton FIRST so the ConfigReloader below can resolve the SAME
 // running instance (AddHostedService<T> creates a separate instance owned by the host, which the
