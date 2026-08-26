@@ -948,7 +948,8 @@ public class BgpMessageTests
         // ErrorCode stays null: this is a fixed-header failure, which BgpSession.ReadLoopAsync must
         // propagate (tear down) rather than route to treat-as-withdraw.
         Assert.Null(ex.ErrorCode);
-        Assert.Equal([(byte)(totalLength >> 8), (byte)totalLength], ex.NotificationData);
+        Assert.NotNull(ex.NotificationData);
+        Assert.Equal([(byte)(totalLength >> 8), (byte)totalLength], ex.NotificationData!);
     }
 
     [Fact]
@@ -981,7 +982,8 @@ public class BgpMessageTests
         var ex = Assert.Throws<BgpParseException>(() => BgpMessageReader.ReadMessage(frame));
         Assert.Null(ex.ErrorCode);
         Assert.Equal(BgpConstants.SubError.BadMessageLength, ex.SubErrorCode);
-        Assert.Equal([(byte)(declaredLength >> 8), (byte)declaredLength], ex.NotificationData);
+        Assert.NotNull(ex.NotificationData);
+        Assert.Equal([(byte)(declaredLength >> 8), (byte)declaredLength], ex.NotificationData!);
     }
 
     /// <summary>
@@ -1002,7 +1004,8 @@ public class BgpMessageTests
         var ex = Assert.Throws<BgpParseException>(() => BgpMessageReader.ReadMessage(frame));
         Assert.Null(ex.ErrorCode);
         Assert.Equal(BgpConstants.SubError.BadMessageType, ex.SubErrorCode);
-        Assert.Equal([type], ex.NotificationData);
+        Assert.NotNull(ex.NotificationData);
+        Assert.Equal([type], ex.NotificationData!);
     }
 
     /// <summary>

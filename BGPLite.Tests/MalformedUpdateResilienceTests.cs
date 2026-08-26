@@ -457,7 +457,8 @@ public class MalformedUpdateResilienceTests
         // MUST be set to Bad Message Length ... The Data field MUST contain the erroneous Length
         // field." Previously this emitted 1/0 with no Data, giving the peer's operator nothing.
         Assert.Equal(BgpConstants.SubError.BadMessageLength, notif.SubErrorCode);
-        Assert.Equal([0x00, 0x05], notif.Data); // the declared length that was rejected
+        Assert.NotNull(notif.Data);
+        Assert.Equal([0x00, 0x05], notif.Data!); // the declared length that was rejected
 
         try { await runTask.WaitAsync(TimeSpan.FromSeconds(5)); }
         catch (OperationCanceledException) { /* session torn down */ }
