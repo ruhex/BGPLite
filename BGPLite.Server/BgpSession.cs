@@ -635,7 +635,21 @@ public sealed class BgpSession : IDisposable
                 return;
             }
 
-            await SendKeepaliveAsync();
+            // #252: a failed/timed-out send (per-send budget in SocketBgpConnection) means the
+            // outbound path is dead — most commonly a peer that stopped reading. Claim the
+            // teardown and end this loop: Task.WhenAny in RunEstablishedAsync then cancels the
+            // read loop and the session unwinds (no NOTIFICATION is attempted — the peer is not
+            // reading by definition, so it would only block for another budget window).
+            try
+            {
+                await SendKeepaliveAsync();
+            }
+            catch (IOException ex)
+            {
+                _logger.LogWarning(ex, "Keepalive send to {Peer} failed/timed out — tearing down", _peer);
+                Interlocked.CompareExchange(ref _teardownReason, (int)TeardownReason.LocalCease, (int)TeardownReason.None);
+                return;
+            }
             _logger.LogDebug("KeepAliveSent to {Peer}", _peer);
         }
     }
