@@ -29,7 +29,7 @@ public class BgpSessionRfc6793Tests
             UpdateCodec.MergeAsPathWithAs4Path([65010u, BgpConstants.AsPath.AsTrans, 65001u], [200000u]));
 
         Assert.Equal(BgpConstants.Error.UpdateMessageError, ex.ErrorCode);
-        Assert.Equal(BgpConstants.SubError.Unspecific, ex.SubErrorCode);
+        Assert.Equal(BgpConstants.SubError.MalformedAsPath, ex.SubErrorCode);
     }
 
     [Fact]
@@ -55,7 +55,7 @@ public class BgpSessionRfc6793Tests
             UpdateCodec.MergeAsPathWithAs4Path([65001u], [200000u, 300000u]));
 
         Assert.Equal(BgpConstants.Error.UpdateMessageError, ex.ErrorCode);
-        Assert.Equal(BgpConstants.SubError.Unspecific, ex.SubErrorCode);
+        Assert.Equal(BgpConstants.SubError.MalformedAsPath, ex.SubErrorCode);
     }
 
     [Fact]
@@ -83,7 +83,7 @@ public class BgpSessionRfc6793Tests
             UpdateCodec.ValidateAggregatorReconstruction(null, 200000u));
 
         Assert.Equal(BgpConstants.Error.UpdateMessageError, ex.ErrorCode);
-        Assert.Equal(BgpConstants.SubError.Unspecific, ex.SubErrorCode);
+        Assert.Equal(BgpConstants.SubError.OptionalAttributeError, ex.SubErrorCode);
     }
 
     [Fact]
@@ -93,7 +93,7 @@ public class BgpSessionRfc6793Tests
             UpdateCodec.ValidateAggregatorReconstruction(BgpConstants.AsPath.AsTrans, null));
 
         Assert.Equal(BgpConstants.Error.UpdateMessageError, ex.ErrorCode);
-        Assert.Equal(BgpConstants.SubError.Unspecific, ex.SubErrorCode);
+        Assert.Equal(BgpConstants.SubError.OptionalAttributeError, ex.SubErrorCode);
     }
 
     // --- #154: wire-format codec for AGGREGATOR (type 7) and AS4_AGGREGATOR (type 18) ---

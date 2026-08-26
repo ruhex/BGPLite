@@ -674,7 +674,7 @@ public sealed class BgpSession : IDisposable
                     {
                         case BgpConstants.Attribute.Origin:
                             if (attr.Data.Length < 1)
-                                throw new BgpNotificationException(BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.Unspecific, "Malformed ORIGIN attribute");
+                                throw new BgpNotificationException(BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.InvalidOriginAttribute, "Malformed ORIGIN attribute");
                             AttributeHelper.ReadOrigin(attr);
                             originSeen = true;
                             break;
@@ -687,7 +687,7 @@ public sealed class BgpSession : IDisposable
                             break;
                         case BgpConstants.Attribute.NextHop:
                             if (attr.Data.Length < 4)
-                                throw new BgpNotificationException(BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.Unspecific, "Malformed NEXT_HOP attribute");
+                                throw new BgpNotificationException(BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.InvalidNextHopAttribute, "Malformed NEXT_HOP attribute");
                             nextHop = AttributeHelper.ReadNextHop(attr);
                             nextHopSeen = true;
                             break;
@@ -734,7 +734,10 @@ public sealed class BgpSession : IDisposable
             }
             catch (BgpParseException ex)
             {
-                throw new BgpNotificationException(BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.Unspecific, ex.Message);
+                // #235: preserve the RFC 4271 §6.3 subcode the codec recorded (e.g. Malformed AS_PATH
+                // from ReadAsPath, Optional Attribute Error from AGGREGATOR/Large Communities) instead
+                // of flattening it to Unspecific.
+                throw new BgpNotificationException(BgpConstants.Error.UpdateMessageError, ex.SubErrorCode ?? BgpConstants.SubError.Unspecific, ex.Message);
             }
         }
 

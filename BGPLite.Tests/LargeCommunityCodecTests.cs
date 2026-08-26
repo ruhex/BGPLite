@@ -76,6 +76,8 @@ public class LargeCommunityCodecTests
         };
         var ex = Assert.Throws<BgpParseException>(() => AttributeHelper.ReadLargeCommunities(attr));
         Assert.Contains("multiple of 12", ex.Message);
+        Assert.Equal(BgpConstants.Error.UpdateMessageError, ex.ErrorCode);
+        Assert.Equal(BgpConstants.SubError.OptionalAttributeError, ex.SubErrorCode);
     }
 
     [Fact]

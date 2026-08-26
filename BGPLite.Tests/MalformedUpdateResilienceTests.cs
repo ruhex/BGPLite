@@ -31,6 +31,7 @@ public class MalformedUpdateResilienceTests
 
         var ex = Assert.Throws<BgpParseException>(() => BgpMessageReader.ReadMessage(BuildUpdateFrame([.. attrBytes])));
         Assert.Equal(BgpConstants.Error.UpdateMessageError, ex.ErrorCode);
+        Assert.Equal(BgpConstants.SubError.AttributeLengthError, ex.SubErrorCode);
     }
 
     [Fact]
@@ -42,6 +43,7 @@ public class MalformedUpdateResilienceTests
 
         var ex = Assert.Throws<BgpParseException>(() => BgpMessageReader.ReadMessage(BuildUpdateFrame([.. attrBytes])));
         Assert.Equal(BgpConstants.Error.UpdateMessageError, ex.ErrorCode);
+        Assert.Equal(BgpConstants.SubError.MalformedAttributeList, ex.SubErrorCode);
     }
 
     [Fact]
@@ -59,6 +61,21 @@ public class MalformedUpdateResilienceTests
 
         var ex = Assert.Throws<BgpParseException>(() => BgpMessageReader.ReadMessage(frame));
         Assert.Equal(BgpConstants.Error.UpdateMessageError, ex.ErrorCode);
+    }
+
+    [Fact]
+    public void ParseUpdate_AttrsLengthExceedsPayload_ThrowsMalformedAttributeList()
+    {
+        // #235: a declared path-attributes length that runs past the payload is a malformed
+        // attribute list (RFC 4271 §6.3 subcode 1), not Unspecific.
+        var payload = new byte[4];
+        BinaryPrimitives.WriteUInt16BigEndian(payload, 0); // withdrawn length = 0
+        BinaryPrimitives.WriteUInt16BigEndian(payload.AsSpan(2), 0xFFFF); // attrs length = 65535
+        var frame = BuildMessage(BgpMessageType.Update, payload);
+
+        var ex = Assert.Throws<BgpParseException>(() => BgpMessageReader.ReadMessage(frame));
+        Assert.Equal(BgpConstants.Error.UpdateMessageError, ex.ErrorCode);
+        Assert.Equal(BgpConstants.SubError.MalformedAttributeList, ex.SubErrorCode);
     }
 
     [Fact]
