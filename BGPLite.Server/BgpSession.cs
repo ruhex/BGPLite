@@ -649,9 +649,33 @@ public sealed class BgpSession : IDisposable
                         // Another refresh raced ahead of us; the winning call will do the work.
                         break;
                     }
-                    await RefreshRoutesAsync(cancellationToken);
+                    // #253: run the re-announcement OFF the read loop. A refresh is a full
+                    // withdraw + re-announce (plus network fetches on a cold TTL cache) — awaiting
+                    // it inline starved this loop: the peer's KEEPALIVEs sat unread in the socket
+                    // buffer and a completely live session was killed by a false Hold Timer
+                    // Expired. Fire-and-forget: stacking is bounded by the CAS rate-limit above,
+                    // faults are logged instead of tearing down the read loop.
+                    _ = Task.Run(() => RefreshInBackgroundAsync(cancellationToken), CancellationToken.None);
                     break;
             }
+        }
+    }
+
+    /// <summary>
+    /// #253: fire-and-forget wrapper for the read loop's ROUTE_REFRESH handling — the loop must
+    /// keep reading (KEEPALIVEs feed the hold timer) while the refresh runs. RefreshRoutesAsync
+    /// already swallows its own errors; this wrapper only guards against the unexpected.
+    /// </summary>
+    private async Task RefreshInBackgroundAsync(CancellationToken ct)
+    {
+        try
+        {
+            await RefreshRoutesAsync(ct);
+        }
+        catch (OperationCanceledException) { /* teardown — fine */ }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Background refresh faulted for {Peer}", _peer);
         }
     }
 
