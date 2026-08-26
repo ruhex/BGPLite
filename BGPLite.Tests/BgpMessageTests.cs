@@ -69,6 +69,92 @@ public class BgpMessageTests
         Assert.Equal(asn, effectiveAsn);
     }
 
+    // Builds a raw OPEN message: marker + length + type + fixed 10-byte body + optional parameters.
+    // Unlike BgpMessageWriter, this lets a test declare an optParamsLen that disagrees with the
+    // bytes actually present — the malformed framing the #234 truncation cases need.
+    private static byte[] BuildRawOpen(byte optParamsLen, byte[] optParams)
+    {
+        var length = BgpConstants.MessageHeaderSize + 10 + optParams.Length;
+        var message = new byte[length];
+        BgpConstants.Marker.CopyTo(message);
+        BinaryPrimitives.WriteUInt16BigEndian(message.AsSpan(16), (ushort)length);
+        message[18] = (byte)BgpMessageType.Open;
+        message[19] = 4; // version
+        BinaryPrimitives.WriteUInt16BigEndian(message.AsSpan(20), (ushort)65000); // ASN
+        BinaryPrimitives.WriteUInt16BigEndian(message.AsSpan(22), (ushort)180);   // hold time
+        BinaryPrimitives.WriteUInt32BigEndian(message.AsSpan(24), 0x0A000001);    // router ID
+        message[28] = optParamsLen;
+        optParams.AsSpan().CopyTo(message.AsSpan(29));
+        return message;
+    }
+
+    [Fact]
+    public void Open_WellFormedRawOptParams_Parses()
+    {
+        // Capability parameter (type 2) carrying a Four-Octet-ASN TLV (code 65, len 4, ASN 200000).
+        // Validates the raw builder so the truncation tests below fail for the right reason.
+        var message = BuildRawOpen(8, [0x02, 0x06, 0x41, 0x04, 0x00, 0x03, 0x0D, 0x40]);
+
+        var open = Assert.IsType<BgpOpenMessage>(BgpMessageReader.ReadMessage(message));
+
+        var cap = Assert.Single(open.Capabilities);
+        Assert.Equal(BgpConstants.Capability.FourOctetAsn, cap.Code);
+        Assert.Equal(200000u, CapabilityHelper.GetEffectiveAsn(open));
+    }
+
+    [Fact]
+    public void Open_OptParamsLengthExceedsMessage_Rejected()
+    {
+        // Declared optParamsLen=10 but only 4 parameter bytes present — previously parsing was
+        // silently skipped and all capabilities dropped (#234).
+        var message = BuildRawOpen(10, [0x02, 0x02, 0x41, 0x00]);
+
+        var ex = Assert.Throws<BgpParseException>(() => BgpMessageReader.ReadMessage(message));
+        Assert.Equal(BgpConstants.Error.OpenMessageError, ex.ErrorCode);
+    }
+
+    [Fact]
+    public void Open_TruncatedOptParamHeader_Rejected()
+    {
+        // A complete capability param followed by one stray byte — the trailing 1-byte TLV header
+        // needs 2 bytes; previously the loop just broke out of it.
+        var message = BuildRawOpen(5, [0x02, 0x02, 0x41, 0x00, 0x02]);
+
+        var ex = Assert.Throws<BgpParseException>(() => BgpMessageReader.ReadMessage(message));
+        Assert.Equal(BgpConstants.Error.OpenMessageError, ex.ErrorCode);
+    }
+
+    [Fact]
+    public void Open_TruncatedOptParamValue_Rejected()
+    {
+        // Parameter type 2 declares 4 bytes of capability data but only 2 follow.
+        var message = BuildRawOpen(4, [0x02, 0x04, 0x41, 0x04]);
+
+        var ex = Assert.Throws<BgpParseException>(() => BgpMessageReader.ReadMessage(message));
+        Assert.Equal(BgpConstants.Error.OpenMessageError, ex.ErrorCode);
+    }
+
+    [Fact]
+    public void Open_TruncatedCapabilityHeader_Rejected()
+    {
+        // Capability parameter whose payload is a single stray byte (a TLV header needs 2).
+        var message = BuildRawOpen(3, [0x02, 0x01, 0x41]);
+
+        var ex = Assert.Throws<BgpParseException>(() => BgpMessageReader.ReadMessage(message));
+        Assert.Equal(BgpConstants.Error.OpenMessageError, ex.ErrorCode);
+    }
+
+    [Fact]
+    public void Open_TruncatedFourOctetAsnCapability_Rejected()
+    {
+        // The #234 headline case: a Four-Octet-ASN TLV declaring 4 data bytes with only 2 present.
+        // Previously the capability was silently dropped and the session downgraded to a 2-byte AS.
+        var message = BuildRawOpen(6, [0x02, 0x04, 0x41, 0x04, 0x00, 0x00]);
+
+        var ex = Assert.Throws<BgpParseException>(() => BgpMessageReader.ReadMessage(message));
+        Assert.Equal(BgpConstants.Error.OpenMessageError, ex.ErrorCode);
+    }
+
     [Fact]
     public void Notification_WriteThenRead_Roundtrip()
     {
