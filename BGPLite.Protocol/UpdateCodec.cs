@@ -141,8 +141,12 @@ public static class UpdateCodec
         if (as4Path.Length == 0)
             return asPath;
 
+        // RFC 6793 §4.2.3: "If the number of AS numbers in the AS_PATH attribute is less than
+        // the number of AS numbers in the AS4_PATH attribute, then the AS4_PATH attribute SHALL
+        // be ignored, and the AS_PATH attribute SHALL be taken as the AS path information."
+        // (Happens when an intermediate aggregator truncated the AS_PATH — not a malformed UPDATE.)
         if (as4Path.Length > asPath.Length)
-            throw new BgpNotificationException(BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.Unspecific, "AS4_PATH longer than AS_PATH");
+            return asPath;
 
         if (as4Path.Length == asPath.Length)
             return as4Path;
@@ -151,7 +155,7 @@ public static class UpdateCodec
         for (var i = 0; i < leadingCount; i++)
         {
             if (asPath[i] == BgpConstants.AsPath.AsTrans)
-                throw new BgpNotificationException(BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.Unspecific, "Unresolved AS_TRANS in AS_PATH");
+                throw new BgpNotificationException(BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.MalformedAsPath, "Unresolved AS_TRANS in AS_PATH");
         }
 
         var merged = new uint[asPath.Length];
@@ -168,10 +172,10 @@ public static class UpdateCodec
     public static void ValidateAggregatorReconstruction(uint? aggregatorAsn, uint? as4AggregatorAsn)
     {
         if (aggregatorAsn == BgpConstants.AsPath.AsTrans && as4AggregatorAsn is null)
-            throw new BgpNotificationException(BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.Unspecific, "Missing AS4_AGGREGATOR for AGGREGATOR AS_TRANS");
+            throw new BgpNotificationException(BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.OptionalAttributeError, "Missing AS4_AGGREGATOR for AGGREGATOR AS_TRANS");
 
         if (!aggregatorAsn.HasValue && as4AggregatorAsn.HasValue)
-            throw new BgpNotificationException(BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.Unspecific, "Missing AGGREGATOR attribute for AS4_AGGREGATOR");
+            throw new BgpNotificationException(BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.OptionalAttributeError, "Missing AGGREGATOR attribute for AS4_AGGREGATOR");
     }
 
     /// <summary>

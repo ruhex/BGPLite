@@ -494,7 +494,9 @@ public class BgpMessageTests
             Data = new byte[] { BgpConstants.AsPath.AsSequence, 2, 0x00, 0x01 }
         };
 
-        Assert.Throws<BgpParseException>(() => AttributeHelper.ReadAsPath(attr, fourByteAsn: false));
+        var ex = Assert.Throws<BgpParseException>(() => AttributeHelper.ReadAsPath(attr, fourByteAsn: false));
+        Assert.Equal(BgpConstants.Error.UpdateMessageError, ex.ErrorCode);
+        Assert.Equal(BgpConstants.SubError.MalformedAsPath, ex.SubErrorCode);
     }
 
     [Fact]
@@ -507,7 +509,9 @@ public class BgpMessageTests
             Data = new byte[] { 0x7F, 1, 0x00, 0x01 }
         };
 
-        Assert.Throws<BgpParseException>(() => AttributeHelper.ReadAsPath(attr, fourByteAsn: false));
+        var ex = Assert.Throws<BgpParseException>(() => AttributeHelper.ReadAsPath(attr, fourByteAsn: false));
+        Assert.Equal(BgpConstants.Error.UpdateMessageError, ex.ErrorCode);
+        Assert.Equal(BgpConstants.SubError.MalformedAsPath, ex.SubErrorCode);
     }
 
     [Fact]
@@ -520,7 +524,25 @@ public class BgpMessageTests
             Data = new byte[] { BgpConstants.AsPath.AsSequence, 2, 0x00, 0x00, 0x00, 0x01 }
         };
 
-        Assert.Throws<BgpParseException>(() => AttributeHelper.ReadAs4Path(attr));
+        var ex = Assert.Throws<BgpParseException>(() => AttributeHelper.ReadAs4Path(attr));
+        Assert.Equal(BgpConstants.Error.UpdateMessageError, ex.ErrorCode);
+        Assert.Equal(BgpConstants.SubError.MalformedAsPath, ex.SubErrorCode);
+    }
+
+    [Fact]
+    public void AsPath_TrailingByteAfterSegment_Throws()
+    {
+        // #235: a complete 1-ASN segment followed by one stray byte — offset != data.Length.
+        var attr = new PathAttribute
+        {
+            Flags = BgpConstants.Attribute.FlagTransitive,
+            TypeCode = BgpConstants.Attribute.AsPath,
+            Data = new byte[] { BgpConstants.AsPath.AsSequence, 1, 0x00, 0x01, 0xFF }
+        };
+
+        var ex = Assert.Throws<BgpParseException>(() => AttributeHelper.ReadAsPath(attr, fourByteAsn: false));
+        Assert.Equal(BgpConstants.Error.UpdateMessageError, ex.ErrorCode);
+        Assert.Equal(BgpConstants.SubError.MalformedAsPath, ex.SubErrorCode);
     }
 
     [Fact]

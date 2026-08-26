@@ -34,12 +34,32 @@ public static class BgpConstants
     public static class SubError
     {
         public const byte Unspecific = 0;
+
+        // Subcode namespaces are per-error-code: the same numeric value means different things
+        // under Open Message Error (2) and Update Message Error (3) — e.g. 3 is Bad BGP Identifier
+        // in the former and Missing Well-known Attribute in the latter (RFC 4271 §6.2/§6.3).
+        // The dual naming below (BadBgpIdentifier/MissingWellKnownAttribute both = 3) is intentional.
+
+        // Open Message Error subcodes (RFC 4271 §6.2) — used with ErrorCode = OpenMessageError
         public const byte UnsupportedVersion = 1;
         public const byte BadPeerAs = 2;
-        public const byte MissingWellKnownAttribute = 3;
         public const byte BadBgpIdentifier = 3;
         public const byte UnacceptableHoldTime = 6;
         public const byte UnsupportedCapability = 7;
+
+        // Update Message Error subcodes (RFC 4271 §6.3) — used with ErrorCode = UpdateMessageError
+        public const byte MalformedAttributeList = 1;
+        public const byte UnrecognizedWellKnownAttribute = 2;
+        public const byte MissingWellKnownAttribute = 3;
+        public const byte AttributeFlagsError = 4;
+        public const byte AttributeLengthError = 5;
+        public const byte InvalidOriginAttribute = 6;
+        // Subcode 7 (AS Routing Loop) is "[Deprecated - see Appendix A]" in RFC 4271 §4.5 and
+        // is intentionally not defined here.
+        public const byte InvalidNextHopAttribute = 8;
+        public const byte OptionalAttributeError = 9;
+        public const byte InvalidNetworkField = 10;
+        public const byte MalformedAsPath = 11;
 
         // RFC 4486 Cease subcodes (apply when ErrorCode = Cease = 6)
         public const byte CeaseMaxPrefixes = 1;

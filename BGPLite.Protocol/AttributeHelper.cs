@@ -56,20 +56,23 @@ public static class AttributeHelper
 
     /// <summary>
     /// Reads the aggregator ASN from a legacy AGGREGATOR attribute (type 7). Per RFC 6793 §3 the
-    /// AGGREGATOR attribute is unconditionally 6 octets: a 2-octet AS followed by a 4-octet IPv4
-    /// address — independent of whether the session negotiated 4-byte AS support. The 4-byte AS
+    /// attribute carries a four-octet AS (8 octets total: AS + IPv4) between NEW — 4-octet-AS —
+    /// speakers, and a two-octet AS (6 octets total) when an OLD speaker is involved; the
+    /// <paramref name="fourByteAsn"/> flag selects the negotiated form. The 4-octet-AS-on-OLD-session
     /// form lives in the separate AS4_AGGREGATOR attribute (type 18, see <see cref="ReadAs4AggregatorAsn"/>).
-    /// The <paramref name="fourByteAsn"/> parameter is retained for signature compatibility with
-    /// the call site but no longer affects the wire format — the prior branch accepted a malformed
-    /// 8-byte AGGREGATOR and rejected every legal 6-byte one on a 4-byte session (regression of #31).
+    /// The #154 fix made this unconditionally 6 octets, rejecting every legal AGGREGATOR from a
+    /// 4-octet peer — corrected per the RFC text in the #245 review.
     /// </summary>
     public static uint ReadAggregatorAsn(PathAttribute attr, bool fourByteAsn = false)
     {
-        _ = fourByteAsn; // retained for API compatibility; AGGREGATOR is always 6 octets (RFC 6793 §3).
-        if (attr.Data.Length != 6)
-            throw new BgpParseException($"Malformed AGGREGATOR attribute: expected 6 bytes, got {attr.Data.Length}");
+        var expectedLength = fourByteAsn ? 8 : 6;
+        if (attr.Data.Length != expectedLength)
+            throw new BgpParseException($"Malformed AGGREGATOR attribute: expected {expectedLength} bytes on a {(fourByteAsn ? "4-octet" : "2-octet")}-AS session, got {attr.Data.Length}",
+                BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.OptionalAttributeError);
 
-        return BinaryPrimitives.ReadUInt16BigEndian(attr.Data);
+        return fourByteAsn
+            ? BinaryPrimitives.ReadUInt32BigEndian(attr.Data)
+            : BinaryPrimitives.ReadUInt16BigEndian(attr.Data);
     }
 
     /// <summary>
@@ -82,7 +85,8 @@ public static class AttributeHelper
     public static uint ReadAs4AggregatorAsn(PathAttribute attr)
     {
         if (attr.Data.Length != 8)
-            throw new BgpParseException($"Malformed AS4_AGGREGATOR attribute: expected 8 bytes, got {attr.Data.Length}");
+            throw new BgpParseException($"Malformed AS4_AGGREGATOR attribute: expected 8 bytes, got {attr.Data.Length}",
+                BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.OptionalAttributeError);
 
         return BinaryPrimitives.ReadUInt32BigEndian(attr.Data);
     }
@@ -130,7 +134,8 @@ public static class AttributeHelper
     public static (uint Global, uint Local1, uint Local2)[] ReadLargeCommunities(PathAttribute attr)
     {
         if (attr.Data.Length == 0 || attr.Data.Length % 12 != 0)
-            throw new BgpParseException("Large Communities attribute length must be a non-zero multiple of 12");
+            throw new BgpParseException("Large Communities attribute length must be a non-zero multiple of 12",
+                BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.OptionalAttributeError);
 
         var count = attr.Data.Length / 12;
         var large = new (uint Global, uint Local1, uint Local2)[count];
@@ -201,11 +206,13 @@ public static class AttributeHelper
             var segmentLength = data[offset++];
 
             if (segmentType != BgpConstants.AsPath.AsSequence && segmentType != BgpConstants.AsPath.AsSet)
-                throw new BgpParseException($"Invalid {attributeName} segment type: {segmentType}");
+                throw new BgpParseException($"Invalid {attributeName} segment type: {segmentType}",
+                    BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.MalformedAsPath);
 
             var segBytes = segmentLength * asSize;
             if (offset + segBytes > data.Length)
-                throw new BgpParseException($"Truncated {attributeName} segment");
+                throw new BgpParseException($"Truncated {attributeName} segment",
+                    BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.MalformedAsPath);
 
             for (var i = 0; i < segmentLength; i++)
             {
@@ -220,7 +227,8 @@ public static class AttributeHelper
         }
 
         if (offset != data.Length)
-            throw new BgpParseException($"Malformed {attributeName} attribute");
+            throw new BgpParseException($"Malformed {attributeName} attribute",
+                BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.MalformedAsPath);
 
         return ases.ToArray();
     }

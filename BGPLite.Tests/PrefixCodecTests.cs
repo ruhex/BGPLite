@@ -108,6 +108,7 @@ public class PrefixCodecTests
 
         var ex = Assert.Throws<BgpParseException>(() => PrefixCodec.Decode(buffer));
         Assert.Equal(BgpConstants.Error.UpdateMessageError, ex.ErrorCode);
+        Assert.Equal(BgpConstants.SubError.InvalidNetworkField, ex.SubErrorCode);
     }
 
     [Fact]
@@ -162,6 +163,7 @@ public class PrefixCodecTests
             PrefixCodec.Decode(span);
         });
         Assert.Equal(BgpConstants.Error.UpdateMessageError, ex.ErrorCode);
+        Assert.Equal(BgpConstants.SubError.InvalidNetworkField, ex.SubErrorCode);
     }
 
     [Fact]

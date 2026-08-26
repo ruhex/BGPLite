@@ -29,7 +29,7 @@ public class BgpSessionRfc6793Tests
             UpdateCodec.MergeAsPathWithAs4Path([65010u, BgpConstants.AsPath.AsTrans, 65001u], [200000u]));
 
         Assert.Equal(BgpConstants.Error.UpdateMessageError, ex.ErrorCode);
-        Assert.Equal(BgpConstants.SubError.Unspecific, ex.SubErrorCode);
+        Assert.Equal(BgpConstants.SubError.MalformedAsPath, ex.SubErrorCode);
     }
 
     [Fact]
@@ -49,13 +49,15 @@ public class BgpSessionRfc6793Tests
     }
 
     [Fact]
-    public void MergeAsPathWithAs4Path_As4PathLongerThanAsPath_Throws()
+    public void MergeAsPathWithAs4Path_As4PathLongerThanAsPath_IgnoresAs4Path()
     {
-        var ex = Assert.Throws<BgpNotificationException>(() =>
-            UpdateCodec.MergeAsPathWithAs4Path([65001u], [200000u, 300000u]));
+        // RFC 6793 §4.2.3: "If the number of AS numbers in the AS_PATH attribute is less than
+        // the number of AS numbers in the AS4_PATH attribute, then the AS4_PATH attribute SHALL
+        // be ignored, and the AS_PATH attribute SHALL be taken as the AS path information."
+        // Previously this threw and discarded the route (#245 review finding).
+        var merged = UpdateCodec.MergeAsPathWithAs4Path([65001u], [200000u, 300000u]);
 
-        Assert.Equal(BgpConstants.Error.UpdateMessageError, ex.ErrorCode);
-        Assert.Equal(BgpConstants.SubError.Unspecific, ex.SubErrorCode);
+        Assert.Equal([65001u], merged);
     }
 
     [Fact]
@@ -83,7 +85,7 @@ public class BgpSessionRfc6793Tests
             UpdateCodec.ValidateAggregatorReconstruction(null, 200000u));
 
         Assert.Equal(BgpConstants.Error.UpdateMessageError, ex.ErrorCode);
-        Assert.Equal(BgpConstants.SubError.Unspecific, ex.SubErrorCode);
+        Assert.Equal(BgpConstants.SubError.OptionalAttributeError, ex.SubErrorCode);
     }
 
     [Fact]
@@ -93,7 +95,7 @@ public class BgpSessionRfc6793Tests
             UpdateCodec.ValidateAggregatorReconstruction(BgpConstants.AsPath.AsTrans, null));
 
         Assert.Equal(BgpConstants.Error.UpdateMessageError, ex.ErrorCode);
-        Assert.Equal(BgpConstants.SubError.Unspecific, ex.SubErrorCode);
+        Assert.Equal(BgpConstants.SubError.OptionalAttributeError, ex.SubErrorCode);
     }
 
     // --- #154: wire-format codec for AGGREGATOR (type 7) and AS4_AGGREGATOR (type 18) ---
@@ -102,29 +104,42 @@ public class BgpSessionRfc6793Tests
     // wire format so the regression cannot slip back.
 
     [Fact]
-    public void ReadAggregatorAsn_LegacySixByteForm_ReadsTwoOctetAs()
+    public void ReadAggregatorAsn_TwoOctetSession_SixByteForm_ReadsTwoOctetAs()
     {
-        // RFC 6793 §3: AGGREGATOR is unconditionally 6 octets (2 AS + 4 IPv4), independent of the
-        // session's 4-byte-ASN capability. The fourByteAsn flag must NOT change the wire format.
+        // RFC 6793 §3: AGGREGATOR carries a two-octet AS (6 octets total) when an OLD
+        // (2-octet-AS) speaker is involved.
         var data = new byte[] { 0xFD, 0xE9, 10, 0, 0, 1 }; // AS 65001, aggregator IP 10.0.0.1
         var attr = new PathAttribute { Flags = BgpConstants.Attribute.FlagTransitive, TypeCode = BgpConstants.Attribute.Aggregator, Data = data };
 
         Assert.Equal(65001u, AttributeHelper.ReadAggregatorAsn(attr, fourByteAsn: false));
-        // The flag must be ignored — AGGREGATOR is always 6 bytes.
-        Assert.Equal(65001u, AttributeHelper.ReadAggregatorAsn(attr, fourByteAsn: true));
+    }
+
+    [Fact]
+    public void ReadAggregatorAsn_FourOctetSession_EightByteForm_ReadsFourOctetAs()
+    {
+        // RFC 6793 §3: "The same applies to the AGGREGATOR attribute -- the same attribute is
+        // used between NEW BGP speakers, except that the AS number carried in the attribute is
+        // encoded as a four-octet entity" — 8 octets total on a 4-octet-AS session. The #154
+        // code required 6 bytes unconditionally, rejecting every legal peer AGGREGATOR (#245
+        // review finding).
+        var data = new byte[] { 0x00, 0x03, 0x0D, 0x40, 10, 0, 0, 1 }; // AS 200000, IP 10.0.0.1
+        var attr = new PathAttribute { Flags = BgpConstants.Attribute.FlagTransitive, TypeCode = BgpConstants.Attribute.Aggregator, Data = data };
+
+        Assert.Equal(200000u, AttributeHelper.ReadAggregatorAsn(attr, fourByteAsn: true));
     }
 
     [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public void ReadAggregatorAsn_WrongLength_Throws(bool fourByteAsn)
+    [InlineData(false, 4)]
+    [InlineData(false, 8)] // the 4-octet form is AS4_AGGREGATOR's job on a 2-octet session
+    [InlineData(true, 4)]
+    [InlineData(true, 6)]  // the 2-octet form is wrong on a 4-octet-AS session
+    public void ReadAggregatorAsn_WrongLengthForSession_Throws(bool fourByteAsn, int len)
     {
-        // The old bug: passing fourByteAsn=true expected 8 bytes and rejected the legal 6-byte form.
-        var tooShort = new PathAttribute { TypeCode = BgpConstants.Attribute.Aggregator, Data = new byte[4] };
-        var tooLong = new PathAttribute { TypeCode = BgpConstants.Attribute.Aggregator, Data = new byte[8] };
+        var attr = new PathAttribute { TypeCode = BgpConstants.Attribute.Aggregator, Data = new byte[len] };
 
-        Assert.Throws<BgpParseException>(() => AttributeHelper.ReadAggregatorAsn(tooShort, fourByteAsn));
-        Assert.Throws<BgpParseException>(() => AttributeHelper.ReadAggregatorAsn(tooLong, fourByteAsn));
+        var ex = Assert.Throws<BgpParseException>(() => AttributeHelper.ReadAggregatorAsn(attr, fourByteAsn));
+        Assert.Equal(BgpConstants.Error.UpdateMessageError, ex.ErrorCode);
+        Assert.Equal(BgpConstants.SubError.OptionalAttributeError, ex.SubErrorCode);
     }
 
     [Fact]

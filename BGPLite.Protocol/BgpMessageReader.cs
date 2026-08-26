@@ -158,9 +158,11 @@ public static class BgpMessageReader
         // #222: a declared length that runs past the payload is stream-level corruption, not a
         // per-UPDATE content error — surface it as a parse exception (Update Message Error) so the
         // caller can treat-as-withdraw instead of throwing ArgumentOutOfRangeException out of Slice.
+        // RFC 4271 §6.3: "If the Withdrawn Routes Length or Total Attribute Length is too large
+        // ... the Error Subcode MUST be set to Malformed Attribute List."
         if (offset + withdrawnLen > payload.Length)
             throw new BgpParseException($"UPDATE withdrawn-routes length {withdrawnLen} exceeds payload",
-                BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.Unspecific);
+                BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.MalformedAttributeList);
 
         var withdrawn = new List<IpPrefix>();
         if (withdrawnLen > 0)
@@ -178,7 +180,7 @@ public static class BgpMessageReader
         offset += 2;
         if (offset + attrsLen > payload.Length)
             throw new BgpParseException($"UPDATE path-attributes length {attrsLen} exceeds payload",
-                BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.Unspecific);
+                BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.MalformedAttributeList);
 
         var attributes = new List<PathAttribute>();
         if (attrsLen > 0)
@@ -186,7 +188,10 @@ public static class BgpMessageReader
             var attrsEnd = offset + attrsLen;
             while (offset < attrsEnd)
             {
-                var (attr, consumed) = ParseAttribute(payload[offset..]);
+                // Slice to the declared end of the attribute section (not payload end): an
+                // attribute TLV whose declared value crosses attrsEnd must be rejected instead
+                // of silently consuming NLRI bytes as attribute data (#245 review finding).
+                var (attr, consumed) = ParseAttribute(payload.Slice(offset, attrsEnd - offset));
                 attributes.Add(attr);
                 offset += consumed;
             }
@@ -215,10 +220,13 @@ public static class BgpMessageReader
         // of Span.Slice / indexing, which escaped ReadLoopAsync (it only catches OCE/IOException) and
         // tore down the session with a generic Cease — a single malformed UPDATE killed the peer.
         // Now these surface as BgpParseException (Update Message Error) and are handled by the
-        // treat-as-withdraw path. RFC 7606 §2 / RFC 4271 §6.3.
+        // treat-as-withdraw path. RFC 7606 §2 / RFC 4271 §6.3. Subcodes (#235): a header that
+        // cannot even be read (flags/type/length bytes missing) is a malformed attribute list (1);
+        // a readable header whose declared value length overshoots the buffer is an attribute
+        // length error (5).
         if (data.Length < 2)
             throw new BgpParseException($"Truncated path attribute header: have {data.Length}, need 2",
-                BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.Unspecific);
+                BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.MalformedAttributeList);
 
         var flags = data[0];
         var typeCode = data[1];
@@ -229,7 +237,7 @@ public static class BgpMessageReader
         {
             if (data.Length < offset + 2)
                 throw new BgpParseException($"Truncated extended-length path attribute: have {data.Length}, need {offset + 2}",
-                    BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.Unspecific);
+                    BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.MalformedAttributeList);
             length = BinaryPrimitives.ReadUInt16BigEndian(data[offset..]);
             offset += 2;
         }
@@ -237,14 +245,14 @@ public static class BgpMessageReader
         {
             if (data.Length < offset + 1)
                 throw new BgpParseException($"Truncated path attribute length byte: have {data.Length}, need {offset + 1}",
-                    BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.Unspecific);
+                    BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.MalformedAttributeList);
             length = data[offset];
             offset += 1;
         }
 
         if (offset + length > data.Length)
             throw new BgpParseException($"Truncated path attribute value: declared {length} at offset {offset}, have {data.Length}",
-                BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.Unspecific);
+                BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.AttributeLengthError);
 
         var attrData = new byte[length];
         data.Slice(offset, length).CopyTo(attrData);
