@@ -4,7 +4,7 @@ using BGPLite.Server;
 namespace BGPLite.Tests;
 
 /// <summary>
-/// Direct unit tests for the pure <see cref="BgpSession.ValidateOpen(BgpOpenMessage, uint?, uint, int)"/>
+/// Direct unit tests for the pure <see cref="OpenNegotiator.Validate(BgpOpenMessage, uint?, uint, int)"/>
 /// extraction (#97). Every OPEN-validation branch is exercised without standing up a BgpSession
 /// over a live socket — mirroring how the RFC-6793 tests exercise MergeAsPathWithAs4Path.
 /// <para>
@@ -14,7 +14,7 @@ namespace BGPLite.Tests;
 /// <c>min(local, peer)</c> rule.
 /// </para>
 /// </summary>
-public class BgpSessionValidateOpenTests
+public class OpenNegotiatorTests
 {
     private const uint LocalRouterId = 0x0A000001u; // 10.0.0.1
     private const uint PeerRouterId = 0x0A000002u;  // 10.0.0.2
@@ -37,9 +37,9 @@ public class BgpSessionValidateOpenTests
         };
 
     /// <summary>Shorthand for the 4-arg ValidateOpen with the default local hold time (180s).</summary>
-    private static BgpSession.OpenNegotiation Negotiate(
+    private static OpenNegotiation Negotiate(
         BgpOpenMessage open, uint? expectedRemoteAsn = AsnFourOctet, int localHoldTime = DefaultLocalHoldTime) =>
-        BgpSession.ValidateOpen(open, expectedRemoteAsn, LocalRouterId, localHoldTime);
+        OpenNegotiator.Validate(open, expectedRemoteAsn, LocalRouterId, localHoldTime);
 
     [Fact]
     public void ValidOpen_NegotiatesFourByteAsn_RouteRefresh_KeepAlive()
