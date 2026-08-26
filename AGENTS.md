@@ -123,7 +123,7 @@ BGP protocol bugs can cause route leaks or session resets, so correctness beats 
 
 ## Database and persistence rules
 
-- SQLite via EF Core handles peer storage; migrations are managed by `EnsureCreated`.
+- SQLite via EF Core handles peer storage; schema is managed by EF Migrations (`BgpDbContext.Initialize` applies `Database.Migrate()`; EnsureCreated-era databases are stamped and converged by the `LegacyEnsureCreated` migration).
 - Do not modify the schema outside of `BgpDbContext`.
 - Cache (RIPE Stat) is in-memory only; no persistent cache layer exists.
 - Do not expose full connection strings through API responses or logs.

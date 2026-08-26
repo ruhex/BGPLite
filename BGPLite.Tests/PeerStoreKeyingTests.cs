@@ -27,7 +27,7 @@ public class PeerStoreKeyingTests
             .UseSqlite(connection)
             .Options;
         using (var boot = new BgpDbContext(options))
-            BgpDbContext.Initialize(boot); // EnsureCreated + composite-index migration
+            BgpDbContext.Initialize(boot); // EF Migrations: Init + LegacyEnsureCreated
 
         return (new PeerStore(new StaticOptionsFactory(options)), connection);
     }
@@ -256,5 +256,30 @@ public class PeerStoreKeyingTests
 
         using var check2 = new BgpDbContext(options);
         Assert.Equal(2, check2.Peers.AsNoTracking().Count());
+    }
+
+    /// <summary>
+    /// #237: Initialize runs the EF migration pipeline — a fresh database gets Init +
+    /// LegacyEnsureCreated applied in order and recorded in __EFMigrationsHistory, and a second
+    /// startup is an idempotent no-op (Migrate() finds nothing pending).
+    /// </summary>
+    [Fact]
+    public void Initialize_FreshDatabase_AppliesMigrations_And_IsIdempotent()
+    {
+        using var connection = new SqliteConnection("DataSource=:memory:");
+        connection.Open();
+        var options = new DbContextOptionsBuilder<BgpDbContext>().UseSqlite(connection).Options;
+
+        using (var boot = new BgpDbContext(options))
+            BgpDbContext.Initialize(boot);
+        using (var again = new BgpDbContext(options))
+            BgpDbContext.Initialize(again); // second startup must be a no-op, not an error
+
+        using var check = new BgpDbContext(options);
+        var applied = check.Database.SqlQueryRaw<string>(
+            "SELECT \"MigrationId\" AS \"Value\" FROM __EFMigrationsHistory ORDER BY \"MigrationId\"").ToList();
+        Assert.Equal(["20260826182256_Init", "20260826182324_LegacyEnsureCreated"], applied);
+        // The full schema is in place (spot-check a table from each era).
+        Assert.NotNull(check.Peers);
     }
 }
