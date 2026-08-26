@@ -4,9 +4,19 @@ namespace BGPLite.Protocol;
 
 public static class AttributeHelper
 {
+    /// <summary>
+    /// Reads the ORIGIN attribute value. RFC 4271 §5.1.2 defines exactly three origins —
+    /// IGP (0), EGP (1), INCOMPLETE (2) — any other value is a malformed UPDATE and is
+    /// rejected with Update Message Error / Invalid ORIGIN Attribute (§6.3 subcode 6) so
+    /// the session's treat-as-withdraw path applies instead of silently accepting garbage (#233).
+    /// </summary>
     public static BgpOrigin ReadOrigin(PathAttribute attr)
     {
-        return (BgpOrigin)attr.Data[0];
+        var value = attr.Data[0];
+        if (value > 2)
+            throw new BgpParseException($"Invalid ORIGIN value: {value} (must be 0=IGP, 1=EGP, or 2=INCOMPLETE)",
+                BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.InvalidOriginAttribute);
+        return (BgpOrigin)value;
     }
 
     public static PathAttribute WriteOrigin(BgpOrigin origin)
