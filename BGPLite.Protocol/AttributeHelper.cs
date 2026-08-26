@@ -46,6 +46,11 @@ public static class AttributeHelper
 
     public static PathAttribute WriteAs4Path(uint[] ases)
     {
+        // Write-side symmetry with ReadAs4Path: AS_TRANS is the 2-octet placeholder and must not
+        // be written into the 4-octet-encoded attribute the reader rejects (#248 review).
+        if (ases.Contains(BgpConstants.AsPath.AsTrans))
+            throw new ArgumentOutOfRangeException(nameof(ases), $"AS4_PATH must not carry AS_TRANS ({BgpConstants.AsPath.AsTrans}).");
+
         return new PathAttribute
         {
             Flags = BgpConstants.Attribute.FlagOptional | BgpConstants.Attribute.FlagTransitive,
@@ -270,6 +275,11 @@ public static class AttributeHelper
         // multiple segments.
         if (ases.Length > byte.MaxValue)
             throw new ArgumentOutOfRangeException(nameof(ases), $"{attributeName} segment length cannot exceed 255 ASNs.");
+
+        // An empty path is encoded as a zero-length attribute — NOT a zero-length segment, which
+        // RFC 4271 §4.3 forbids ("one or more AS numbers") and ReadPathData rejects (#248 review).
+        if (ases.Length == 0)
+            return [];
 
         var data = new byte[2 + ases.Length * asSize];
         data[0] = BgpConstants.AsPath.AsSequence;

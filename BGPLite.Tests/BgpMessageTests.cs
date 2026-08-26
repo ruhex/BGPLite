@@ -564,6 +564,25 @@ public class BgpMessageTests
     }
 
     [Fact]
+    public void AsPath_Empty_RoundtripsAsZeroLengthAttribute()
+    {
+        // RFC 4271 §4.3: an empty path is a ZERO-LENGTH attribute — a zero-length SEGMENT is
+        // malformed. The writer must not emit what the reader rejects (#248 review).
+        var attr = AttributeHelper.WriteAsPath([], fourByteAsn: true);
+
+        Assert.Empty(attr.Data);
+        Assert.Equal([], AttributeHelper.ReadAsPath(attr, fourByteAsn: true));
+    }
+
+    [Fact]
+    public void As4Path_Write_WithAsTrans_Throws()
+    {
+        // Write-side symmetry with the reader's AS_TRANS rejection (#248 review).
+        Assert.Throws<ArgumentOutOfRangeException>(
+            () => AttributeHelper.WriteAs4Path([BgpConstants.AsPath.AsTrans]));
+    }
+
+    [Fact]
     public void AsPath_TrailingByteAfterSegment_Throws()
     {
         // #235: a complete 1-ASN segment followed by one stray byte — offset != data.Length.

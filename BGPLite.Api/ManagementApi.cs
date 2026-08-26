@@ -43,6 +43,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
     /// </summary>
     private const int DefaultInflightCap = 64;
     private readonly SemaphoreSlim _inflightCap = new(DefaultInflightCap);
+    private readonly List<Task> _inflightHandlers = new();
     private HttpListener? _listener;
     private Task? _listenTask;
     private readonly CancellationTokenSource _cts = new();
@@ -182,26 +183,46 @@ public sealed class ManagementApi : IHostedService, IDisposable
         {
             try { await _listenTask; } catch { }
         }
+
+        // Drain in-flight handlers before the host disposes this service: a handler reaching
+        // _inflightCap.Release() after Dispose would hit ObjectDisposedException (#248 review).
+        Task[] pending;
+        lock (_inflightHandlers) pending = _inflightHandlers.ToArray();
+        if (pending.Length > 0)
+        {
+            try { await Task.WhenAll(pending); } catch { }
+        }
     }
 
     private async Task ListenAsync(CancellationToken ct)
     {
         while (!ct.IsCancellationRequested)
         {
+            HttpListenerContext? ctx = null;
             try
             {
-                var ctx = await _listener!.GetContextAsync();
+                ctx = await _listener!.GetContextAsync();
                 if (ct.IsCancellationRequested) break;
                 // #238: acquire an in-flight slot before spawning so the default posture is
                 // bounded even when the operator has not enabled the #119 concurrency limiter.
                 await _inflightCap.WaitAsync(ct);
-                _ = HandleWithInflightReleaseAsync(ctx);
+                var accepted = ctx;
+                ctx = null; // ownership transferred to the handler task
+                var handler = HandleWithInflightReleaseAsync(accepted);
+                lock (_inflightHandlers) _inflightHandlers.Add(handler);
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested) { break; }
             catch (HttpListenerException) when (ct.IsCancellationRequested) { break; }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Management API error");
+            }
+            finally
+            {
+                // An accepted context that never reached its handler task (shutdown cancelled
+                // the permit acquisition, or the ct-check raced the accept) must not leak an
+                // open response (#248 review).
+                try { ctx?.Response.Close(); } catch { /* best-effort on shutdown */ }
             }
         }
     }
@@ -223,7 +244,9 @@ public sealed class ManagementApi : IHostedService, IDisposable
         }
         finally
         {
-            _inflightCap.Release();
+            // Tolerate teardown racing the StopAsync drain (e.g. direct Dispose without StopAsync).
+            try { _inflightCap.Release(); }
+            catch (ObjectDisposedException) { /* cap already disposed */ }
         }
     }
 
@@ -614,7 +637,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
         var customPrefixes = new List<(string Prefix, byte Length)>();
 
         _logger.LogInformation("CreatePeer deserialized: AsnLists={Lists}, CustomPrefixes={Prefixes}, CustomAsns={Asns}",
-            SanitizeForLog(string.Join(",", asnLists)), string.Join(",", data.CustomPrefixes ?? []),
+            SanitizeForLog(string.Join(",", asnLists)), SanitizeForLog(string.Join(",", data.CustomPrefixes ?? [])),
             string.Join(",", data.CustomAsns ?? []));
 
         if (data.CustomPrefixes is not null)
