@@ -156,6 +156,17 @@ public class BgpMessageTests
     }
 
     [Fact]
+    public void Open_SurplusBytesAfterOptParams_Rejected()
+    {
+        // optParamsLen declares 0 but one surplus byte follows — the declared length must match
+        // the message exactly (RFC 4271 §4.2, CodeRabbit review on #244).
+        var message = BuildRawOpen(0, [0x00]);
+
+        var ex = Assert.Throws<BgpParseException>(() => BgpMessageReader.ReadMessage(message));
+        Assert.Equal(BgpConstants.Error.OpenMessageError, ex.ErrorCode);
+    }
+
+    [Fact]
     public void Notification_WriteThenRead_Roundtrip()
     {
         var notif = new BgpNotificationMessage

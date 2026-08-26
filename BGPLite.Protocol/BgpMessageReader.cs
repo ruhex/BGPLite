@@ -66,18 +66,17 @@ public static class BgpMessageReader
         var optParamsLen = payload[9];
 
         var capabilities = new List<BgpCapabilityInfo>();
+        // #234: the declared optional-parameters length is authoritative (RFC 4271 §4.2) — it
+        // must match the bytes present exactly, including the zero-length case. Previously a
+        // length running past the message silently skipped parsing (dropping capabilities, e.g.
+        // corrupting a Four-Octet-ASN TLV into a 2-byte-AS session), while surplus trailing
+        // bytes were silently ignored.
+        if (payload.Length != 10 + optParamsLen)
+            throw new BgpParseException(
+                $"OPEN optional-parameters length {optParamsLen} does not match message: have {payload.Length - 10} bytes",
+                BgpConstants.Error.OpenMessageError, BgpConstants.SubError.Unspecific);
         if (optParamsLen > 0)
-        {
-            // #234: the declared optional-parameters length is authoritative (RFC 4271 §4.2) — a
-            // value running past the message bytes is a malformed OPEN, not a silently shrinkable
-            // one. Previously the guard skipped parsing entirely, dropping capabilities (e.g. a
-            // corrupted Four-Octet-ASN TLV silently downgraded the session to 2-byte AS).
-            if (payload.Length < 10 + optParamsLen)
-                throw new BgpParseException(
-                    $"OPEN optional-parameters length {optParamsLen} exceeds message: have {payload.Length - 10} bytes",
-                    BgpConstants.Error.OpenMessageError, BgpConstants.SubError.Unspecific);
             ParseOptParameters(payload[10..][..optParamsLen], capabilities);
-        }
 
         return new BgpOpenMessage
         {
