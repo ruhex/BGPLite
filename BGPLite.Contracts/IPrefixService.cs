@@ -1,4 +1,4 @@
-namespace BGPLite.Configuration;
+namespace BGPLite.Contracts;
 
 /// <summary>
 /// Origin-AS / source prefix lookup contract. Lives in this neutral lower layer so that the

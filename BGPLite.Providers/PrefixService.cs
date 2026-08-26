@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using BGPLite.Configuration;
 using Microsoft.Extensions.Logging;
+using BGPLite.Contracts;
 
 namespace BGPLite.Providers;
 

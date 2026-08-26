@@ -3,6 +3,7 @@ using BGPLite.Providers;
 using BGPLite.Server;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using BGPLite.Contracts;
 
 namespace BGPLite;
 
