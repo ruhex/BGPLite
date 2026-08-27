@@ -44,7 +44,7 @@ public class RefreshDebounceTests
 
         public PeerRoutingView? LoadPeerRoutingView(string ip, uint asn)
         {
-            LoadCalls++;
+            Interlocked.Increment(ref LoadCalls);
             if (Armed)
                 Release.Wait(); // block the refresh cycle mid-flight (sync contract)
             return new PeerRoutingView("peer", [], [], [], []);
@@ -162,13 +162,33 @@ public class RefreshDebounceTests
 
         try
         {
-            // Task.Run is essential: until the gated Load the refresh chain has no incomplete
-            // await (locks free, loopback writes complete synchronously), so running it on the
-            // test thread would self-deadlock inside the gate before anyone can release it.
+            // Off the test thread: until the gated Load the refresh chain has no incomplete await
+            // (locks free, loopback writes complete synchronously), so calling it here would
+            // self-deadlock inside the gate before anyone could release it.
+            //
+            // #302: LongRunning rather than Task.Run. The caller that wins the CAS parks its thread
+            // inside the gated Load, and the thread pool then grows by roughly one thread per 500 ms
+            // — so on a contended 2-core CI runner the remaining callers did not all reach the CAS
+            // within the old 500 ms wall-clock wait. Each straggler arrived after the gate had been
+            // released and _refreshRunning reset, won its own CAS, and ran a FULL cycle: the observed
+            // failures were 3 and 4 loads against an expected 1-2. A dedicated thread per caller
+            // removes the dependency on pool growth entirely.
             var tasks = Enumerable.Range(0, 5)
-                .Select(_ => Task.Run(() => session.RefreshRoutesAsync(), CancellationToken.None))
+                .Select(_ => Task.Factory.StartNew(
+                    () => session.RefreshRoutesAsync(),
+                    CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default).Unwrap())
                 .ToArray();
-            await Task.Delay(500); // let the runner block inside the gated Load and the rest coalesce
+
+            // Wait for the state the assertions are about instead of guessing how long it takes.
+            // Both halves are facts the test can observe rather than hope for:
+            //   - LoadCalls == baseline + 1: the CAS winner is inside the gated Load, mid-cycle;
+            //   - four tasks completed: the other four lost the CAS, set _refreshPending and
+            //     returned — which is precisely "they have been coalesced", the thing the old
+            //     Task.Delay was standing in for.
+            await WaitForAsync(
+                () => Volatile.Read(ref store.LoadCalls) == baseline + 1 && CompletedCount(tasks) == 4,
+                () => $"loads={Volatile.Read(ref store.LoadCalls) - baseline} (want 1), " +
+                      $"callers returned={CompletedCount(tasks)} (want 4)");
 
             Assert.Equal(baseline + 1, Volatile.Read(ref store.LoadCalls)); // exactly ONE in-flight cycle
 
@@ -183,6 +203,33 @@ public class RefreshDebounceTests
         {
             store.Armed = false;
             store.Release.Set(); // never leak a blocked pool thread on an assertion failure
+        }
+    }
+
+    private static int CompletedCount(Task[] tasks)
+    {
+        var completed = 0;
+        foreach (var task in tasks)
+            if (task.IsCompleted) completed++;
+        return completed;
+    }
+
+    /// <summary>
+    /// Polls until <paramref name="condition"/> holds, failing with what was actually observed once
+    /// the deadline passes. A generous deadline is safe here precisely because it is never waited
+    /// out on a healthy run — unlike a fixed delay, which is waited out every time and is still too
+    /// short on the one run that matters (#302).
+    /// </summary>
+    private static async Task WaitForAsync(Func<bool> condition, Func<string> observed,
+        int timeoutMilliseconds = 30_000)
+    {
+        var deadline = Environment.TickCount64 + timeoutMilliseconds;
+        while (!condition())
+        {
+            if (Environment.TickCount64 > deadline)
+                Assert.Fail($"timed out after {timeoutMilliseconds} ms waiting for the refresh " +
+                            $"debounce to settle — {observed()}");
+            await Task.Delay(5);
         }
     }
 
