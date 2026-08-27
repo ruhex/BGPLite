@@ -22,6 +22,10 @@ public class PeerStoreConfigurationAtomicityTests
     private const string Ip = "203.0.113.30";
     private const uint Asn = 64530;
 
+    /// <summary>
+    /// The reported trigger: a repeated CIDR violates the <c>(PeerId, Prefix, PrefixLength)</c> key.
+    /// Deduplicated rather than rejected — a set of prefixes means the same thing either way.
+    /// </summary>
     [Fact]
     public void SavePeerConfiguration_DuplicatePrefixes_AreAcceptedIdempotently()
     {
@@ -40,6 +44,10 @@ public class PeerStoreConfigurationAtomicityTests
         Assert.Equal([64512u], store.GetCustomAsns(id));
     }
 
+    /// <summary>
+    /// The collections the issue does not mention. Subscriptions and custom ASNs carry the same
+    /// composite keys, so a pasted-twice list name or ASN threw exactly as a repeated CIDR did.
+    /// </summary>
     [Fact]
     public void SavePeerConfiguration_DuplicateListNamesAndAsns_AreAcceptedIdempotently()
     {
@@ -55,6 +63,10 @@ public class PeerStoreConfigurationAtomicityTests
         Assert.Equal([64512u, 64513u], store.GetCustomAsns(id).Order().ToList());
     }
 
+    /// <summary>
+    /// Read back through <c>LoadPeerRoutingView</c> — the same view the BGP send path uses, so this
+    /// asserts the peer is complete where it actually matters, not merely in the store.
+    /// </summary>
     [Fact]
     public void SavePeerConfiguration_AppliesEveryPartOrNothing()
     {
@@ -97,6 +109,9 @@ public class PeerStoreConfigurationAtomicityTests
         Assert.Single(transactions);
     }
 
+    /// <summary>
+    /// The update path carries the same guarantee as the create path.
+    /// </summary>
     [Fact]
     public void UpdatePeerConfiguration_RunsInASingleTransaction()
     {
@@ -114,6 +129,9 @@ public class PeerStoreConfigurationAtomicityTests
         Assert.Single(transactions);
     }
 
+    /// <summary>
+    /// PATCH semantics: <c>null</c> means "leave this alone", while an empty list means "clear it".
+    /// </summary>
     [Fact]
     public void UpdatePeerConfiguration_NullsLeaveTheExistingValueAlone()
     {
@@ -135,6 +153,7 @@ public class PeerStoreConfigurationAtomicityTests
         Assert.Equal("initial", store.GetDbPeerById(id)!.Description);
     }
 
+    /// <summary>A store over an in-memory SQLite DB that records every transaction EF opens.</summary>
     private static (PeerStore Store, SqliteConnection Connection, List<string> Transactions) NewStoreCountingTransactions()
     {
         var connection = new SqliteConnection("DataSource=:memory:");
@@ -150,6 +169,7 @@ public class PeerStoreConfigurationAtomicityTests
         return (new PeerStore(new StaticOptionsFactory(options)), connection, transactions);
     }
 
+    /// <summary>A store over an in-memory SQLite DB, so composite keys and transactions are real.</summary>
     private static (PeerStore Store, SqliteConnection Connection) NewStore()
     {
         var connection = new SqliteConnection("DataSource=:memory:");
@@ -162,6 +182,7 @@ public class PeerStoreConfigurationAtomicityTests
 
     private sealed class StaticOptionsFactory(DbContextOptions<BgpDbContext> options) : IDbContextFactory<BgpDbContext>
     {
+        /// <summary>Hands out contexts over the one open connection, so the in-memory DB survives.</summary>
         public BgpDbContext CreateDbContext() => new(options);
     }
 }

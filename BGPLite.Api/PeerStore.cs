@@ -10,6 +10,11 @@ public sealed class PeerStore : IPeerStore
 
     public PeerStore(IDbContextFactory<BgpDbContext> dbFactory) => _dbFactory = dbFactory;
 
+    /// <summary>
+    /// Creates or upserts the peer row alone. Callers configuring a peer in full should use
+    /// <see cref="SavePeerConfiguration"/> instead, so the row and its collections commit together
+    /// (#259).
+    /// </summary>
     public string CreatePeer(string ip, uint asn, string? description)
     {
         using var db = _dbFactory.CreateDbContext();
@@ -317,6 +322,7 @@ public sealed class PeerStore : IPeerStore
     // the composite methods above can put every part of a save inside one transaction. The public
     // Set* methods keep their own DbContext + transaction for single-field callers.
 
+    /// <summary>Stages the subscription set, deduplicated — keyed <c>(PeerId, AsnListName)</c>.</summary>
     private static void ReplaceSubscriptions(BgpDbContext db, string peerId, IReadOnlyList<string> names)
     {
         db.Set<PeerSubscription>().Where(s => s.PeerId == peerId).ExecuteDelete();
@@ -325,6 +331,7 @@ public sealed class PeerStore : IPeerStore
                  .Select(n => new PeerSubscription { PeerId = peerId, AsnListName = n }));
     }
 
+    /// <summary>Stages the custom-prefix set, deduplicated — keyed <c>(PeerId, Prefix, PrefixLength)</c>.</summary>
     private static void ReplaceCustomPrefixes(BgpDbContext db, string peerId, IReadOnlyList<(string Prefix, byte Length)> prefixes)
     {
         db.Set<PeerCustomPrefix>().Where(c => c.PeerId == peerId).ExecuteDelete();
@@ -333,6 +340,7 @@ public sealed class PeerStore : IPeerStore
                     .Select(p => new PeerCustomPrefix { PeerId = peerId, Prefix = p.Prefix, PrefixLength = p.Length }));
     }
 
+    /// <summary>Stages the custom-ASN set, deduplicated — keyed <c>(PeerId, Asn)</c>.</summary>
     private static void ReplaceCustomAsns(BgpDbContext db, string peerId, IReadOnlyList<uint> asns)
     {
         db.Set<PeerCustomAsn>().Where(c => c.PeerId == peerId).ExecuteDelete();
