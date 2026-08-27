@@ -200,7 +200,7 @@ public static class UpdateCodec
     /// mandatory well-known set (ORIGIN/AS_PATH/NEXT_HOP), AS4_PATH trailing-sequence
     /// reconstruction, and AGGREGATOR/AS4_AGGREGATOR consistency. On a 4-octet session
     /// (<paramref name="fourByteAsnSession"/>) AS4_PATH/AS4_AGGREGATOR are skipped per RFC 6793 §4.1.
-    /// Throws <see cref="BgpNotificationException"/> carrying the RFC subcode (3/6/8/9/11) so the
+    /// Throws <see cref="BgpNotificationException"/> carrying the RFC subcode (2/3/4/5/6/8/9/11) so the
     /// caller can apply treat-as-withdraw (RFC 7606) — the exact pipeline previously inlined in
     /// BgpSession.HandleUpdateAsync, moved verbatim (#270).
     /// </summary>
@@ -249,6 +249,20 @@ public static class UpdateCodec
                 // never shape-checked. RFC 7606 §3 says those occurrences are discarded, not
                 // "discarded but still validated" — checking them would reject an UPDATE over an
                 // attribute that has no effect on the result (#287 + #290).
+                //
+                // RFC 4271 §6.3 (#322): an attribute with the Optional bit clear that this codec
+                // does not recognize has unknown well-known semantics — it MUST be rejected with
+                // Unrecognized Well-known Attribute (subcode 2), never silently ignored. Only
+                // unrecognized OPTIONAL attributes may be discarded (RFC 7606 §2), and those fall
+                // through untouched here. The throw routes through the caller's treat-as-withdraw,
+                // not a session reset. Known-but-unread attributes (LOCAL_PREF,
+                // ATOMIC_AGGREGATE; MED is optional) pass IsKnownAttribute and stay accepted —
+                // over-rejecting those was the #290 lesson.
+                if (!attr.Optional && !AttributeHelper.IsKnownAttribute(attr.TypeCode))
+                    throw new BgpNotificationException(
+                        BgpConstants.Error.UpdateMessageError,
+                        BgpConstants.SubError.UnrecognizedWellKnownAttribute,
+                        $"Unrecognized well-known path attribute type {attr.TypeCode}");
                 ValidateAttributeShape(attr, fourByteAsnSession);
 
                 switch (attr.TypeCode)

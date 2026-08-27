@@ -272,6 +272,68 @@ public class MalformedUpdateResilienceTests
         await runTask.WaitAsync(TimeSpan.FromSeconds(5));
     }
 
+    [Fact]
+    public async Task UnknownWellKnownAttribute_TreatedAsWithdraw_KeepsSessionAlive()
+    {
+        // #322 / RFC 4271 §6.3: an UPDATE carrying an unrecognized WELL-KNOWN attribute (Optional
+        // bit clear, unknown type code) must be rejected with subcode 2 and handled by
+        // treat-as-withdraw: the UPDATE's NLRI leaves the table, the session survives, no
+        // NOTIFICATION. Previously the attribute was silently ignored and the route installed.
+        var (server, client) = ConnectedPair();
+        using var clientSock = client;
+        var bgpConfig = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1", HoldTime = 0, KeepAlive = 0 };
+        var metrics = new BgpMetrics();
+        var routeTable = new RouteTable();
+        using var session = new BgpSession(
+            new SocketBgpConnection(server),
+            new PeerConfig { Address = "127.0.0.1" },
+            bgpConfig,
+            routeTable,
+            AllowAllFilter.Instance,
+            metrics,
+            new NopLogger<BgpSession>());
+
+        var runTask = await EstablishSessionAsync(session, client, bgpConfig);
+
+        // 1) A well-formed announcement of 10.0.0.0/8 via 192.0.2.1 (4-octet session → AS_PATH
+        //    is 4-octet encoded).
+        var good = new List<byte>
+        {
+            0x40, 0x01, 0x01, 0x00,                                 // ORIGIN igp
+            0x40, 0x02, 0x06, 0x02, 0x01, 0x00, 0x00, 0x00, 0x64,   // AS_PATH seq [100]
+            0x40, 0x03, 0x04, 0xC0, 0x00, 0x02, 0x01,               // NEXT_HOP 192.0.2.1
+        };
+        SendAll(client, AnnounceFrame(good));
+
+        for (var i = 0; i < 40 && routeTable.Count == 0; i++)
+            await Task.Delay(TimeSpan.FromMilliseconds(50));
+        Assert.NotNull(routeTable.Get(0x0A000000, 8));
+
+        // 2) The same NLRI re-announced with an unrecognized well-known attribute (type 99,
+        //    flags 0x40) attached — the UPDATE is rejected and treat-as-withdraw removes the prefix.
+        var bad = new List<byte>
+        {
+            0x40, 0x01, 0x01, 0x00,
+            0x40, 0x02, 0x06, 0x02, 0x01, 0x00, 0x00, 0x00, 0x64,
+            0x40, 0x03, 0x04, 0xC0, 0x00, 0x02, 0x01,
+            0x40, 0x63, 0x01, 0x00,                                 // type 99, well-known (Optional=0), 1 data byte
+        };
+        SendAll(client, AnnounceFrame(bad));
+
+        for (var i = 0; i < 40 && metrics.UpdatesRejected == 0; i++)
+            await Task.Delay(TimeSpan.FromMilliseconds(50));
+
+        Assert.Null(routeTable.Get(0x0A000000, 8));  // the re-announced NLRI was withdrawn, not installed
+        Assert.True(session.IsEstablished, "an unrecognized well-known attribute must not reset the session");
+        Assert.Equal(1, metrics.UpdatesRejected);
+
+        var sent = await DrainAsync(client, TimeSpan.FromSeconds(2));
+        Assert.DoesNotContain(sent, m => m is BgpNotificationMessage);
+
+        session.MarkSilentClose();
+        await runTask.WaitAsync(TimeSpan.FromSeconds(5));
+    }
+
     /// <summary>
     /// Writes the whole frame. <see cref="Socket.Send(byte[], SocketFlags)"/> may accept fewer bytes
     /// than requested, which would deliver a truncated UPDATE and fail the test somewhere other than

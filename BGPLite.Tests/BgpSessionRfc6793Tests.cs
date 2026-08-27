@@ -107,6 +107,75 @@ public class BgpSessionRfc6793Tests
     }
 
     [Fact]
+    public void ParseRouteAttributes_UnrecognizedWellKnownAttribute_ThrowsSubcode2()
+    {
+        // RFC 4271 §6.3 / #322: an Optional=0 attribute of an unknown type code must be rejected
+        // (subcode 2) — routes must not install with unknown well-known semantics attached.
+        var update = new BgpUpdateMessage
+        {
+            PathAttributes =
+            [
+                AttributeHelper.WriteOrigin(BgpOrigin.Igp),
+                AttributeHelper.WriteAsPath([65001u], fourByteAsn: true),
+                AttributeHelper.WriteNextHop(0x0A000001),
+                new PathAttribute { Flags = BgpConstants.Attribute.FlagTransitive, TypeCode = 99, Data = [0x01] },
+            ],
+            Nlri = []
+        };
+
+        var ex = Assert.Throws<BgpNotificationException>(() => UpdateCodec.ParseRouteAttributes(update, fourByteAsnSession: true));
+
+        Assert.Equal(BgpConstants.Error.UpdateMessageError, ex.ErrorCode);
+        Assert.Equal(BgpConstants.SubError.UnrecognizedWellKnownAttribute, ex.SubErrorCode);
+    }
+
+    [Fact]
+    public void ParseRouteAttributes_UnrecognizedOptionalAttribute_StillParses()
+    {
+        // RFC 4271 §6.3: only unrecognized WELL-KNOWN attributes are rejected; an unrecognized
+        // optional attribute is ignored (BGPLite re-originates everything it advertises, so there
+        // is nothing to propagate with the Partial bit).
+        var update = new BgpUpdateMessage
+        {
+            PathAttributes =
+            [
+                AttributeHelper.WriteOrigin(BgpOrigin.Igp),
+                AttributeHelper.WriteAsPath([65001u], fourByteAsn: true),
+                AttributeHelper.WriteNextHop(0x0A000001),
+                new PathAttribute { Flags = BgpConstants.Attribute.FlagOptional | BgpConstants.Attribute.FlagTransitive, TypeCode = 99, Data = [0x01] },
+            ],
+            Nlri = []
+        };
+
+        var attrs = UpdateCodec.ParseRouteAttributes(update, fourByteAsnSession: true);
+
+        Assert.Equal([65001u], attrs.AsPath);
+    }
+
+    [Fact]
+    public void ParseRouteAttributes_KnownButUnreadWellKnownAttributes_StillAccepted()
+    {
+        // #290 guard for the #322 check: LOCAL_PREF (type 5) and ATOMIC_AGGREGATE (type 6) are
+        // well-known attributes this codec never reads — they must not start being rejected.
+        var update = new BgpUpdateMessage
+        {
+            PathAttributes =
+            [
+                AttributeHelper.WriteOrigin(BgpOrigin.Igp),
+                AttributeHelper.WriteAsPath([65001u], fourByteAsn: true),
+                AttributeHelper.WriteNextHop(0x0A000001),
+                new PathAttribute { Flags = BgpConstants.Attribute.FlagTransitive, TypeCode = BgpConstants.Attribute.LocalPref, Data = [0x00, 0x00, 0x00, 0x64] },
+                new PathAttribute { Flags = BgpConstants.Attribute.FlagTransitive, TypeCode = BgpConstants.Attribute.AtomicAggregate, Data = [] },
+            ],
+            Nlri = []
+        };
+
+        var attrs = UpdateCodec.ParseRouteAttributes(update, fourByteAsnSession: true);
+
+        Assert.Equal([65001u], attrs.AsPath);
+    }
+
+    [Fact]
     public void ParseRouteAttributes_InvalidOriginValue_ThrowsSubcode6()
     {
         var update = new BgpUpdateMessage
@@ -575,17 +644,19 @@ public class BgpSessionRfc6793Tests
     }
 
     /// <summary>
-    /// An unrecognized attribute is not shape-checked — RFC 7606 §3 leaves those to the
+    /// An unrecognized OPTIONAL attribute is not shape-checked — RFC 7606 §3 leaves those to the
     /// optional/transitive propagation rules. Validating attributes the codec never reads would
-    /// only create new ways to reject an UPDATE a conformant implementation accepts.
+    /// only create new ways to reject an UPDATE a conformant implementation accepts. The
+    /// well-known half of an unknown type code is different since #322: Optional=0 now rejects
+    /// with subcode 2 (see <see cref="ParseRouteAttributes_UnrecognizedWellKnownAttribute_ThrowsSubcode2"/>).
     /// </summary>
     [Fact]
     public void ParseRouteAttributes_UnrecognizedAttribute_IsNotShapeChecked()
     {
         var update = UpdateWith(new PathAttribute
         {
-            Flags = 0x00,          // neither optional nor transitive — nonsense for an unknown type
-            TypeCode = 200,        // unassigned
+            Flags = BgpConstants.Attribute.FlagOptional | BgpConstants.Attribute.FlagTransitive,
+            TypeCode = 200,        // unassigned, but OPTIONAL — ignored, never shape-checked
             Data = [1, 2, 3],
         });
 
