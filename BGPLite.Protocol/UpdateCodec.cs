@@ -245,11 +245,18 @@ public static class UpdateCodec
                     continue;
                 seenTypes[attr.TypeCode] = true;
 
+                // Order matters: the duplicate guard runs FIRST, so a discarded later occurrence is
+                // never shape-checked. RFC 7606 §3 says those occurrences are discarded, not
+                // "discarded but still validated" — checking them would reject an UPDATE over an
+                // attribute that has no effect on the result (#287 + #290).
+                ValidateAttributeShape(attr, fourByteAsnSession);
+
                 switch (attr.TypeCode)
                 {
                     case BgpConstants.Attribute.Origin:
-                        if (attr.Data.Length < 1)
-                            throw new BgpNotificationException(BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.InvalidOriginAttribute, "Malformed ORIGIN attribute");
+                        // Length is guaranteed to be exactly 1 by ValidateAttributeShape; only the
+                        // value remains to check (RFC 7606 §7.1: "malformed if its length is not 1
+                        // or if it has an undefined value").
                         AttributeHelper.ReadOrigin(attr);
                         originSeen = true;
                         break;
@@ -261,8 +268,8 @@ public static class UpdateCodec
                         as4Path = AttributeHelper.ReadAs4Path(attr);
                         break;
                     case BgpConstants.Attribute.NextHop:
-                        if (attr.Data.Length < 4)
-                            throw new BgpNotificationException(BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.InvalidNextHopAttribute, "Malformed NEXT_HOP attribute");
+                        // Length is guaranteed to be exactly 4 by ValidateAttributeShape (RFC 7606
+                        // §7.3: "malformed if its length is not 4").
                         nextHop = AttributeHelper.ReadNextHop(attr);
                         nextHopSeen = true;
                         break;
@@ -294,6 +301,73 @@ public static class UpdateCodec
             // of flattening it to Unspecific.
             throw new BgpNotificationException(BgpConstants.Error.UpdateMessageError, ex.SubErrorCode ?? BgpConstants.SubError.Unspecific, ex.Message);
         }
+    }
+
+    /// <summary>
+    /// The RFC-mandated shape of a recognized path attribute: the required Optional/Transitive flag
+    /// bits and, where the type code fixes it, the exact value length. Returns <c>null</c> for a
+    /// type code this codec does not parse — RFC 7606 §3 leaves unrecognized attributes to the
+    /// optional/transitive propagation rules rather than validating them.
+    /// <para>
+    /// Scoped deliberately to the attributes <see cref="ParseRouteAttributes"/> actually consumes.
+    /// MED/LOCAL_PREF/ATOMIC_AGGREGATE are "known" to <see cref="AttributeHelper.IsKnownAttribute"/>
+    /// but are never read here, and validating attributes the codec ignores would only create new
+    /// ways to reject an UPDATE a conformant implementation accepts.
+    /// </para>
+    /// </summary>
+    private static (bool Optional, bool Transitive, int? FixedLength)? ExpectedAttributeShape(
+        byte typeCode, bool fourByteAsnSession) => typeCode switch
+        {
+            // Well-known mandatory (RFC 4271 §4.3 / §5.1): optional=0, transitive=1.
+            BgpConstants.Attribute.Origin => (false, true, 1),
+            BgpConstants.Attribute.AsPath => (false, true, (int?)null),
+            BgpConstants.Attribute.NextHop => (false, true, 4),
+            // Optional transitive (RFC 4271 §5.1.7, RFC 1997, RFC 6793 §3, RFC 8092 §2).
+            BgpConstants.Attribute.Aggregator => (true, true, (int?)null),
+            BgpConstants.Attribute.Community => (true, true, (int?)null),
+            // AS4_PATH / AS4_AGGREGATOR exist only to tunnel 4-octet ASNs across a 2-octet session
+            // (RFC 6793 §3). On a 4-octet session the switch below ignores them entirely
+            // (`case ... when !fourByteAsnSession`), so validating their shape there would withdraw an
+            // UPDATE's routes over an attribute this codec does not even read — the same over-rejection
+            // the type list above avoids by excluding MED/LOCAL_PREF/ATOMIC_AGGREGATE (#290 review).
+            BgpConstants.Attribute.As4Path when !fourByteAsnSession => (true, true, (int?)null),
+            BgpConstants.Attribute.As4Aggregator when !fourByteAsnSession => (true, true, (int?)null),
+            BgpConstants.Attribute.LargeCommunity => (true, true, (int?)null),
+            _ => null,
+        };
+
+    /// <summary>
+    /// Validates a recognized attribute's flags and fixed length against its type code (#290).
+    /// Throws <see cref="BgpNotificationException"/> with Attribute Flags Error (4) or Attribute
+    /// Length Error (5) so the caller's treat-as-withdraw path applies (RFC 7606 §4).
+    /// </summary>
+    private static void ValidateAttributeShape(PathAttribute attr, bool fourByteAsnSession)
+    {
+        if (ExpectedAttributeShape(attr.TypeCode, fourByteAsnSession) is not { } expected)
+            return;
+
+        // RFC 7606 §3: "If the value of either the Optional or Transitive bits in the Attribute
+        // Flags is in conflict with their specified values, then the attribute MUST be treated as
+        // malformed and the 'treat-as-withdraw' approach used."
+        //
+        // ONLY those two bits. The Partial bit is deliberately not checked: RFC 7606 narrows the
+        // RFC 4271 §5 "MUST be 0 for well-known attributes" rule to Optional/Transitive, and
+        // rejecting on Partial would drop routes that conformant implementations accept. Bit 0x08
+        // (reserved) is already rejected at the wire level by BgpMessageReader.ParseAttribute (#272).
+        if (attr.Optional != expected.Optional || attr.Transitive != expected.Transitive)
+            throw new BgpNotificationException(
+                BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.AttributeFlagsError,
+                $"Attribute type {attr.TypeCode} has flags 0x{attr.Flags:X2} conflicting with its type code " +
+                $"(expected optional={expected.Optional}, transitive={expected.Transitive})");
+
+        // RFC 4271 §6.3: "If any recognized attribute has an Attribute Length that conflicts with
+        // the expected length (based on the attribute type code), then the Error Subcode MUST be
+        // set to Attribute Length Error." RFC 7606 §7.1/§7.3 fix ORIGIN at 1 octet and NEXT_HOP at
+        // 4, both handled as treat-as-withdraw.
+        if (expected.FixedLength is { } fixedLength && attr.Data.Length != fixedLength)
+            throw new BgpNotificationException(
+                BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.AttributeLengthError,
+                $"Attribute type {attr.TypeCode} has length {attr.Data.Length}, which conflicts with its type code (expected {fixedLength})");
     }
 
     public static byte[] GetMalformedFourOctetAsnCapabilityData(BgpOpenMessage open)

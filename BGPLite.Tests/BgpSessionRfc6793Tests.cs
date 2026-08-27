@@ -421,4 +421,264 @@ public class BgpSessionRfc6793Tests
             () => UpdateCodec.ParseRouteAttributes(update, fourByteAsnSession: true));
         Assert.Equal(BgpConstants.SubError.InvalidOriginAttribute, ex.SubErrorCode);
     }
+
+    // ---- #290: attribute flags vs type code, and fixed lengths ----
+
+    /// <summary>
+    /// Builds a minimal valid announcing UPDATE (ORIGIN + AS_PATH + NEXT_HOP) with
+    /// <paramref name="replacement"/> substituted for the attribute sharing its type code, or
+    /// appended when it is a new type.
+    /// </summary>
+    private static BgpUpdateMessage UpdateWith(PathAttribute replacement, bool fourByteAsn = true)
+    {
+        // The base AS_PATH must match the session encoding the caller will parse with, or it throws
+        // Malformed AS_PATH before the loop ever reaches the attribute under test.
+        var attrs = new List<PathAttribute>
+        {
+            AttributeHelper.WriteOrigin(BgpOrigin.Igp),
+            AttributeHelper.WriteAsPath([65001u], fourByteAsn),
+            AttributeHelper.WriteNextHop(0x0A000001),
+        };
+        var i = attrs.FindIndex(a => a.TypeCode == replacement.TypeCode);
+        if (i >= 0) attrs[i] = replacement; else attrs.Add(replacement);
+        return new BgpUpdateMessage { PathAttributes = attrs, Nlri = [] };
+    }
+
+    /// <summary>
+    /// RFC 7606 §3: "If the value of either the Optional or Transitive bits in the Attribute Flags
+    /// is in conflict with their specified values, then the attribute MUST be treated as malformed
+    /// and the 'treat-as-withdraw' approach used." Nothing checked this before #290.
+    /// </summary>
+    [Theory]
+    [InlineData(BgpConstants.Attribute.Origin, (byte)0x80)]          // well-known marked Optional
+    [InlineData(BgpConstants.Attribute.Origin, (byte)0x00)]          // Transitive cleared
+    [InlineData(BgpConstants.Attribute.AsPath, (byte)0x00)]          // well-known non-transitive
+    [InlineData(BgpConstants.Attribute.AsPath, (byte)0xC0)]          // marked Optional
+    [InlineData(BgpConstants.Attribute.NextHop, (byte)0x80)]
+    [InlineData(BgpConstants.Attribute.Community, (byte)0x40)]       // optional marked well-known
+    [InlineData(BgpConstants.Attribute.Community, (byte)0x80)]       // Transitive cleared
+    [InlineData(BgpConstants.Attribute.LargeCommunity, (byte)0x40)]
+    public void ParseRouteAttributes_FlagsConflictWithTypeCode_AttributeFlagsError(byte typeCode, byte flags)
+    {
+        var data = typeCode switch
+        {
+            BgpConstants.Attribute.Origin => new byte[] { 0x00 },
+            BgpConstants.Attribute.AsPath => [0x02, 0x01, 0x00, 0x00, 0xFD, 0xE9],
+            BgpConstants.Attribute.NextHop => [0x0A, 0x00, 0x00, 0x01],
+            BgpConstants.Attribute.Community => [0x00, 0x00, 0x00, 0x01],
+            BgpConstants.Attribute.LargeCommunity => new byte[12],
+            BgpConstants.Attribute.As4Path => [0x02, 0x01, 0x00, 0x03, 0x0D, 0x40],
+            _ => throw new InvalidOperationException(),
+        };
+        var update = UpdateWith(new PathAttribute { Flags = flags, TypeCode = typeCode, Data = data });
+
+        var ex = Assert.Throws<BgpNotificationException>(
+            () => UpdateCodec.ParseRouteAttributes(update, fourByteAsnSession: true));
+        Assert.Equal(BgpConstants.Error.UpdateMessageError, ex.ErrorCode);
+        Assert.Equal(BgpConstants.SubError.AttributeFlagsError, ex.SubErrorCode);
+    }
+
+    /// <summary>
+    /// AS4_PATH / AS4_AGGREGATOR exist only to tunnel 4-octet ASNs across a 2-octet session
+    /// (RFC 6793 §3), so their shape IS validated on a 2-octet session — where the parser reads
+    /// them.
+    /// </summary>
+    [Theory]
+    [InlineData(BgpConstants.Attribute.As4Path, (byte)0x40)]   // marked well-known
+    [InlineData(BgpConstants.Attribute.As4Path, (byte)0x80)]   // Transitive cleared
+    public void ParseRouteAttributes_As4FlagsConflict_OnTwoOctetSession_AttributeFlagsError(byte typeCode, byte flags)
+    {
+        var update = UpdateWith(new PathAttribute
+        {
+            Flags = flags,
+            TypeCode = typeCode,
+            Data = [0x02, 0x01, 0x00, 0x03, 0x0D, 0x40], // AS_SEQUENCE [200000]
+        }, fourByteAsn: false);
+
+        var ex = Assert.Throws<BgpNotificationException>(
+            () => UpdateCodec.ParseRouteAttributes(update, fourByteAsnSession: false));
+        Assert.Equal(BgpConstants.SubError.AttributeFlagsError, ex.SubErrorCode);
+    }
+
+    /// <summary>
+    /// ...and is NOT validated on a 4-octet session, where the parser ignores those attributes
+    /// outright (`case ... when !fourByteAsnSession`). Validating an attribute the codec never
+    /// reads would withdraw an UPDATE's routes over something that has no effect on the result —
+    /// the same over-rejection the shape table avoids for MED/LOCAL_PREF/ATOMIC_AGGREGATE (#290 review).
+    /// </summary>
+    [Theory]
+    [InlineData(BgpConstants.Attribute.As4Path, (byte)0x40)]
+    [InlineData(BgpConstants.Attribute.As4Path, (byte)0x00)]
+    [InlineData(BgpConstants.Attribute.As4Aggregator, (byte)0x40)]
+    public void ParseRouteAttributes_As4FlagsConflict_OnFourOctetSession_IsIgnored(byte typeCode, byte flags)
+    {
+        var update = UpdateWith(new PathAttribute
+        {
+            Flags = flags,
+            TypeCode = typeCode,
+            Data = [0x02, 0x01, 0x00, 0x03, 0x0D, 0x40],
+        });
+
+        var attrs = UpdateCodec.ParseRouteAttributes(update, fourByteAsnSession: true);
+
+        Assert.Equal(0x0A000001u, attrs.NextHop);
+        Assert.Equal([65001u], attrs.AsPath); // the ignored AS4_PATH did not affect the result
+    }
+
+    /// <summary>
+    /// The Partial bit is deliberately NOT checked. RFC 7606 §3 narrows the flags check to the
+    /// Optional and Transitive bits; RFC 4271 §5's "Partial MUST be 0 for well-known attributes"
+    /// is not re-stated as an error condition, and rejecting on it would drop routes that
+    /// conformant implementations accept.
+    /// </summary>
+    [Theory]
+    [InlineData(BgpConstants.Attribute.Origin, (byte)0x60)]          // Transitive | Partial
+    [InlineData(BgpConstants.Attribute.Community, (byte)0xE0)]       // Optional | Transitive | Partial
+    public void ParseRouteAttributes_PartialBitSet_IsAccepted(byte typeCode, byte flags)
+    {
+        var data = typeCode == BgpConstants.Attribute.Origin
+            ? new byte[] { 0x00 }
+            : [0x00, 0x00, 0x00, 0x01];
+        var update = UpdateWith(new PathAttribute { Flags = flags, TypeCode = typeCode, Data = data });
+
+        var attrs = UpdateCodec.ParseRouteAttributes(update, fourByteAsnSession: true);
+
+        Assert.Equal(0x0A000001u, attrs.NextHop);
+    }
+
+    /// <summary>
+    /// RFC 7606 §7.1 (ORIGIN) and §7.3 (NEXT_HOP): "considered malformed if its length is not 1"
+    /// / "not 4". The previous checks were lower bounds (&lt; 1 / &lt; 4), so an over-long ORIGIN was
+    /// accepted and an 8-octet NEXT_HOP was silently truncated to its first four octets.
+    /// </summary>
+    [Theory]
+    [InlineData(BgpConstants.Attribute.Origin, 0)]
+    [InlineData(BgpConstants.Attribute.Origin, 2)]
+    [InlineData(BgpConstants.Attribute.Origin, 4)]
+    [InlineData(BgpConstants.Attribute.NextHop, 0)]
+    [InlineData(BgpConstants.Attribute.NextHop, 3)]
+    [InlineData(BgpConstants.Attribute.NextHop, 8)]  // an IPv6-shaped value must not be truncated
+    [InlineData(BgpConstants.Attribute.NextHop, 16)]
+    public void ParseRouteAttributes_FixedLengthMismatch_AttributeLengthError(byte typeCode, int length)
+    {
+        var update = UpdateWith(new PathAttribute
+        {
+            Flags = BgpConstants.Attribute.FlagTransitive,
+            TypeCode = typeCode,
+            Data = new byte[length],
+        });
+
+        var ex = Assert.Throws<BgpNotificationException>(
+            () => UpdateCodec.ParseRouteAttributes(update, fourByteAsnSession: true));
+        Assert.Equal(BgpConstants.Error.UpdateMessageError, ex.ErrorCode);
+        Assert.Equal(BgpConstants.SubError.AttributeLengthError, ex.SubErrorCode);
+    }
+
+    /// <summary>
+    /// An unrecognized attribute is not shape-checked — RFC 7606 §3 leaves those to the
+    /// optional/transitive propagation rules. Validating attributes the codec never reads would
+    /// only create new ways to reject an UPDATE a conformant implementation accepts.
+    /// </summary>
+    [Fact]
+    public void ParseRouteAttributes_UnrecognizedAttribute_IsNotShapeChecked()
+    {
+        var update = UpdateWith(new PathAttribute
+        {
+            Flags = 0x00,          // neither optional nor transitive — nonsense for an unknown type
+            TypeCode = 200,        // unassigned
+            Data = [1, 2, 3],
+        });
+
+        var attrs = UpdateCodec.ParseRouteAttributes(update, fourByteAsnSession: true);
+
+        Assert.Equal(0x0A000001u, attrs.NextHop);
+    }
+
+    /// <summary>Correct flags and lengths still parse — guards against over-rejecting.</summary>
+    [Fact]
+    public void ParseRouteAttributes_CanonicalFlagsAndLengths_StillParse()
+    {
+        var update = new BgpUpdateMessage
+        {
+            PathAttributes =
+            [
+                AttributeHelper.WriteOrigin(BgpOrigin.Igp),
+                AttributeHelper.WriteAsPath([65001u], fourByteAsn: true),
+                AttributeHelper.WriteNextHop(0x0A000001),
+                AttributeHelper.WriteCommunities([65000u, 100u]),
+                AttributeHelper.WriteLargeCommunities([(64512u, 1u, 2u)]),
+            ],
+            Nlri = []
+        };
+
+        var attrs = UpdateCodec.ParseRouteAttributes(update, fourByteAsnSession: true);
+
+        Assert.Equal(0x0A000001u, attrs.NextHop);
+        Assert.Equal([65000u, 100u], attrs.Communities);
+        Assert.Equal([(64512u, 1u, 2u)], attrs.LargeCommunities);
+    }
+
+    /// <summary>
+    /// The interaction between the duplicate rule (#287) and shape validation (#290), which only
+    /// exists once both are in place: the guard runs FIRST, so a discarded later occurrence is never
+    /// shape-checked. RFC 7606 §3 says those occurrences are discarded, not "discarded but still
+    /// validated" — rejecting on the flags of an attribute that has no effect on the result would
+    /// drop an UPDATE a conformant implementation accepts.
+    /// </summary>
+    [Fact]
+    public void ParseRouteAttributes_DuplicateWithConflictingFlags_IsDiscardedNotRejected()
+    {
+        var update = new BgpUpdateMessage
+        {
+            PathAttributes =
+            [
+                AttributeHelper.WriteOrigin(BgpOrigin.Igp),
+                AttributeHelper.WriteAsPath([65001u], fourByteAsn: true),
+                AttributeHelper.WriteNextHop(0x0A000001),
+                AttributeHelper.WriteCommunities([65000u, 100u]),   // first — wins
+                new PathAttribute
+                {
+                    Flags = BgpConstants.Attribute.FlagTransitive,  // well-known: conflicts with COMMUNITY
+                    TypeCode = BgpConstants.Attribute.Community,
+                    Data = [0x00, 0x00, 0x03, 0xE7],
+                },
+            ],
+            Nlri = []
+        };
+
+        var attrs = UpdateCodec.ParseRouteAttributes(update, fourByteAsnSession: true);
+
+        Assert.Equal([65000u, 100u], attrs.Communities);
+        Assert.Equal(0x0A000001u, attrs.NextHop);
+    }
+
+    /// <summary>
+    /// The inverse: a conflicting-flags attribute in FIRST position is still rejected, so the
+    /// duplicate rule cannot be used to smuggle a malformed attribute past shape validation.
+    /// </summary>
+    [Fact]
+    public void ParseRouteAttributes_ConflictingFlagsOnFirstOccurrence_StillRejected()
+    {
+        var update = new BgpUpdateMessage
+        {
+            PathAttributes =
+            [
+                AttributeHelper.WriteOrigin(BgpOrigin.Igp),
+                AttributeHelper.WriteAsPath([65001u], fourByteAsn: true),
+                AttributeHelper.WriteNextHop(0x0A000001),
+                new PathAttribute
+                {
+                    Flags = BgpConstants.Attribute.FlagTransitive,  // conflicting — and first
+                    TypeCode = BgpConstants.Attribute.Community,
+                    Data = [0x00, 0x00, 0x03, 0xE7],
+                },
+                AttributeHelper.WriteCommunities([65000u, 100u]),
+            ],
+            Nlri = []
+        };
+
+        var ex = Assert.Throws<BgpNotificationException>(
+            () => UpdateCodec.ParseRouteAttributes(update, fourByteAsnSession: true));
+        Assert.Equal(BgpConstants.SubError.AttributeFlagsError, ex.SubErrorCode);
+    }
 }
