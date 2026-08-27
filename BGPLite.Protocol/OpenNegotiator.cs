@@ -61,6 +61,15 @@ public static class OpenNegotiator
         var remoteAsn = CapabilityHelper.GetEffectiveAsn(open);
         var remoteRouteRefresh = open.Capabilities.Any(c => c.Code == BgpConstants.Capability.RouteRefresh);
 
+        // RFC 7607 §2: "If a BGP speaker receives zero as the peer AS in an OPEN message, it MUST
+        // abort the connection and send a NOTIFICATION with Error Code 'OPEN Message Error' and
+        // subcode 'Bad Peer AS'." Both fields are checked: the declared My Autonomous System and
+        // the effective ASN (the 4-octet capability value when present, which takes precedence per
+        // RFC 6793 §4.1). Without this an AS-0 peer was accepted and — since BGPLite auto-registers
+        // unknown peers — persisted in the PeerStore as a real peer (#300).
+        if (open.Asn == 0 || remoteAsn == 0)
+            throw new BgpNotificationException(BgpConstants.Error.OpenMessageError, BgpConstants.SubError.BadPeerAs, "Invalid peer AS: 0 (RFC 7607)");
+
         if (expectedRemoteAsn.HasValue && remoteAsn != expectedRemoteAsn.Value)
             throw new BgpNotificationException(BgpConstants.Error.OpenMessageError, BgpConstants.SubError.BadPeerAs, $"Unexpected ASN: expected {expectedRemoteAsn}, got {remoteAsn}");
 

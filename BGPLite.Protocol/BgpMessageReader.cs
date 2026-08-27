@@ -13,12 +13,35 @@ public static class BgpMessageReader
 
         var length = BinaryPrimitives.ReadUInt16BigEndian(buffer[16..]);
         if (length < BgpConstants.MinMessageSize || length > BgpConstants.MaxMessageSize)
-            throw new BgpParseException($"Invalid message length: {length}");
+            throw BadMessageLength(length);
 
         if (buffer.Length < length)
             throw new BgpParseException($"Incomplete message: have {buffer.Length}, need {length}");
 
         var type = (BgpMessageType)buffer[18];
+
+        // RFC 4271 §6.1: "if the Length field of a KEEPALIVE message is not equal to 19 ... then the
+        // Error Subcode MUST be set to Bad Message Length." Nothing checked this — type 4 mapped
+        // straight to the singleton and any trailing bytes were silently ignored, so a peer could
+        // pad a KEEPALIVE arbitrarily and BGPLite would accept it (#300).
+        //
+        // ONLY KEEPALIVE is validated here, deliberately. §6.1 also gives per-type minimums for
+        // OPEN (29), UPDATE (23) and NOTIFICATION (21), and all three are already rejected today —
+        // but by their body parsers, as Open/Update Message Error rather than as header errors.
+        // Reclassifying them would change behaviour in ways that are not improvements:
+        //   - OPEN: #223 deliberately made a too-short OPEN report Open Message Error (2), with a
+        //     test asserting it. Moving it to Message Header Error would flip that decision, and
+        //     would make ParseOpen's own `payload.Length < 10` guard unreachable.
+        //   - UPDATE: a body error is routed to treat-as-withdraw and the session SURVIVES. A header
+        //     error tears it down — so a 22-byte UPDATE would become a remote session kill, exactly
+        //     the class of defect #222 and #284 closed. RFC 7606 §3 revises UPDATE error handling
+        //     toward keeping the session, and that direction wins here.
+        //   - NOTIFICATION: already a header error, just without the subcode; not worth a special
+        //     case of its own.
+        // Recorded rather than silently skipped; see the PR for the full reasoning.
+        if (type == BgpMessageType.Keepalive && length != BgpConstants.MessageHeaderSize)
+            throw BadMessageLength(length);
+
         var payload = buffer[BgpConstants.MessageHeaderSize..length];
 
         return type switch
@@ -28,9 +51,24 @@ public static class BgpMessageReader
             BgpMessageType.Update => ParseUpdate(payload),
             BgpMessageType.Notification => ParseNotification(payload),
             BgpMessageType.RouteRefresh => ParseRouteRefresh(payload),
-            _ => throw new BgpParseException($"Unknown message type: {type}")
+            // RFC 4271 §6.1: "the Error Subcode MUST be set to Bad Message Type. The Data field
+            // MUST contain the erroneous Message Type field."
+            _ => throw new BgpParseException($"Unknown message type: {(byte)type}",
+                subErrorCode: BgpConstants.SubError.BadMessageType, notificationData: [(byte)type])
         };
     }
+
+    /// <summary>
+    /// RFC 4271 §6.1 Bad Message Length: "The Data field MUST contain the erroneous Length field."
+    /// <c>ErrorCode</c> is deliberately left <c>null</c> — that is how <c>BgpSession.ReadLoopAsync</c>
+    /// tells a fixed-header failure (tear the session down) from a message-body failure
+    /// (treat-as-withdraw), and turning it into a body error here would both violate §6.1 and
+    /// desync the stream, since the payload has not been consumed (#223, #300).
+    /// </summary>
+    private static BgpParseException BadMessageLength(int length) =>
+        new($"Invalid message length: {length}",
+            subErrorCode: BgpConstants.SubError.BadMessageLength,
+            notificationData: [(byte)(length >> 8), (byte)length]);
 
     public static int GetMessageLength(ReadOnlySpan<byte> buffer)
     {
@@ -43,8 +81,16 @@ public static class BgpMessageReader
     {
         // #105: SequenceEqual over ReadOnlySpan<byte> replaces the hand-rolled byte-by-byte loop —
         // idiomatic, vectorizable by the JIT, and the same semantics.
+        //
+        // RFC 4271 §6.1: "If the Marker field of the message header is not as expected, then a
+        // synchronization error has occurred and the Error Subcode MUST be set to Connection Not
+        // Synchronized." This previously emitted Unspecific, which tells the peer's operator
+        // nothing about the one header failure that actually means "our streams have diverged"
+        // (#300). ErrorCode stays null so it remains a fixed-header failure that tears the session
+        // down, which is exactly right for a desync.
         if (!marker.SequenceEqual(BgpConstants.Marker))
-            throw new BgpParseException("Invalid BGP marker");
+            throw new BgpParseException("Invalid BGP marker",
+                subErrorCode: BgpConstants.SubError.ConnectionNotSynchronized);
     }
 
     #region OPEN
@@ -342,10 +388,13 @@ public static class BgpMessageReader
 /// </summary>
 public sealed class BgpParseException : Exception
 {
-    public BgpParseException(string message, byte? errorCode = null, byte? subErrorCode = null) : base(message)
+    private readonly byte[]? _notificationData;
+
+    public BgpParseException(string message, byte? errorCode = null, byte? subErrorCode = null, byte[]? notificationData = null) : base(message)
     {
         ErrorCode = errorCode;
         SubErrorCode = subErrorCode;
+        _notificationData = notificationData is null ? null : (byte[])notificationData.Clone();
     }
 
     public BgpParseException(string message, Exception inner) : base(message, inner) { }
@@ -355,4 +404,12 @@ public sealed class BgpParseException : Exception
     public byte? ErrorCode { get; }
     /// <summary>RFC 4271 §6 sub-error code, or <c>null</c> for Unspecific (0).</summary>
     public byte? SubErrorCode { get; }
+    /// <summary>
+    /// Contents of the NOTIFICATION Data field, or <c>null</c> when the failure carries none.
+    /// RFC 4271 §6.1 requires the erroneous Length field for Bad Message Length and the erroneous
+    /// Message Type for Bad Message Type, so the peer's operator gets a usable diagnostic instead
+    /// of a bare "unknown error" (#300). Cloned in and out, mirroring
+    /// <see cref="BgpNotificationException.NotificationData"/>.
+    /// </summary>
+    public byte[]? NotificationData => _notificationData is null ? null : (byte[])_notificationData.Clone();
 }

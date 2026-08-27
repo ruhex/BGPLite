@@ -453,6 +453,12 @@ public class MalformedUpdateResilienceTests
         var notif = sent.OfType<BgpNotificationMessage>().SingleOrDefault();
         Assert.NotNull(notif);
         Assert.Equal(BgpConstants.Error.MessageHeaderError, notif!.ErrorCode);
+        // #300: RFC 4271 §6.1 also mandates the subcode and the Data field — "the Error Subcode
+        // MUST be set to Bad Message Length ... The Data field MUST contain the erroneous Length
+        // field." Previously this emitted 1/0 with no Data, giving the peer's operator nothing.
+        Assert.Equal(BgpConstants.SubError.BadMessageLength, notif.SubErrorCode);
+        Assert.NotNull(notif.Data);
+        Assert.Equal([0x00, 0x05], notif.Data!); // the declared length that was rejected
 
         try { await runTask.WaitAsync(TimeSpan.FromSeconds(5)); }
         catch (OperationCanceledException) { /* session torn down */ }

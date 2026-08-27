@@ -257,12 +257,23 @@ public static class AttributeHelper
 
             for (var i = 0; i < segmentLength; i++)
             {
-                ases.Add(asSize switch
+                var asn = asSize switch
                 {
                     2 => BinaryPrimitives.ReadUInt16BigEndian(data.Slice(offset, asSize)),
                     4 => BinaryPrimitives.ReadUInt32BigEndian(data.Slice(offset, asSize)),
                     _ => throw new ArgumentOutOfRangeException(nameof(asSize))
-                });
+                };
+
+                // RFC 7607 §2: "An UPDATE message that contains the AS number of zero in the AS_PATH
+                // ... MUST be considered as malformed and be handled by the procedures specified in
+                // [RFC7606]" — i.e. treat-as-withdraw via Malformed AS_PATH, the remedy RFC 7606 §7.2
+                // prescribes for a malformed AS_PATH. The same applies to AS4_PATH through this
+                // shared reader (#300). AS 0 is reserved and must never appear in a path.
+                if (asn == 0)
+                    throw new BgpParseException($"Invalid {attributeName}: AS 0 is reserved (RFC 7607)",
+                        BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.MalformedAsPath);
+
+                ases.Add(asn);
                 offset += asSize;
             }
         }
