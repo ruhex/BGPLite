@@ -218,6 +218,80 @@ public class PrefixAggregatorTests
         Assert.Equal(0xC0A80000u, route.Prefix);
     }
 
+    // ---- #305: normalization is memoized per backing-array instance ----
+
+    /// <summary>
+    /// The memo keys by REFERENCE, so this is the case that would break if identity were mistaken
+    /// for equivalence in the other direction: two routes carrying equal communities in DIFFERENT
+    /// array instances normalize separately and must still land in one group, because
+    /// <c>AttributeKey</c> compares structurally.
+    /// </summary>
+    [Fact]
+    public void EqualCommunitiesInDistinctInstances_StillGroupTogether()
+    {
+        uint[] first = [0x65u, 0x100u];
+        uint[] second = [0x100u, 0x65u];   // same set, different instance, different order
+        Assert.NotSame(first, second);
+
+        var result = _aggregator.Aggregate([
+            R(0xC0A80000, 24, first),
+            R(0xC0A80100, 24, second),
+        ]);
+
+        var route = Assert.Single(result);
+        Assert.Equal((0xC0A80000u, (byte)23), (route.Prefix, route.PrefixLength));  // merged
+        Assert.Equal([0x65u, 0x100u], route.Communities);
+    }
+
+    /// <summary>
+    /// The shape the memo is built for: one resolved community array shared by every route from a
+    /// source (what <c>RouteAssembler.MakeRoute</c> does), alongside a second source. The shared
+    /// instance must not collapse the two sources together.
+    /// </summary>
+    [Fact]
+    public void SharedCommunityInstances_GroupPerInstanceContent()
+    {
+        uint[] fromSourceA = [0xAAu];
+        uint[] fromSourceB = [0xBBu];
+
+        var routes = new List<Route>();
+        for (var i = 0u; i < 8; i++)
+            routes.Add(R(0xC0A80000 + (i * 256), 24, fromSourceA));
+        for (var i = 0u; i < 8; i++)
+            routes.Add(R(0x0A000000 + (i * 256), 24, fromSourceB));
+
+        var result = _aggregator.Aggregate(routes);
+
+        Assert.Equal(2, result.Count);
+        Assert.Contains(result, r => r.Prefix == 0xC0A80000 && r.PrefixLength == 21 && r.Communities.SequenceEqual([0xAAu]));
+        Assert.Contains(result, r => r.Prefix == 0x0A000000 && r.PrefixLength == 21 && r.Communities.SequenceEqual([0xBBu]));
+    }
+
+    /// <summary>
+    /// Large communities go through their own memo, and the empty case short-circuits before either
+    /// dictionary is created — so a set of routes mixing "has large communities" with "has none"
+    /// must still separate correctly.
+    /// </summary>
+    [Fact]
+    public void LargeCommunities_MemoizedSeparatelyFromRegularOnes()
+    {
+        (uint, uint, uint)[] large = [(65000u, 1u, 2u), (65000u, 1u, 1u)];
+
+        var result = _aggregator.Aggregate([
+            R(0xC0A80000, 24, [0x65u], large),
+            R(0xC0A80100, 24, [0x65u], large),
+            R(0xC0A80200, 24, [0x65u]),          // same regular set, no large communities
+        ]);
+
+        Assert.Equal(2, result.Count);
+        var withLarge = Assert.Single(result, r => r.LargeCommunities.Count == 2);
+        Assert.Equal((0xC0A80000u, (byte)23), (withLarge.Prefix, withLarge.PrefixLength));
+        // Sorting is for the grouping key only — the emitted route carries the group template's
+        // own array, so what goes on the wire keeps the order the source produced.
+        Assert.Equal(large, withLarge.LargeCommunities);
+        Assert.Single(result, r => r.LargeCommunities.Count == 0 && r.Prefix == 0xC0A80200);
+    }
+
     [Fact]
     public void SendPath_GroupByCommunitySet_NeverMixesCommunities()
     {
