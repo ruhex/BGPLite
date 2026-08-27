@@ -36,9 +36,16 @@ public sealed class ExactUnionPrefixAggregator : IPrefixAggregator
         // Capacity is the expected number of DISTINCT community sets, not route count.
         // A typical send carries 1-5 community sets even with tens of thousands of routes.
         var groups = new Dictionary<AttributeKey, List<Route>>(4);
+        // #305: normalization was per route — Distinct().ToArray() twice over, so four allocations
+        // for every route on every send. RouteAssembler hands every route built from one source the
+        // SAME community array instance, so a 60k-route dump normalizes a handful of distinct
+        // instances tens of thousands of times. The normalizer memoizes by instance for the duration
+        // of this call; it is a struct with lazily-created dictionaries, so a send whose routes carry
+        // no communities allocates nothing for it at all.
+        var normalizer = default(KeyNormalizer);
         foreach (var route in source)
         {
-            var key = AttributeKey.From(route);
+            var key = normalizer.KeyFor(route);
             if (!groups.TryGetValue(key, out var group))
             {
                 group = new List<Route>();
@@ -145,33 +152,14 @@ public sealed class ExactUnionPrefixAggregator : IPrefixAggregator
             _largeCommunities = largeCommunities;
         }
 
-        public static AttributeKey From(Route route)
-        {
-            // #238: Route collections are IReadOnlyList now — normalize into privately-owned
-            // arrays so the key never aliases a route's (shared) backing array.
-            return new AttributeKey(NormalizeCommunities(route.Communities), NormalizeLargeCommunities(route.LargeCommunities));
-        }
+        // #238: Route collections are IReadOnlyList — the key holds privately-owned normalized
+        // arrays so it never aliases a route's (shared) backing array. Building them is
+        // KeyNormalizer's job.
+        internal static AttributeKey Create(
+            uint[] communities, (uint Global, uint Local1, uint Local2)[] largeCommunities) =>
+            new(communities, largeCommunities);
 
-        private static uint[] NormalizeCommunities(IReadOnlyList<uint> communities)
-        {
-            // Communities are a set: dedup (and sort) so set-equivalent routes key together.
-            var sorted = communities.Distinct().ToArray();
-            Array.Sort(sorted);
-            return sorted;
-        }
-
-        private static (uint Global, uint Local1, uint Local2)[] NormalizeLargeCommunities(
-            IReadOnlyList<(uint Global, uint Local1, uint Local2)> large)
-        {
-            // Large Communities are likewise a set: dedup and order by (Global,Local1,Local2)
-            // so set-equivalent routes key together. (Value tuples have no IComparable, hence
-            // the explicit Comparison rather than Array.Sort(items).)
-            var distinct = large.Distinct().ToArray();
-            Array.Sort(distinct, LargeCommunityComparison);
-            return distinct;
-        }
-
-        private static int LargeCommunityComparison(
+        internal static int LargeCommunityComparison(
             (uint Global, uint Local1, uint Local2) a, (uint Global, uint Local1, uint Local2) b)
         {
             var c = a.Global.CompareTo(b.Global);
@@ -200,6 +188,71 @@ public sealed class ExactUnionPrefixAggregator : IPrefixAggregator
             foreach (var c in _communities) hc.Add(c);
             foreach (var l in _largeCommunities) hc.Add(l);
             return hc.ToHashCode();
+        }
+    }
+
+    /// <summary>
+    /// Builds <see cref="AttributeKey"/>s, memoizing each normalized set by the identity of the
+    /// backing collection it came from, for the duration of a single <see cref="Aggregate"/> call
+    /// (#305).
+    /// <para>
+    /// The memo is keyed by REFERENCE, not by content: <c>RouteAssembler.MakeRoute</c> passes one
+    /// resolved community array to every route built from a source, so identity is exactly the
+    /// "same set" signal, and comparing by content would reintroduce the per-route work the memo
+    /// exists to remove. Distinct instances holding equal content simply normalize twice and then
+    /// compare equal in <see cref="AttributeKey.Equals"/>, which is structural — so grouping is
+    /// unchanged either way.
+    /// </para>
+    /// <para>
+    /// A mutable struct with lazily-created dictionaries, held as a local by <see cref="Aggregate"/>:
+    /// a send whose routes carry no communities at all — the common case for the seeded shared
+    /// table — allocates nothing for it. Not thread-safe, and does not need to be: it never escapes
+    /// the one call that created it.
+    /// </para>
+    /// </summary>
+    private struct KeyNormalizer
+    {
+        private Dictionary<object, uint[]>? _communities;
+        private Dictionary<object, (uint Global, uint Local1, uint Local2)[]>? _largeCommunities;
+
+        public AttributeKey KeyFor(Route route) =>
+            AttributeKey.Create(Normalize(route.Communities), NormalizeLarge(route.LargeCommunities));
+
+        /// <summary>Communities are a set: dedup and sort so set-equivalent routes key together.</summary>
+        private uint[] Normalize(IReadOnlyList<uint> communities)
+        {
+            if (communities.Count == 0)
+                return [];
+
+            _communities ??= new Dictionary<object, uint[]>(4, ReferenceEqualityComparer.Instance);
+            if (_communities.TryGetValue(communities, out var cached))
+                return cached;
+
+            var sorted = communities.Distinct().ToArray();
+            Array.Sort(sorted);
+            _communities[communities] = sorted;
+            return sorted;
+        }
+
+        /// <summary>
+        /// Large Communities are likewise a set: dedup and order by (Global, Local1, Local2). Value
+        /// tuples have no <see cref="IComparable"/>, hence the explicit comparison.
+        /// </summary>
+        private (uint Global, uint Local1, uint Local2)[] NormalizeLarge(
+            IReadOnlyList<(uint Global, uint Local1, uint Local2)> large)
+        {
+            if (large.Count == 0)
+                return [];
+
+            _largeCommunities ??= new Dictionary<object, (uint Global, uint Local1, uint Local2)[]>(
+                4, ReferenceEqualityComparer.Instance);
+            if (_largeCommunities.TryGetValue(large, out var cached))
+                return cached;
+
+            var distinct = large.Distinct().ToArray();
+            Array.Sort(distinct, AttributeKey.LargeCommunityComparison);
+            _largeCommunities[large] = distinct;
+            return distinct;
         }
     }
 }
