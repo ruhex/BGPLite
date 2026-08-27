@@ -233,6 +233,133 @@ public class BgpSessionHoldTimerTests
     }
 
     /// <summary>
+    /// #286: a peer that sends a well-formed OPEN and then goes silent must NOT pin the session.
+    /// OpenTimeoutSeconds (#115) bounds only the read that receives the OPEN; the KEEPALIVE read
+    /// that follows was unbounded, and the keepalive/hold loop does not start until
+    /// RunEstablishedAsync — so the session sat in OpenConfirm forever, holding a socket FD and a
+    /// task. RFC 4271 §8.2.2 runs the Hold Timer in OpenConfirm; on expiry it must send
+    /// NOTIFICATION(Hold Timer Expired) and go to Idle.
+    /// </summary>
+    [Fact]
+    public async Task OpenConfirm_PeerNeverSendsKeepalive_TearsDownOnHoldTimer()
+    {
+        var time = new FakeTimeProvider();
+        var conn = new FakeBgpConnection();
+        var bgpConfig = new BgpConfig
+        {
+            Asn = 65001,
+            RouterId = "127.0.0.1",
+            HoldTime = 9,
+            KeepAlive = 3,
+            OpenTimeoutSeconds = 30, // deliberately longer than HoldTime: it must not be what saves us
+        };
+        using var session = new BgpSession(
+            conn,
+            new PeerConfig { Address = "127.0.0.1" },
+            bgpConfig,
+            new RouteTable(),
+            AllowAllFilter.Instance,
+            new BgpMetrics(),
+            new NopLogger<BgpSession>(),
+            timeProvider: time);
+
+        var runTask = Task.Run(() => session.RunAsync(CancellationToken.None));
+
+        // The peer sends a valid OPEN...
+        conn.Enqueue(Serialize(new BgpOpenMessage
+        {
+            Version = BgpConstants.BgpVersion,
+            Asn = 65002,
+            HoldTime = (ushort)bgpConfig.HoldTime,
+            RouterId = 0x7F000002,
+            Capabilities = [BgpCapabilityInfo.FourOctetAsn(65002)]
+        }));
+
+        // ...the session answers with OPEN + KEEPALIVE and enters OpenConfirm...
+        for (var i = 0; i < 200 && session.State != BgpFsmState.OpenConfirm; i++)
+            await Task.Delay(5);
+        Assert.Equal(BgpFsmState.OpenConfirm, session.State);
+
+        // ...and then the peer never sends its KEEPALIVE. Advance past the negotiated hold time.
+        var sentBefore = conn.Sent.Count;
+        for (var i = 0; i < 20 && !runTask.IsCompleted; i++)
+        {
+            time.Advance(TimeSpan.FromSeconds(2));
+            await Task.Delay(5);
+        }
+
+        await runTask.WaitAsync(TimeSpan.FromSeconds(5)); // must not hang
+        Assert.Equal(BgpFsmState.Idle, session.State);
+
+        var notifs = conn.Sent.Skip(sentBefore)
+            .Select(b => BgpMessageReader.ReadMessage(b.AsSpan()))
+            .OfType<BgpNotificationMessage>()
+            .ToList();
+        var notif = Assert.Single(notifs);
+        Assert.Equal(BgpConstants.Error.HoldTimerExpired, notif.ErrorCode);
+        Assert.Equal(BgpConstants.SubError.Unspecific, notif.SubErrorCode);
+    }
+
+    /// <summary>
+    /// #286, hold time 0: RFC 4271 §4.2 disables the Hold Timer at 0, but that is a rule for an
+    /// ESTABLISHED session. A handshake that never completes must still be bounded, so OpenConfirm
+    /// falls back to the §8.2.2 initial Hold Time (4 minutes) rather than waiting forever.
+    /// </summary>
+    [Fact]
+    public async Task OpenConfirm_HoldTimeZero_StillBoundedByFallback()
+    {
+        var time = new FakeTimeProvider();
+        var conn = new FakeBgpConnection();
+        var bgpConfig = new BgpConfig
+        {
+            Asn = 65001,
+            RouterId = "127.0.0.1",
+            HoldTime = 0,
+            KeepAlive = 0,
+            OpenTimeoutSeconds = 30,
+        };
+        using var session = new BgpSession(
+            conn,
+            new PeerConfig { Address = "127.0.0.1" },
+            bgpConfig,
+            new RouteTable(),
+            AllowAllFilter.Instance,
+            new BgpMetrics(),
+            new NopLogger<BgpSession>(),
+            timeProvider: time);
+
+        var runTask = Task.Run(() => session.RunAsync(CancellationToken.None));
+        conn.Enqueue(Serialize(new BgpOpenMessage
+        {
+            Version = BgpConstants.BgpVersion,
+            Asn = 65002,
+            HoldTime = 0,
+            RouterId = 0x7F000002,
+            Capabilities = [BgpCapabilityInfo.FourOctetAsn(65002)]
+        }));
+
+        for (var i = 0; i < 200 && session.State != BgpFsmState.OpenConfirm; i++)
+            await Task.Delay(5);
+        Assert.Equal(BgpFsmState.OpenConfirm, session.State);
+
+        // Well inside the 4-minute fallback: still waiting, exactly as before this change.
+        time.Advance(TimeSpan.FromMinutes(3));
+        await Task.Delay(20);
+        Assert.False(runTask.IsCompleted, "must still be waiting inside the fallback window");
+        Assert.Equal(BgpFsmState.OpenConfirm, session.State);
+
+        // Past it: bounded.
+        for (var i = 0; i < 20 && !runTask.IsCompleted; i++)
+        {
+            time.Advance(TimeSpan.FromSeconds(30));
+            await Task.Delay(5);
+        }
+
+        await runTask.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Equal(BgpFsmState.Idle, session.State);
+    }
+
+    /// <summary>
     /// Proof of concept: a peer that connects but never sends OPEN is dropped when the OPEN timeout
     /// fires — the timer CTS uses the TimeProvider, so the fake clock advances instantly instead of
     /// waiting wall-clock seconds. No real socket, no multi-second wait.
