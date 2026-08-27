@@ -230,7 +230,15 @@ public static class UpdateCodec
             // The MP_REACH_NLRI/MP_UNREACH_NLRI half of that paragraph — duplicate → NOTIFICATION,
             // session reset — is deliberately not implemented: BGPLite is IPv4-unicast only and never
             // parses those attributes. It belongs with MP-BGP support (#14).
+            //
+            // Clear() is not redundant despite `localsinit` zeroing stackalloc by default: adding
+            // [SkipLocalsInit] (or <SkipLocalsInit> in the csproj) is an ordinary perf tweak for a
+            // codec like this one, and it would turn the guard below into garbage — random type
+            // codes reading as "already seen", so the FIRST occurrence of a mandatory attribute
+            // gets skipped and valid UPDATEs are withdrawn. 256 bytes of memset against a silent,
+            // traffic-dependent failure is not a trade worth making.
             Span<bool> seenTypes = stackalloc bool[256];
+            seenTypes.Clear();
             foreach (var attr in update.PathAttributes)
             {
                 if (seenTypes[attr.TypeCode])
