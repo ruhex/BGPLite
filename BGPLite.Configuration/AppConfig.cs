@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Sockets;
+using BGPLite.Protocol;
 using YamlDotNet.Serialization;
 
 namespace BGPLite.Configuration;
@@ -123,6 +124,93 @@ public sealed class AppConfig
                     $"Invalid configuration: Peers[{i}].Address must be a valid IPv4 address " +
                     $"(got '{peer.Address}').");
             }
+        }
+
+        // #327: prefix-source errors used to surface only at load time, where LoadAllAsync absorbs
+        // them into a Warning plus an empty prefix set — a config typo silently served zero prefixes
+        // until restart. Fail loud at startup (and reject the file on hot reload) instead. The
+        // per-kind required fields mirror the providers' own load-time checks
+        // (FilePrefixProvider/HttpPrefixProvider/AsnPrefixProvider); the community rule is
+        // CommunityCodec's, single-sourced via the Protocol leaf. The ?? [] guards keep an explicit
+        // YAML null ("PrefixSources:") meaning "none" — every runtime consumer treats it that way,
+        // and Validate must reject with a message, never with an NRE.
+        var prefixSources = PrefixSources ?? [];
+        var sourceNames = new HashSet<string>(StringComparer.Ordinal);
+        for (var i = 0; i < prefixSources.Count; i++)
+        {
+            var source = prefixSources[i];
+            var at = $"PrefixSources[{i}] ('{source.Name}')";
+
+            if (string.IsNullOrWhiteSpace(source.Name))
+                throw new InvalidOperationException($"Invalid configuration: {at} requires a Name.");
+            if (!sourceNames.Add(source.Name))
+                throw new InvalidOperationException(
+                    $"Invalid configuration: duplicate prefix source name '{source.Name}' — sources are addressed by name (subscriptions, per-source cache).");
+
+            switch (source.Kind)
+            {
+                case "file":
+                    if (string.IsNullOrWhiteSpace(source.Path))
+                        throw new InvalidOperationException($"Invalid configuration: {at}: Kind=file requires a Path.");
+                    break;
+                case "http":
+                    if (string.IsNullOrWhiteSpace(source.Url))
+                        throw new InvalidOperationException($"Invalid configuration: {at}: Kind=http requires a Url.");
+                    // A malformed URL only fails inside HttpClient after startup, and LoadAllAsync
+                    // absorbs that into a Warning plus zero prefixes — the same silent class this
+                    // validation exists to prevent. Deeper checks (SSRF ranges, ports) stay at fetch
+                    // time in PrefixSourceUrlValidator.
+                    if (!Uri.TryCreate(source.Url, UriKind.Absolute, out var url)
+                        || (url.Scheme != Uri.UriSchemeHttp && url.Scheme != Uri.UriSchemeHttps))
+                        throw new InvalidOperationException(
+                            $"Invalid configuration: {at}: Url must be an absolute http(s) URL (got '{source.Url}').");
+                    break;
+                case "asn":
+                    if (!source.Asn.HasValue)
+                        throw new InvalidOperationException($"Invalid configuration: {at}: Kind=asn requires an Asn.");
+                    if (source.Asn.Value == 0)
+                        throw new InvalidOperationException(
+                            $"Invalid configuration: {at}: Asn must be a positive AS number (RFC 7607 rejects AS 0).");
+                    break;
+                default:
+                    throw new InvalidOperationException(
+                        $"Invalid configuration: {at}: unknown Kind '{source.Kind}' (expected file, http or asn).");
+            }
+
+            if (source.Timeout is <= 0)
+                throw new InvalidOperationException(
+                    $"Invalid configuration: {at}: Timeout must be a positive number of seconds (got {source.Timeout}).");
+
+            ValidateCommunity(source.Community, $"{at}: Community");
+        }
+
+        if (!string.IsNullOrEmpty(DefaultPrefixSource) && !sourceNames.Contains(DefaultPrefixSource))
+            throw new InvalidOperationException(
+                $"Invalid configuration: DefaultPrefixSource '{DefaultPrefixSource}' does not match any PrefixSources entry — unconfigured peers would silently get zero prefixes.");
+
+        // Every community string in this file goes through the same rule so a typo cannot silently
+        // fall back at send time (ConfigCommunityResolver) — the runtime half landed with #335.
+        ValidateCommunity(CustomPrefixCommunity, "CustomPrefixCommunity");
+        ValidateCommunity(CustomAsnCommunity, "CustomAsnCommunity");
+        var asnLists = RipeStat?.AsnLists ?? [];
+        for (var i = 0; i < asnLists.Count; i++)
+            ValidateCommunity(asnLists[i].Community, $"RipeStat.AsnLists[{i}] ('{asnLists[i].Name}'): Community");
+    }
+
+    /// <summary>
+    /// Fail-loud variant of the community format check: the runtime layers (ConfigCommunityResolver,
+    /// RouteSeedingService) deliberately never throw and fall back to defaults/untagged, so config
+    /// validation is the only place a malformed community is actually rejected (#327).
+    /// </summary>
+    private void ValidateCommunity(string? community, string field)
+    {
+        if (string.IsNullOrEmpty(community))
+            return;
+        try { CommunityCodec.Parse(community); }
+        catch (FormatException ex)
+        {
+            throw new InvalidOperationException(
+                $"Invalid configuration: {field} is not a valid 'ASN:VALUE' community — {ex.Message}", ex);
         }
     }
 }
