@@ -624,6 +624,11 @@ public sealed class ManagementApi : IHostedService, IDisposable
 
     #region /api/peers
 
+    /// <summary>
+    /// <c>POST /api/peers</c> — creates a peer from the request body. Every field is validated and
+    /// the address canonicalized (#255) BEFORE the store is touched, so a rejected request leaves no
+    /// row behind and an accepted one is stored in the form <c>BgpServer</c> keys sessions by.
+    /// </summary>
     private async Task<ApiResponse> HandleCreatePeer(HttpListenerContext ctx)
     {
         var (body, bodyError) = await ReadBodyAsync(ctx);
@@ -716,6 +721,11 @@ public sealed class ManagementApi : IHostedService, IDisposable
         });
     }
 
+    /// <summary>
+    /// <c>PATCH /api/peers/{id}</c> — updates the supplied fields of an existing peer; an omitted
+    /// collection means "leave it alone", an empty one means "clear it". Validation runs before the
+    /// store is touched, matching <see cref="HandleCreatePeer"/> (#255).
+    /// </summary>
     private async Task<ApiResponse> HandleUpdatePeer(string peerId, HttpListenerContext ctx)
     {
         var peer = _store.GetDbPeerById(peerId);
