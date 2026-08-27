@@ -237,6 +237,16 @@ public sealed class RouteAssembler : IRouteAssembler
         }
         else
         {
+            // A cancelled token here means the session is being torn down (Dispose cancels its
+            // token before a peer deletion removes the row, #323) — a refresh or initial dump that
+            // straddles the Dispose must not auto-register the just-deleted peer back into the
+            // store. Shutdown (StopAsync) cancels the same token, so the gate covers it too.
+            if (ct.IsCancellationRequested)
+            {
+                _logger.LogInformation("Cancelled build for unknown peer {Ip} — not auto-registering", peerLabel);
+                return FilterAndReturn(routes, filterPeerConfig);
+            }
+
             // Unknown peer — auto-register and send default RU list.
             _logger.LogInformation("Unknown peer {Ip}, auto-registering with RU defaults", peerLabel);
             _peerStore.CreatePeer(peerIp, remoteAsn, null);

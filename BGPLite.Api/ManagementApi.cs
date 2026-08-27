@@ -377,7 +377,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
         if (segments.Length == 3 && segments[0] == "api" && segments[1] == "peers" && method == "PUT")
             return await HandleUpdatePeer(segments[2], ctx);
         if (segments.Length == 3 && segments[0] == "api" && segments[1] == "peers" && method == "DELETE")
-            return HandleDeletePeer(segments[2]);
+            return await HandleDeletePeer(segments[2]);
 
         // /api/peers/{id}/prefixes
         if (segments.Length == 4 && segments[0] == "api" && segments[1] == "peers" && segments[3] == "prefixes" && method == "GET")
@@ -778,11 +778,21 @@ public sealed class ManagementApi : IHostedService, IDisposable
         return HandleGetPeer(peerId);
     }
 
-    private ApiResponse HandleDeletePeer(string peerId)
+    internal async Task<ApiResponse> HandleDeletePeer(string peerId)
     {
         var peer = _store.GetDbPeerById(peerId);
         if (peer is null)
             return ApiResponse.Error("Peer not found", 404);
+
+        // #323: terminate the peer's live session(s) BEFORE the row is deleted. Terminating first
+        // stops the advertisement immediately; RouteAssembler's unknown-peer branch refuses to
+        // auto-register once the session token is cancelled (Dispose runs before the row goes
+        // away), so a refresh that straddles the teardown cannot resurrect the deleted peer. The
+        // 10 s bound keeps a slow peer (full TCP receive window — the Cease send can block on the
+        // send-timeout backstop) from pinning the DELETE request; the session is disposed even
+        // when the Cease send is cancelled.
+        using var bound = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        await _sessionManager.TerminatePeerAsync(peer.Ip, peer.Asn ?? 0, bound.Token);
 
         _store.DeletePeer(peerId);
         _logger.LogInformation("Deleted peer {Id} ({Ip})", SanitizeForLog(peerId), peer.Ip);

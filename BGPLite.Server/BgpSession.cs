@@ -1290,7 +1290,9 @@ public sealed class BgpSession : IDisposable
     /// Best-effort Cease NOTIFICATION for graceful shutdown (RFC 4271 §6.2). The caller (BgpServer)
     /// should only invoke this on an Established session and only when Graceful Restart is disabled —
     /// a NOTIFICATION termination bypasses GR (RFC 4724 §4), so with GR on we drop the TCP connection
-    /// instead to let peers retain our routes. Write/IO errors are swallowed (we are shutting down).
+    /// instead to let peers retain our routes. The one GR-on exception is peer deletion (#323, D16):
+    /// a deleted peer is a permanent removal, not a restart, so the Cease is what tells the peer to
+    /// flush our routes. Write/IO errors are swallowed (we are shutting down).
     /// Accepts a <see cref="CancellationToken"/> so the host's shutdown grace can bound how long a
     /// single Cease send blocks (a slow/stuck peer otherwise pins the send lock indefinitely).
     /// </summary>

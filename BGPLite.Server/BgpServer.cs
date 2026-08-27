@@ -333,6 +333,49 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
             await session.RefreshRoutesAsync();
     }
 
+    public async Task TerminatePeerAsync(string peerIp, uint asn, CancellationToken ct = default)
+    {
+        // Same (ip, asn) matching as RefreshPeerAsync (#200): a NAT/shared-IP sibling session with
+        // a different ASN must survive a peer deletion.
+        if (!IPAddress.TryParse(peerIp, out var ip))
+        {
+            _logger.LogWarning("TerminatePeer: invalid IP {Ip}", peerIp);
+            return;
+        }
+
+        var sessions = _sessions
+            .Where(kvp => kvp.Key.Address.Equals(ip) && kvp.Value.RemoteAsn == asn)
+            .Select(kvp => kvp.Value)
+            .ToList();
+
+        if (sessions.Count == 0)
+            return;
+
+        _logger.LogInformation("Terminating {Count} session(s) for {Ip} AS{Asn} (peer deleted)",
+            sessions.Count, peerIp, asn);
+        await TerminateSessionsAsync(sessions, ct);
+    }
+
+    /// <summary>
+    /// The #323 teardown core, split out so tests can drive real sessions without a live BgpServer
+    /// (sessions enter <see cref="_sessions"/> only through the accept loop, which binds port 179).
+    /// Established sessions get exactly one Cease (Administrative Reset) — NotifyCeaseAsync
+    /// CAS-latches the teardown reason, so the session's own finally-block cannot double-send —
+    /// and then every session is disposed. The dictionary is left alone: RunSessionAsync's
+    /// compare-and-remove unwinds each entry, exactly like session replacement. Unlike StopAsync,
+    /// the Cease is sent even when Graceful Restart is enabled: a deleted peer is a permanent
+    /// removal, not a restart we will return from, and a NOTIFICATION termination is what makes
+    /// the peer flush our routes instead of retaining them (RFC 4724 §4).
+    /// </summary>
+    internal static async Task TerminateSessionsAsync(IReadOnlyList<BgpSession> sessions, CancellationToken ct)
+    {
+        foreach (var session in sessions.Where(s => s.IsEstablished))
+            await session.NotifyCeaseAsync(ct);   // best-effort: swallows send/IO failures internally
+
+        foreach (var session in sessions)
+            session.Dispose();
+    }
+
     public List<string> GetActivePeerIps() =>
         _sessions.Where(kvp => kvp.Value.IsEstablished)
                  .Select(kvp => kvp.Key.Address.ToString())
