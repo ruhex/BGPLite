@@ -360,65 +360,6 @@ public class BgpSessionRouteOwnershipTests
         session.Dispose();
     }
 
-    /// <summary>Scripts inbound frames and discards outbound bytes; reads block until a frame arrives.</summary>
-    private sealed class ScriptedConnection : IBgpConnection
-    {
-        private readonly Channel<byte[]> _inbound = Channel.CreateUnbounded<byte[]>();
-        private readonly Queue<byte> _readBuffer = new();
-        private int _pending;
-
-        /// <summary>True once every enqueued frame has been fully handed to the read loop.</summary>
-        public bool Drained => Volatile.Read(ref _pending) == 0 && _readBuffer.Count == 0;
-
-        public void EnqueueFrame(byte[] frame)
-        {
-            Interlocked.Increment(ref _pending);
-            _inbound.Writer.TryWrite(frame);
-        }
-
-        public void EnqueueMessage(BgpMessage message)
-        {
-            var buf = new byte[BgpMessageWriter.GetBufferSize(message)];
-            var n = BgpMessageWriter.WriteMessage(message, buf);
-            EnqueueFrame(buf[..n]);
-        }
-
-        public async ValueTask ReadExactAsync(Memory<byte> buffer, CancellationToken cancellationToken)
-        {
-            var offset = 0;
-            while (offset < buffer.Length)
-            {
-                while (_readBuffer.Count > 0 && offset < buffer.Length)
-                    buffer.Span[offset++] = _readBuffer.Dequeue();
-                if (offset >= buffer.Length) break;
-
-                byte[] chunk;
-                try { chunk = await _inbound.Reader.ReadAsync(cancellationToken); }
-                catch (ChannelClosedException) { throw new IOException("Connection closed by peer"); }
-
-                var toCopy = Math.Min(chunk.Length, buffer.Length - offset);
-                for (var i = 0; i < toCopy; i++) buffer.Span[offset++] = chunk[i];
-                for (var i = toCopy; i < chunk.Length; i++) _readBuffer.Enqueue(chunk[i]);
-                Interlocked.Decrement(ref _pending);
-            }
-        }
-
-        private readonly List<byte[]> _sent = [];
-
-        /// <summary>Outbound frames, copied because SendMessageAsync returns its buffer to the pool.</summary>
-        public IReadOnlyList<byte[]> Sent { get { lock (_sent) return [.. _sent]; } }
-
-        public ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken cancellationToken)
-        {
-            lock (_sent) _sent.Add(buffer.ToArray());
-            return default;
-        }
-
-        public bool IsPeerClosed => false;
-
-        public void Dispose() => _inbound.Writer.TryComplete();
-    }
-
     /// <summary>Rejects every inbound route, so nothing this peer announces reaches the table.</summary>
     private sealed class RejectAllIncomingFilter : IRouteFilter
     {

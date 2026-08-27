@@ -76,6 +76,7 @@ public class PrefixServiceTests
                 NullLogger<RipeStatProvider>.Instance,
                 new RipeStatConfig { RetryAttempts = retryAttempts, RetryDelaySeconds = 0 }),
             null!, // IPrefixSourceService is not on the GetPrefixesForAsns path
+            null!, // HttpPrefixProvider is only on the per-peer user-source path (#263)
             cacheTtl: cacheTtl ?? TimeSpan.FromHours(1),
             negativeTtl: negativeTtl,
             maxCacheEntries: maxCacheEntries);

@@ -28,9 +28,12 @@ public sealed class ManagementApi : IHostedService, IDisposable
     private ConcurrencyLimiter? _concurrencyLimiter;
     private IReadOnlyList<string>? _corsAllowedOrigins;
     private readonly BgpMetrics _metrics;
-    private readonly IPrefixService? _prefixService;
-    private readonly IPrefixSourceService? _prefixSources;
-    private readonly ISessionManager? _sessionManager;
+    // #263: required, not optional. Each of these was a silent feature switch: without
+    // _sessionManager a peer edited in the UI was persisted but never pushed to its live session,
+    // and without _prefixService the prefix views reported zero instead of failing.
+    private readonly IPrefixService _prefixService;
+    private readonly IPrefixSourceService _prefixSources;
+    private readonly ISessionManager _sessionManager;
     private readonly ILogger<ManagementApi> _logger;
     private readonly int _port;
     private readonly string _listenAddress;  // #90: bind address — loopback by default
@@ -54,9 +57,9 @@ public sealed class ManagementApi : IHostedService, IDisposable
         AppConfig config,
         BgpMetrics metrics,
         ILogger<ManagementApi> logger,
-        IPrefixService? prefixService = null,
-        IPrefixSourceService? prefixSources = null,
-        ISessionManager? sessionManager = null)
+        IPrefixService prefixService,
+        IPrefixSourceService prefixSources,
+        ISessionManager sessionManager)
     {
         _store = store;
         _routeTable = routeTable;
@@ -597,7 +600,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
 
         // #212: actual advertised count from the live session (post-aggregation, post-dedup).
         var advertisedCount = peer.Asn.HasValue
-            ? _sessionManager?.GetAdvertisedPrefixCount(peer.Ip, peer.Asn.Value) ?? 0
+            ? _sessionManager.GetAdvertisedPrefixCount(peer.Ip, peer.Asn.Value)
             : 0;
 
         return new
@@ -679,8 +682,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
         _logger.LogInformation("Created peer {Ip} AS{Asn} ({Id}): {Subs} lists, {Prefixes} custom prefixes, {Asns} custom AS",
             normalizedIp, data.Asn, id, asnLists.Count, customPrefixes.Count, data.CustomAsns?.Count ?? 0);
 
-        if (_sessionManager is not null)
-            _ = _sessionManager.RefreshPeerAsync(normalizedIp, data.Asn);
+        _ = _sessionManager.RefreshPeerAsync(normalizedIp, data.Asn);
 
         return ApiResponse.Ok(new
         {
@@ -771,8 +773,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
 
         _logger.LogInformation("Updated peer {Id}", SanitizeForLog(peerId));
 
-        if (_sessionManager is not null)
-            _ = _sessionManager.RefreshPeerAsync(peer.Ip, peer.Asn ?? 0);
+        _ = _sessionManager.RefreshPeerAsync(peer.Ip, peer.Asn ?? 0);
 
         return HandleGetPeer(peerId);
     }
@@ -853,8 +854,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
 
         // Trigger refresh so the peer receives the new source's prefixes immediately —
         // same pattern as CreatePeer/UpdatePeer. Pass ASN so shared-IP peers aren't refreshed (#200).
-        if (_sessionManager is not null)
-            _ = _sessionManager.RefreshPeerAsync(peer.Ip, peer.Asn ?? 0);
+        _ = _sessionManager.RefreshPeerAsync(peer.Ip, peer.Asn ?? 0);
 
         _logger.LogInformation("Added source '{Name}' ({Url}) to peer {PeerId}",
             SanitizeForLog(data.Name), SanitizeForLog(data.Url), SanitizeForLog(peerId));
@@ -871,8 +871,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
             return ApiResponse.Error($"Source '{sourceId}' not found", 404);
 
         // Trigger refresh so the source's prefixes are withdrawn immediately (#200: ASN-scoped).
-        if (_sessionManager is not null)
-            _ = _sessionManager.RefreshPeerAsync(peer.Ip, peer.Asn ?? 0);
+        _ = _sessionManager.RefreshPeerAsync(peer.Ip, peer.Asn ?? 0);
 
         _logger.LogInformation("Deleted source {SourceId} from peer {PeerId}", SanitizeForLog(sourceId), SanitizeForLog(peerId));
         return ApiResponse.Ok(new { id = sourceId, deleted = true });
@@ -895,8 +894,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
             return ApiResponse.Error($"Source '{sourceId}' not found", 404);
 
         // Trigger refresh so toggling active/inactive takes effect immediately (#200: ASN-scoped).
-        if (_sessionManager is not null)
-            _ = _sessionManager.RefreshPeerAsync(peer.Ip, peer.Asn ?? 0);
+        _ = _sessionManager.RefreshPeerAsync(peer.Ip, peer.Asn ?? 0);
 
         _logger.LogInformation("Source {SourceId} active={Active}", SanitizeForLog(sourceId), data.Active.Value);
         return ApiResponse.Ok(new { id = sourceId, active = data.Active.Value });
@@ -928,9 +926,6 @@ public sealed class ManagementApi : IHostedService, IDisposable
 
         // Custom prefixes
         prefixes.AddRange(_store.GetCustomPrefixes(peerId));
-
-        if (_prefixService is null)
-            return prefixes.Distinct().OrderBy(p => p).ToList();
 
         var subscriptions = _store.GetSubscriptions(peerId);
         var subscribedLists = _config.RipeStat?.AsnLists
@@ -981,21 +976,18 @@ public sealed class ManagementApi : IHostedService, IDisposable
         foreach (var l in lists)
         {
             int prefixCount = 0;
-            if (_prefixService is not null)
+            if (l.Asns.Count > 0)
             {
-                if (l.Asns.Count > 0)
+                foreach (var asn in l.Asns)
                 {
-                    foreach (var asn in l.Asns)
-                    {
-                        try { prefixCount += await _prefixService.GetPrefixCountAsync(asn); }
-                        catch (Exception ex) { _logger.LogWarning(ex, "Failed to get prefix count for AS{Asn}", asn); }
-                    }
+                    try { prefixCount += await _prefixService.GetPrefixCountAsync(asn); }
+                    catch (Exception ex) { _logger.LogWarning(ex, "Failed to get prefix count for AS{Asn}", asn); }
                 }
-                else if (l.Country is not null)
-                {
-                    try { prefixCount = (await _prefixService.GetRuPrefixesAsync()).Count; }
-                    catch (Exception ex) { _logger.LogWarning(ex, "Failed to get RU prefix count"); }
-                }
+            }
+            else if (l.Country is not null)
+            {
+                try { prefixCount = (await _prefixService.GetRuPrefixesAsync()).Count; }
+                catch (Exception ex) { _logger.LogWarning(ex, "Failed to get RU prefix count"); }
             }
 
             result.Add(new
@@ -1012,23 +1004,20 @@ public sealed class ManagementApi : IHostedService, IDisposable
 
         // Append configured PrefixSources (file/http) alongside the legacy RipeStat ASN-lists,
         // reusing the same response shape. "Kind" is intentionally not exposed.
-        if (_prefixSources is not null)
+        var seen = lists.Select(l => l.Name).ToHashSet();
+        foreach (var (source, prefixes) in await _prefixSources.LoadAllAsync())
         {
-            var seen = lists.Select(l => l.Name).ToHashSet();
-            foreach (var (source, prefixes) in await _prefixSources.LoadAllAsync())
+            if (!seen.Add(source.Name)) continue; // skip names already present (e.g. shared "ru")
+            result.Add(new
             {
-                if (!seen.Add(source.Name)) continue; // skip names already present (e.g. shared "ru")
-                result.Add(new
-                {
-                    id = source.Name,
-                    Name = source.Name,
-                    Description = source.Description,
-                    Country = (string?)null,
-                    Community = source.Community,
-                    prefixCount = prefixes.Count,
-                    type = source.Kind == "asn" ? "asn" : "list"
-                });
-            }
+                id = source.Name,
+                Name = source.Name,
+                Description = source.Description,
+                Country = (string?)null,
+                Community = source.Community,
+                prefixCount = prefixes.Count,
+                type = source.Kind == "asn" ? "asn" : "list"
+            });
         }
 
         return ApiResponse.Ok(result);
@@ -1094,9 +1083,6 @@ public sealed class ManagementApi : IHostedService, IDisposable
 
         if (countOnly)
         {
-            if (_prefixService is null)
-                return ApiResponse.Error("Prefix service not available", 503);
-
             try
             {
                 var count = await _prefixService.GetPrefixCountAsync(asn);

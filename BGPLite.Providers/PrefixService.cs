@@ -7,10 +7,10 @@ namespace BGPLite.Providers;
 
 public sealed class PrefixService : IPrefixService
 {
-    private readonly RipeStatProvider? _ripeStat;
+    private readonly RipeStatProvider _ripeStat;
     private readonly IPrefixSourceService _prefixSources;
     private readonly AppConfig _config;
-    private readonly HttpPrefixProvider? _httpProvider;
+    private readonly HttpPrefixProvider _httpProvider;
     // asn → (prefix list, cached at, is negative). Negative entries (failed RIPEstat fetches) use
     // _negativeTtl. The tuple is shaped to mirror PrefixSourceService so the resilience semantics
     // (stale-on-failure, negative cache, bounded sweep) are identical across both caches.
@@ -34,7 +34,7 @@ public sealed class PrefixService : IPrefixService
     // when the TTL elapses. Mirrors the per-ASN gate pattern in GetPrefixesAsync.
     private readonly SemaphoreSlim _ruGate = new(1, 1);
 
-    public PrefixService(AppConfig config, RipeStatProvider? ripeStat, IPrefixSourceService prefixSources, HttpPrefixProvider? httpProvider = null, TimeSpan? cacheTtl = null, ILogger<PrefixService>? logger = null, TimeSpan? negativeTtl = null, int? maxCacheEntries = null, TimeProvider? timeProvider = null)
+    public PrefixService(AppConfig config, RipeStatProvider ripeStat, IPrefixSourceService prefixSources, HttpPrefixProvider httpProvider, TimeSpan? cacheTtl = null, ILogger<PrefixService>? logger = null, TimeSpan? negativeTtl = null, int? maxCacheEntries = null, TimeProvider? timeProvider = null)
     {
         _config = config;
         _ripeStat = ripeStat;
@@ -56,13 +56,12 @@ public sealed class PrefixService : IPrefixService
     /// peer-supplied (not in <c>AppConfig.PrefixSources</c>, so the name-keyed <see cref="PrefixSourceService"/>
     /// cache can't help); instead a URL-keyed TTL cache (<see cref="UserSourceCache"/>) dedupes fetches
     /// across peers and serves a stale copy on transient failure. SSRF defense (#144) is inherited from
-    /// the http provider's named client. Returns empty when no http provider is wired. The <c>Active</c>
+    /// the http provider's named client. The <c>Active</c>
     /// lifecycle is handled by the caller (LoadPeerRoutingView filters Active before this is reached),
     /// so paused sources are never advertised regardless of cache state.
     /// </summary>
     public async Task<IReadOnlyList<(uint Prefix, byte Length)>> GetUserSourcePrefixesAsync(string name, string url, string? community, CancellationToken ct = default)
     {
-        if (_httpProvider is null) return [];
         var source = new PrefixSourceConfig
         {
             Kind = "http",
@@ -82,8 +81,6 @@ public sealed class PrefixService : IPrefixService
         // Fast path: fresh entry (positive or negative within its TTL).
         if (TryGetFresh(asn, out var fresh))
             return fresh;
-
-        if (_ripeStat is null) return [];
 
         // Serialize per-ASN so concurrent callers share a single RIPEstat fetch — no thundering herd
         // on a cold or just-expired ASN (#164). Mirrors PrefixSourceService.LoadCachedAsync.

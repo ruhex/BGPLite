@@ -32,14 +32,13 @@ public sealed class BgpSession : IDisposable
     private readonly CancellationTokenSource _cts = new();
     private readonly Action<string, uint>? _onPeerIdentified;
     private readonly IPeerStore? _peerStore;
-    private readonly IPrefixService? _prefixService;
-    private readonly AppConfig? _appConfig;
     private readonly IPrefixAggregator _prefixAggregator;
-    private readonly ICommunityResolver _communityResolver;
     // #93 Phase 2: the outbound route-assembly policy lives here, not in the session. The session
     // delegates to BuildOutboundRoutesAsync and keeps the send/withdraw mirror (_advertisedPrefixes)
-    // and the codec glue (SendRoutesAsync).
-    private readonly RouteAssembler _routeAssembler;
+    // and the codec glue (SendRoutesAsync). #263: injected rather than constructed here — the
+    // session no longer carries the assembler's own dependencies (prefix service, AppConfig,
+    // community resolver) just to hand them on.
+    private readonly IRouteAssembler _routeAssembler;
 
     // volatile: read by external threads (BgpServer.RefreshPeerAsync/StopAsync). Guarantees
     // acquire/release so IsEstablished reflects the most recent TransitionTo without JIT caching.
@@ -244,10 +243,8 @@ public sealed class BgpSession : IDisposable
         ILogger<BgpSession> logger,
         Action<string, uint>? onPeerIdentified = null,
         IPeerStore? peerStore = null,
-        IPrefixService? prefixService = null,
-        AppConfig? appConfig = null,
         IPrefixAggregator? prefixAggregator = null,
-        ICommunityResolver? communityResolver = null,
+        IRouteAssembler? routeAssembler = null,
         TimeProvider? timeProvider = null)
     {
         _connection = connection;
@@ -261,13 +258,11 @@ public sealed class BgpSession : IDisposable
         _logger = logger;
         _onPeerIdentified = onPeerIdentified;
         _peerStore = peerStore;
-        _prefixService = prefixService;
-        _appConfig = appConfig;
         _prefixAggregator = prefixAggregator ?? new ExactUnionPrefixAggregator();
-        _communityResolver = communityResolver ?? NullCommunityResolver.Instance;
-        _routeAssembler = new RouteAssembler(
-            prefixService, _peerStore, _communityResolver, _routeFilter,
-            _appConfig, _bgpConfig, _routeTable, logger, _peer);
+        // #263: no assembler supplied means no per-peer configuration is reachable. That is a real
+        // (test-only) composition, so it gets a real, named implementation that says so out loud —
+        // not a RouteAssembler quietly holding nulls.
+        _routeAssembler = routeAssembler ?? new SharedTableRouteAssembler(_routeTable, _routeFilter, logger);
     }
 
     public async Task RunAsync(CancellationToken cancellationToken = default)
@@ -907,16 +902,16 @@ public sealed class BgpSession : IDisposable
     }
 
     /// <summary>
-    /// Thin wrapper over <see cref="RouteAssembler.BuildOutboundRoutesAsync"/> (#93 Phase 2): resolves
+    /// Thin wrapper over <see cref="IRouteAssembler.BuildOutboundRoutesAsync"/> (#93 Phase 2): resolves
     /// the per-peer route set, then delegates the aggregate + batch + send to <see cref="SendRoutesAsync"/>.
     /// The decision tree (RU defaults / subscriptions / custom prefixes / custom AS / user sources) and
-    /// the outgoing filter live in RouteAssembler; the send/withdraw mirror stays here.
+    /// the outgoing filter live in the assembler; the send/withdraw mirror stays here.
     /// </summary>
     private async Task SendAllRoutesAsync()
     {
         var nextHop = BgpConstants.IPAddressToUint(_bgpConfig.GetRouterIdAddress());
         var routes = await _routeAssembler.BuildOutboundRoutesAsync(
-            _peerConfig.Address, _remoteAsn, GetFilterPeerConfig(), _cts.Token);
+            _peerConfig.Address, _remoteAsn, GetFilterPeerConfig(), _peer, _cts.Token);
         if (routes.Count > 0)
             await SendRoutesAsync(nextHop, routes);
     }

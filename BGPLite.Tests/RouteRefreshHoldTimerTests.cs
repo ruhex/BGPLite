@@ -7,6 +7,7 @@ using BGPLite.Protocol;
 using BGPLite.Routing;
 using BGPLite.Server;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace BGPLite.Tests;
 
@@ -104,8 +105,11 @@ public class RouteRefreshHoldTimerTests
             new BgpMetrics(),
             new NopLogger<BgpSession>(),
             peerStore: store,
-            prefixService: new EmptyPrefixService(),
-            appConfig: new AppConfig());
+            // #263: the assembler is injected now, so the test supplies the same store it asserts on.
+            routeAssembler: new RouteAssembler(
+                new EmptyPrefixService(), store, NullCommunityResolver.Instance,
+                AllowAllFilter.Instance, new AppConfig(), cfg,
+                NullLogger<RouteAssembler>.Instance));
         var runTask = Task.Run(() => session.RunAsync(CancellationToken.None));
 
         // Handshake with the RouteRefresh capability negotiated (otherwise the message is ignored).

@@ -16,13 +16,10 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
     private readonly RouteTable _routeTable;
     private readonly IRouteFilter _routeFilter;
     private readonly BgpMetrics _metrics;
-    private readonly ILogger<BgpSession> _sessionLogger;
     private readonly ILogger<BgpServer> _logger;
-    private readonly Action<string, uint>? _onPeerIdentified;
-    private readonly IPeerStore? _peerStore;
-    private readonly IPrefixService? _prefixService;
-    private readonly IPrefixAggregator _prefixAggregator;
-    private readonly ICommunityResolver _communityResolver;
+    // #263: the accept loop needs none of the session's dependencies for itself — it only forwarded
+    // them, and every forwarded one was optional. The factory owns them and requires them.
+    private readonly IBgpSessionFactory _sessionFactory;
     // Keyed by the accepted TCP connection (remote IP + remote source port), NOT by remote IP
     // alone: per RFC 4271 §8.2.1 there is one session per TCP connection, so several distinct peers
     // arriving from the same source IP (different ephemeral source ports) must coexist as separate
@@ -46,25 +43,15 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
         RouteTable routeTable,
         IRouteFilter routeFilter,
         BgpMetrics metrics,
-        ILogger<BgpSession> sessionLogger,
-        ILogger<BgpServer> logger,
-        Action<string, uint>? onPeerIdentified = null,
-        IPeerStore? peerStore = null,
-        IPrefixService? prefixService = null,
-        IPrefixAggregator? prefixAggregator = null,
-        ICommunityResolver? communityResolver = null)
+        IBgpSessionFactory sessionFactory,
+        ILogger<BgpServer> logger)
     {
         _config = config;
         _routeTable = routeTable;
         _routeFilter = routeFilter;
         _metrics = metrics;
-        _sessionLogger = sessionLogger;
+        _sessionFactory = sessionFactory;
         _logger = logger;
-        _onPeerIdentified = onPeerIdentified;
-        _peerStore = peerStore;
-        _prefixService = prefixService;
-        _prefixAggregator = prefixAggregator ?? new ExactUnionPrefixAggregator();
-        _communityResolver = communityResolver ?? NullCommunityResolver.Instance;
         _acceptThrottle = new IpAcceptThrottle(config.Bgp.MaxAcceptsPerIpPerMinute);
     }
 
@@ -192,11 +179,7 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
                 // SendTimeout backstop from #160), so BgpSession no longer touches Socket directly.
                 var peerConfig = new PeerConfig { Address = peerAddress, Port = remoteEndpoint.Port };
 
-                var session = new BgpSession(
-                    new SocketBgpConnection(socket), peerConfig, _config.Bgp, _routeTable,
-                    _routeFilter, _metrics, _sessionLogger,
-                    _onPeerIdentified,
-                    _peerStore, _prefixService, _config, _prefixAggregator, _communityResolver);
+                var session = _sessionFactory.Create(new SocketBgpConnection(socket), peerConfig);
 
                 if (Volatile.Read(ref _acceptingConnections) == 0)
                 {
