@@ -515,6 +515,26 @@ public sealed class BgpSession : IDisposable
                 catch { /* best-effort */ }
             }
             TransitionTo(BgpFsmState.Idle);
+
+            // RFC 4271 §8.2.2: every transition out of Established "deletes all routes associated
+            // with this connection". #313: nothing did. A peer's announcements outlived its session
+            // forever — no other path in the server removes an entry — so a peer could disconnect,
+            // reconnect and add another batch without limit, and both GET /api/routes and the route
+            // count kept reporting peers that were long gone. Unconditional, not gated on
+            // wasEstablished: a session that installed nothing removes nothing, and the guard would
+            // only be a hole if the FSM ever grew another way to install routes.
+            //
+            // Not GR-exempt. RFC 4724 lets a receiver RETAIN a restarting peer's routes as stale for
+            // its advertised Restart Time and flush them when it expires; BGPLite implements no part
+            // of that (HandleOpen only logs the peer's GR capability), and retention without the
+            // timer is not Graceful Restart, it is the leak.
+            var flushed = _routeTable.RemoveAllOwnedBy(this);
+            if (flushed > 0)
+            {
+                _logger.LogInformation("Removed {Count} route(s) learned from {Peer} on session close", flushed, _peer);
+                _metrics.SetRouteCount(_routeTable.Count);
+            }
+
             if (wasEstablished)
             {
                 _metrics.SessionClosed();

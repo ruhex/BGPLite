@@ -77,6 +77,36 @@ public sealed class RouteTable
             .Remove(new KeyValuePair<(uint Prefix, byte Length), Entry>(key, entry));
     }
 
+    /// <summary>
+    /// Removes every entry still owned by <paramref name="owner"/> and returns how many went — the
+    /// session-close counterpart to <see cref="RemoveOwnedBy"/>. RFC 4271 §8.2.2 has a speaker
+    /// "delete all routes associated with this connection" on every transition out of Established,
+    /// and without it a peer's announcements outlived its session forever: nothing else in the
+    /// server removes an entry, so a peer could reconnect and add another batch indefinitely (#313).
+    /// <para>
+    /// Each removal is the same atomic compare-and-remove <see cref="RemoveOwnedBy"/> performs, so
+    /// an entry another peer has taken over between the scan and the delete stays put — the losing
+    /// session must not delete the winner's route, exactly as in #289. Enumerating a
+    /// <see cref="ConcurrentDictionary{TKey,TValue}"/> while removing from it is safe and defined:
+    /// the enumerator is a moment-in-time view, not a snapshot, and never throws for concurrent
+    /// modification.
+    /// </para>
+    /// </summary>
+    public int RemoveAllOwnedBy(object owner)
+    {
+        ArgumentNullException.ThrowIfNull(owner);
+
+        var removed = 0;
+        foreach (var pair in _routes)
+        {
+            if (!ReferenceEquals(pair.Value.Owner, owner))
+                continue;
+            if (((ICollection<KeyValuePair<(uint Prefix, byte Length), Entry>>)_routes).Remove(pair))
+                removed++;
+        }
+        return removed;
+    }
+
     public Route? Get(uint prefix, byte length) =>
         _routes.TryGetValue((prefix, length), out var entry) ? entry.Route : null;
 

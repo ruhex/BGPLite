@@ -282,6 +282,108 @@ public class BgpSessionRouteOwnershipTests
         return Frame(BgpMessageType.Update, [.. payload]);
     }
 
+    // ---- #313: a session's routes go when the session goes ----
+
+    /// <summary>
+    /// RFC 4271 §8.2.2: every transition out of Established "deletes all routes associated with this
+    /// connection". #313: nothing did. A peer's announcements outlived its session, and since no
+    /// other path in the server removes an entry, a peer could disconnect, reconnect and add another
+    /// batch without limit — which is also why a per-session max-prefix cap (#304) could not have
+    /// contained it on its own.
+    /// </summary>
+    [Fact]
+    public async Task SessionClose_RemovesTheRoutesThatSessionAnnounced()
+    {
+        var routeTable = new RouteTable();
+        var (session, run, conn) = await EstablishAsync(routeTable);
+
+        conn.EnqueueFrame(AnnounceFrame(8, 0x0A));
+        await SettleAsync(conn, () => routeTable.Count == 1);
+
+        await TeardownAsync(session, run);
+
+        Assert.Equal(0, routeTable.Count);
+    }
+
+    /// <summary>
+    /// A reconnect must not accumulate. Two sessions in sequence announcing the same and a further
+    /// prefix leave exactly what the second one announced — the growth-across-reconnects property.
+    /// </summary>
+    [Fact]
+    public async Task Reconnecting_DoesNotAccumulateTheFormerSessionsRoutes()
+    {
+        var routeTable = new RouteTable();
+
+        var (first, firstRun, firstConn) = await EstablishAsync(routeTable);
+        firstConn.EnqueueFrame(AnnounceFrame(8, 0x0A));
+        await SettleAsync(firstConn, () => routeTable.Count == 1);
+        await TeardownAsync(first, firstRun);
+
+        var (second, secondRun, secondConn) = await EstablishAsync(routeTable, routerId: 0x0A000003);
+        secondConn.EnqueueFrame(AnnounceFrame(8, 0x0A));
+        secondConn.EnqueueFrame(AnnounceFrame(24, 0xC0, 0x00, 0x02));
+        await SettleAsync(secondConn, () => routeTable.Count == 2);
+
+        Assert.Equal(2, routeTable.Count);
+
+        await TeardownAsync(second, secondRun);
+        Assert.Equal(0, routeTable.Count);
+    }
+
+    /// <summary>
+    /// The mirror of #307's isolation property at teardown: the flush is scoped by owner, so the
+    /// startup seed (written unowned by <c>RouteSeedingService</c>) survives a peer disconnecting.
+    /// A flush by prefix rather than by owner would empty the table every time any peer left.
+    /// </summary>
+    [Fact]
+    public async Task SessionClose_LeavesTheStartupSeedAndOtherPeersRoutes()
+    {
+        var routeTable = Seeded((TestNetSlash24, 24));
+        var (keeper, keeperRun, keeperConn) = await EstablishAsync(routeTable, routerId: 0x0A000003);
+        keeperConn.EnqueueFrame(AnnounceFrame(16, 0xAC, 0x10));
+        await SettleAsync(keeperConn, () => routeTable.Count == 2);
+
+        var (leaver, leaverRun, leaverConn) = await EstablishAsync(routeTable, routerId: 0x0A000004);
+        leaverConn.EnqueueFrame(AnnounceFrame(8, 0x0A));
+        await SettleAsync(leaverConn, () => routeTable.Count == 3);
+
+        await TeardownAsync(leaver, leaverRun);
+
+        Assert.Null(routeTable.Get(TenSlashEight, 8));                    // the leaver's route is gone
+        Assert.NotNull(routeTable.Get(TestNetSlash24, 24));               // the seed stays
+        Assert.NotNull(routeTable.Get(0xAC100000, 16));                   // the other peer's route stays
+
+        await TeardownAsync(keeper, keeperRun);
+    }
+
+    /// <summary>
+    /// The compare-and-remove rule from #289 applies to the bulk flush too: a route this session
+    /// announced but another peer has since replaced belongs to the replacement, and this session
+    /// closing must not take it with it.
+    /// </summary>
+    [Fact]
+    public async Task SessionClose_DoesNotRemoveARouteAnotherPeerHasSinceReplaced()
+    {
+        var routeTable = new RouteTable();
+        var (a, aRun, aConn) = await EstablishAsync(routeTable, routerId: 0x0A000002);
+        aConn.EnqueueFrame(AnnounceFrame(8, 0x0A));
+        await SettleAsync(aConn, () => routeTable.Count == 1);
+
+        var (b, bRun, bConn) = await EstablishAsync(routeTable, routerId: 0x0A000003);
+        // Same prefix, different next hop, so the installed route is observably B's.
+        bConn.EnqueueFrame(BuildAnnounce(AttributesWithNextHop(0x0A, 0x0A, 0x0A, 0x0A), 8, [0x0A]));
+        await SettleAsync(bConn, () => routeTable.Get(TenSlashEight, 8)?.NextHop == 0x0A0A0A0A);
+
+        await TeardownAsync(a, aRun);
+
+        var route = routeTable.Get(TenSlashEight, 8);
+        Assert.NotNull(route);
+        Assert.Equal(0x0A0A0A0Au, route!.NextHop);   // still B's
+
+        await TeardownAsync(b, bRun);
+        Assert.Equal(0, routeTable.Count);
+    }
+
     // ---- harness ----
 
     private static RouteTable Seeded(params (uint Prefix, byte Length)[] routes)
