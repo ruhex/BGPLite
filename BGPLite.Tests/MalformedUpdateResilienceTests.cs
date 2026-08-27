@@ -112,7 +112,7 @@ public class MalformedUpdateResilienceTests
             0x40, 0x02, 0x06, 0x02, 0x01, 0x00, 0x00, 0x00, 0x64,   // AS_PATH seq [100]
             0x40, 0x03, 0x04, 0xC0, 0x00, 0x02, 0x01,               // NEXT_HOP 192.0.2.1
         };
-        client.Send(AnnounceFrame(good), SocketFlags.None);
+        SendAll(client, AnnounceFrame(good));
 
         for (var i = 0; i < 40 && routeTable.Count == 0; i++)
             await Task.Delay(TimeSpan.FromMilliseconds(50));
@@ -125,7 +125,7 @@ public class MalformedUpdateResilienceTests
             0x40, 0x01, 0x01, 0x00,
             0x40, 0x02, 0x06, 0x02, 0x01, 0x00, 0x00, 0x00, 0x64,
         };
-        client.Send(AnnounceFrame(bad), SocketFlags.None);
+        SendAll(client, AnnounceFrame(bad));
 
         for (var i = 0; i < 40 && metrics.UpdatesRejected == 0; i++)
             await Task.Delay(TimeSpan.FromMilliseconds(50));
@@ -139,6 +139,20 @@ public class MalformedUpdateResilienceTests
 
         session.MarkSilentClose();
         await runTask.WaitAsync(TimeSpan.FromSeconds(5));
+    }
+
+    /// <summary>
+    /// Writes the whole frame. <see cref="Socket.Send(byte[], SocketFlags)"/> may accept fewer bytes
+    /// than requested, which would deliver a truncated UPDATE and fail the test somewhere other than
+    /// the behaviour under test (#288 review). Loopback frames of this size never actually short-write,
+    /// but a test that can fail for a reason unrelated to its subject is worth two lines to prevent —
+    /// #302 is what that costs when it happens.
+    /// </summary>
+    private static void SendAll(Socket socket, byte[] frame)
+    {
+        var sent = 0;
+        while (sent < frame.Length)
+            sent += socket.Send(frame, sent, frame.Length - sent, SocketFlags.None);
     }
 
     /// <summary>Wraps path-attribute bytes into an UPDATE announcing 10.0.0.0/8.</summary>
