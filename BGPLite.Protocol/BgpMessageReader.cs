@@ -81,8 +81,16 @@ public static class BgpMessageReader
     {
         // #105: SequenceEqual over ReadOnlySpan<byte> replaces the hand-rolled byte-by-byte loop —
         // idiomatic, vectorizable by the JIT, and the same semantics.
+        //
+        // RFC 4271 §6.1: "If the Marker field of the message header is not as expected, then a
+        // synchronization error has occurred and the Error Subcode MUST be set to Connection Not
+        // Synchronized." This previously emitted Unspecific, which tells the peer's operator
+        // nothing about the one header failure that actually means "our streams have diverged"
+        // (#300). ErrorCode stays null so it remains a fixed-header failure that tears the session
+        // down, which is exactly right for a desync.
         if (!marker.SequenceEqual(BgpConstants.Marker))
-            throw new BgpParseException("Invalid BGP marker");
+            throw new BgpParseException("Invalid BGP marker",
+                subErrorCode: BgpConstants.SubError.ConnectionNotSynchronized);
     }
 
     #region OPEN

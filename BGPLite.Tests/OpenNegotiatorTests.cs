@@ -240,10 +240,12 @@ public class OpenNegotiatorTests
     [Fact]
     public void Validate_FourOctetCapabilityCarryingZero_BadPeerAs()
     {
+        // Asn is deliberately NON-zero: with Asn = 0 the `open.Asn == 0` half short-circuits and
+        // this test would still pass if the capability-derived check were deleted (#300 review).
         var open = new BgpOpenMessage
         {
             Version = 4,
-            Asn = 0,
+            Asn = 65002,
             HoldTime = 180,
             RouterId = 0x0A000002,
             Capabilities = [BgpCapabilityInfo.FourOctetAsn(0)],

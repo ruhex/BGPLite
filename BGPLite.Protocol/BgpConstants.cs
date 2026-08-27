@@ -41,8 +41,7 @@ public static class BgpConstants
         // The dual naming below (BadBgpIdentifier/MissingWellKnownAttribute both = 3) is intentional.
 
         // Message Header Error subcodes (RFC 4271 §6.1) — used with ErrorCode = MessageHeaderError.
-        // ConnectionNotSynchronized (1) is intentionally absent: the codec surfaces a bad marker as
-        // a generic header failure and never reaches a subcode for it.
+        public const byte ConnectionNotSynchronized = 1;
         public const byte BadMessageLength = 2;
         public const byte BadMessageType = 3;
 
