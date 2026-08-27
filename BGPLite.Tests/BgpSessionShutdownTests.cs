@@ -73,6 +73,74 @@ public class BgpSessionShutdownTests
         Assert.Equal(BgpConstants.SubError.CeaseAdministrativeReset, notif.SubErrorCode);
     }
 
+    /// <summary>
+    /// Regression #325: UpdateSessionStatus in the RunAsync finally is a best-effort DB write on a
+    /// fire-and-forget task (RunSessionAsync has no catch) — a transient store failure must not
+    /// fault RunAsync, or the exception vanishes unobserved, PeerDisconnected() is skipped, and
+    /// PeerCount (plus the peer's Status=active row) leaks forever.
+    /// </summary>
+    [Fact]
+    public async Task RunAsync_StoreFailureInFinally_DoesNotFaultTask_AndDecrementsPeerCount()
+    {
+        var metrics = new BgpMetrics();
+        var conn = new ScriptedConnection();
+        using var session = new BgpSession(
+            conn,
+            new PeerConfig { Address = "127.0.0.1" },
+            new BgpConfig { Asn = 65001, RouterId = "127.0.0.1", HoldTime = 0, KeepAlive = 0 },
+            new RouteTable(),
+            AllowAllFilter.Instance,
+            metrics,
+            new NopLogger<BgpSession>(),
+            peerStore: new ThrowingUpdateStatusStore());
+
+        var run = session.RunAsync();
+        conn.EnqueueMessage(new BgpOpenMessage
+        {
+            Version = BgpConstants.BgpVersion,
+            Asn = 65002,
+            HoldTime = 0,
+            RouterId = 0x0A000002,
+            Capabilities = [BgpCapabilityInfo.FourOctetAsn(65002)],
+        });
+        conn.EnqueueMessage(BgpKeepaliveMessage.Instance);
+        for (var i = 0; i < 200 && !session.IsEstablished; i++)
+            await Task.Delay(TimeSpan.FromMilliseconds(10));
+        Assert.True(session.IsEstablished, "session must reach Established");
+
+        var peersBeforeTeardown = metrics.PeerCount;
+        session.Dispose();
+
+        // Old behavior: the store exception escaped RunAsync — the task faulted (rethrown here by
+        // WaitAsync) and PeerDisconnected() never ran.
+        try { await run.WaitAsync(TimeSpan.FromSeconds(5)); }
+        catch (OperationCanceledException) { /* unwound via cancellation — fine */ }
+        catch (IOException) { /* unwound via the scripted closed connection — fine */ }
+        Assert.Equal(peersBeforeTeardown - 1, metrics.PeerCount);
+    }
+
+    /// <summary>Every member throws; UpdateSessionStatus simulates the transient DB failure from #325.</summary>
+    private sealed class ThrowingUpdateStatusStore : IPeerStore
+    {
+        public string CreatePeer(string ip, uint asn, string? description) => throw new NotSupportedException();
+        public void UpsertPeer(string ip, uint asn) => throw new NotSupportedException();
+        public void UpdateSessionStatus(string ip, uint asn, bool active) =>
+            throw new InvalidOperationException("simulated: database is locked");
+        public void DeletePeer(string id) => throw new NotSupportedException();
+        public PeerInfo? GetPeerByIp(string ip) => throw new NotSupportedException();
+        public PeerInfo? GetPeer(string ip, uint asn) => throw new NotSupportedException();
+        public PeerInfo? GetPeerById(string id) => throw new NotSupportedException();
+        public List<string> GetSubscriptions(string peerId) => throw new NotSupportedException();
+        public List<string> GetCustomPrefixes(string peerId) => throw new NotSupportedException();
+        public List<uint> GetCustomAsns(string peerId) => throw new NotSupportedException();
+        public HashSet<uint> GetCommunities(string peerId) => throw new NotSupportedException();
+        public HashSet<uint> GetCommunities(string ip, uint asn) => throw new NotSupportedException();
+        public void SetCommunities(string peerId, HashSet<uint> communities) => throw new NotSupportedException();
+        public void ClearCommunities(string peerId) => throw new NotSupportedException();
+        public void SetDescription(string id, string description) => throw new NotSupportedException();
+        public PeerRoutingView? LoadPeerRoutingView(string ip, uint asn) => throw new NotSupportedException();
+    }
+
     [Fact]
     public async Task NotifyCeaseAsync_Swallows_Error_When_Socket_Closed()
     {
