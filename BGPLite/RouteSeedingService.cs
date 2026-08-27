@@ -63,9 +63,20 @@ internal sealed class RouteSeedingService(
         {
             foreach (var (source, prefixes) in await sources.LoadAllAsync(ct))
             {
-                var communities = string.IsNullOrEmpty(source.Community)
-                    ? Array.Empty<uint>()
-                    : new[] { CommunityCodec.Parse(source.Community!) };
+                // Never throw during seeding (the ConfigCommunityResolver contract): a malformed
+                // community degrades THIS source to untagged instead of aborting the loop — the
+                // outer catch-all would otherwise skip every later source, WarmUpAsync, and the
+                // final push. #328 made out-of-range communities throw instead of silently masking.
+                var communities = Array.Empty<uint>();
+                if (!string.IsNullOrEmpty(source.Community))
+                {
+                    try { communities = [CommunityCodec.Parse(source.Community!)]; }
+                    catch (FormatException ex)
+                    {
+                        logger.LogWarning(ex, "Source '{Name}': invalid community '{Community}' — seeding untagged",
+                            source.Name, source.Community);
+                    }
+                }
 
                 foreach (var (prefix, length) in prefixes)
                 {
@@ -78,9 +89,11 @@ internal sealed class RouteSeedingService(
                     });
                 }
 
+                // The suffix reflects the APPLIED tag, not the configured one — after a degrade
+                // (Warning above) the configured string was invalid and the source went out untagged.
                 logger.LogInformation("Source '{Name}': {Count} prefixes{Community}",
                     source.Name, prefixes.Count,
-                    source.Community is null ? "" : $" community={source.Community}");
+                    communities.Length == 0 ? "" : $" community={source.Community}");
             }
 
             logger.LogInformation("Loaded routes: {RouteCount} — warming RIPEstat cache", routeTable.Count);
@@ -98,7 +111,8 @@ internal sealed class RouteSeedingService(
         catch (Exception ex)
         {
             // The server keeps serving whatever seeded (local fallback / stale-on-failure caches);
-            // per-source failures were already absorbed by LoadAllAsync.
+            // per-source load failures are absorbed by LoadAllAsync and community errors degrade
+            // to untagged in the loop above — reaching here means seeding itself failed.
             logger.LogError(ex, "Route seeding failed — serving with {RouteCount} routes", routeTable.Count);
         }
     }

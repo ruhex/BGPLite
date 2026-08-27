@@ -1,5 +1,6 @@
 using BGPLite.Configuration;
 using BGPLite.Contracts;
+using BGPLite.Protocol;
 using BGPLite.Providers;
 using BGPLite.Routing;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -37,12 +38,17 @@ public class RouteSeedingServiceTests
 
     private sealed class FakeSourceService : IPrefixSourceService
     {
-        public Task<IReadOnlyList<(PrefixSourceConfig Source, IReadOnlyList<(uint Prefix, byte Length)> Prefixes)>> LoadAllAsync(CancellationToken ct = default) =>
-            Task.FromResult<IReadOnlyList<(PrefixSourceConfig Source, IReadOnlyList<(uint Prefix, byte Length)> Prefixes)>>(new List<(PrefixSourceConfig, IReadOnlyList<(uint, byte)>)>
-            {
+        private readonly IReadOnlyList<(PrefixSourceConfig Source, IReadOnlyList<(uint Prefix, byte Length)> Prefixes)> _sources;
+
+        public FakeSourceService(IReadOnlyList<(PrefixSourceConfig, IReadOnlyList<(uint, byte)>)>? sources = null) =>
+            _sources = sources ??
+            [
                 (new PrefixSourceConfig { Name = "nets", Kind = "file", Url = "nets.txt" },
                     new List<(uint, byte)> { (0xC0A80000u, 24), (0x0A000000u, 8) })
-            });
+            ];
+
+        public Task<IReadOnlyList<(PrefixSourceConfig Source, IReadOnlyList<(uint Prefix, byte Length)> Prefixes)>> LoadAllAsync(CancellationToken ct = default) =>
+            Task.FromResult(_sources);
         public Task<IReadOnlyList<(uint Prefix, byte Length)>> GetAsync(string name, CancellationToken ct = default) => Task.FromResult<IReadOnlyList<(uint Prefix, byte Length)>>([]);
         public Task<IReadOnlyList<(uint Prefix, byte Length)>> GetDefaultAsync(CancellationToken ct = default) => Task.FromResult<IReadOnlyList<(uint Prefix, byte Length)>>([]);
         public Task WarmUpAsync(CancellationToken ct = default) => Task.CompletedTask;
@@ -95,6 +101,37 @@ public class RouteSeedingServiceTests
         for (var i = 0; i < 100 && table.Count < 2; i++)
             await Task.Delay(20);
         Assert.Equal(2, table.Count);
+    }
+
+    [Fact]
+    public async Task BadSourceCommunity_DegradesToUntagged_DoesNotAbortSeeding()
+    {
+        // #328/#327: an out-of-range community VALUE used to be silently masked; now that the codec
+        // rejects it, seeding must degrade that ONE source to untagged instead of aborting the loop
+        // (later sources unseeded, warm-up and the final established-session push skipped).
+        var prefix = new HangingPrefixService();
+        var table = new RouteTable();
+        var sources = new FakeSourceService(
+        [
+            (new PrefixSourceConfig { Name = "bad", Kind = "file", Url = "a.txt", Community = "65444:99999" },
+                new List<(uint, byte)> { (0xAC100000u, 12) }),
+            (new PrefixSourceConfig { Name = "good", Kind = "file", Url = "b.txt", Community = "65000:100" },
+                new List<(uint, byte)> { (0xC0A80000u, 24) }),
+        ]);
+        using var service = NewService(prefix, sources, table, new RecordingSessionManager());
+
+        await service.StartAsync(CancellationToken.None);
+
+        for (var i = 0; i < 100 && table.Count < 2; i++)
+            await Task.Delay(20);
+
+        Assert.Equal(2, table.Count);
+        var bad = table.Get(0xAC100000, 12);
+        Assert.NotNull(bad);
+        Assert.Empty(bad!.Communities);
+        var good = table.Get(0xC0A80000, 24);
+        Assert.NotNull(good);
+        Assert.Equal([CommunityCodec.Parse("65000:100")], good!.Communities);
     }
 
     [Fact]
