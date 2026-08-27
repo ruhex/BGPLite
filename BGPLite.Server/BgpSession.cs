@@ -63,6 +63,12 @@ public sealed class BgpSession : IDisposable
     private bool _localFourByteAsn; // derived from negotiated OPEN capability (RFC 6793)
     private ushort _negotiatedHoldTime;
     private List<IpPrefix> _advertisedPrefixes = [];
+    // #289: the prefixes THIS peer actually installed in the shared RouteTable — a minimal stand-in
+    // for the per-peer Adj-RIB-In of RFC 4271 §3.2. Without it a withdrawal was applied by prefix
+    // alone, so any peer could delete entries seeded by RouteSeedingService or announced by another
+    // peer. Only touched from HandleUpdateAsync, which runs on the single read loop, so no lock is
+    // needed; the shared RouteTable itself is concurrent.
+    private readonly HashSet<(uint Prefix, byte Length)> _installedByPeer = [];
     // #212: actual count sent on the wire (after aggregation + dedup). Updated at the end of
     // SendRoutesAsync. Read via AdvertisedPrefixCount for the management API/UI so operators see
     // the real number their peer's router receives, not the raw pre-aggregation count.
@@ -812,12 +818,13 @@ public sealed class BgpSession : IDisposable
         _logger.LogInformation("UpdateReceived from {Peer}: {Withdrawn} withdrawn, {Nlri} announced",
             _peer, update.WithdrawnRoutes.Count, update.Nlri.Count);
 
-        // Process withdrawals
+        // Process withdrawals. RFC 4271 §3.2/§9: a withdrawal removes the route received FROM THIS
+        // PEER, not whatever happens to sit at that prefix. BGPLite has one shared RouteTable rather
+        // than per-peer Adj-RIBs-In, so ownership is tracked here (#289) — otherwise any peer that
+        // completed a handshake could delete prefixes seeded at startup by RouteSeedingService or
+        // announced by another peer, simply by listing them as withdrawn.
         foreach (var w in update.WithdrawnRoutes)
-        {
-            _routeTable.Remove(w.Address, w.Length);
-            _logger.LogDebug("Route withdrawn: {Prefix}", w);
-        }
+            WithdrawIfOwned(w, "Route withdrawn");
 
         // Process announcements
         if (update.Nlri.Count > 0)
@@ -846,12 +853,10 @@ public sealed class BgpSession : IDisposable
                 //
                 // The withdrawn-routes half of this same UPDATE was already applied above, before
                 // the parse; this closes the asymmetry on the NLRI side.
+                // Same ownership rule as an explicit withdrawal (#289): treat-as-withdraw removes
+                // what this peer installed, not whatever is at that prefix.
                 foreach (var nlri in update.Nlri)
-                {
-                    _routeTable.Remove(nlri.Address, nlri.Length);
-                    if (_logger.IsEnabled(LogLevel.Debug))
-                        _logger.LogDebug("Route withdrawn (treat-as-withdraw): {Prefix}", nlri);
-                }
+                    WithdrawIfOwned(nlri, "Route withdrawn (treat-as-withdraw)");
                 _metrics.SetRouteCount(_routeTable.Count);
                 throw;
             }
@@ -873,6 +878,9 @@ public sealed class BgpSession : IDisposable
                 if (_routeFilter.AcceptIncoming(route, filterPeerConfig))
                 {
                     _routeTable.AddOrUpdate(route);
+                    // Only what actually reached the table is owned — a route the filter dropped was
+                    // never installed, so a later withdrawal for it must remove nothing (#289).
+                    _installedByPeer.Add((nlri.Address, nlri.Length));
                     // #85: guard the UintToIPAddress allocation behind IsEnabled — LogDebug
                     // evaluates the arg eagerly even when Debug is filtered out.
                     if (_logger.IsEnabled(LogLevel.Debug))
@@ -882,6 +890,27 @@ public sealed class BgpSession : IDisposable
         }
 
         _metrics.SetRouteCount(_routeTable.Count);
+    }
+
+    /// <summary>
+    /// Removes <paramref name="prefix"/> from the shared route table only if this session installed
+    /// it (#289). A withdrawal for a prefix this peer never announced is logged and ignored rather
+    /// than applied — RFC 4271 §9 withdraws the route received from that peer, and with one shared
+    /// table the alternative is letting any peer delete another's routes, or the startup seed.
+    /// </summary>
+    private void WithdrawIfOwned(IpPrefix prefix, string reason)
+    {
+        var key = (prefix.Address, prefix.Length);
+        if (!_installedByPeer.Remove(key))
+        {
+            if (_logger.IsEnabled(LogLevel.Debug))
+                _logger.LogDebug("Ignoring withdrawal of {Prefix} from {Peer}: not announced by this session", prefix, _peer);
+            return;
+        }
+
+        _routeTable.Remove(prefix.Address, prefix.Length);
+        if (_logger.IsEnabled(LogLevel.Debug))
+            _logger.LogDebug("{Reason}: {Prefix}", reason, prefix);
     }
 
     /// <summary>
