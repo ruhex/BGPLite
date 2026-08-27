@@ -165,7 +165,8 @@ public sealed class PeerDeleteTeardownTests
     private static BgpOpenMessage PeerOpen(uint asn) => new()
     {
         Version = BgpConstants.BgpVersion,
-        Asn = (ushort)asn,
+        // RFC 6793 §4.1: the 2-octet My-AS field carries AS_TRANS when the ASN needs 4 octets.
+        Asn = (ushort)(asn > ushort.MaxValue ? BgpConstants.AsPath.AsTrans : asn),
         HoldTime = 0,
         RouterId = 0x0A000002,
         Capabilities = [BgpCapabilityInfo.FourOctetAsn(asn)],
