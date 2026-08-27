@@ -651,10 +651,13 @@ public sealed class ManagementApi : IHostedService, IDisposable
             }
         }
 
-        var id = _store.CreatePeer(data.Ip, data.Asn, data.Description);
-        _store.SetSubscriptions(id, asnLists);
-        _store.SetCustomPrefixes(id, customPrefixes);
-        _store.SetCustomAsns(id, data.CustomAsns ?? []);
+        // #259: one transaction for the whole create. The previous CreatePeer + three Set* calls
+        // each committed separately, so a duplicate CIDR — which violates the
+        // (PeerId, Prefix, PrefixLength) key — returned 500 over an already-committed peer row and
+        // left the user with a half-configured peer. Duplicates are now deduplicated inside the
+        // store: a set of prefixes means the same thing whether a value appears once or twice.
+        var id = _store.SavePeerConfiguration(
+            data.Ip, data.Asn, data.Description, asnLists, customPrefixes, data.CustomAsns ?? []);
 
         var peer = _store.GetDbPeerById(id);
 
@@ -736,16 +739,10 @@ public sealed class ManagementApi : IHostedService, IDisposable
         _logger.LogInformation("UpdatePeer {Id}: CustomPrefixes={Count}, CustomAsns={AsnCount}",
             SanitizeForLog(peerId), parsedPrefixes?.Count ?? 0, data.CustomAsns?.Count ?? 0);
 
-        if (data.Description is not null)
-            _store.SetDescription(peerId, data.Description);
-
-        if (data.Lists is not null)
-            _store.SetSubscriptions(peerId, data.Lists);
-
-        if (parsedPrefixes is not null)
-            _store.SetCustomPrefixes(peerId, parsedPrefixes);
-        if (data.CustomAsns is not null)
-            _store.SetCustomAsns(peerId, data.CustomAsns);
+        // #259: one transaction for the whole update, same reasoning as the create path. A null
+        // argument means "leave this alone" — the PATCH semantics this endpoint already had, now
+        // expressed once in the store instead of as four conditional calls that each committed.
+        _store.UpdatePeerConfiguration(peerId, data.Description, data.Lists, parsedPrefixes, data.CustomAsns);
 
         _logger.LogInformation("Updated peer {Id}", SanitizeForLog(peerId));
 
