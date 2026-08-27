@@ -212,6 +212,90 @@ public class MalformedUpdateResilienceTests
     }
 
     [Fact]
+    public async Task TreatAsWithdraw_RemovesTheNlriFromTheRouteTable()
+    {
+        // #288 / RFC 7606 §2: "the UPDATE message containing the path attribute in question MUST be
+        // treated as though all contained routes had been withdrawn ... thus causing them to be
+        // removed from the Adj-RIB-In." Only the "treat" half was implemented: the UPDATE was
+        // discarded and the session kept, but its NLRI stayed installed carrying the attributes of
+        // the PREVIOUS announcement.
+        var (server, client) = ConnectedPair();
+        using var clientSock = client;
+        var bgpConfig = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1", HoldTime = 0, KeepAlive = 0 };
+        var metrics = new BgpMetrics();
+        var routeTable = new RouteTable();
+        using var session = new BgpSession(
+            new SocketBgpConnection(server),
+            new PeerConfig { Address = "127.0.0.1" },
+            bgpConfig,
+            routeTable,
+            AllowAllFilter.Instance,
+            metrics,
+            new NopLogger<BgpSession>());
+
+        var runTask = await EstablishSessionAsync(session, client, bgpConfig);
+
+        // 1) A well-formed announcement of 10.0.0.0/8 via 192.0.2.1. EstablishSessionAsync
+        //    negotiates the 4-octet-ASN capability, so AS_PATH is 4-octet encoded.
+        var good = new List<byte>
+        {
+            0x40, 0x01, 0x01, 0x00,                                 // ORIGIN igp
+            0x40, 0x02, 0x06, 0x02, 0x01, 0x00, 0x00, 0x00, 0x64,   // AS_PATH seq [100]
+            0x40, 0x03, 0x04, 0xC0, 0x00, 0x02, 0x01,               // NEXT_HOP 192.0.2.1
+        };
+        SendAll(client, AnnounceFrame(good));
+
+        for (var i = 0; i < 40 && routeTable.Count == 0; i++)
+            await Task.Delay(TimeSpan.FromMilliseconds(50));
+        Assert.Equal(0xC0000201u, routeTable.Get(0x0A000000, 8)?.NextHop);
+
+        // 2) The same NLRI re-announced with NEXT_HOP omitted — a missing mandatory attribute, so
+        //    the pipeline rejects it and treat-as-withdraw applies.
+        var bad = new List<byte>
+        {
+            0x40, 0x01, 0x01, 0x00,
+            0x40, 0x02, 0x06, 0x02, 0x01, 0x00, 0x00, 0x00, 0x64,
+        };
+        SendAll(client, AnnounceFrame(bad));
+
+        for (var i = 0; i < 40 && metrics.UpdatesRejected == 0; i++)
+            await Task.Delay(TimeSpan.FromMilliseconds(50));
+
+        Assert.Null(routeTable.Get(0x0A000000, 8));  // RFC 7606 §2 — must be gone, not stale
+        Assert.True(session.IsEstablished, "treat-as-withdraw keeps the session up");
+        Assert.Equal(1, metrics.UpdatesRejected);
+
+        var sent = await DrainAsync(client, TimeSpan.FromSeconds(2));
+        Assert.DoesNotContain(sent, m => m is BgpNotificationMessage);
+
+        session.MarkSilentClose();
+        await runTask.WaitAsync(TimeSpan.FromSeconds(5));
+    }
+
+    /// <summary>
+    /// Writes the whole frame. <see cref="Socket.Send(byte[], SocketFlags)"/> may accept fewer bytes
+    /// than requested, which would deliver a truncated UPDATE and fail the test somewhere other than
+    /// the behaviour under test (#288 review). Loopback frames of this size never actually short-write,
+    /// but a test that can fail for a reason unrelated to its subject is worth two lines to prevent —
+    /// #302 is what that costs when it happens.
+    /// </summary>
+    private static void SendAll(Socket socket, byte[] frame)
+    {
+        var sent = 0;
+        while (sent < frame.Length)
+            sent += socket.Send(frame, sent, frame.Length - sent, SocketFlags.None);
+    }
+
+    /// <summary>Wraps path-attribute bytes into an UPDATE announcing 10.0.0.0/8.</summary>
+    private static byte[] AnnounceFrame(List<byte> attributeBytes)
+    {
+        var payload = new List<byte> { 0x00, 0x00, (byte)(attributeBytes.Count >> 8), (byte)attributeBytes.Count };
+        payload.AddRange(attributeBytes);
+        payload.AddRange([8, 0x0A]); // NLRI 10.0.0.0/8
+        return BuildMessage(BgpMessageType.Update, [.. payload]);
+    }
+
+    [Fact]
     public void ParseUpdate_AttributeValueCrossingAttrsEnd_Rejected()
     {
         // #245 review finding: an attribute TLV whose declared value length reaches past the
