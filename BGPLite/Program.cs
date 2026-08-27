@@ -1,7 +1,6 @@
 using BGPLite;
 using BGPLite.Api;
 using BGPLite.Configuration;
-using Microsoft.EntityFrameworkCore.Diagnostics;
 using BGPLite.Protocol;
 using BGPLite.Providers;
 using BGPLite.Routing;
@@ -49,16 +48,18 @@ builder.Services.AddSingleton(routeTable);
 // busy_timeout (engine-level lock retry) applied on every connection via a DbConnectionInterceptor,
 // so both the factory-created and scoped contexts get the same settings.
 var sqlitePragmas = new SqlitePragmasInterceptor();
-// Suppress EF Core warning 20504 (MultipleCollectionIncludeWarning): LoadPeerRoutingView includes 3
-// collection navigations in a SingleQuery. For SQLite (local, embedded) with small per-peer data
-// (tens of rows), the Cartesian product is negligible and SingleQuery keeps the read atomic (#138).
+// #260: the MultipleCollectionIncludeWarning suppression is gone. It was added by #138 on the
+// premise that "for SQLite with small per-peer data (tens of rows), the Cartesian product is
+// negligible" — measured false: a peer with 200 custom prefixes made LoadPeerRoutingView materialize
+// 6,000 rows (31 ms per call, on the BGP send path), and one with 1,000 made it 150,000 (814 ms).
+// Both peer reads now use AsSplitQuery, so the warning has nothing to fire on; leaving the
+// suppression in would only hide the next reintroduction. PeerStoreSplitQueryTests asserts the
+// emitted SQL directly, which also covers the projection shape the warning cannot see.
 builder.Services.AddDbContextFactory<BgpDbContext>(options =>
-    options.UseSqlite($"Data Source={dbPath}").AddInterceptors(sqlitePragmas)
-        .ConfigureWarnings(w => w.Ignore(RelationalEventId.MultipleCollectionIncludeWarning)));
+    options.UseSqlite($"Data Source={dbPath}").AddInterceptors(sqlitePragmas));
 
 builder.Services.AddDbContext<BgpDbContext>(options =>
-    options.UseSqlite($"Data Source={dbPath}").AddInterceptors(sqlitePragmas)
-        .ConfigureWarnings(w => w.Ignore(RelationalEventId.MultipleCollectionIncludeWarning)), ServiceLifetime.Scoped);
+    options.UseSqlite($"Data Source={dbPath}").AddInterceptors(sqlitePragmas), ServiceLifetime.Scoped);
 
 builder.Services.AddSingleton<PeerStore>();
 builder.Services.AddSingleton<IRouteFilter>(sp =>

@@ -171,12 +171,33 @@ public sealed class PeerStore : IPeerStore
     public PeerRoutingView? LoadPeerRoutingView(string ip, uint asn)
     {
         using var db = _dbFactory.CreateDbContext();
-        var peer = db.Peers.AsNoTracking()
-            .Include(p => p.Subscriptions)
-            .Include(p => p.CustomPrefixes)
-            .Include(p => p.CustomAsns)
-            .Include(p => p.CustomSources.Where(c => c.Active))
-            .FirstOrDefault(p => p.Ip == ip && p.Asn == asn);
+
+        // AsSplitQuery: without it EF emits ONE statement that LEFT JOINs all four collections, so
+        // the driver materializes subs x prefixes x asns x sources rows. Measured on a real SQLite
+        // file, 200 iterations: a peer with 3 subscriptions / 200 custom prefixes / 5 ASNs /
+        // 2 sources produces 6,000 rows and takes 31 ms per call; 5/1000/10/3 produces 150,000 rows
+        // and takes 814 ms. Split, the same reads are 0.33 ms and 1.4 ms — 96x and 596x (#260).
+        //
+        // This runs on the BGP send path (every session establish, every RefreshRoutesAsync, and
+        // RefreshAllEstablishedAsync fires it for all peers at once), so it is the read a user waits
+        // on before their selected prefixes reach the wire.
+        //
+        // The read is wrapped in a transaction because splitting gives up the single-statement
+        // consistency #138 relied on: the four SELECTs would otherwise each see their own snapshot,
+        // and a UI edit landing between them would advertise a mixed configuration. SQLite runs in
+        // WAL here (#95), so a read transaction takes no write lock and does not block writers.
+        Peer? peer;
+        using (var read = db.Database.BeginTransaction())
+        {
+            peer = db.Peers.AsNoTracking()
+                .Include(p => p.Subscriptions)
+                .Include(p => p.CustomPrefixes)
+                .Include(p => p.CustomAsns)
+                .Include(p => p.CustomSources.Where(c => c.Active))
+                .AsSplitQuery()
+                .FirstOrDefault(p => p.Ip == ip && p.Asn == asn);
+            read.Commit();
+        }
         if (peer is null) return null;
 
         // Fold the status update (was UpdateSessionStatus(active:true) on its own DbContext) into
@@ -204,20 +225,28 @@ public sealed class PeerStore : IPeerStore
     /// <c>GetCommunities</c> sequence the management API's GET endpoints used to issue as 5–6
     /// separate <c>DbContext</c> instances (each opening its own SQLite connection + running the
     /// PRAGMA trio) — issue #228. Loads the peer and ALL its child collections through ONE
-    /// read-only <c>DbContext</c> via an EF Core projection. EF auto-splits the collection
-    /// subqueries inside a projection (one SELECT per collection + one for the peer row, all on the
-    /// same connection), so there is no Cartesian-product row explosion that an Include-based load
-    /// would produce. Read-only (<c>AsNoTracking</c>); unlike <see cref="LoadPeerRoutingView"/> it
+    /// read-only <c>DbContext</c> via an EF Core projection.
+    /// <para>
+    /// This doc previously claimed EF "auto-splits the collection subqueries inside a projection ...
+    /// so there is no Cartesian-product row explosion". That is not what EF emits: the projection
+    /// produced a single statement LEFT JOINing all five collections, byte-for-byte the same shape
+    /// as an Include-based load, and this method carried the full N x M x K x ... explosion since
+    /// #228. Verified by dumping the SQL — one SELECT before, six after adding
+    /// <c>AsSplitQuery</c> (#260). For a peer with 200 custom prefixes that is 120 ms per call
+    /// against 0.17 ms, on the path the management UI hits to render a peer.
+    /// </para>
+    /// Read-only (<c>AsNoTracking</c>); unlike <see cref="LoadPeerRoutingView"/> it
     /// does NOT fold a status update (the GET path does not mutate). Returns null if the peer does
     /// not exist. Field shapes match the prior standalone getters byte-for-byte.
     /// </summary>
     public PeerDetailDto? GetPeerDetail(string peerId)
     {
         using var db = _dbFactory.CreateDbContext();
-        // Project straight into the DTO — EF Core applies collection-splitting automatically inside
-        // a projection, so the four collection subqueries each run as a separate SELECT filtered by
-        // the peer's Id (no N×M×K Cartesian row explosion that an Include-based load would produce).
-        return db.Peers.AsNoTracking()
+        // AsSplitQuery is what makes each collection its own SELECT — a projection alone does not
+        // split (#260). Read transaction for the same reason as LoadPeerRoutingView: the six
+        // statements must see one snapshot, and in WAL a read transaction blocks nobody.
+        using var read = db.Database.BeginTransaction();
+        var detail = db.Peers.AsNoTracking()
             .Where(p => p.Id == peerId)
             .Select(p => new PeerDetailDto(
                 p.Id,
@@ -236,7 +265,10 @@ public sealed class PeerStore : IPeerStore
                     .ToList(),
                 // Communities stored as long (PeerCommunity.Community); the API formats to "ASN:VAL".
                 p.Communities.Select(c => c.Community).ToList()))
+            .AsSplitQuery()
             .FirstOrDefault();
+        read.Commit();
+        return detail;
     }
 
     public void SetDescription(string id, string description)
