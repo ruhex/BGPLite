@@ -325,6 +325,7 @@ public class ConfigHotReloadTests
         public List<string> GetActivePeerIps() => [];
         public int GetAdvertisedPrefixCount(string peerIp, uint asn) => 0;
         public Task RefreshAllEstablishedAsync() => Task.CompletedTask;
+        public Task TerminatePeerAsync(string peerIp, uint asn, CancellationToken ct = default) => Task.CompletedTask;
     }
 
     private sealed class ApiHarness : IDisposable

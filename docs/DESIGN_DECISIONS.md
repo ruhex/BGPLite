@@ -146,3 +146,17 @@ For section-by-section RFC conformance status, see `RFC_COMPLIANCE.md` (2026-07-
   stably to guarantee it for any producer (#272).
 - **Consequence:** attribute order is a convention, not a wire requirement — parsers must not rely on it.
 - **Tracker:** #87, #272 (closed).
+
+### D16. Peer deletion sends Cease even with Graceful Restart enabled
+- **Decision:** `ISessionManager.TerminatePeerAsync` (management-API peer deletion) sends a Cease
+  (Administrative Reset) to the peer's established sessions even when Graceful Restart is enabled —
+  unlike `StopAsync`, which silent-closes under GR.
+- **Context:** GR retention exists so peers keep our routes across a restart we will return from
+  (RFC 4724 §4). Deleting a peer is a permanent removal, not a restart — retention would leave stale
+  routes at the peer until its restart timer expired, so the NOTIFICATION termination (which bypasses
+  GR and makes the peer flush) is the correct signal (#323).
+- **Consequence:** deletion is not a revocation: nothing stops the peer from reconnecting, and D11
+  auto-registration serves it again on the next OPEN (a deny-list is a separate product decision).
+  Pre-OPEN connections (remote ASN not yet known) are not matched by the (ip, asn) termination and
+  may re-register the row once their OPEN arrives.
+- **Tracker:** #323.
