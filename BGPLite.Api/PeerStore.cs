@@ -10,9 +10,24 @@ public sealed class PeerStore : IPeerStore
 
     public PeerStore(IDbContextFactory<BgpDbContext> dbFactory) => _dbFactory = dbFactory;
 
+    /// <summary>
+    /// Creates or upserts the peer row alone. Callers configuring a peer in full should use
+    /// <see cref="SavePeerConfiguration"/> instead, so the row and its collections commit together
+    /// (#259).
+    /// </summary>
     public string CreatePeer(string ip, uint asn, string? description)
     {
         using var db = _dbFactory.CreateDbContext();
+        return UpsertPeerRow(db, ip, asn, description);
+    }
+
+    /// <summary>
+    /// The peer-row upsert, on a caller-supplied <see cref="BgpDbContext"/> so it can participate in
+    /// an enclosing transaction (#259) instead of always committing on its own. Behaviour is
+    /// unchanged from the #227 implementation this was extracted from.
+    /// </summary>
+    private static string UpsertPeerRow(BgpDbContext db, string ip, uint asn, string? description)
+    {
         // #227: atomic SQLite upsert eliminates the read-then-write race on the composite unique
         // index UX_Peers_Ip_Asn. Two concurrent CreatePeer calls for the same (Ip, Asn) previously
         // both observed `existing is null`, both INSERTed, and the second threw DbUpdateException
@@ -269,6 +284,100 @@ public sealed class PeerStore : IPeerStore
             .FirstOrDefault();
         read.Commit();
         return detail;
+    }
+
+    /// <summary>
+    /// Creates (or upserts) a peer and applies its whole configuration in ONE transaction (#259).
+    /// <para>
+    /// The management API previously chained <c>CreatePeer</c> → <c>SetSubscriptions</c> →
+    /// <c>SetCustomPrefixes</c> → <c>SetCustomAsns</c>, each opening its own <c>DbContext</c> and
+    /// transaction. #226/#227 made each individual step atomic; the composition was not. A failure
+    /// part-way — a duplicate CIDR violating the <c>(PeerId, Prefix, PrefixLength)</c> key is the
+    /// reported trigger — returned 500 to the client over an already-committed peer row, leaving a
+    /// half-configured peer that the client's retry then had to reconcile. It also opened a window
+    /// where a concurrent BGP session read a <c>LoadPeerRoutingView</c> with the subscriptions
+    /// applied but not the custom prefixes, and advertised the incomplete set.
+    /// </para>
+    /// <para>
+    /// Every child collection is a set, and all four are keyed on <c>(PeerId, …)</c>, so duplicates
+    /// are deduplicated rather than rejected: asking to advertise 10.0.0.0/8 twice means the same
+    /// thing as asking once, and a user assembling a list in the UI produces repeats by pasting.
+    /// </para>
+    /// </summary>
+    public string SavePeerConfiguration(
+        string ip, uint asn, string? description,
+        IReadOnlyList<string> asnListNames,
+        IReadOnlyList<(string Prefix, byte Length)> customPrefixes,
+        IReadOnlyList<uint> customAsns)
+    {
+        using var db = _dbFactory.CreateDbContext();
+        using var tx = db.Database.BeginTransaction();
+
+        var id = UpsertPeerRow(db, ip, asn, description);
+        ReplaceSubscriptions(db, id, asnListNames);
+        ReplaceCustomPrefixes(db, id, customPrefixes);
+        ReplaceCustomAsns(db, id, customAsns);
+        db.SaveChanges();
+
+        tx.Commit();
+        return id;
+    }
+
+    /// <summary>
+    /// Applies a partial peer update in ONE transaction (#259). A <c>null</c> argument means "leave
+    /// this alone", matching the PATCH semantics the management API exposes — an empty list means
+    /// "clear it", which is a different request and is honoured as such.
+    /// </summary>
+    public void UpdatePeerConfiguration(
+        string peerId, string? description,
+        IReadOnlyList<string>? asnListNames,
+        IReadOnlyList<(string Prefix, byte Length)>? customPrefixes,
+        IReadOnlyList<uint>? customAsns)
+    {
+        using var db = _dbFactory.CreateDbContext();
+        using var tx = db.Database.BeginTransaction();
+
+        if (description is not null)
+        {
+            db.Peers.Where(p => p.Id == peerId)
+                .ExecuteUpdate(s => s.SetProperty(p => p.Description, description));
+        }
+        if (asnListNames is not null) ReplaceSubscriptions(db, peerId, asnListNames);
+        if (customPrefixes is not null) ReplaceCustomPrefixes(db, peerId, customPrefixes);
+        if (customAsns is not null) ReplaceCustomAsns(db, peerId, customAsns);
+        db.SaveChanges();
+
+        tx.Commit();
+    }
+
+    // The Replace* helpers stage a delete + insert on the CALLER's DbContext without committing, so
+    // the composite methods above can put every part of a save inside one transaction. The public
+    // Set* methods keep their own DbContext + transaction for single-field callers.
+
+    /// <summary>Stages the subscription set, deduplicated — keyed <c>(PeerId, AsnListName)</c>.</summary>
+    private static void ReplaceSubscriptions(BgpDbContext db, string peerId, IReadOnlyList<string> names)
+    {
+        db.Set<PeerSubscription>().Where(s => s.PeerId == peerId).ExecuteDelete();
+        db.Set<PeerSubscription>().AddRange(
+            names.Distinct(StringComparer.Ordinal)
+                 .Select(n => new PeerSubscription { PeerId = peerId, AsnListName = n }));
+    }
+
+    /// <summary>Stages the custom-prefix set, deduplicated — keyed <c>(PeerId, Prefix, PrefixLength)</c>.</summary>
+    private static void ReplaceCustomPrefixes(BgpDbContext db, string peerId, IReadOnlyList<(string Prefix, byte Length)> prefixes)
+    {
+        db.Set<PeerCustomPrefix>().Where(c => c.PeerId == peerId).ExecuteDelete();
+        db.Set<PeerCustomPrefix>().AddRange(
+            prefixes.Distinct()
+                    .Select(p => new PeerCustomPrefix { PeerId = peerId, Prefix = p.Prefix, PrefixLength = p.Length }));
+    }
+
+    /// <summary>Stages the custom-ASN set, deduplicated — keyed <c>(PeerId, Asn)</c>.</summary>
+    private static void ReplaceCustomAsns(BgpDbContext db, string peerId, IReadOnlyList<uint> asns)
+    {
+        db.Set<PeerCustomAsn>().Where(c => c.PeerId == peerId).ExecuteDelete();
+        db.Set<PeerCustomAsn>().AddRange(
+            asns.Distinct().Select(a => new PeerCustomAsn { PeerId = peerId, Asn = a }));
     }
 
     public void SetDescription(string id, string description)
