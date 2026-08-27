@@ -163,6 +163,50 @@ public class BgpSessionRouteOwnershipTests
         await TeardownAsync(b, bRun);
     }
 
+    [Fact]
+    public async Task SharedTableFallback_DoesNotAdvertiseRoutesInjectedByAnotherPeer()
+    {
+        // #307: with no peer store injected, RouteAssembler falls back to the shared table — which
+        // also holds every NLRI any peer announced inbound. Advertising those would hand one peer's
+        // injected routes to every other peer. The owner tag from #289 is what separates the startup
+        // seed (unowned) from peer-injected entries (owned by the installing session).
+        var routeTable = Seeded((TestNetSlash24, 24));   // the "startup seed"
+        var (injector, injectorRun, injectorConn) = await EstablishAsync(routeTable, routerId: 0x0A000002);
+
+        injectorConn.EnqueueFrame(AnnounceFrame(8, 0x0A));
+        await SettleAsync(injectorConn, () => routeTable.Count == 2);
+        Assert.NotNull(routeTable.Get(TenSlashEight, 8)); // it IS in the shared table
+
+        // A second peer connects; its initial dump goes through the fallback.
+        var (victim, victimRun, victimConn) = await EstablishAsync(routeTable, routerId: 0x0A000003);
+        var advertised = await CollectAdvertisedNlriAsync(victimConn);
+
+        Assert.Contains((TestNetSlash24, (byte)24), advertised);      // the seed reaches the peer
+        Assert.DoesNotContain((TenSlashEight, (byte)8), advertised);  // the other peer's injection does not
+
+        await TeardownAsync(injector, injectorRun);
+        await TeardownAsync(victim, victimRun);
+    }
+
+    /// <summary>Waits for the initial dump and returns every NLRI the session put on the wire.</summary>
+    private static async Task<List<(uint Prefix, byte Length)>> CollectAdvertisedNlriAsync(ScriptedConnection conn)
+    {
+        var nlri = new List<(uint, byte)>();
+        for (var i = 0; i < 200; i++)
+        {
+            nlri.Clear();
+            foreach (var frame in conn.Sent)
+            {
+                if (BgpMessageReader.ReadMessage(frame) is not BgpUpdateMessage update) continue;
+                foreach (var p in update.Nlri)
+                    nlri.Add((p.Address, p.Length));
+            }
+            if (nlri.Count > 0) break;
+            await Task.Delay(TimeSpan.FromMilliseconds(10));
+        }
+        return nlri;
+    }
+
     // ---- frame builders ----
 
     private static byte[] Frame(BgpMessageType type, params byte[] payload)
@@ -359,7 +403,16 @@ public class BgpSessionRouteOwnershipTests
             }
         }
 
-        public ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken cancellationToken) => default;
+        private readonly List<byte[]> _sent = [];
+
+        /// <summary>Outbound frames, copied because SendMessageAsync returns its buffer to the pool.</summary>
+        public IReadOnlyList<byte[]> Sent { get { lock (_sent) return [.. _sent]; } }
+
+        public ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken cancellationToken)
+        {
+            lock (_sent) _sent.Add(buffer.ToArray());
+            return default;
+        }
 
         public bool IsPeerClosed => false;
 

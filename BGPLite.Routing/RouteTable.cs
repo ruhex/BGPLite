@@ -95,6 +95,26 @@ public sealed class RouteTable
             yield return entry.Route;
     }
 
+    /// <summary>
+    /// Enumerates only the routes installed with no owner — in practice the startup seed written by
+    /// <c>RouteSeedingService</c>. Excludes everything a peer announced inbound, which
+    /// <c>BgpSession.HandleUpdateAsync</c> installs owned by its session.
+    /// <para>
+    /// This is the advertise-side counterpart to <see cref="RemoveOwnedBy"/>: the owner tag exists so
+    /// a peer can neither remove what it does not own nor have what it injected handed to somebody
+    /// else. Used by <c>RouteAssembler</c>'s shared-table fallback, which would otherwise re-advertise
+    /// one peer's inbound announcements to every other peer (#307).
+    /// </para>
+    /// </summary>
+    public IEnumerable<Route> EnumerateUnowned()
+    {
+        foreach (var entry in _routes.Values)
+        {
+            if (entry.Owner is null)
+                yield return entry.Route;
+        }
+    }
+
     public void Clear() =>
         _routes.Clear();
 }

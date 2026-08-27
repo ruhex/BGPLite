@@ -268,10 +268,23 @@ internal sealed class RouteAssembler
             }
         }
 
-        // Final fallback: send from shared route table.
+        // Fallback: no per-peer configuration is reachable, so serve the shared table's SEEDED
+        // routes. This branch means a dependency is missing from the composition — in a correct
+        // production wiring it is unreachable (#263), and reaching it silently changes what every
+        // peer receives rather than merely disabling a feature, so it is logged (#307).
+        _logger.LogWarning(
+            "Route assembly for {Peer} fell back to the shared table — per-peer configuration is unavailable " +
+            "(peerStore={HasPeerStore}, prefixService={HasPrefixService}, appConfig={HasAppConfig}). " +
+            "This peer will NOT receive its configured prefixes.",
+            _peer, _peerStore is not null, _prefixService is not null, _appConfig is not null);
+
+        // EnumerateUnowned, not Enumerate: everything a peer announced inbound is installed in this
+        // same table owned by its session (#289). Advertising those here would hand one peer's
+        // injected routes to every other peer — a tenant-isolation failure, not just a wrong list.
+        // The startup seed is written with no owner and is what this fallback is meant to serve.
         var sharedAllowSet = _routeFilter.ResolveOutgoingAllowSet(filterPeerConfig);
         var filtered = new List<Route>();
-        foreach (var r in _routeTable.Enumerate())
+        foreach (var r in _routeTable.EnumerateUnowned())
         {
             if (_routeFilter.AcceptOutgoing(r, filterPeerConfig, sharedAllowSet))
                 filtered.Add(r);
