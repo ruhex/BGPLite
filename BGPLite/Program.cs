@@ -15,6 +15,19 @@ using BGPLite.Contracts;
 
 var builder = Host.CreateApplicationBuilder(args);
 
+// #263: validate the whole composition when the container is built, not when a service is first
+// used. ValidateOnBuild walks every constructor-injected registration and throws — naming the
+// service and the parameter — if a dependency is unregistered, so a missing registration is a
+// startup failure instead of a feature that quietly does nothing.
+// ValidateScopes stays off: EF Core's own AddDbContext plumbing resolves the scoped
+// IDbContextOptionsConfiguration<BgpDbContext> while building the singleton DbContextOptions, which
+// the root-scope check rejects. That is EF's internal wiring, not this composition — the app's own
+// singletons already take IDbContextFactory rather than a scoped DbContext.
+builder.ConfigureContainer(new DefaultServiceProviderFactory(new ServiceProviderOptions
+{
+    ValidateOnBuild = true
+}));
+
 // EF Core logs every SQL statement at Information by default; with no appsettings.json the host
 // uses Information for everything → EF SQL is ~85% of log volume. Silence EF SQL (warnings/errors
 // still surface) without muting startup/host logs. (appsettings.yml Logging:LogLevel is NOT read
@@ -155,29 +168,40 @@ builder.Services.AddSingleton<IPrefixService>(sp =>
     return new PrefixService(config, ripe, sources, sp.GetRequiredService<HttpPrefixProvider>(), logger: sp.GetRequiredService<ILogger<PrefixService>>());
 });
 
+// #263: the BGP send path's dependencies are registered explicitly and resolved with
+// GetRequiredService, so an incomplete composition throws at startup naming the missing service.
+// They used to be optional constructor arguments threaded BgpServer -> BgpSession -> RouteAssembler,
+// where dropping one produced no error at all — just peers receiving the seeded shared table
+// instead of the prefixes their operator selected.
+builder.Services.AddSingleton<IPeerStore>(sp => sp.GetRequiredService<PeerStore>());
+builder.Services.AddSingleton(TimeProvider.System);
+// Summarization policy for what goes on the wire. Was hard-coded as a `?? new ExactUnion...()`
+// fallback in two constructors and never passed by this file; naming it here is what makes it
+// swappable at all.
+builder.Services.AddSingleton<IPrefixAggregator, ExactUnionPrefixAggregator>();
+builder.Services.AddSingleton<IRouteAssembler>(sp => new RouteAssembler(
+    sp.GetRequiredService<IPrefixService>(),
+    sp.GetRequiredService<IPeerStore>(),
+    sp.GetRequiredService<ICommunityResolver>(),
+    sp.GetRequiredService<IRouteFilter>(),
+    sp.GetRequiredService<AppConfig>(),
+    sp.GetRequiredService<BgpConfig>(),
+    sp.GetRequiredService<ILogger<RouteAssembler>>()));
+builder.Services.AddSingleton<IBgpSessionFactory, BgpSessionFactory>();
+
 // BgpServer is registered as a singleton FIRST (same pattern as ManagementApi below): the old
 // wiring created it inside the AddHostedService factory while writing a captured local that the
 // ISessionManager factory read back with `!` — resolution-order-dependent and NRE-prone, since
 // ISessionManager consumers (PrefixAutoRefreshService, PrefixSourceService) can resolve it
 // before the hosted service starts. Now the container owns exactly one instance and every
 // consumer resolves it regardless of order (#231).
-builder.Services.AddSingleton(sp =>
-{
-    var store = sp.GetRequiredService<PeerStore>();
-    var prefixService = sp.GetRequiredService<IPrefixService>();
-
-    return new BgpServer(
-        sp.GetRequiredService<AppConfig>(),
-        sp.GetRequiredService<RouteTable>(),
-        sp.GetRequiredService<IRouteFilter>(),
-        sp.GetRequiredService<BgpMetrics>(),
-        sp.GetRequiredService<ILogger<BgpSession>>(),
-        sp.GetRequiredService<ILogger<BgpServer>>(),
-        (ip, asn) => store.UpsertPeer(ip, asn),
-        store,
-        prefixService,
-        communityResolver: sp.GetRequiredService<ICommunityResolver>());
-});
+builder.Services.AddSingleton(sp => new BgpServer(
+    sp.GetRequiredService<AppConfig>(),
+    sp.GetRequiredService<RouteTable>(),
+    sp.GetRequiredService<IRouteFilter>(),
+    sp.GetRequiredService<BgpMetrics>(),
+    sp.GetRequiredService<IBgpSessionFactory>(),
+    sp.GetRequiredService<ILogger<BgpServer>>()));
 // #251: route seeding (sources + RIPEstat warm-up) runs as a BACKGROUND task — the listeners
 // start immediately, the local nets.txt fallback seeds in milliseconds, and established sessions
 // get the full set pushed once warm-up completes. Registered before the BGP server so seeding

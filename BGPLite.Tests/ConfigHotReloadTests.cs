@@ -3,6 +3,7 @@ using System.Text;
 using BGPLite;
 using BGPLite.Api;
 using BGPLite.Configuration;
+using BGPLite.Providers;
 using BGPLite.Routing;
 using BGPLite.Server;
 using Microsoft.Data.Sqlite;
@@ -276,8 +277,54 @@ public class ConfigHotReloadTests
             new RouteTable(),
             config,
             new BgpMetrics(),
-            new CapturingLogger<ManagementApi>());
+            new CapturingLogger<ManagementApi>(),
+            // #263: these are required now. This fixture exercises only the hot-reload path
+            // (trusted proxies / CORS / rate limits), so inert stubs are supplied rather than
+            // omitted — the API can no longer be built in a half-wired state by accident.
+            new InertPrefixService(),
+            new InertPrefixSourceService(),
+            new InertSessionManager());
         return new ApiHarness(api, connection);
+    }
+
+    /// <summary>Answers every prefix query with an empty set; the hot-reload path never calls it.</summary>
+    private sealed class InertPrefixService : IPrefixService
+    {
+        public Task<IReadOnlyList<(uint Prefix, byte Length)>> GetPrefixesAsync(uint asn, CancellationToken ct = default)
+            => Task.FromResult<IReadOnlyList<(uint Prefix, byte Length)>>([]);
+        public Task<List<(uint Prefix, byte Length, uint Asn)>> GetPrefixesForAsns(IEnumerable<uint> asns, CancellationToken ct = default)
+            => Task.FromResult(new List<(uint Prefix, byte Length, uint Asn)>());
+        public Task<int> GetPrefixCountAsync(uint asn, CancellationToken ct = default) => Task.FromResult(0);
+        public Task<List<(uint Prefix, byte Length, uint Asn)>> GetRuPrefixesAsync(CancellationToken ct = default)
+            => Task.FromResult(new List<(uint Prefix, byte Length, uint Asn)>());
+        public Task<IReadOnlyList<(uint Prefix, byte Length)>> GetSourcePrefixesAsync(string name, CancellationToken ct = default)
+            => Task.FromResult<IReadOnlyList<(uint Prefix, byte Length)>>([]);
+        public Task<IReadOnlyList<(uint Prefix, byte Length)>> GetUserSourcePrefixesAsync(string name, string url, string? community, CancellationToken ct = default)
+            => Task.FromResult<IReadOnlyList<(uint Prefix, byte Length)>>([]);
+        public Task WarmUpAsync(CancellationToken ct = default) => Task.CompletedTask;
+    }
+
+    /// <summary>Reports no configured prefix sources; the hot-reload path never calls it.</summary>
+    private sealed class InertPrefixSourceService : IPrefixSourceService
+    {
+        public Task<IReadOnlyList<(PrefixSourceConfig Source, IReadOnlyList<(uint Prefix, byte Length)> Prefixes)>> LoadAllAsync(CancellationToken ct = default)
+            => Task.FromResult<IReadOnlyList<(PrefixSourceConfig, IReadOnlyList<(uint, byte)>)>>([]);
+        public Task<IReadOnlyList<(uint Prefix, byte Length)>> GetAsync(string name, CancellationToken ct = default)
+            => Task.FromResult<IReadOnlyList<(uint Prefix, byte Length)>>([]);
+        public Task<IReadOnlyList<(uint Prefix, byte Length)>> GetDefaultAsync(CancellationToken ct = default)
+            => Task.FromResult<IReadOnlyList<(uint Prefix, byte Length)>>([]);
+        public Task WarmUpAsync(CancellationToken ct = default) => Task.CompletedTask;
+        public Task<bool> RefreshAsync(string sourceName, CancellationToken ct = default) => Task.FromResult(false);
+        public bool SourceSupportsConditional(string sourceName) => false;
+    }
+
+    /// <summary>Holds no sessions; the hot-reload path never calls it.</summary>
+    private sealed class InertSessionManager : ISessionManager
+    {
+        public Task RefreshPeerAsync(string peerIp, uint asn) => Task.CompletedTask;
+        public List<string> GetActivePeerIps() => [];
+        public int GetAdvertisedPrefixCount(string peerIp, uint asn) => 0;
+        public Task RefreshAllEstablishedAsync() => Task.CompletedTask;
     }
 
     private sealed class ApiHarness : IDisposable

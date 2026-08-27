@@ -18,29 +18,32 @@ namespace BGPLite.Server;
 /// route-shaping helpers that were <c>internal static</c> on BgpSession. The send/withdraw mirror
 /// (<c>_advertisedPrefixes</c>) and the codec glue (<c>SendRoutesAsync</c>) stay in BgpSession.
 /// </para>
+/// <para>
+/// #263: the peer store, prefix service and <c>AppConfig</c> are required. They used to be nullable
+/// and a null in any of them silently switched every peer over to the shared route table, so a
+/// dropped DI registration read as "why is this peer not getting its prefixes" rather than as a
+/// startup error. That degraded mode is now <see cref="SharedTableRouteAssembler"/> — a type a
+/// caller has to pick — and this one cannot be constructed without the configuration it needs.
+/// </para>
 /// </summary>
-internal sealed class RouteAssembler
+public sealed class RouteAssembler : IRouteAssembler
 {
-    private readonly IPrefixService? _prefixService;
-    private readonly IPeerStore? _peerStore;
+    private readonly IPrefixService _prefixService;
+    private readonly IPeerStore _peerStore;
     private readonly ICommunityResolver _communityResolver;
     private readonly IRouteFilter _routeFilter;
-    private readonly AppConfig? _appConfig;
+    private readonly AppConfig _appConfig;
     private readonly BgpConfig _bgpConfig;
-    private readonly RouteTable _routeTable;
-    private readonly ILogger _logger;
-    private readonly string _peer;
+    private readonly ILogger<RouteAssembler> _logger;
 
     public RouteAssembler(
-        IPrefixService? prefixService,
-        IPeerStore? peerStore,
+        IPrefixService prefixService,
+        IPeerStore peerStore,
         ICommunityResolver communityResolver,
         IRouteFilter routeFilter,
-        AppConfig? appConfig,
+        AppConfig appConfig,
         BgpConfig bgpConfig,
-        RouteTable routeTable,
-        ILogger logger,
-        string peer)
+        ILogger<RouteAssembler> logger)
     {
         _prefixService = prefixService;
         _peerStore = peerStore;
@@ -48,248 +51,211 @@ internal sealed class RouteAssembler
         _routeFilter = routeFilter;
         _appConfig = appConfig;
         _bgpConfig = bgpConfig;
-        _routeTable = routeTable;
         _logger = logger;
-        _peer = peer;
     }
 
-    /// <summary>
-    /// Resolves the outbound route set for the given peer: the per-peer decision tree (RU defaults,
-    /// subscriptions, custom prefixes, custom AS, user URL sources) or the shared-table fallback.
-    /// Returns the filtered routes — the caller does aggregate + batch + send. No transport access.
-    /// </summary>
+    /// <inheritdoc />
     public async Task<List<Route>> BuildOutboundRoutesAsync(
-        string peerIp, uint remoteAsn, PeerConfig filterPeerConfig, CancellationToken ct)
+        string peerIp, uint remoteAsn, PeerConfig filterPeerConfig, string peerLabel, CancellationToken ct)
     {
         var nextHop = BgpConstants.IPAddressToUint(_bgpConfig.GetRouterIdAddress());
         var routes = new List<Route>();
         var defaultComms = _communityResolver.Resolve(
-            new CommunitySource(CommunitySourceKind.PrefixSource, _appConfig?.DefaultPrefixSource));
+            new CommunitySource(CommunitySourceKind.PrefixSource, _appConfig.DefaultPrefixSource));
 
-        if (_peerStore is not null && _prefixService is not null && _appConfig is not null)
+        var peer = _peerStore.LoadPeerRoutingView(peerIp, remoteAsn);
+        if (peer is not null)
         {
-            // Capture non-null locals so the compiler tracks the null-guard through the nested
-            // branches without null-forgiving operators (#105 nullable).
-            var peerStore = _peerStore;
-            var prefixService = _prefixService;
-            var appConfig = _appConfig;
-            var peer = peerStore.LoadPeerRoutingView(peerIp, remoteAsn);
-            if (peer is not null)
+            var subscriptionIds = peer.Subscriptions;
+            var customPrefixes = peer.CustomPrefixes;
+            var customAsns = peer.CustomAsns;
+
+            // Unconfigured peer — send RU defaults. A peer whose only configuration is active
+            // user URL sources (#147) is NOT unconfigured — it must not fall through to RU.
+            if (subscriptionIds.Count == 0 && customPrefixes.Count == 0 && customAsns.Count == 0
+                && peer.UserSources.Count == 0)
             {
-                var subscriptionIds = peer.Subscriptions;
-                var customPrefixes = peer.CustomPrefixes;
-                var customAsns = peer.CustomAsns;
-
-                // Unconfigured peer — send RU defaults. A peer whose only configuration is active
-                // user URL sources (#147) is NOT unconfigured — it must not fall through to RU.
-                if (subscriptionIds.Count == 0 && customPrefixes.Count == 0 && customAsns.Count == 0
-                    && peer.UserSources.Count == 0)
+                _logger.LogInformation("Unconfigured peer {Peer}, sending RU defaults", peerLabel);
+                try
                 {
-                    _logger.LogInformation("Unconfigured peer {Peer}, sending RU defaults", _peer);
-                    try
-                    {
-                        var ruPrefixes = await prefixService.GetRuPrefixesAsync(ct);
-                        foreach (var (prefix, length, _) in ruPrefixes)
-                            routes.Add(MakeRoute(prefix, length, nextHop, null, defaultComms));
-                        _logger.LogInformation("Sent {Count} RU prefixes to unconfigured peer {Peer}",
-                            ruPrefixes.Count, _peer);
-                    }
-                    catch (Exception ex)
-                    {
-                        _logger.LogError(ex, "Failed to fetch RU prefixes for {Peer}", _peer);
-                    }
-
-                    return FilterAndReturn(routes, filterPeerConfig);
+                    var ruPrefixes = await _prefixService.GetRuPrefixesAsync(ct);
+                    foreach (var (prefix, length, _) in ruPrefixes)
+                        routes.Add(MakeRoute(prefix, length, nextHop, null, defaultComms));
+                    _logger.LogInformation("Sent {Count} RU prefixes to unconfigured peer {Peer}",
+                        ruPrefixes.Count, peerLabel);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "Failed to fetch RU prefixes for {Peer}", peerLabel);
                 }
 
-                _logger.LogInformation("Peer {Peer} subscriptions: [{Subs}]", _peer, string.Join(", ", subscriptionIds));
+                return FilterAndReturn(routes, filterPeerConfig);
+            }
 
-                var subscribedLists = appConfig.RipeStat?.AsnLists
-                    .Where(l => subscriptionIds.Contains(l.Name))
-                    .ToList() ?? [];
+            _logger.LogInformation("Peer {Peer} subscriptions: [{Subs}]", peerLabel, string.Join(", ", subscriptionIds));
 
-                // ASN-based lists — resolve per list so each list's community is stamped on its prefixes.
-                var asnLists = subscribedLists.Where(l => l.Asns.Count > 0).ToList();
+            var subscribedLists = _appConfig.RipeStat?.AsnLists
+                .Where(l => subscriptionIds.Contains(l.Name))
+                .ToList() ?? [];
 
-                _logger.LogInformation("Peer {Peer} resolved {Count} ASNs from subscriptions",
-                    _peer, asnLists.SelectMany(l => l.Asns).Count());
+            // ASN-based lists — resolve per list so each list's community is stamped on its prefixes.
+            var asnLists = subscribedLists.Where(l => l.Asns.Count > 0).ToList();
 
-                if (asnLists.Count > 0)
-                {
-                    var before = routes.Count;
-                    foreach (var list in asnLists)
-                    {
-                        try
-                        {
-                            var comms = _communityResolver.Resolve(
-                                new CommunitySource(CommunitySourceKind.AsnList, list.Name));
-                            var prefixes = await prefixService.GetPrefixesForAsns(list.Asns, ct);
-                            foreach (var (prefix, length, _) in prefixes)
-                                // #85: AsPath is overwritten by the local ASN in the outbound codec
-                                // (BuildUpdateAttributes), so the per-prefix asn value is never used
-                                // on the wire — pass null instead of allocating [asn] per prefix.
-                                routes.Add(MakeRoute(prefix, length, nextHop, null, comms));
-                        }
-                        catch (Exception ex)
-                        {
-                            _logger.LogError(ex, "Failed to fetch prefixes for {Peer} (list '{List}')", _peer, list.Name);
-                        }
-                    }
-                    _logger.LogInformation("Fetched {Count} prefixes for {Peer} from ASN subscriptions",
-                        routes.Count - before, _peer);
-                }
+            _logger.LogInformation("Peer {Peer} resolved {Count} ASNs from subscriptions",
+                peerLabel, asnLists.SelectMany(l => l.Asns).Count());
 
-                // Country-based lists (e.g. RU with no ASNs → use local nets.txt).
-                var countryLists = subscribedLists.Where(l => l.Asns.Count == 0 && l.Country is not null).ToList();
-                if (countryLists.Count > 0)
+            if (asnLists.Count > 0)
+            {
+                var before = routes.Count;
+                foreach (var list in asnLists)
                 {
                     try
                     {
                         var comms = _communityResolver.Resolve(
-                            new CommunitySource(CommunitySourceKind.Country, countryLists[0].Name));
-                        var ruPrefixes = await prefixService.GetRuPrefixesAsync(ct);
-                        foreach (var (prefix, length, _) in ruPrefixes)
+                            new CommunitySource(CommunitySourceKind.AsnList, list.Name));
+                        var prefixes = await _prefixService.GetPrefixesForAsns(list.Asns, ct);
+                        foreach (var (prefix, length, _) in prefixes)
+                            // #85: AsPath is overwritten by the local ASN in the outbound codec
+                            // (BuildUpdateAttributes), so the per-prefix asn value is never used
+                            // on the wire — pass null instead of allocating [asn] per prefix.
                             routes.Add(MakeRoute(prefix, length, nextHop, null, comms));
-                        _logger.LogInformation("Fetched {Count} RU prefixes for {Peer}", ruPrefixes.Count, _peer);
                     }
                     catch (Exception ex)
                     {
-                        _logger.LogError(ex, "Failed to fetch RU prefixes for {Peer}", _peer);
+                        _logger.LogError(ex, "Failed to fetch prefixes for {Peer} (list '{List}')", peerLabel, list.Name);
                     }
                 }
-
-                // Prefix-source subscriptions: subscribed names that match a configured PrefixSource.
-                var resolvedAsRipe = subscribedLists.Select(l => l.Name).ToHashSet();
-                var prefixSources = appConfig.PrefixSources;  // safe: we're inside the _appConfig is not null guard
-                var sourceNames = subscriptionIds
-                    .Where(n => !resolvedAsRipe.Contains(n) && prefixSources.Any(s => s.Name == n))
-                    .ToList();
-                foreach (var name in sourceNames)
-                {
-                    try
-                    {
-                        var comms = _communityResolver.Resolve(new CommunitySource(CommunitySourceKind.PrefixSource, name));
-                        var srcPrefixes = await prefixService.GetSourcePrefixesAsync(name, ct);
-                        foreach (var (prefix, length) in srcPrefixes)
-                            routes.Add(MakeRoute(prefix, length, nextHop, null, comms));
-                        _logger.LogInformation("Fetched {Count} prefixes from source '{Source}' for {Peer}",
-                            srcPrefixes.Count, name, _peer);
-                    }
-                    catch (Exception ex)
-                    {
-                        _logger.LogError(ex, "Failed to fetch source '{Source}' for {Peer}", name, _peer);
-                    }
-                }
-
-                _logger.LogInformation("Peer {Peer} has {SubRoutes} subscription routes + {CustomCount} custom prefixes",
-                    _peer, routes.Count, customPrefixes.Count);
-
-                // Custom prefixes carry the static "custom prefix" community (<Asn>:100).
-                // #236: parse via the canonical PrefixCidr parser — host-bit masking + range check +
-                // IPv4-only, shared with the API and file sources. Custom prefixes are validated at
-                // write time (ParseCustomPrefix), but a corrupt row or a write path that bypassed the
-                // API must not throw a FormatException out of the BGP send path — skip + log instead.
-                var customPrefixComms = _communityResolver.Resolve(new CommunitySource(CommunitySourceKind.Custom));
-                foreach (var cidr in customPrefixes)
-                {
-                    if (!PrefixCidr.TryParse(cidr, out var prefix, out var length))
-                    {
-                        _logger.LogWarning("Skipping malformed custom prefix '{Cidr}' for {Peer}", cidr, _peer);
-                        continue;
-                    }
-                    routes.Add(MakeRoute(prefix, length, nextHop, null, customPrefixComms));
-                }
-
-                // Add custom AS prefixes. Custom-AS routes carry the static "custom AS" community.
-                if (customAsns.Count > 0)
-                {
-                    try
-                    {
-                        var customAsnComms = _communityResolver.Resolve(new CommunitySource(CommunitySourceKind.CustomAsn));
-                        var asnPrefixes = await prefixService.GetPrefixesForAsns(customAsns, ct);
-                        foreach (var (prefix, length, _) in asnPrefixes)
-                            routes.Add(MakeRoute(prefix, length, nextHop, null, customAsnComms));
-                        _logger.LogInformation("Peer {Peer} custom AS: {Asns} -> {Count} prefixes",
-                            _peer, string.Join(",", customAsns), asnPrefixes.Count);
-                    }
-                    catch (Exception ex)
-                    {
-                        _logger.LogError(ex, "Failed to fetch custom AS prefixes for {Peer}", _peer);
-                    }
-                }
-
-                // Per-peer user URL sources (#143/#147): each Active source fetched + community-stamped.
-                foreach (var source in peer.UserSources)
-                {
-                    await AddUserSourceRoutesAsync(
-                        routes, source, nextHop, prefixService, _communityResolver, _logger, _peer, ct);
-                }
-
-                _logger.LogInformation("Sending {Count} total routes to {Peer}", routes.Count, _peer);
-
-                // Configured peer resolved 0 prefixes — fall back to RU.
-                if (routes.Count == 0)
-                {
-                    _logger.LogInformation("Peer {Peer} resolved 0 prefixes, falling back to RU defaults", _peer);
-                    try
-                    {
-                        var ruPrefixes = await prefixService.GetRuPrefixesAsync(ct);
-                        foreach (var (prefix, length, _) in ruPrefixes)
-                            routes.Add(MakeRoute(prefix, length, nextHop, null, defaultComms));
-                    }
-                    catch (Exception ex)
-                    {
-                        _logger.LogError(ex, "Failed to fetch RU fallback for {Peer}", _peer);
-                    }
-                }
-
-                return FilterAndReturn(routes, filterPeerConfig);
+                _logger.LogInformation("Fetched {Count} prefixes for {Peer} from ASN subscriptions",
+                    routes.Count - before, peerLabel);
             }
-            else
-            {
-                // Unknown peer — auto-register and send default RU list.
-                _logger.LogInformation("Unknown peer {Ip}, auto-registering with RU defaults", _peer);
-                peerStore.CreatePeer(peerIp, remoteAsn, null);
 
+            // Country-based lists (e.g. RU with no ASNs → use local nets.txt).
+            var countryLists = subscribedLists.Where(l => l.Asns.Count == 0 && l.Country is not null).ToList();
+            if (countryLists.Count > 0)
+            {
                 try
                 {
-                    var ruPrefixes = await prefixService.GetRuPrefixesAsync(ct);
+                    var comms = _communityResolver.Resolve(
+                        new CommunitySource(CommunitySourceKind.Country, countryLists[0].Name));
+                    var ruPrefixes = await _prefixService.GetRuPrefixesAsync(ct);
                     foreach (var (prefix, length, _) in ruPrefixes)
-                        routes.Add(MakeRoute(prefix, length, nextHop, null, defaultComms));
-                    _logger.LogInformation("Fetched {Count} RU prefixes for unknown peer {Peer}",
-                        ruPrefixes.Count, _peer);
+                        routes.Add(MakeRoute(prefix, length, nextHop, null, comms));
+                    _logger.LogInformation("Fetched {Count} RU prefixes for {Peer}", ruPrefixes.Count, peerLabel);
                 }
                 catch (Exception ex)
                 {
-                    _logger.LogError(ex, "Failed to fetch RU prefixes for {Peer}", _peer);
+                    _logger.LogError(ex, "Failed to fetch RU prefixes for {Peer}", peerLabel);
                 }
-
-                return FilterAndReturn(routes, filterPeerConfig);
             }
+
+            // Prefix-source subscriptions: subscribed names that match a configured PrefixSource.
+            var resolvedAsRipe = subscribedLists.Select(l => l.Name).ToHashSet();
+            var prefixSources = _appConfig.PrefixSources;
+            var sourceNames = subscriptionIds
+                .Where(n => !resolvedAsRipe.Contains(n) && prefixSources.Any(s => s.Name == n))
+                .ToList();
+            foreach (var name in sourceNames)
+            {
+                try
+                {
+                    var comms = _communityResolver.Resolve(new CommunitySource(CommunitySourceKind.PrefixSource, name));
+                    var srcPrefixes = await _prefixService.GetSourcePrefixesAsync(name, ct);
+                    foreach (var (prefix, length) in srcPrefixes)
+                        routes.Add(MakeRoute(prefix, length, nextHop, null, comms));
+                    _logger.LogInformation("Fetched {Count} prefixes from source '{Source}' for {Peer}",
+                        srcPrefixes.Count, name, peerLabel);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "Failed to fetch source '{Source}' for {Peer}", name, peerLabel);
+                }
+            }
+
+            _logger.LogInformation("Peer {Peer} has {SubRoutes} subscription routes + {CustomCount} custom prefixes",
+                peerLabel, routes.Count, customPrefixes.Count);
+
+            // Custom prefixes carry the static "custom prefix" community (<Asn>:100).
+            // #236: parse via the canonical PrefixCidr parser — host-bit masking + range check +
+            // IPv4-only, shared with the API and file sources. Custom prefixes are validated at
+            // write time (ParseCustomPrefix), but a corrupt row or a write path that bypassed the
+            // API must not throw a FormatException out of the BGP send path — skip + log instead.
+            var customPrefixComms = _communityResolver.Resolve(new CommunitySource(CommunitySourceKind.Custom));
+            foreach (var cidr in customPrefixes)
+            {
+                if (!PrefixCidr.TryParse(cidr, out var prefix, out var length))
+                {
+                    _logger.LogWarning("Skipping malformed custom prefix '{Cidr}' for {Peer}", cidr, peerLabel);
+                    continue;
+                }
+                routes.Add(MakeRoute(prefix, length, nextHop, null, customPrefixComms));
+            }
+
+            // Add custom AS prefixes. Custom-AS routes carry the static "custom AS" community.
+            if (customAsns.Count > 0)
+            {
+                try
+                {
+                    var customAsnComms = _communityResolver.Resolve(new CommunitySource(CommunitySourceKind.CustomAsn));
+                    var asnPrefixes = await _prefixService.GetPrefixesForAsns(customAsns, ct);
+                    foreach (var (prefix, length, _) in asnPrefixes)
+                        routes.Add(MakeRoute(prefix, length, nextHop, null, customAsnComms));
+                    _logger.LogInformation("Peer {Peer} custom AS: {Asns} -> {Count} prefixes",
+                        peerLabel, string.Join(",", customAsns), asnPrefixes.Count);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "Failed to fetch custom AS prefixes for {Peer}", peerLabel);
+                }
+            }
+
+            // Per-peer user URL sources (#143/#147): each Active source fetched + community-stamped.
+            foreach (var source in peer.UserSources)
+            {
+                await AddUserSourceRoutesAsync(
+                    routes, source, nextHop, _prefixService, _communityResolver, _logger, peerLabel, ct);
+            }
+
+            _logger.LogInformation("Sending {Count} total routes to {Peer}", routes.Count, peerLabel);
+
+            // Configured peer resolved 0 prefixes — fall back to RU.
+            if (routes.Count == 0)
+            {
+                _logger.LogInformation("Peer {Peer} resolved 0 prefixes, falling back to RU defaults", peerLabel);
+                try
+                {
+                    var ruPrefixes = await _prefixService.GetRuPrefixesAsync(ct);
+                    foreach (var (prefix, length, _) in ruPrefixes)
+                        routes.Add(MakeRoute(prefix, length, nextHop, null, defaultComms));
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "Failed to fetch RU fallback for {Peer}", peerLabel);
+                }
+            }
+
+            return FilterAndReturn(routes, filterPeerConfig);
         }
-
-        // Fallback: no per-peer configuration is reachable, so serve the shared table's SEEDED
-        // routes. This branch means a dependency is missing from the composition — in a correct
-        // production wiring it is unreachable (#263), and reaching it silently changes what every
-        // peer receives rather than merely disabling a feature, so it is logged (#307).
-        _logger.LogWarning(
-            "Route assembly for {Peer} fell back to the shared table — per-peer configuration is unavailable " +
-            "(peerStore={HasPeerStore}, prefixService={HasPrefixService}, appConfig={HasAppConfig}). " +
-            "This peer will NOT receive its configured prefixes.",
-            _peer, _peerStore is not null, _prefixService is not null, _appConfig is not null);
-
-        // EnumerateUnowned, not Enumerate: everything a peer announced inbound is installed in this
-        // same table owned by its session (#289). Advertising those here would hand one peer's
-        // injected routes to every other peer — a tenant-isolation failure, not just a wrong list.
-        // The startup seed is written with no owner and is what this fallback is meant to serve.
-        var sharedAllowSet = _routeFilter.ResolveOutgoingAllowSet(filterPeerConfig);
-        var filtered = new List<Route>();
-        foreach (var r in _routeTable.EnumerateUnowned())
+        else
         {
-            if (_routeFilter.AcceptOutgoing(r, filterPeerConfig, sharedAllowSet))
-                filtered.Add(r);
+            // Unknown peer — auto-register and send default RU list.
+            _logger.LogInformation("Unknown peer {Ip}, auto-registering with RU defaults", peerLabel);
+            _peerStore.CreatePeer(peerIp, remoteAsn, null);
+
+            try
+            {
+                var ruPrefixes = await _prefixService.GetRuPrefixesAsync(ct);
+                foreach (var (prefix, length, _) in ruPrefixes)
+                    routes.Add(MakeRoute(prefix, length, nextHop, null, defaultComms));
+                _logger.LogInformation("Fetched {Count} RU prefixes for unknown peer {Peer}",
+                    ruPrefixes.Count, peerLabel);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to fetch RU prefixes for {Peer}", peerLabel);
+            }
+
+            return FilterAndReturn(routes, filterPeerConfig);
         }
-        return filtered;
     }
 
     /// <summary>Applies the per-peer outgoing community filter and returns the filtered list.</summary>
