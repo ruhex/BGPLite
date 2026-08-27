@@ -161,6 +161,57 @@ public class MalformedUpdateResilienceTests
     }
 
     [Fact]
+    public async Task DuplicateNextHop_OnWire_InstallsTheFirstOccurrence()
+    {
+        // #287 / RFC 7606 §3: a duplicated attribute is not an error — all occurrences after the
+        // first are discarded and the UPDATE is still processed. Before the fix the switch in
+        // ParseRouteAttributes assigned unconditionally, so the SECOND next hop landed in the route
+        // table while anything reading the first (collector, looking glass, packet capture) saw the
+        // other one.
+        var (server, client) = ConnectedPair();
+        using var clientSock = client;
+        var bgpConfig = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1", HoldTime = 0, KeepAlive = 0 };
+        var metrics = new BgpMetrics();
+        var routeTable = new RouteTable();
+        using var session = new BgpSession(
+            new SocketBgpConnection(server),
+            new PeerConfig { Address = "127.0.0.1" },
+            bgpConfig,
+            routeTable,
+            AllowAllFilter.Instance,
+            metrics,
+            new NopLogger<BgpSession>());
+
+        var runTask = await EstablishSessionAsync(session, client, bgpConfig);
+
+        // EstablishSessionAsync negotiates the 4-octet-ASN capability, so AS_PATH is 4-octet encoded.
+        var attrs = new List<byte>
+        {
+            0x40, 0x01, 0x01, 0x00,                                     // ORIGIN igp
+            0x40, 0x02, 0x06, 0x02, 0x01, 0x00, 0x00, 0x00, 0x64,       // AS_PATH seq [100]
+            0x40, 0x03, 0x04, 0xC0, 0x00, 0x02, 0x01,                   // NEXT_HOP 192.0.2.1  <- wins
+            0x40, 0x03, 0x04, 0x0A, 0x0A, 0x0A, 0x0A,                   // NEXT_HOP 10.10.10.10 <- discarded
+        };
+        var payload = new List<byte> { 0x00, 0x00, (byte)(attrs.Count >> 8), (byte)attrs.Count };
+        payload.AddRange(attrs);
+        payload.AddRange([8, 0x0A]); // NLRI 10.0.0.0/8
+        var frame = BuildMessage(BgpMessageType.Update, [.. payload]);
+        client.Send(frame, 0, frame.Length, SocketFlags.None);
+
+        for (var i = 0; i < 40 && routeTable.Count == 0; i++)
+            await Task.Delay(TimeSpan.FromMilliseconds(50));
+
+        var route = routeTable.Get(0x0A000000, 8);
+        Assert.NotNull(route);
+        Assert.Equal(0xC0000201u, route!.NextHop); // 192.0.2.1 — the FIRST occurrence
+        Assert.True(session.IsEstablished, "a duplicated attribute must not tear the session down");
+        Assert.Equal(0, metrics.UpdatesRejected); // RFC 7606 §3: processed, not rejected
+
+        session.MarkSilentClose();
+        await runTask.WaitAsync(TimeSpan.FromSeconds(5));
+    }
+
+    [Fact]
     public void ParseUpdate_AttributeValueCrossingAttrsEnd_Rejected()
     {
         // #245 review finding: an attribute TLV whose declared value length reaches past the

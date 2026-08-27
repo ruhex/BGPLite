@@ -219,8 +219,32 @@ public static class UpdateCodec
             uint? aggregatorAsn = null;
             uint? as4AggregatorAsn = null;
 
+            // RFC 7606 §3 (revising RFC 4271 §6.3): "If any other attribute (whether recognized or
+            // unrecognized) appears more than once in an UPDATE message, then all the occurrences of
+            // the attribute other than the first one SHALL be discarded and the UPDATE message will
+            // continue to be processed." The switch below assigns unconditionally, so without this
+            // guard the LAST occurrence won — an UPDATE carrying two NEXT_HOPs installed the second
+            // one, so anything reading the first (a collector, a looking glass, an operator's packet
+            // capture) disagreed with what actually landed in the route table (#287).
+            //
+            // The MP_REACH_NLRI/MP_UNREACH_NLRI half of that paragraph — duplicate → NOTIFICATION,
+            // session reset — is deliberately not implemented: BGPLite is IPv4-unicast only and never
+            // parses those attributes. It belongs with MP-BGP support (#14).
+            //
+            // Clear() is not redundant despite `localsinit` zeroing stackalloc by default: adding
+            // [SkipLocalsInit] (or <SkipLocalsInit> in the csproj) is an ordinary perf tweak for a
+            // codec like this one, and it would turn the guard below into garbage — random type
+            // codes reading as "already seen", so the FIRST occurrence of a mandatory attribute
+            // gets skipped and valid UPDATEs are withdrawn. 256 bytes of memset against a silent,
+            // traffic-dependent failure is not a trade worth making.
+            Span<bool> seenTypes = stackalloc bool[256];
+            seenTypes.Clear();
             foreach (var attr in update.PathAttributes)
             {
+                if (seenTypes[attr.TypeCode])
+                    continue;
+                seenTypes[attr.TypeCode] = true;
+
                 switch (attr.TypeCode)
                 {
                     case BgpConstants.Attribute.Origin:
