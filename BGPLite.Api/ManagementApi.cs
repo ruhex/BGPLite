@@ -633,6 +633,16 @@ public sealed class ManagementApi : IHostedService, IDisposable
         if (data is null)
             return ApiResponse.Error("Invalid request body", 400);
 
+        // #255: validate everything BEFORE the store is touched. The peer row and its collections
+        // now commit together (#259), so a rejection here leaves nothing behind at all.
+        var normalizedIp = NormalizePeerIp(data.Ip);
+        if (normalizedIp is null)
+            return ApiResponse.Error($"Invalid peer IP: {SanitizeForLog(data.Ip ?? "(missing)")}", 400);
+        if (!IsConfigurablePeerAsn(data.Asn))
+            return ApiResponse.Error($"Invalid peer AS number: {data.Asn}", 400);
+        if (ValidatePeerFields(data.Description, data.CustomAsns) is { } createError)
+            return createError;
+
         var asnLists = data.AsnLists ?? [];
         var customPrefixes = new List<(string Prefix, byte Length)>();
 
@@ -657,20 +667,20 @@ public sealed class ManagementApi : IHostedService, IDisposable
         // left the user with a half-configured peer. Duplicates are now deduplicated inside the
         // store: a set of prefixes means the same thing whether a value appears once or twice.
         var id = _store.SavePeerConfiguration(
-            data.Ip, data.Asn, data.Description, asnLists, customPrefixes, data.CustomAsns ?? []);
+            normalizedIp, data.Asn, data.Description, asnLists, customPrefixes, data.CustomAsns ?? []);
 
         var peer = _store.GetDbPeerById(id);
 
         _logger.LogInformation("Created peer {Ip} AS{Asn} ({Id}): {Subs} lists, {Prefixes} custom prefixes, {Asns} custom AS",
-            data.Ip, data.Asn, id, asnLists.Count, customPrefixes.Count, data.CustomAsns?.Count ?? 0);
+            normalizedIp, data.Asn, id, asnLists.Count, customPrefixes.Count, data.CustomAsns?.Count ?? 0);
 
         if (_sessionManager is not null)
-            _ = _sessionManager.RefreshPeerAsync(data.Ip, data.Asn);
+            _ = _sessionManager.RefreshPeerAsync(normalizedIp, data.Asn);
 
         return ApiResponse.Ok(new
         {
             id,
-            ip = data.Ip,
+            ip = normalizedIp,
             asn = data.Asn,
             description = data.Description,
             status = peer?.Status ?? "inactive",
@@ -738,6 +748,11 @@ public sealed class ManagementApi : IHostedService, IDisposable
 
         _logger.LogInformation("UpdatePeer {Id}: CustomPrefixes={Count}, CustomAsns={AsnCount}",
             SanitizeForLog(peerId), parsedPrefixes?.Count ?? 0, data.CustomAsns?.Count ?? 0);
+
+        // #255: the address and the peer's own ASN are not updatable through this endpoint, so only
+        // the shared fields need checking — but they need it before anything is written.
+        if (ValidatePeerFields(data.Description, data.CustomAsns) is { } updateError)
+            return updateError;
 
         // #259: one transaction for the whole update, same reasoning as the create path. A null
         // argument means "leave this alone" — the PATCH semantics this endpoint already had, now
@@ -1129,6 +1144,78 @@ public sealed class ManagementApi : IHostedService, IDisposable
         // Return the masked network address in dotted-quad form (matches how it is stored in the DB
         // and re-parsed by the BGP send path, so the round-trip is byte-identical).
         return (BgpConstants.UintToIPAddress(prefix).ToString(), length);
+    }
+
+    /// <summary>
+    /// Validates a peer address and returns it in canonical dotted-quad form, or <c>null</c> if it is
+    /// not a usable IPv4 address (#255).
+    /// <para>
+    /// Canonicalizing is the point, not a nicety. <c>BgpServer</c> keys an accepted session by
+    /// <c>remoteEndpoint.Address.ToString()</c>, so a peer row storing any other spelling of the same
+    /// address never binds to its session — the peer is configured, visible in the UI, and silently
+    /// never comes up. <see cref="IPAddress.TryParse"/> accepts several such spellings and rewrites
+    /// them: <c>01.02.03.04</c> and <c>0x1.2.3.4</c> both become <c>1.2.3.4</c>, and the three-part
+    /// form <c>1.2.3</c> becomes <c>1.2.0.3</c> — a different host than the one typed. Storing
+    /// <c>ToString()</c> collapses all of them onto the form the BGP path will look for.
+    /// </para>
+    /// <para>
+    /// IPv6 is rejected rather than mapped: BGPLite is IPv4-unicast only (#14 tracks the rest), so
+    /// <c>::ffff:1.2.3.4</c> would produce a peer no session can match.
+    /// </para>
+    /// </summary>
+    internal static string? NormalizePeerIp(string? ip)
+    {
+        if (string.IsNullOrWhiteSpace(ip)) return null;
+        if (!IPAddress.TryParse(ip, out var address)) return null;
+        if (address.AddressFamily != AddressFamily.InterNetwork) return null;
+        return address.ToString();
+    }
+
+    /// <summary>
+    /// Whether an AS number may be configured for a peer (#255). Rejects exactly four values:
+    /// <list type="bullet">
+    /// <item><c>0</c> — RFC 7607 §2 requires an OPEN carrying peer AS 0 to be rejected with Bad Peer
+    /// AS, which BGPLite now does (#300). Accepting it here produces a peer that is stored, shown in
+    /// the UI, and can never establish a session.</item>
+    /// <item><c>23456</c> — AS_TRANS is the RFC 6793 placeholder a 4-octet speaker puts in My AS; its
+    /// real AS arrives in the capability, so no peer ever *is* AS_TRANS.</item>
+    /// <item><c>65535</c> and <c>4294967295</c> — the Last ASNs reserved by RFC 7300.</item>
+    /// </list>
+    /// <para>
+    /// The private ranges are deliberately NOT rejected. 64512–65534 (RFC 6996) and 4200000000–
+    /// 4294967294 are exactly what a user of a route server peers with; #255 suggested excluding
+    /// "4200000000+", which is the private 32-bit range and would lock out real peers. RFC 7300
+    /// reserves only the two endpoints above.
+    /// </para>
+    /// </summary>
+    internal static bool IsConfigurablePeerAsn(uint asn) =>
+        asn is not (0 or BgpConstants.AsPath.AsTrans or 65535 or uint.MaxValue);
+
+    /// <summary>Maximum stored length of a peer description — bounds what a client can persist per peer.</summary>
+    internal const int MaxDescriptionLength = 512;
+
+    /// <summary>
+    /// Validates the peer fields shared by create and update, returning the error response to send or
+    /// <c>null</c> when everything checks out. Runs BEFORE anything is persisted, so a rejected
+    /// request leaves no trace (#255, and #259 for why "before" matters).
+    /// </summary>
+    private static ApiResponse? ValidatePeerFields(string? description, IReadOnlyList<uint>? customAsns)
+    {
+        if (description is { Length: > MaxDescriptionLength })
+            return ApiResponse.Error($"Description exceeds {MaxDescriptionLength} characters", 400);
+
+        if (customAsns is not null)
+        {
+            foreach (var asn in customAsns)
+            {
+                // Custom ASNs are handed to RIPEstat to resolve the prefixes that AS originates, so
+                // an unusable value becomes a lookup that can never return anything.
+                if (!IsConfigurablePeerAsn(asn))
+                    return ApiResponse.Error($"Invalid custom AS number: {asn}", 400);
+            }
+        }
+
+        return null;
     }
 
     private string GetClientIp(HttpListenerContext ctx) =>
