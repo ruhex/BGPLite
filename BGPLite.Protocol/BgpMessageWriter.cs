@@ -209,6 +209,15 @@ public static class BgpMessageWriter
 
     private static int WriteAttribute(PathAttribute attr, Span<byte> buffer)
     {
+        // RFC 4271 §4.3: flag bit 0x08 is reserved and MUST be zero on the wire. BgpMessageReader
+        // rejects it on the way in (#272); emitting it would make the writer produce a frame its
+        // own reader refuses — the same round-trip break this PR fixes for the Extended Length bit.
+        // Checked BEFORE anything is written so a rejected attribute leaves the caller's span
+        // untouched, matching WriteOpen's RequireFitsByte guard.
+        if ((attr.Flags & BgpConstants.Attribute.FlagReserved) != 0)
+            throw new ArgumentOutOfRangeException(nameof(attr), attr.Flags,
+                $"Path attribute flag bit 0x{BgpConstants.Attribute.FlagReserved:X2} is reserved and must be zero (RFC 4271 §4.3).");
+
         var extended = UsesExtendedLength(attr);
 
         var p = 0;

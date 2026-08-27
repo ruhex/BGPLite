@@ -969,4 +969,45 @@ public class BgpMessageTests
         Assert.Equal(0x00, buffer[attrStart + 2]); // two-octet length, high byte
         Assert.Equal(0x04, buffer[attrStart + 3]); // two-octet length, low byte
     }
+
+    /// <summary>
+    /// RFC 4271 §4.3: flag bit 0x08 is reserved and MUST be zero. The reader rejects it (#272), so
+    /// emitting it would make the writer produce a frame its own reader refuses — the same
+    /// round-trip break this PR fixes for the Extended Length bit (#291 review).
+    /// </summary>
+    [Theory]
+    [InlineData((byte)0x08)]                      // reserved alone
+    [InlineData((byte)0xC8)]                      // optional | transitive | reserved
+    [InlineData((byte)0xD8)]                      // ...also extended length
+    public void WriteAttribute_ReservedFlagBitSet_Throws(byte flags)
+    {
+        var update = new BgpUpdateMessage
+        {
+            PathAttributes = [new PathAttribute { Flags = flags, TypeCode = BgpConstants.Attribute.Community, Data = [0, 0, 0, 1] }],
+        };
+        var buffer = new byte[BgpMessageWriter.GetBufferSize(update)];
+
+        Assert.Throws<ArgumentOutOfRangeException>(() => BgpMessageWriter.WriteMessage(update, buffer));
+    }
+
+    [Fact]
+    public void WriteAttribute_ReservedFlagBitSet_LeavesBufferUntouched()
+    {
+        // The guard runs before any byte is written, so a rejected attribute cannot leave a
+        // half-serialized frame in the caller's span.
+        var update = new BgpUpdateMessage
+        {
+            PathAttributes = [new PathAttribute { Flags = 0xC8, TypeCode = BgpConstants.Attribute.Community, Data = [0, 0, 0, 1] }],
+        };
+        var buffer = new byte[BgpMessageWriter.GetBufferSize(update)];
+        var canary = new byte[buffer.Length];
+        Array.Fill(canary, (byte)0xEE);
+        canary.CopyTo(buffer, 0);
+
+        Assert.Throws<ArgumentOutOfRangeException>(() => BgpMessageWriter.WriteMessage(update, buffer));
+        // The header is written by WriteUpdate before the attribute loop, so only assert that the
+        // attribute region — everything past the fixed UPDATE header — is untouched.
+        var attrRegion = BgpConstants.MessageHeaderSize + 4;
+        Assert.Equal(canary.AsSpan(attrRegion).ToArray(), buffer.AsSpan(attrRegion).ToArray());
+    }
 }
