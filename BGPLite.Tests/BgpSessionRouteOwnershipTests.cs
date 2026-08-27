@@ -128,6 +128,41 @@ public class BgpSessionRouteOwnershipTests
         await TeardownAsync(session, run);
     }
 
+    [Fact]
+    public async Task Withdrawal_AfterAnotherPeerReplacedTheRoute_RemovesNothing()
+    {
+        // The residual hole in the first version of this fix, caught in review: ownership was tracked
+        // per session, but RouteTable.AddOrUpdate replaces by prefix. Peer A announces, peer B
+        // announces the SAME prefix (replacing A's route), then A withdraws — and A's set still said
+        // it owned that prefix, so it deleted B's route. Two peers announcing one prefix is ordinary
+        // for a route server, so this was reachable without anything adversarial.
+        var routeTable = new RouteTable();
+        var (a, aRun, aConn) = await EstablishAsync(routeTable, routerId: 0x0A000002);
+        var (b, bRun, bConn) = await EstablishAsync(routeTable, routerId: 0x0A000003);
+
+        aConn.EnqueueFrame(AnnounceFrame(8, 0x0A));
+        await SettleAsync(aConn, () => routeTable.Count == 1);
+
+        // B replaces it — same prefix, different next hop, so the installed route is observably B's.
+        bConn.EnqueueFrame(BuildAnnounce(AttributesWithNextHop(0x0A, 0x0A, 0x0A, 0x0A), 8, [0x0A]));
+        await SettleAsync(bConn, () => routeTable.Get(TenSlashEight, 8)?.NextHop == 0x0A0A0A0A);
+
+        // A withdraws the prefix it no longer owns.
+        aConn.EnqueueFrame(WithdrawFrame([8, 0x0A]));
+        await SettleAsync(aConn);
+
+        var route = routeTable.Get(TenSlashEight, 8);
+        Assert.NotNull(route);
+        Assert.Equal(0x0A0A0A0Au, route!.NextHop); // still B's route
+
+        // B, the current owner, can still withdraw it.
+        bConn.EnqueueFrame(WithdrawFrame([8, 0x0A]));
+        await SettleAsync(bConn, () => routeTable.Count == 0);
+
+        await TeardownAsync(a, aRun);
+        await TeardownAsync(b, bRun);
+    }
+
     // ---- frame builders ----
 
     private static byte[] Frame(BgpMessageType type, params byte[] payload)
@@ -163,6 +198,19 @@ public class BgpSessionRouteOwnershipTests
         0x40, 0x02, 0x06, 0x02, 0x01, 0x00, 0x00, 0x00, 0x64,   // AS_PATH seq [100]
         0x40, 0x03, 0x04, 0xC0, 0x00, 0x02, 0x01,               // NEXT_HOP 192.0.2.1
     ];
+
+    /// <summary>Well-formed ORIGIN + AS_PATH + NEXT_HOP, with the next hop supplied by the caller.</summary>
+    private static byte[] AttributesWithNextHop(params byte[] nextHop)
+    {
+        var attrs = new List<byte>
+        {
+            0x40, 0x01, 0x01, 0x00,
+            0x40, 0x02, 0x06, 0x02, 0x01, 0x00, 0x00, 0x00, 0x64,
+            0x40, 0x03, 0x04,
+        };
+        attrs.AddRange(nextHop);
+        return [.. attrs];
+    }
 
     // ORIGIN + AS_PATH but no NEXT_HOP — Missing Well-known Attribute, so treat-as-withdraw applies.
     private static readonly byte[] AttributesMissingNextHop =
@@ -239,13 +287,24 @@ public class BgpSessionRouteOwnershipTests
     /// </summary>
     private static async Task SettleAsync(ScriptedConnection conn, Func<bool>? until = null)
     {
+        var reached = false;
         for (var i = 0; i < 200; i++)
         {
-            if (conn.Drained && (until?.Invoke() ?? false)) return;
-            if (conn.Drained && until is null && i > 5) return;
+            if (conn.Drained)
+            {
+                reached = until?.Invoke() ?? true;
+                // A "nothing happened" assertion needs the read loop to have actually processed the
+                // frame, not merely to have consumed its bytes — give it a few more ticks to settle.
+                if (reached && (until is not null || i > 5)) break;
+            }
             await Task.Delay(TimeSpan.FromMilliseconds(10));
         }
-        Assert.True(until is null, "the expected route-table state was not reached in time");
+
+        // Asserted unconditionally: without it a negative test passes when the frame was never
+        // delivered at all, which is exactly the failure mode it is supposed to rule out (#289 review).
+        Assert.True(conn.Drained, "the scripted frame was never consumed by the read loop");
+        if (until is not null)
+            Assert.True(reached, "the expected route-table state was not reached in time");
     }
 
     private static async Task TeardownAsync(BgpSession session, Task run)
