@@ -179,16 +179,29 @@ public static class BgpMessageWriter
         return len;
     }
 
+    /// <summary>
+    /// Whether an attribute is serialized with the two-octet length field. RFC 4271 §4.3 lets the
+    /// Extended Length bit select the field width independently of the value length — it is only
+    /// <em>required</em> above 255 octets, not forbidden below — so a caller-supplied flag is
+    /// honoured rather than ignored.
+    /// <para>
+    /// The single source of truth for both <see cref="GetAttributesLength"/> and
+    /// <see cref="WriteAttribute"/>: previously they each re-derived it from
+    /// <c>Data.Length &gt; 255</c> while the flags byte was written through verbatim, so an
+    /// attribute arriving with 0x10 already set and a value of 255 octets or fewer produced a TLV
+    /// whose flags declared a two-octet length field followed by a one-octet one (#291).
+    /// </para>
+    /// </summary>
+    private static bool UsesExtendedLength(PathAttribute attr) =>
+        attr.Data.Length > 255 || (attr.Flags & BgpConstants.Attribute.FlagExtendedLength) != 0;
+
     private static int GetAttributesLength(List<PathAttribute> attributes)
     {
         var len = 0;
         foreach (var attr in attributes)
         {
             len += 2; // flags + type code
-            if (attr.Data.Length > 255)
-                len += 2; // extended length
-            else
-                len += 1; // single byte length
+            len += UsesExtendedLength(attr) ? 2 : 1; // length field width
             len += attr.Data.Length;
         }
         return len;
@@ -196,13 +209,25 @@ public static class BgpMessageWriter
 
     private static int WriteAttribute(PathAttribute attr, Span<byte> buffer)
     {
+        // RFC 4271 §4.3: flag bit 0x08 is reserved and MUST be zero on the wire. BgpMessageReader
+        // rejects it on the way in (#272); emitting it would make the writer produce a frame its
+        // own reader refuses — the same round-trip break this PR fixes for the Extended Length bit.
+        // Checked BEFORE anything is written so a rejected attribute leaves the caller's span
+        // untouched, matching WriteOpen's RequireFitsByte guard.
+        if ((attr.Flags & BgpConstants.Attribute.FlagReserved) != 0)
+            throw new ArgumentOutOfRangeException(nameof(attr), attr.Flags,
+                $"Path attribute flag bit 0x{BgpConstants.Attribute.FlagReserved:X2} is reserved and must be zero (RFC 4271 §4.3).");
+
+        var extended = UsesExtendedLength(attr);
+
         var p = 0;
-        buffer[p++] = attr.Flags;
+        // Emit the flag that matches the field actually written. Above 255 octets the bit is
+        // required, so set it even when the caller left it clear.
+        buffer[p++] = extended ? (byte)(attr.Flags | BgpConstants.Attribute.FlagExtendedLength) : attr.Flags;
         buffer[p++] = attr.TypeCode;
 
-        if (attr.Data.Length > 255)
+        if (extended)
         {
-            buffer[p - 2] |= BgpConstants.Attribute.FlagExtendedLength;
             BinaryPrimitives.WriteUInt16BigEndian(buffer[p..], (ushort)attr.Data.Length);
             p += 2;
         }
