@@ -13,13 +13,17 @@ This keeps the history clear and reduces the risk of accidental pushes to the wr
 
 ## Workflow
 
+The commands below describe the normal human contributor workflow. AI agents must follow AGENTS.md restrictions and must not execute git/GitHub mutation commands unless explicitly authorized.
+
+Before starting work, ensure the working tree is clean or preserve existing user changes. Do not switch branches while unrelated changes are present.
+
 ```bash
 # always start from fresh main
-git checkout main
+git switch main
 git pull --ff-only
 
 # branch per change
-git checkout -b fix/short-description     # or feature/, chore/, docs/
+git switch -c fix/short-description     # or feature/, chore/, docs/
 # ... edit, commit ...
 git push -u origin fix/short-description
 
@@ -109,52 +113,26 @@ PR body is free-form, but should usually include:
 - validation
 - risk or possible regressions
 
-Co-author trailers are welcome when AI agents contributed:
-
-```text
-Co-Authored-By: opencode <noreply@opencode.ai>
-```
-
 ## Local development
 
-```bash
-# build the solution
-dotnet build
+General build/run/test commands live in `README.md` and `AGENTS.md` ("Build and validation commands"). What is specific to the contributor workflow:
 
-# run the app
-dotnet run --project BGPLite
-
-# run tests
-dotnet test
-
-# run tests with code coverage
-dotnet test --collect:"XPlat Code Coverage"
-
-# optional: check formatting
-dotnet format --verify-no-changes
-```
-
-Before opening a PR, run the checks relevant to your change:
+Before opening a PR:
 
 ```bash
 dotnet format
 dotnet test
 ```
 
-For protocol or server changes, also do a quick manual smoke test using a BGP-speaking peer (e.g. bird, frr, gobgp).
+Run formatting without introducing unrelated formatting changes (format only the files you touched when practical — see AGENTS.md).
+
+Bug fixes should include a regression test when the behavior can reasonably be tested automatically.
+
+For protocol or server changes, perform a manual interoperability smoke test with at least one real BGP implementation when practical (e.g. FRR, BIRD, GoBGP).
 
 ## Project structure
 
-| Path | What |
-|---|---|
-| `BGPLite/` | application entrypoint and DI wiring |
-| `BGPLite.Protocol/` | BGP message encoding/decoding, FSM states, path attributes |
-| `BGPLite.Server/` | TCP listener, BGP session FSM, timers, metrics |
-| `BGPLite.Routing/` | route table and route filters |
-| `BGPLite.Configuration/` | YAML config models and loading |
-| `BGPLite.Api/` | HTTP management API and SQLite peer store |
-| `BGPLite.Providers/` | RIPE Stat integration and prefix service |
-| `BGPLite.Tests/` | unit tests (xUnit) |
+See `docs/ARCHITECTURE.md` for the current project structure and dependency boundaries.
 
 ## Configuration and state
 
