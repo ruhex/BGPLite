@@ -533,7 +533,13 @@ public sealed class BgpSession : IDisposable
             if (wasEstablished)
             {
                 _metrics.SessionClosed();
-                _peerStore?.UpdateSessionStatus(_peerConfig.Address, _remoteAsn, false);
+                // Best-effort, like SendNotificationAsync above: this sync DB write runs in the
+                // finally of a fire-and-forget task (RunSessionAsync has no catch), so a transient
+                // store failure (SQLite "database is locked" past busy_timeout) must not escape —
+                // it would fault RunAsync unobserved, skip PeerDisconnected() below, and leak
+                // PeerCount plus the row's Status=active forever (#325).
+                try { _peerStore?.UpdateSessionStatus(_peerConfig.Address, _remoteAsn, false); }
+                catch (Exception ex) { _logger.LogWarning(ex, "Failed to persist session status for {Peer}", _peer); }
             }
             _metrics.PeerDisconnected();
             _logger.LogInformation("SessionClosed with {Peer}", _peer);
