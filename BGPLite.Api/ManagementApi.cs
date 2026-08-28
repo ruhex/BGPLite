@@ -50,6 +50,12 @@ public sealed class ManagementApi : IHostedService, IDisposable
     private HttpListener? _listener;
     private Task? _listenTask;
     private readonly CancellationTokenSource _cts = new();
+    // #326: cancelled at the top of StopAsync so in-flight handlers stop provider work (RIPEstat
+    // fetches) instead of pinning the drain — the host stops services in reverse registration
+    // order, and BgpServer.StopAsync (the Cease + socket teardown) waits behind this drain.
+    // Deliberately never disposed: handlers abandoned by the bounded drain may still hold its
+    // token, and a disposed source's Token getter would throw ODE at them.
+    private readonly CancellationTokenSource _shutdownCts = new();
 
     public ManagementApi(
         PeerStore store,
@@ -180,6 +186,13 @@ public sealed class ManagementApi : IHostedService, IDisposable
 
     public async Task StopAsync(CancellationToken cancellationToken)
     {
+        // #326: cancel in-flight handlers FIRST — they observe this token on provider calls, so a
+        // cold-cache RIPEstat fetch (per-attempt timeout 180 s × retries, /api/asn-lists sequential
+        // per ASN) unwinds immediately instead of pinning the drain. The host stops services in
+        // reverse registration order, so BgpServer.StopAsync (the Cease teardown) waits behind this
+        // method; an unbounded drain got the process SIGKILLed in Docker (default 10 s stop grace)
+        // — peers saw a TCP RST instead of the promised Cease.
+        _shutdownCts.Cancel();
         _cts.Cancel();
         _listener?.Stop();
         if (_listenTask is not null)
@@ -187,13 +200,14 @@ public sealed class ManagementApi : IHostedService, IDisposable
             try { await _listenTask; } catch { }
         }
 
-        // Drain in-flight handlers before the host disposes this service: a handler reaching
-        // _inflightCap.Release() after Dispose would hit ObjectDisposedException (#248 review).
+        // Drain in-flight handlers, but bounded: 10 s after cancellation is enough for a response
+        // write or an orderly OCE unwind, and short of the host's 30 s shutdown grace.
         Task[] pending;
         lock (_inflightHandlers) pending = _inflightHandlers.ToArray();
         if (pending.Length > 0)
         {
-            try { await Task.WhenAll(pending); } catch { }
+            try { await Task.WhenAny(Task.WhenAll(pending), Task.Delay(TimeSpan.FromSeconds(10), cancellationToken)); }
+            catch { /* host grace elapsed — proceed */ }
         }
     }
 
@@ -240,6 +254,11 @@ public sealed class ManagementApi : IHostedService, IDisposable
         try
         {
             await HandleAsync(ctx);
+        }
+        catch (OperationCanceledException) when (_shutdownCts.IsCancellationRequested)
+        {
+            // #326/#114: shutdown cancelled an in-flight provider fetch — a normal unwind, not a
+            // fault. The response is closed by the listener teardown; the drain observes this task.
         }
         catch (Exception ex)
         {
@@ -920,7 +939,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
         if (peer is null)
             return ApiResponse.Error("Peer not found", 404);
 
-        var prefixes = await CollectPeerPrefixes(peerId);
+        var prefixes = await CollectPeerPrefixes(peerId, _shutdownCts.Token);
 
         var format = ctx.Request.QueryString["format"] ?? "txt";
         if (format == "json")
@@ -930,7 +949,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
         return ApiResponse.Ok(string.Join("\n", prefixes));
     }
 
-    private async Task<List<string>> CollectPeerPrefixes(string peerId)
+    private async Task<List<string>> CollectPeerPrefixes(string peerId, CancellationToken ct)
     {
         var prefixes = new List<string>();
 
@@ -948,10 +967,11 @@ public sealed class ManagementApi : IHostedService, IDisposable
         {
             try
             {
-                var fetched = await _prefixService.GetPrefixesForAsns(asns);
+                var fetched = await _prefixService.GetPrefixesForAsns(asns, ct);
                 foreach (var (prefix, length, _) in fetched)
                     prefixes.Add($"{BgpConstants.UintToIPAddress(prefix)}/{length}");
             }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }  // #114/#337: only shutdown cancellation — a provider-timeout OCE (live token) is a fetch failure below
             catch (Exception ex) { _logger.LogWarning(ex, "CollectPeerPrefixes: ASN fetch failed"); }
         }
 
@@ -960,10 +980,11 @@ public sealed class ManagementApi : IHostedService, IDisposable
         {
             try
             {
-                var ruPrefixes = await _prefixService.GetRuPrefixesAsync();
+                var ruPrefixes = await _prefixService.GetRuPrefixesAsync(ct);
                 foreach (var (prefix, length, _) in ruPrefixes)
                     prefixes.Add($"{BgpConstants.UintToIPAddress(prefix)}/{length}");
             }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }  // #114/#337: only shutdown cancellation — a provider-timeout OCE (live token) is a fetch failure below
             catch (Exception ex) { _logger.LogWarning(ex, "CollectPeerPrefixes: RU prefix fetch failed"); }
         }
 
@@ -980,6 +1001,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
 
     private async Task<ApiResponse> HandleGetAsnListsAsync()
     {
+        var ct = _shutdownCts.Token;
         var lists = _config.RipeStat?.AsnLists ?? [];
         var result = new List<object>();
 
@@ -990,13 +1012,15 @@ public sealed class ManagementApi : IHostedService, IDisposable
             {
                 foreach (var asn in l.Asns)
                 {
-                    try { prefixCount += await _prefixService.GetPrefixCountAsync(asn); }
+                    try { prefixCount += await _prefixService.GetPrefixCountAsync(asn, ct); }
+                    catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }  // #114/#337: only shutdown cancellation — a provider-timeout OCE (live token) is a fetch failure below
                     catch (Exception ex) { _logger.LogWarning(ex, "Failed to get prefix count for AS{Asn}", asn); }
                 }
             }
             else if (l.Country is not null)
             {
-                try { prefixCount = (await _prefixService.GetRuPrefixesAsync()).Count; }
+                try { prefixCount = (await _prefixService.GetRuPrefixesAsync(ct)).Count; }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }  // #114/#337: only shutdown cancellation — a provider-timeout OCE (live token) is a fetch failure below
                 catch (Exception ex) { _logger.LogWarning(ex, "Failed to get RU prefix count"); }
             }
 
@@ -1015,7 +1039,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
         // Append configured PrefixSources (file/http) alongside the legacy RipeStat ASN-lists,
         // reusing the same response shape. "Kind" is intentionally not exposed.
         var seen = lists.Select(l => l.Name).ToHashSet();
-        foreach (var (source, prefixes) in await _prefixSources.LoadAllAsync())
+        foreach (var (source, prefixes) in await _prefixSources.LoadAllAsync(ct))
         {
             if (!seen.Add(source.Name)) continue; // skip names already present (e.g. shared "ru")
             result.Add(new
@@ -1095,7 +1119,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
         {
             try
             {
-                var count = await _prefixService.GetPrefixCountAsync(asn);
+                var count = await _prefixService.GetPrefixCountAsync(asn, _shutdownCts.Token);
                 return ApiResponse.Ok(new { asn, prefixCount = count });
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
@@ -1403,6 +1427,10 @@ public sealed class ManagementApi : IHostedService, IDisposable
         if (_disposed) return;
         _disposed = true;
 
+        // #337 review: direct Dispose (embedded use, tests) skips StopAsync — cancel the shutdown
+        // token here too so in-flight provider work observes shutdown. Still never disposed:
+        // abandoned handlers may hold its token (a disposed source's Token getter throws ODE).
+        _shutdownCts.Cancel();
         _cts.Cancel();
         _cts.Dispose();
         // At shutdown no requests are in-flight, so disposing the current limiters is safe
