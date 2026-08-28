@@ -84,6 +84,7 @@ public sealed class RouteAssembler : IRouteAssembler
                     _logger.LogInformation("Sent {Count} RU prefixes to unconfigured peer {Peer}",
                         ruPrefixes.Count, peerLabel);
                 }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }  // #114/#330: only CALLER cancellation — a per-source timeout OCE (HttpPrefixProvider's linked CTS, live ct) must stay a fetch failure below
                 catch (Exception ex)
                 {
                     _logger.LogError(ex, "Failed to fetch RU prefixes for {Peer}", peerLabel);
@@ -120,6 +121,7 @@ public sealed class RouteAssembler : IRouteAssembler
                             // on the wire — pass null instead of allocating [asn] per prefix.
                             routes.Add(MakeRoute(prefix, length, nextHop, null, comms));
                     }
+                    catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }  // #114/#330
                     catch (Exception ex)
                     {
                         _logger.LogError(ex, "Failed to fetch prefixes for {Peer} (list '{List}')", peerLabel, list.Name);
@@ -142,6 +144,7 @@ public sealed class RouteAssembler : IRouteAssembler
                         routes.Add(MakeRoute(prefix, length, nextHop, null, comms));
                     _logger.LogInformation("Fetched {Count} RU prefixes for {Peer}", ruPrefixes.Count, peerLabel);
                 }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }  // #114/#330
                 catch (Exception ex)
                 {
                     _logger.LogError(ex, "Failed to fetch RU prefixes for {Peer}", peerLabel);
@@ -165,6 +168,7 @@ public sealed class RouteAssembler : IRouteAssembler
                     _logger.LogInformation("Fetched {Count} prefixes from source '{Source}' for {Peer}",
                         srcPrefixes.Count, name, peerLabel);
                 }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }  // #114/#330
                 catch (Exception ex)
                 {
                     _logger.LogError(ex, "Failed to fetch source '{Source}' for {Peer}", name, peerLabel);
@@ -202,6 +206,7 @@ public sealed class RouteAssembler : IRouteAssembler
                     _logger.LogInformation("Peer {Peer} custom AS: {Asns} -> {Count} prefixes",
                         peerLabel, string.Join(",", customAsns), asnPrefixes.Count);
                 }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }  // #114/#330
                 catch (Exception ex)
                 {
                     _logger.LogError(ex, "Failed to fetch custom AS prefixes for {Peer}", peerLabel);
@@ -227,6 +232,7 @@ public sealed class RouteAssembler : IRouteAssembler
                     foreach (var (prefix, length, _) in ruPrefixes)
                         routes.Add(MakeRoute(prefix, length, nextHop, null, defaultComms));
                 }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }  // #114/#330
                 catch (Exception ex)
                 {
                     _logger.LogError(ex, "Failed to fetch RU fallback for {Peer}", peerLabel);
@@ -259,6 +265,7 @@ public sealed class RouteAssembler : IRouteAssembler
                 _logger.LogInformation("Fetched {Count} RU prefixes for unknown peer {Peer}",
                     ruPrefixes.Count, peerLabel);
             }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }  // #114/#330
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Failed to fetch RU prefixes for {Peer}", peerLabel);

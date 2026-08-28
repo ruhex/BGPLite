@@ -248,9 +248,12 @@ public sealed class PrefixService : IPrefixService
             // caller-initiated cancellation propagates.
             throw;
         }
-        catch
+        catch (Exception ex)
         {
-            // skip failed ASN (a transient RIPEstat error), continue with the others
+            // Skip the failed ASN (a transient RIPEstat error) and continue with the others — but
+            // not silently: its prefixes vanish from this cycle's advertisement, and the operator
+            // must be able to tell "ASN no longer has prefixes" from "fetch failed" (#330).
+            _logger?.LogWarning(ex, "AS{Asn}: RIPEstat resolve failed — advertising no prefixes for this ASN this cycle", asn);
             return [];
         }
     }
