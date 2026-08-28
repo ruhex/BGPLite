@@ -26,6 +26,10 @@ public sealed class ManagementApi : IHostedService, IDisposable
     private IReadOnlyList<IPNetwork> _trustedProxyNetworks;
     private PartitionedRateLimiter<string>? _rateLimiter;
     private ConcurrencyLimiter? _concurrencyLimiter;
+    // #330: limiters swapped out by ApplyConfig, disposed in StopAsync/Dispose after in-flight
+    // requests have drained — a retired TokenBucketRateLimiter with AutoReplenishment roots a
+    // replenish Timer that GC never collects, so "let GC handle it" leaked one timer per reload.
+    private readonly List<IDisposable> _retiredLimiters = [];
     private IReadOnlyList<string>? _corsAllowedOrigins;
     private readonly BgpMetrics _metrics;
     // #263: required, not optional. Each of these was a silent feature switch: without
@@ -114,13 +118,18 @@ public sealed class ManagementApi : IHostedService, IDisposable
         // Swap every reloadable field atomically. A request that has already captured the old
         // references into locals finishes against them; the next request reads the new ones.
         // _config is swapped last so CORS / client-IP and the limiters always move together.
-        Interlocked.Exchange(ref _rateLimiter, rateLimiter);
-        Interlocked.Exchange(ref _concurrencyLimiter, concurrencyLimiter);
+        var oldRateLimiter = Interlocked.Exchange(ref _rateLimiter, rateLimiter);
+        var oldConcurrencyLimiter = Interlocked.Exchange(ref _concurrencyLimiter, concurrencyLimiter);
         Interlocked.Exchange(ref _trustedProxyNetworks, trusted);
         Interlocked.Exchange(ref _corsAllowedOrigins, newConfig.CorsAllowedOrigins);
 
-        // Old limiters are NOT disposed: a concurrent HandleAsync may have captured the old reference
-        // and be mid-acquire. Let GC collect them (reload is rare, one retired object per reload).
+        // Old limiters cannot be disposed here — a concurrent HandleAsync may still be mid-acquire
+        // on them (#137). Park them for StopAsync/Dispose, which run after the in-flight drain.
+        lock (_retiredLimiters)
+        {
+            if (oldRateLimiter is not null) _retiredLimiters.Add(oldRateLimiter);
+            if (oldConcurrencyLimiter is not null) _retiredLimiters.Add(oldConcurrencyLimiter);
+        }
 
         _logger.LogInformation(
             "Soft config reloaded: trustedProxies={TrustedProxyCount}, corsOrigins={CorsOriginCount}, rateLimit={RateLimitEnabled}, concurrencyLimit={ConcurrencyEnabled}",
@@ -209,6 +218,25 @@ public sealed class ManagementApi : IHostedService, IDisposable
             try { await Task.WhenAny(Task.WhenAll(pending), Task.Delay(TimeSpan.FromSeconds(10), cancellationToken)); }
             catch { /* host grace elapsed — proceed */ }
         }
+
+        // In-flight requests have drained (boundedly) — limiters retired by ApplyConfig can go.
+        DisposeRetiredLimiters();
+    }
+
+    /// <summary>
+    /// #330: dispose limiters retired by <see cref="ApplyConfig"/>. Safe after the in-flight drain
+    /// in StopAsync; Dispose calls it as best-effort teardown — a request still mid-acquire on a
+    /// retired limiter there (direct Dispose without StopAsync, embedded use) surfaces as an
+    /// ObjectDisposedException in its fault log. Idempotent.
+    /// </summary>
+    private void DisposeRetiredLimiters()
+    {
+        lock (_retiredLimiters)
+        {
+            foreach (var limiter in _retiredLimiters)
+                try { limiter.Dispose(); } catch { /* best-effort teardown */ }
+            _retiredLimiters.Clear();
+        }
     }
 
     private async Task ListenAsync(CancellationToken ct)
@@ -266,6 +294,10 @@ public sealed class ManagementApi : IHostedService, IDisposable
         }
         finally
         {
+            // #330: fault paths that never reach WriteResponse (429/503 early returns, a throwing
+            // WriteResponse, the shutdown unwind above) must not leave the response to the
+            // finalizer — Close is idempotent after a successful write.
+            try { ctx.Response.Close(); } catch { /* best-effort teardown */ }
             // Tolerate teardown racing the StopAsync drain (e.g. direct Dispose without StopAsync).
             try { _inflightCap.Release(); }
             catch (ObjectDisposedException) { /* cap already disposed */ }
@@ -1091,6 +1123,10 @@ public sealed class ManagementApi : IHostedService, IDisposable
 
     #region GET /api/routes
 
+    // #330: the peer-owned rows are live, but the unowned seed rows are a STARTUP snapshot —
+    // auto-refresh pushes updated source content to peers per-session; the seed rows themselves
+    // are only rebuilt on restart. Operators reading this endpoint should treat seed counts
+    // accordingly.
     private ApiResponse HandleGetRoutes()
     {
         var routes = _routeTable.GetAll();
@@ -1429,8 +1465,9 @@ public sealed class ManagementApi : IHostedService, IDisposable
 
         _cts.Cancel();
         _cts.Dispose();
+        DisposeRetiredLimiters();
         // At shutdown no requests are in-flight, so disposing the current limiters is safe
-        // (unlike ApplyConfig mid-flight where we leave old ones for GC per #137's CodeRabbit fix).
+        // (unlike ApplyConfig mid-flight, where old ones are parked for later disposal — #137/#330).
         Volatile.Read(ref _rateLimiter)?.Dispose();
         Volatile.Read(ref _concurrencyLimiter)?.Dispose();
         _inflightCap.Dispose();

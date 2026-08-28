@@ -162,8 +162,8 @@ public static class AttributeHelper
     /// <summary>
     /// Decodes a BGP Large Communities attribute (RFC 8092 §2). Each Large Community is three
     /// 4-octet fields — Global Administrator : Local Data 1 : Local Data 2 — in network byte
-    /// order, so the attribute payload MUST be a multiple of 12 bytes. A zero-length payload is
-    /// a valid (empty) set; any other non-multiple-of-12 length is malformed.
+    /// order, so the attribute payload MUST be a non-zero multiple of 12 bytes — a zero-length
+    /// payload is malformed, not an empty set (see Read_ZeroLength_Throws).
     /// </summary>
     public static (uint Global, uint Local1, uint Local2)[] ReadLargeCommunities(PathAttribute attr)
     {
