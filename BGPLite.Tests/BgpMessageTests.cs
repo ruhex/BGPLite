@@ -135,6 +135,33 @@ public class BgpMessageTests
     }
 
     [Fact]
+    public void Open_UnrecognizedOptionalParameterType_RejectedWithSubcode4()
+    {
+        // RFC 4271 §6.2 / #329: only type 2 (Capabilities) is supported; any other optional
+        // parameter type must yield Open Message Error / Unsupported Optional Parameter (2/4),
+        // not silent acceptance — the sender otherwise assumes the parameter was honored.
+        // Well-formed TLV (type 1, the deprecated Authentication parameter), so the rejection is
+        // about the type, not framing.
+        var message = BuildRawOpen(4, [0x01, 0x02, 0xAA, 0xBB]);
+
+        var ex = Assert.Throws<BgpParseException>(() => BgpMessageReader.ReadMessage(message));
+        Assert.Equal(BgpConstants.Error.OpenMessageError, ex.ErrorCode);
+        Assert.Equal(BgpConstants.SubError.UnsupportedOptionalParameter, ex.SubErrorCode);
+    }
+
+    [Fact]
+    public void Open_ExtendedOptionalParametersType255_RejectedWithSubcode4()
+    {
+        // RFC 9072 Extended Optional Parameters (type 255) — the realistic modern trigger for
+        // the same rule: an extended-message speaker must learn we do not support the parameter.
+        var message = BuildRawOpen(3, [0xFF, 0x01, 0x06]);
+
+        var ex = Assert.Throws<BgpParseException>(() => BgpMessageReader.ReadMessage(message));
+        Assert.Equal(BgpConstants.Error.OpenMessageError, ex.ErrorCode);
+        Assert.Equal(BgpConstants.SubError.UnsupportedOptionalParameter, ex.SubErrorCode);
+    }
+
+    [Fact]
     public void Open_TruncatedCapabilityHeader_Rejected()
     {
         // Capability parameter whose payload is a single stray byte (a TLV header needs 2).
