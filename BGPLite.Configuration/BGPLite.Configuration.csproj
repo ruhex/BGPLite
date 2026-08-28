@@ -10,4 +10,10 @@
     <PackageReference Include="YamlDotNet" Version="18.1.0" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- Protocol is the BCL-only leaf (#230 layering): sharing CommunityCodec here single-sources
+         the community-format rule for config validation (#327) instead of duplicating it. -->
+    <ProjectReference Include="..\BGPLite.Protocol\BGPLite.Protocol.csproj" />
+  </ItemGroup>
+
 </Project>

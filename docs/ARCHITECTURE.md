@@ -19,9 +19,9 @@ No cycles. The boundaries are enforced by tests, not by convention alone (see "E
      ▼           ▼           ▼            ▼             ▼
 ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌──────────┐ ┌────────────┐
 │ Server  │ │   Api   │ │Providers│ │ Routing  │ │Configuration│
-└────┬────┘ └────┬────┘ └────┬────┘ └────┬─────┘ └─────────────┘
-     │           │           │           │              (YamlDotNet only)
-     ▼           │           ▼           ▼
+└────┬────┘ └────┬────┘ └────┬────┘ └────┬─────┘ └──────┬──────┘
+     │           │           │           │        (YamlDotNet; → Protocol
+     ▼           │           ▼           ▼         for CommunityCodec, #327)
 ┌─────────┐     │      ┌──────────────────────┐
 │Protocol │     │      │ Contracts (pure leaf)│
 │(BCL-only│     │      │ no dependencies      │
@@ -36,10 +36,10 @@ Direct references (from the `.csproj` files):
 |---|---|---|
 | `BGPLite.Contracts` | — (dependency-free leaf) | — |
 | `BGPLite.Protocol` | — (BCL-only leaf) | — |
-| `BGPLite.Configuration` | — | YamlDotNet |
+| `BGPLite.Configuration` | Protocol (CommunityCodec for config validation, #327) | YamlDotNet |
 | `BGPLite.Routing` | Configuration, Protocol | — |
 | `BGPLite.Providers` | Contracts, Configuration, Protocol | M.E.Hosting.Abstractions, M.E.Http(+Resilience), Logging.Abstractions |
-| `BGPLite.Server` | Contracts, Configuration, Protocol, Routing | — |
+| `BGPLite.Server` | Contracts, Configuration, Protocol, Routing | M.E.Hosting.Abstractions, Logging.Abstractions |
 | `BGPLite.Api` | Contracts, Configuration, Providers, Routing | EF Core Sqlite, System.Threading.RateLimiting |
 | `BGPLite` (app) | all of the above | M.E.Hosting, EF Design (build-time) |
 

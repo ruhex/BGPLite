@@ -19,8 +19,16 @@ public class ConfigValidationTests
             MaxAcceptsPerIpPerMinute = maxAcceptsPerIpPerMinute
         };
 
-    private static AppConfig Config(BgpConfig? bgp = null, int apiPort = 5001, List<PeerConfig>? peers = null)
-        => new() { Bgp = bgp ?? Bgp(), ApiPort = apiPort, Peers = peers ?? [] };
+    private static AppConfig Config(BgpConfig? bgp = null, int apiPort = 5001, List<PeerConfig>? peers = null,
+        List<PrefixSourceConfig>? sources = null, string? defaultSource = null)
+        => new()
+        {
+            Bgp = bgp ?? Bgp(),
+            ApiPort = apiPort,
+            Peers = peers ?? [],
+            PrefixSources = sources ?? [],
+            DefaultPrefixSource = defaultSource
+        };
 
     [Fact]
     public void Validate_AcceptsValidConfig()
@@ -30,6 +38,218 @@ public class ConfigValidationTests
         var act = () => config.Validate();
 
         act();
+    }
+
+    // ---- PrefixSources (#327: fail loud at startup instead of a silent empty source at load) ----
+
+    [Fact]
+    public void Validate_AcceptsValidPrefixSources()
+    {
+        var config = Config(defaultSource: "nets", sources:
+        [
+            new PrefixSourceConfig { Name = "nets", Kind = "file", Path = "nets.txt" },
+            new PrefixSourceConfig { Name = "ext", Kind = "http", Url = "https://example.net/list.txt", Community = "65000:100", Timeout = 30 },
+            new PrefixSourceConfig { Name = "as65444", Kind = "asn", Asn = 65444 },
+        ]);
+
+        config.Validate();
+    }
+
+    [Fact]
+    public void Validate_FileSourceWithoutPath_Throws()
+    {
+        var config = Config(sources: [new PrefixSourceConfig { Name = "nets", Kind = "file" }]);
+
+        var ex = Assert.Throws<InvalidOperationException>(config.Validate);
+        Assert.Contains("Kind=file requires a Path", ex.Message);
+    }
+
+    [Fact]
+    public void Validate_HttpSourceWithoutUrl_Throws()
+    {
+        var config = Config(sources: [new PrefixSourceConfig { Name = "ext", Kind = "http" }]);
+
+        var ex = Assert.Throws<InvalidOperationException>(config.Validate);
+        Assert.Contains("Kind=http requires a Url", ex.Message);
+    }
+
+    [Theory]
+    [InlineData("raw.githubusercontent.com/org/repo/main/ru.txt")] // no scheme
+    [InlineData("ftp://example.net/list.txt")]                     // wrong scheme
+    [InlineData("https://exa mple.net/list.txt")]                  // space — not a valid absolute URI
+    public void Validate_HttpSourceWithNonHttpAbsoluteUrl_Throws(string url)
+    {
+        var config = Config(sources: [new PrefixSourceConfig { Name = "ext", Kind = "http", Url = url }]);
+
+        var ex = Assert.Throws<InvalidOperationException>(config.Validate);
+        Assert.Contains("absolute http(s) URL", ex.Message);
+    }
+
+    [Fact]
+    public void Validate_AsnSourceWithoutAsn_Throws()
+    {
+        var config = Config(sources: [new PrefixSourceConfig { Name = "as65444", Kind = "asn" }]);
+
+        var ex = Assert.Throws<InvalidOperationException>(config.Validate);
+        Assert.Contains("Kind=asn requires an Asn", ex.Message);
+    }
+
+    [Fact]
+    public void Validate_AsnSourceWithZeroAsn_Throws()
+    {
+        var config = Config(sources: [new PrefixSourceConfig { Name = "as0", Kind = "asn", Asn = 0 }]);
+
+        var ex = Assert.Throws<InvalidOperationException>(config.Validate);
+        Assert.Contains("positive AS number", ex.Message);
+    }
+
+    [Theory]
+    [InlineData("File")]
+    [InlineData("HTTP")]
+    public void Validate_SourceKindIsCaseSensitive_Throws(string kind)
+    {
+        var config = Config(sources: [new PrefixSourceConfig { Name = "x", Kind = kind, Path = "x.txt" }]);
+
+        var ex = Assert.Throws<InvalidOperationException>(config.Validate);
+        Assert.Contains("unknown Kind", ex.Message);
+    }
+
+    [Fact]
+    public void Validate_UnknownSourceKind_Throws()
+    {
+        var config = Config(sources: [new PrefixSourceConfig { Name = "x", Kind = "ftp", Path = "x.txt" }]);
+
+        var ex = Assert.Throws<InvalidOperationException>(config.Validate);
+        Assert.Contains("unknown Kind 'ftp'", ex.Message);
+    }
+
+    [Fact]
+    public void Validate_BadSourceCommunity_Throws()
+    {
+        // "65000:70000" is exactly the case #328 made a FormatException (VALUE masked before).
+        var config = Config(sources:
+        [
+            new PrefixSourceConfig { Name = "ext", Kind = "http", Url = "https://example.net/l.txt", Community = "65000:70000" },
+        ]);
+
+        var ex = Assert.Throws<InvalidOperationException>(config.Validate);
+        Assert.Contains("Community", ex.Message);
+        Assert.NotNull(ex.InnerException);
+    }
+
+    [Fact]
+    public void Validate_NonPositiveSourceTimeout_Throws()
+    {
+        var config = Config(sources:
+        [
+            new PrefixSourceConfig { Name = "ext", Kind = "http", Url = "https://example.net/l.txt", Timeout = 0 },
+        ]);
+
+        Assert.Contains("Timeout must be a positive",
+            Assert.Throws<InvalidOperationException>(config.Validate).Message);
+
+        var negative = Config(sources:
+        [
+            new PrefixSourceConfig { Name = "ext", Kind = "http", Url = "https://example.net/l.txt", Timeout = -1 },
+        ]);
+
+        Assert.Contains("Timeout must be a positive",
+            Assert.Throws<InvalidOperationException>(negative.Validate).Message);
+    }
+
+    [Fact]
+    public void Validate_EmptySourceName_Throws()
+    {
+        var config = Config(sources: [new PrefixSourceConfig { Name = "", Kind = "file", Path = "nets.txt" }]);
+
+        var ex = Assert.Throws<InvalidOperationException>(config.Validate);
+        Assert.Contains("requires a Name", ex.Message);
+    }
+
+    [Fact]
+    public void Validate_DuplicateSourceNames_Throws()
+    {
+        var config = Config(sources:
+        [
+            new PrefixSourceConfig { Name = "dup", Kind = "file", Path = "a.txt" },
+            new PrefixSourceConfig { Name = "dup", Kind = "file", Path = "b.txt" },
+        ]);
+
+        var ex = Assert.Throws<InvalidOperationException>(config.Validate);
+        Assert.Contains("duplicate prefix source name 'dup'", ex.Message);
+    }
+
+    [Fact]
+    public void Validate_DefaultPrefixSourceWithoutMatchingSource_Throws()
+    {
+        var config = Config(defaultSource: "ruu", sources:
+        [
+            new PrefixSourceConfig { Name = "ru", Kind = "file", Path = "nets.txt" },
+        ]);
+
+        var ex = Assert.Throws<InvalidOperationException>(config.Validate);
+        Assert.Contains("DefaultPrefixSource 'ruu'", ex.Message);
+    }
+
+    [Fact]
+    public void Validate_CustomPrefixCommunity_Throws()
+    {
+        var config = new AppConfig { Bgp = Bgp(), CustomPrefixCommunity = "65000:70000" };
+
+        var ex = Assert.Throws<InvalidOperationException>(config.Validate);
+        Assert.Contains("CustomPrefixCommunity", ex.Message);
+    }
+
+    [Fact]
+    public void Validate_RipeStatAsnListCommunity_Throws()
+    {
+        var config = new AppConfig
+        {
+            Bgp = Bgp(),
+            RipeStat = new RipeStatConfig
+            {
+                AsnLists = [new AsnList { Name = "ru", Country = "RU", Community = "65000:abc" }]
+            }
+        };
+
+        var ex = Assert.Throws<InvalidOperationException>(config.Validate);
+        Assert.Contains("RipeStat.AsnLists[0]", ex.Message);
+    }
+
+    [Fact]
+    public void Validate_ExplicitYamlNullCollections_AreTreatedAsEmpty()
+    {
+        // "PrefixSources:" / "AsnLists:" with no value deserialize as null collections — every
+        // runtime consumer treats them as "none", and Validate must reject config with a message,
+        // never with a NullReferenceException (#327 review).
+        var config = ConfigLoader.LoadFromText(
+            "Bgp:\n  Asn: 65001\n  RouterId: 10.0.0.1\nPrefixSources:\nRipeStat:\n  AsnLists:\n");
+
+        config.Validate();
+    }
+
+    [Fact]
+    public void Validate_NullSourceElement_ThrowsWithIndex()
+    {
+        // An empty YAML list item ("- ") deserializes as a null element — message, not NRE
+        // (CodeRabbit review of #336).
+        var config = Config(sources: [null!]);
+
+        var ex = Assert.Throws<InvalidOperationException>(config.Validate);
+        Assert.Contains("PrefixSources[0] is empty", ex.Message);
+    }
+
+    [Fact]
+    public void Validate_NullAsnListElement_ThrowsWithIndex()
+    {
+        var config = new AppConfig
+        {
+            Bgp = Bgp(),
+            RipeStat = new RipeStatConfig { AsnLists = [null!] }
+        };
+
+        var ex = Assert.Throws<InvalidOperationException>(config.Validate);
+        Assert.Contains("RipeStat.AsnLists[0] is empty", ex.Message);
     }
 
     [Fact]
