@@ -229,6 +229,30 @@ public class ConfigValidationTests
     }
 
     [Fact]
+    public void Validate_NullSourceElement_ThrowsWithIndex()
+    {
+        // An empty YAML list item ("- ") deserializes as a null element — message, not NRE
+        // (CodeRabbit review of #336).
+        var config = Config(sources: [null!]);
+
+        var ex = Assert.Throws<InvalidOperationException>(config.Validate);
+        Assert.Contains("PrefixSources[0] is empty", ex.Message);
+    }
+
+    [Fact]
+    public void Validate_NullAsnListElement_ThrowsWithIndex()
+    {
+        var config = new AppConfig
+        {
+            Bgp = Bgp(),
+            RipeStat = new RipeStatConfig { AsnLists = [null!] }
+        };
+
+        var ex = Assert.Throws<InvalidOperationException>(config.Validate);
+        Assert.Contains("RipeStat.AsnLists[0] is empty", ex.Message);
+    }
+
+    [Fact]
     public void Validate_AcceptsZeroHoldTime_KeepAliveSkipped()
     {
         // RFC 4271 §4.2: HoldTime=0 disables keepalive processing; KeepAlive is then irrelevant.

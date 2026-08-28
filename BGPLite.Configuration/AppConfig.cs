@@ -139,6 +139,11 @@ public sealed class AppConfig
         for (var i = 0; i < prefixSources.Count; i++)
         {
             var source = prefixSources[i];
+            // An empty YAML list item ("- ") deserializes as a null element — reject it with a
+            // message instead of an NRE, like the null-collection case above.
+            if (source is null)
+                throw new InvalidOperationException(
+                    $"Invalid configuration: PrefixSources[{i}] is empty — each item must be a mapping (Kind, Name, ...).");
             var at = $"PrefixSources[{i}] ('{source.Name}')";
 
             if (string.IsNullOrWhiteSpace(source.Name))
@@ -194,7 +199,13 @@ public sealed class AppConfig
         ValidateCommunity(CustomAsnCommunity, "CustomAsnCommunity");
         var asnLists = RipeStat?.AsnLists ?? [];
         for (var i = 0; i < asnLists.Count; i++)
-            ValidateCommunity(asnLists[i].Community, $"RipeStat.AsnLists[{i}] ('{asnLists[i].Name}'): Community");
+        {
+            var list = asnLists[i];
+            if (list is null)
+                throw new InvalidOperationException(
+                    $"Invalid configuration: RipeStat.AsnLists[{i}] is empty — each item must be a mapping (Name, Asns, ...).");
+            ValidateCommunity(list.Community, $"RipeStat.AsnLists[{i}] ('{list.Name}'): Community");
+        }
     }
 
     /// <summary>
