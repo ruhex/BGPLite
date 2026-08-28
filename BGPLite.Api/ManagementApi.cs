@@ -971,7 +971,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
                 foreach (var (prefix, length, _) in fetched)
                     prefixes.Add($"{BgpConstants.UintToIPAddress(prefix)}/{length}");
             }
-            catch (OperationCanceledException) { throw; }  // #114: shutdown is not a fetch failure
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }  // #114/#337: only shutdown cancellation — a provider-timeout OCE (live token) is a fetch failure below
             catch (Exception ex) { _logger.LogWarning(ex, "CollectPeerPrefixes: ASN fetch failed"); }
         }
 
@@ -984,7 +984,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
                 foreach (var (prefix, length, _) in ruPrefixes)
                     prefixes.Add($"{BgpConstants.UintToIPAddress(prefix)}/{length}");
             }
-            catch (OperationCanceledException) { throw; }  // #114: shutdown is not a fetch failure
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }  // #114/#337: only shutdown cancellation — a provider-timeout OCE (live token) is a fetch failure below
             catch (Exception ex) { _logger.LogWarning(ex, "CollectPeerPrefixes: RU prefix fetch failed"); }
         }
 
@@ -1013,14 +1013,14 @@ public sealed class ManagementApi : IHostedService, IDisposable
                 foreach (var asn in l.Asns)
                 {
                     try { prefixCount += await _prefixService.GetPrefixCountAsync(asn, ct); }
-                    catch (OperationCanceledException) { throw; }  // #114: shutdown is not a fetch failure
+                    catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }  // #114/#337: only shutdown cancellation — a provider-timeout OCE (live token) is a fetch failure below
                     catch (Exception ex) { _logger.LogWarning(ex, "Failed to get prefix count for AS{Asn}", asn); }
                 }
             }
             else if (l.Country is not null)
             {
                 try { prefixCount = (await _prefixService.GetRuPrefixesAsync(ct)).Count; }
-                catch (OperationCanceledException) { throw; }  // #114: shutdown is not a fetch failure
+                catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }  // #114/#337: only shutdown cancellation — a provider-timeout OCE (live token) is a fetch failure below
                 catch (Exception ex) { _logger.LogWarning(ex, "Failed to get RU prefix count"); }
             }
 
@@ -1427,6 +1427,10 @@ public sealed class ManagementApi : IHostedService, IDisposable
         if (_disposed) return;
         _disposed = true;
 
+        // #337 review: direct Dispose (embedded use, tests) skips StopAsync — cancel the shutdown
+        // token here too so in-flight provider work observes shutdown. Still never disposed:
+        // abandoned handlers may hold its token (a disposed source's Token getter throws ODE).
+        _shutdownCts.Cancel();
         _cts.Cancel();
         _cts.Dispose();
         // At shutdown no requests are in-flight, so disposing the current limiters is safe
