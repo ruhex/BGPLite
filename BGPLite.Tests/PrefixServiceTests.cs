@@ -3,6 +3,7 @@ using BGPLite.Configuration;
 using BGPLite.Providers;
 using BGPLite.Protocol;
 using Microsoft.Extensions.Http;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Xunit;
 
@@ -70,7 +71,7 @@ public class PrefixServiceTests
         public HttpClient CreateClient(string name) => new(_handler, disposeHandler: false);
     }
 
-    private static PrefixService Service(PerAsnHandler handler, TimeSpan? cacheTtl = null, TimeSpan? negativeTtl = null, int? maxCacheEntries = null, int retryAttempts = 2) =>
+    private static PrefixService Service(PerAsnHandler handler, TimeSpan? cacheTtl = null, TimeSpan? negativeTtl = null, int? maxCacheEntries = null, int retryAttempts = 2, ILogger<PrefixService>? logger = null) =>
         new(new AppConfig(),
             new RipeStatProvider(new StubFactory(handler),
                 NullLogger<RipeStatProvider>.Instance,
@@ -78,6 +79,7 @@ public class PrefixServiceTests
             null!, // IPrefixSourceService is not on the GetPrefixesForAsns path
             null!, // HttpPrefixProvider is only on the per-peer user-source path (#263)
             cacheTtl: cacheTtl ?? TimeSpan.FromHours(1),
+            logger: logger,
             negativeTtl: negativeTtl,
             maxCacheEntries: maxCacheEntries);
 
@@ -120,6 +122,31 @@ public class PrefixServiceTests
         Assert.Equal([100u, 300u], result.Select(r => r.Asn).ToArray());
         Assert.Equal(PrefixFor(100), result[0].Prefix);
         Assert.Equal(PrefixFor(300), result[1].Prefix);
+    }
+
+    [Fact]
+    public async Task GetPrefixesForAsns_FailedAsn_LogsWarning()
+    {
+        // #330: a transient RIPEstat failure for one ASN must not be silent — its prefixes vanish
+        // from this cycle's advertisement and the operator has to tell "no prefixes" from
+        // "fetch failed". Previously the bare catch returned [] without any log line.
+        var handler = new PerAsnHandler(200);
+        var logger = new CapturingLogger();
+        var service = Service(handler, logger: logger);
+
+        await service.GetPrefixesForAsns([100, 200, 300]);
+
+        Assert.Contains(logger.Entries, e => e.Contains("AS200") && e.Contains("RIPEstat resolve failed"));
+    }
+
+    private sealed class CapturingLogger : ILogger<PrefixService>
+    {
+        public List<string> Entries { get; } = [];
+
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+        public bool IsEnabled(LogLevel logLevel) => true;
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter) =>
+            Entries.Add(formatter(state, exception));
     }
 
     [Fact]
