@@ -154,7 +154,9 @@ public class BgpMessageTests
     {
         // RFC 9072 Extended Optional Parameters (type 255) — the realistic modern trigger for
         // the same rule: an extended-message speaker must learn we do not support the parameter.
-        var message = BuildRawOpen(3, [0xFF, 0x01, 0x06]);
+        // A valid Route Refresh capability precedes it, proving the rejection fires mid-list
+        // after well-formed parameters were consumed (CodeRabbit suggestion).
+        var message = BuildRawOpen(6, [0x02, 0x02, 0x02, 0x00, 0xFF, 0x00]);
 
         var ex = Assert.Throws<BgpParseException>(() => BgpMessageReader.ReadMessage(message));
         Assert.Equal(BgpConstants.Error.OpenMessageError, ex.ErrorCode);
