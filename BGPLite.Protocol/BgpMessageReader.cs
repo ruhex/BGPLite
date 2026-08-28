@@ -156,7 +156,19 @@ public static class BgpMessageReader
                     BgpConstants.Error.OpenMessageError, BgpConstants.SubError.Unspecific);
 
             if (paramType == 2) // Capability
+            {
                 ParseCapabilities(data[offset..][..paramLen], capabilities);
+            }
+            else
+            {
+                // RFC 4271 §6.2 (#329): an optional parameter type this speaker does not recognize
+                // must be answered with Unsupported Optional Parameter (2/4) — the sender otherwise
+                // believes the parameter was accepted (e.g. RFC 9072 Extended Optional Parameters,
+                // type 255). Unrecognized CAPABILITIES inside type 2 stay ignored per RFC 5492 §4.2.
+                throw new BgpParseException(
+                    $"Unsupported OPEN optional parameter type {paramType} (length {paramLen})",
+                    BgpConstants.Error.OpenMessageError, BgpConstants.SubError.UnsupportedOptionalParameter);
+            }
 
             offset += paramLen;
         }

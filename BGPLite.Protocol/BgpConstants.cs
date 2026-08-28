@@ -49,6 +49,7 @@ public static class BgpConstants
         public const byte UnsupportedVersion = 1;
         public const byte BadPeerAs = 2;
         public const byte BadBgpIdentifier = 3;
+        public const byte UnsupportedOptionalParameter = 4;
         public const byte UnacceptableHoldTime = 6;
         public const byte UnsupportedCapability = 7;
 
