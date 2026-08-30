@@ -49,6 +49,25 @@ public class RipeStatProviderTests
     private static RipeStatProvider Provider(HttpMessageHandler handler) =>
         new(new StubFactory(handler), NullLogger<RipeStatProvider>.Instance, new RipeStatConfig());
 
+    /// <summary>
+    /// #358 review (hardens #319): a non-string element in the originating array (number/object)
+    /// used to throw InvalidOperationException out of GetString() and discard the whole ASN's
+    /// valid prefixes; it must be skipped like any other non-canonical row.
+    /// </summary>
+    [Fact]
+    public async Task NonStringJsonElement_SkippedWithoutAborting()
+    {
+        const string body =
+            """{"status":"ok","data":{"resource":"65001","prefixes":{"v4":{"originating":[42,{"bad":1},"10.0.0.0/24"]},"v6":{"originating":[]}}}}""";
+        var handler = new StubHandler(HttpStatusCode.OK, body);
+
+        var result = await Provider(handler).GetPrefixesAsync(65001);
+
+        var row = Assert.Single(result);
+        Assert.Equal(0x0A000000u, row.Prefix);
+        Assert.Equal(24, row.PrefixLength);
+    }
+
     [Fact]
     public async Task ParsesPrefixes()
     {

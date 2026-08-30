@@ -552,25 +552,39 @@ public sealed class ManagementApi : IHostedService, IDisposable
     /// <summary>
     /// Pure body reader with a hard byte cap — extracted for unit testing (#156). Returns
     /// <c>(null, 413-error)</c> when the stream yields more than <paramref name="maxBytes"/> bytes,
-    /// <c>(null, 408-error)</c> when a single read breaches <paramref name="readTimeout"/> (#257),
-    /// otherwise the full body decoded as UTF-8. Covers both sized and chunked/streaming bodies.
+    /// <c>(null, 408-error)</c> when the body misses <paramref name="readTimeout"/> (#257) — an
+    /// ABSOLUTE deadline for the whole body, not a per-read window: a per-read WaitAsync restarts
+    /// on every byte, and a client trickling one byte per window held its slot indefinitely
+    /// (#358 review). Otherwise the full body decoded as UTF-8. Covers sized and chunked bodies.
     /// </summary>
     internal static async Task<(string? Body, ApiResponse? Error)> ReadBoundedBodyAsync(
         Stream input, long maxBytes, TimeSpan? readTimeout = null)
     {
         using var ms = new MemoryStream();
         var buffer = new byte[8192];
+        var deadline = readTimeout is { } timeout ? DateTime.UtcNow + timeout : (DateTime?)null;
         while (true)
         {
             int read;
             var readTask = input.ReadAsync(buffer, 0, buffer.Length);
             try
             {
-                // #257: no client-disconnect token exists on HttpListener streams — the deadline
-                // is the only bound on a slow-drip body. WaitAsync leaves the abandoned read
-                // parked on the socket with this call's buffer (bounded by the in-flight cap,
-                // never reused); the caller unwinds, answers 408, and frees its slot.
-                read = readTimeout is { } timeout ? await readTask.WaitAsync(timeout) : await readTask;
+                if (deadline is { } byThen)
+                {
+                    // #257/#358: no client-disconnect token exists on HttpListener streams — the
+                    // deadline is the only bound on a slow-drip body, and it is TOTAL: each read
+                    // gets only the remaining budget, so trickling cannot reset the clock. The
+                    // abandoned read parks on the socket with this call's buffer (bounded by the
+                    // in-flight cap, never reused); the caller unwinds, answers 408, frees its slot.
+                    var remaining = byThen - DateTime.UtcNow;
+                    if (remaining <= TimeSpan.Zero)
+                        throw new TimeoutException();
+                    read = await readTask.WaitAsync(remaining);
+                }
+                else
+                {
+                    read = await readTask;
+                }
             }
             catch (TimeoutException)
             {

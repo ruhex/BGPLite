@@ -132,9 +132,13 @@ public class UserSourceCacheTests
         var cache = new UserSourceCache();
         var cts = new CancellationTokenSource();
         var calls = 0;
+        // #358 review: a fixed delay does not prove the caller entered the loader — synchronize
+        // on entry explicitly instead of racing Task.Run's start.
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 
-        static async Task<IReadOnlyList<(uint Prefix, byte Length)>> Parked(CancellationToken ct)
+        static async Task<IReadOnlyList<(uint Prefix, byte Length)>> Parked(CancellationToken ct, TaskCompletionSource entered)
         {
+            entered.TrySetResult();
             await Task.Delay(Timeout.InfiniteTimeSpan, ct);
             return [];
         }
@@ -142,11 +146,11 @@ public class UserSourceCacheTests
         Task<IReadOnlyList<(uint Prefix, byte Length)>> Invoke(CancellationToken ct)
         {
             calls++;
-            return Parked(ct);
+            return Parked(ct, entered);
         }
 
         var fetch = Task.Run(() => cache.GetOrLoadAsync("https://example.com/l", "src", Invoke, cts.Token));
-        await Task.Delay(50);   // let the caller enter the parked loader
+        await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
         cts.Cancel();
 
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => fetch);
@@ -260,5 +264,69 @@ public class UserSourceCacheTests
 
         Assert.Empty(second);
         Assert.Equal(1, f.Calls);
+    }
+
+    /// <summary>
+    /// #358 review (orphan-lock hygiene for #261): a caller cancelled while queued on the gate
+    /// never writes a cache entry, so its freshly-created gate had nothing to evict — cancelled
+    /// URLs accumulated SemaphoreSlims forever. The cancellation path must pair-remove its gate.
+    /// </summary>
+    [Fact]
+    public async Task CancelledWhileQueued_DoesNotLeaveAnOrphanGate()
+    {
+        var cache = new UserSourceCache();
+        Assert.Equal(0, cache.TrackedGateCount);
+
+        var holder = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var holdCts = new CancellationTokenSource();
+
+        Task<IReadOnlyList<(uint Prefix, byte Length)>> Hold(CancellationToken ct)
+        {
+            entered.TrySetResult();
+            return holder.Task.ContinueWith<IReadOnlyList<(uint Prefix, byte Length)>>(_ => [], CancellationToken.None);
+        }
+
+        // First caller holds the gate without completing.
+        var holding = cache.GetOrLoadAsync("https://example.com/l", "src", Hold, CancellationToken.None);
+        await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        // Second caller queues on the same gate, then is cancelled while queued.
+        var queuedCts = new CancellationTokenSource();
+        var queued = Task.Run(() => cache.GetOrLoadAsync("https://example.com/l", "src", Hold, queuedCts.Token));
+        await Task.Delay(50);            // let it queue behind the holder
+        queuedCts.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => queued);
+
+        // Release the holder; its load completes and caches the entry. The cancelled caller must
+        // not have left a gate dictionary that grows: still exactly one gate for one url.
+        holder.TrySetResult();
+        await holding.WaitAsync(TimeSpan.FromSeconds(5));
+
+        // The cancelled caller's pair-remove took the SHARED gate instance (the holder kept
+        // running on its own reference — the accepted duplicate-fetch tradeoff), and nothing
+        // re-adds a gate until the next call: zero gates, one cached entry, no orphan.
+        Assert.Equal(0, cache.TrackedGateCount);
+        Assert.Equal(1, cache.TrackedCount);
+    }
+
+    /// <summary>
+    /// #358 review: repeated cancelled-then-never-loaded URLs must not accumulate gates — the
+    /// observable orphan-growth case (fresh url per cancelled call, no cache entry ever written).
+    /// </summary>
+    [Fact]
+    public async Task CancelledFreshUrls_DoNotAccumulateGates()
+    {
+        var cache = new UserSourceCache();
+
+        for (var i = 0; i < 5; i++)
+        {
+            var cts = new CancellationTokenSource();
+            cts.Cancel();   // cancelled before the gate is even acquired
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+                cache.GetOrLoadAsync($"https://example.com/never-{i}", "src", ct => Task.FromResult<IReadOnlyList<(uint Prefix, byte Length)>>([]), cts.Token));
+        }
+
+        Assert.Equal(0, cache.TrackedGateCount);   // pre-fix: 5 orphan gates
     }
 }

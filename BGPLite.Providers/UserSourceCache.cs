@@ -52,6 +52,9 @@ internal sealed class UserSourceCache
     /// <summary>Entries currently tracked (test/observability).</summary>
     internal int TrackedCount => _cache.Count;
 
+    /// <summary>Gates currently tracked (test/observability — orphan-lock hygiene, #358 review).</summary>
+    internal int TrackedGateCount => _locks.Count;
+
     /// <param name="url">Cache key (the source URL — dedupes across peers).</param>
     /// <param name="logLabel">Safe identifier (the source <c>Name</c>) for log lines — the URL itself is
     /// never logged, since peer URLs may carry query-string tokens (#149).</param>
@@ -68,7 +71,21 @@ internal sealed class UserSourceCache
         // Serialize per-key so concurrent callers (e.g. several peers refreshing the same URL) share
         // a single fetch — no thundering herd.
         var gate = _locks.GetOrAdd(url, _ => new SemaphoreSlim(1, 1));
-        await gate.WaitAsync(ct);
+        try
+        {
+            await gate.WaitAsync(ct);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            // #358 review (orphan-lock hygiene for #261): a caller cancelled while queued never
+            // writes a cache entry, so its freshly-created gate would never be evicted (the sweep
+            // removes locks only for removed cache keys) — cancelled URLs accumulated semaphores.
+            // Pair-remove OUR gate instance: a concurrent waiter keeps running on its own
+            // reference, and a fresh caller GetOrAdd's a new gate — the same duplicate-fetch
+            // tradeoff the eviction sweep already accepts.
+            ((ICollection<KeyValuePair<string, SemaphoreSlim>>)_locks).Remove(new KeyValuePair<string, SemaphoreSlim>(url, gate));
+            throw;
+        }
         try
         {
             if (TryGetFresh(url, out var rechecked))
