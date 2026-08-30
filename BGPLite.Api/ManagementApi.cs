@@ -525,6 +525,14 @@ public sealed class ManagementApi : IHostedService, IDisposable
     /// deserialization. <c>HttpListener</c> has no default body limit, so without this a single
     /// client could stream gigabytes into the process. The cap also covers chunked-transfer bodies
     /// (no Content-Length) via the read-loop's running byte count.
+    /// <para>
+    /// #257: HttpListener also exposes no client-disconnect token, so a slow-drip body (a byte
+    /// every few seconds) otherwise parks the handler — and its in-flight slot — forever; 64 such
+    /// connections starve the whole API. Each read is therefore bounded by
+    /// <paramref name="readTimeout"/>; a breach surfaces as <c>408 Request Timeout</c>. The
+    /// abandoned read parks on the (dead) socket holding this call's buffer — bounded by the
+    /// in-flight cap (64 × 8 KB), never reused, collected with the socket.
+    /// </para>
     /// </summary>
     private async Task<(string? Body, ApiResponse? Error)> ReadBodyAsync(HttpListenerContext ctx)
     {
@@ -535,21 +543,42 @@ public sealed class ManagementApi : IHostedService, IDisposable
             return (null, ApiResponse.Error(
                 $"Request body too large ({ctx.Request.ContentLength64} bytes, max {maxBytes}).", 413));
 
-        return await ReadBoundedBodyAsync(ctx.Request.InputStream, maxBytes);
+        return await ReadBoundedBodyAsync(ctx.Request.InputStream, maxBytes, BodyReadTimeout);
     }
+
+    /// <summary>#257: per-read deadline for request bodies — the time dimension of the #156 size cap.</summary>
+    private static readonly TimeSpan BodyReadTimeout = TimeSpan.FromSeconds(30);
 
     /// <summary>
     /// Pure body reader with a hard byte cap — extracted for unit testing (#156). Returns
     /// <c>(null, 413-error)</c> when the stream yields more than <paramref name="maxBytes"/> bytes,
+    /// <c>(null, 408-error)</c> when a single read breaches <paramref name="readTimeout"/> (#257),
     /// otherwise the full body decoded as UTF-8. Covers both sized and chunked/streaming bodies.
     /// </summary>
-    internal static async Task<(string? Body, ApiResponse? Error)> ReadBoundedBodyAsync(Stream input, long maxBytes)
+    internal static async Task<(string? Body, ApiResponse? Error)> ReadBoundedBodyAsync(
+        Stream input, long maxBytes, TimeSpan? readTimeout = null)
     {
         using var ms = new MemoryStream();
         var buffer = new byte[8192];
-        int read;
-        while ((read = await input.ReadAsync(buffer, 0, buffer.Length)) > 0)
+        while (true)
         {
+            int read;
+            var readTask = input.ReadAsync(buffer, 0, buffer.Length);
+            try
+            {
+                // #257: no client-disconnect token exists on HttpListener streams — the deadline
+                // is the only bound on a slow-drip body. WaitAsync leaves the abandoned read
+                // parked on the socket with this call's buffer (bounded by the in-flight cap,
+                // never reused); the caller unwinds, answers 408, and frees its slot.
+                read = readTimeout is { } timeout ? await readTask.WaitAsync(timeout) : await readTask;
+            }
+            catch (TimeoutException)
+            {
+                return (null, ApiResponse.Error("Request body read timed out.", 408));
+            }
+            if (read <= 0)
+                break;
+
             ms.Write(buffer, 0, read);
             if (ms.Length > maxBytes)
                 return (null, ApiResponse.Error(

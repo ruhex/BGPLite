@@ -104,4 +104,54 @@ public class RequestBodyLimitsTests
         public override void SetLength(long value) => throw new NotSupportedException();
         public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
     }
+
+    /// <summary>
+    /// #257: a body that never arrives parks <c>ReadBoundedBodyAsync</c> forever — with the
+    /// 64-slot in-flight cap, 64 such connections starve the whole API. Each read must be bounded
+    /// by the deadline and surface as 408. The outer WaitAsync(3s) doubles as the red guard: on
+    /// pre-fix code the call never completes and the test fails on the guard timeout.
+    /// </summary>
+    [Fact]
+    public async Task SlowDripBody_NeverCompletingRead_Returns408()
+    {
+        using var input = new NeverCompletingStream();
+
+        var (body, error) = await ManagementApi
+            .ReadBoundedBodyAsync(input, maxBytes: 1024, readTimeout: TimeSpan.FromMilliseconds(100))
+            .WaitAsync(TimeSpan.FromSeconds(3));
+
+        Assert.Null(body);
+        Assert.NotNull(error);
+        Assert.Equal(408, error!.StatusCode);
+    }
+
+    /// <summary>#257: the deadline must not affect a body that arrives within it.</summary>
+    [Fact]
+    public async Task BodyWithinDeadline_StillRead()
+    {
+        using var input = new MemoryStream(Encoding.UTF8.GetBytes("{\"ip\":\"1.2.3.4\"}"));
+        var (body, error) = await ManagementApi.ReadBoundedBodyAsync(
+            input, maxBytes: 1024, readTimeout: TimeSpan.FromSeconds(30));
+
+        Assert.Null(error);
+        Assert.Equal("{\"ip\":\"1.2.3.4\"}", body);
+    }
+
+    /// <summary>A stream whose ReadAsync never completes — the slow-drip attacker's socket.</summary>
+    private sealed class NeverCompletingStream : Stream
+    {
+        private readonly TaskCompletionSource<int> _never = new();
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+        public override void Flush() { }
+        public override int Read(byte[] buffer, int offset, int count) => _never.Task.Result;
+        public override Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken)
+            => _never.Task;
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+    }
 }
