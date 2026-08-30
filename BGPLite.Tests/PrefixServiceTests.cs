@@ -329,4 +329,70 @@ public class PrefixServiceTests
         var result = await service.GetPrefixesAsync(100);
         Assert.Single(result);
     }
+
+    /// <summary>
+    /// #320: user sources get a fetch budget end-to-end. A server that answers headers instantly
+    /// and then never sends the body used to hang the fetch (and the per-URL gate, and the whole
+    /// route dump) forever. With the budget armed, the fetch fails within it and the negative
+    /// cache throttles the retry — one HTTP attempt total.
+    /// </summary>
+    private sealed class HeadersThenHangHandler : HttpMessageHandler
+    {
+        public int Calls { get; private set; }
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
+        {
+            Calls++;
+            var body = new HangingBodyStream();
+            var response = new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StreamContent(body)
+            };
+            response.Content.Headers.ContentLength = 1024; // plausible, under the size cap
+            return Task.FromResult(response);
+        }
+    }
+
+    /// <summary>Delivers nothing; honors the read token like a real socket stream would.</summary>
+    private sealed class HangingBodyStream : Stream
+    {
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => 1024;
+        public override long Position { get => 0; set => throw new NotSupportedException(); }
+        public override void Flush() { }
+        public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        public override async Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken)
+        {
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            return 0;
+        }
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+    }
+
+    [Fact]
+    public async Task UserSource_SlowBody_BoundedByBudget_NegativeCached()
+    {
+        var handler = new HeadersThenHangHandler();
+        var httpProvider = new HttpPrefixProvider(new StubFactory(handler), NullLogger<HttpPrefixProvider>.Instance);
+        var service = new PrefixService(
+            new AppConfig(),
+            null!, // RipeStatProvider is not on the user-source path
+            null!, // IPrefixSourceService is not on the user-source path
+            httpProvider,
+            userSourceTimeoutSeconds: 1);
+
+        // The fetch must fail within the budget (not hang) — the 8 s guard doubles as the red
+        // guard: on budget-less code the call never completes.
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => service.GetUserSourcePrefixesAsync("slow", "https://example.com/slow.txt", null)
+                .WaitAsync(TimeSpan.FromSeconds(8)));
+
+        // The negative cache throttles the retry: no second HTTP attempt.
+        var second = await service.GetUserSourcePrefixesAsync("slow", "https://example.com/slow.txt", null);
+        Assert.Empty(second);
+        Assert.Equal(1, handler.Calls);
+    }
 }
