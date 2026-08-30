@@ -395,4 +395,71 @@ public class PrefixServiceTests
         Assert.Empty(second);
         Assert.Equal(1, handler.Calls);
     }
+
+    /// <summary>
+    /// #324: a config source that hangs must not wedge sequential seeding — LoadAllAsync awaits
+    /// sources one by one, so before the default budget one dripping source stalled every later
+    /// source, WarmUp, and the final peer push until restart. With the provider-level budget the
+    /// hung source fails on its own deadline and the GOOD source still loads. The outer WaitAsync
+    /// guard doubles as the red guard on budget-less code.
+    /// </summary>
+    private sealed class PerUrlHandler : HttpMessageHandler
+    {
+        private readonly string _hangUrl;
+        public PerUrlHandler(string hangUrl) => _hangUrl = hangUrl;
+
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
+        {
+            if (request.RequestUri?.ToString() == _hangUrl)
+            {
+                var hang = new HttpResponseMessage(HttpStatusCode.OK) { Content = new StreamContent(new HangingStream()) };
+                hang.Content.Headers.ContentLength = 1024;
+                return Task.FromResult(hang);
+            }
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent("10.2.0.0/24\n")
+            });
+        }
+    }
+
+    private sealed class HangingStream : Stream
+    {
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => 1024;
+        public override long Position { get => 0; set => throw new NotSupportedException(); }
+        public override void Flush() { }
+        public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        public override async Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken)
+        {
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            return 0;
+        }
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+    }
+
+    [Fact]
+    public async Task LoadAllAsync_HangingFirstSource_DoesNotWedgeTheRest()
+    {
+        var handler = new PerUrlHandler("https://example.com/hang.txt");
+        var httpProvider = new HttpPrefixProvider(
+            new StubFactory(handler), NullLogger<HttpPrefixProvider>.Instance, defaultFetchTimeoutSeconds: 1);
+        var yaml = "Bgp:\n  Asn: 65444\n  RouterId: 10.0.0.1\nPrefixSources:\n" +
+                   "  - Name: hang\n    Kind: http\n    Url: https://example.com/hang.txt\n" +
+                   "  - Name: good\n    Kind: http\n    Url: https://example.com/good.txt\n";
+        var svc = new PrefixSourceService(
+            ConfigLoader.LoadFromText(yaml),
+            new PrefixSourceProviderFactory([httpProvider]),
+            NullLogger<PrefixSourceService>.Instance);
+
+        var all = await svc.LoadAllAsync().WaitAsync(TimeSpan.FromSeconds(10));
+
+        Assert.Equal(2, all.Count);
+        Assert.Empty(all[0].Prefixes);       // hung source: budget fired → failure → empty set
+        Assert.Single(all[1].Prefixes);      // good source still loaded — seeding not wedged
+    }
 }

@@ -69,7 +69,7 @@ public sealed class PrefixSourceService : IPrefixSourceService
         }
 
         try { return (await LoadCachedAsync(source, ct)).Prefixes; }
-        catch (OperationCanceledException) { throw; }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }  // #324: only CALLER cancellation — the #324 default fetch budget fires as a foreign-token OCE (live ct) and must stay a per-source failure below
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Failed to load prefix source '{Name}'.", name);
@@ -90,7 +90,7 @@ public sealed class PrefixSourceService : IPrefixSourceService
         }
 
         try { return (await LoadCachedAsync(source, ct)).Prefixes; }
-        catch (OperationCanceledException) { throw; }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }  // #324: only CALLER cancellation — the #324 default fetch budget fires as a foreign-token OCE (live ct) and must stay a per-source failure below
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Failed to load default prefix source '{Name}'.", defaultName);
@@ -105,7 +105,7 @@ public sealed class PrefixSourceService : IPrefixSourceService
         {
             IReadOnlyList<(uint Prefix, byte Length)> prefixes;
             try { prefixes = (await LoadCachedAsync(source, ct)).Prefixes; }
-            catch (OperationCanceledException) { throw; }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }  // #324: only CALLER cancellation — the #324 default fetch budget fires as a foreign-token OCE (live ct) and must stay a per-source failure below
             catch (Exception ex)
             {
                 _logger.LogWarning(ex, "Failed to load prefix source '{Name}' ({Kind}).", source.Name, source.Kind);
@@ -143,7 +143,7 @@ public sealed class PrefixSourceService : IPrefixSourceService
             var (_, changed) = await LoadCachedAsync(source, ct, forceRefresh: true, triggerCallback: false);
             return changed;
         }
-        catch (OperationCanceledException) { throw; }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }  // #324: only CALLER cancellation — the #324 default fetch budget fires as a foreign-token OCE (live ct) and must stay a per-source failure below
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Auto-refresh: failed to reload source '{Name}'.", source.Name);
@@ -203,7 +203,7 @@ public sealed class PrefixSourceService : IPrefixSourceService
                 var provider = _factory.Get(source.Kind);
                 result = await provider.LoadAsync(source, etag, lastModified, ct);
             }
-            catch (OperationCanceledException) { throw; }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }  // #324: only CALLER cancellation — the #324 default fetch budget fires as a foreign-token OCE (live ct) and must stay a per-source failure below
             catch
             {
                 if (_cache.TryGetValue(source.Name, out var staleCopy) && !staleCopy.Negative)
