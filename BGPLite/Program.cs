@@ -299,8 +299,13 @@ void ConfigureDefaultHttpResilience(ResiliencePipelineBuilder<HttpResponseMessag
             FailureRatio = 0.5,
             MinimumThroughput = 10,
             BreakDuration = TimeSpan.FromSeconds(30),
-        })
-        .AddTimeout(TimeSpan.FromSeconds(5));
+        });
+// #324/#267-item-2: no pipeline-level AddTimeout. It wrapped SendAsync only up to the
+// response headers (ResponseHeadersRead) and silently CLIPPED any configured source
+// Timeout above it, while the body loop ran outside the pipeline unbounded. The per-source
+// budget in HttpPrefixProvider.LoadAsync is now always armed (configured Timeout or the
+// 30s default) on a linked token that flows through the pipeline and covers headers AND
+// body — one deadline, never clipped, still bounding every attempt and retry.
 
 void ConfigureRipeStatResilience(ResiliencePipelineBuilder<HttpResponseMessage> pipelineBuilder, RipeStatConfig cfg) =>
     pipelineBuilder

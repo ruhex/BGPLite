@@ -21,13 +21,23 @@ namespace BGPLite.Providers;
 /// </summary>
 public sealed class HttpPrefixProvider(
     IHttpClientFactory httpFactory,
-    ILogger<HttpPrefixProvider> logger)
+    ILogger<HttpPrefixProvider> logger,
+    int defaultFetchTimeoutSeconds = 30) // mirrors DefaultFetchTimeoutSeconds (a ctor default cannot reference the member const)
     : IPrefixSourceProvider
 {
     public const string ClientName = "http";
 
     /// <summary>Maximum response body size (10 MB) — defends against OOM from huge/malicious files (#144).</summary>
     internal const int MaxResponseBytes = 10 * 1024 * 1024;
+
+    /// <summary>
+    /// #324: budget applied when the source does not configure one. Without it, a YAML-configured
+    /// PrefixSource omitting <c>Timeout</c> armed no deadline at all — the named client is
+    /// InfiniteTimeSpan (Polly) and the pipeline's timeout only wrapped SendAsync up to the
+    /// headers, so a headers-then-drip body hung seeding and auto-refresh indefinitely (size is
+    /// bounded by <see cref="MaxResponseBytes"/>, time was not). Injectable for tests via the ctor.
+    /// </summary>
+    public const int DefaultFetchTimeoutSeconds = 30;
 
     public string Kind => "http";
 
@@ -45,13 +55,16 @@ public sealed class HttpPrefixProvider(
 
         var http = httpFactory.CreateClient(ClientName);
 
-        // Per-source timeout: link the caller's token with a CancelAfter so a slow peer URL can't pin
-        // the fetch past its configured budget. We do NOT mutate http.Timeout (#155 regression): the
-        // named client is pooled by IHttpClientFactory, and mutating it leaks the per-source timeout
-        // onto the next caller that reuses the same client within the handler-lifetime window.
+        // Per-source timeout: link the caller's token with a CancelAfter so a slow source can't pin
+        // the fetch past its budget — now ALWAYS armed (#324): a configured Timeout wins, otherwise
+        // the default budget covers config sources that omit it (and #320's user sources pass it
+        // explicitly). The linked token covers headers AND the body loop below.
+        // We do NOT mutate http.Timeout (#155 regression): the named client is pooled by
+        // IHttpClientFactory, and mutating it leaks the per-source timeout onto the next caller.
+        var seconds = source.Timeout is int configured && configured > 0 ? configured : defaultFetchTimeoutSeconds;
         CancellationTokenSource? timeoutCts = null;
         CancellationToken linkedToken;
-        if (source.Timeout is int seconds && seconds > 0)
+        if (seconds > 0)
         {
             timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
             timeoutCts.CancelAfter(TimeSpan.FromSeconds(seconds));
