@@ -295,6 +295,29 @@ public class ConfigValidationTests
         Assert.Contains("Bgp.HoldTime", ex.Message);
     }
 
+    /// <summary>
+    /// #265 item 2: Hold Time is a 2-octet OPEN field — a value above 65535 cannot be carried on
+    /// the wire, and the write path used to truncate it silently ((ushort)70000 -> 4464).
+    /// </summary>
+    [Theory]
+    [InlineData(65536)]
+    [InlineData(70000)]
+    public void Validate_RejectsHoldTimeAboveUshortRange(int holdTime)
+    {
+        var config = Config(Bgp(holdTime: holdTime, keepAlive: 60));
+
+        var ex = Assert.Throws<InvalidOperationException>(() => config.Validate());
+        Assert.Contains("Bgp.HoldTime", ex.Message);
+        Assert.Contains("65535", ex.Message);
+    }
+
+    [Fact]
+    public void Validate_AcceptsHoldTimeAtUshortMax()
+    {
+        // The boundary itself is representable and must pass (KeepAlive within max(65535/3,1)).
+        Config(Bgp(holdTime: 65535, keepAlive: 60)).Validate();
+    }
+
     [Fact]
     public void Validate_RejectsKeepAliveAboveHoldTimeThird()
     {
