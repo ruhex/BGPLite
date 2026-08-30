@@ -98,6 +98,21 @@ public class OpenNegotiatorTests
 
         Assert.Equal(BgpConstants.Error.OpenMessageError, ex.ErrorCode);
         Assert.Equal(BgpConstants.SubError.UnsupportedVersion, ex.SubErrorCode);
+        // RFC 4271 §6.2 (#317): the Data field carries a 2-octet version hint. BGPLite supports
+        // only v4, so a bid of 3 hits the "smallest locally-supported" branch → 4.
+        Assert.Equal([(byte)0, (byte)4], ex.NotificationData);
+    }
+
+    [Fact]
+    public void UnsupportedVersion_BidAboveSupported_DataFieldStillFour()
+    {
+        // A bid ABOVE 4 hits the "largest locally-supported less than the bid" branch, which
+        // also resolves to 4 — one constant is correct for both §6.2 branches.
+        var ex = Assert.Throws<BgpNotificationException>(
+            () => Negotiate(Open(version: 5)));
+
+        Assert.Equal(BgpConstants.SubError.UnsupportedVersion, ex.SubErrorCode);
+        Assert.Equal([(byte)0, (byte)4], ex.NotificationData);
     }
 
     [Fact]

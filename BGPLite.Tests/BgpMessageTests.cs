@@ -89,6 +89,21 @@ public class BgpMessageTests
     }
 
     [Fact]
+    public void Open_UnsupportedVersion_CarriesMaxSupportedVersionData()
+    {
+        // RFC 4271 §6.2 (#317): the Unsupported Version NOTIFICATION's Data field must carry the
+        // 2-octet version hint. BGPLite supports only v4 — both §6.2 branches resolve to 4.
+        var message = BuildRawOpen(0, []);
+        message[19] = 3; // BGPv3
+
+        var ex = Assert.Throws<BgpParseException>(() => BgpMessageReader.ReadMessage(message));
+
+        Assert.Equal(BgpConstants.Error.OpenMessageError, ex.ErrorCode);
+        Assert.Equal(BgpConstants.SubError.UnsupportedVersion, ex.SubErrorCode);
+        Assert.Equal([(byte)0, (byte)4], ex.NotificationData);
+    }
+
+    [Fact]
     public void Open_WellFormedRawOptParams_Parses()
     {
         // Capability parameter (type 2) carrying a Four-Octet-ASN TLV (code 65, len 4, ASN 200000).
