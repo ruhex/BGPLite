@@ -291,30 +291,44 @@ public class PrefixSourceServiceTests
     }
 
     /// <summary>
-    /// #214 TOCTOU regression: the changed-detection must be computed inside the per-source gate, so a
-    /// concurrent GetAsync (TTL-expired connect path) that itself loads the new list cannot mask the
-    /// change by making before==after. SequenceProvider returns the new list on the 2nd call regardless
-    /// of which caller wins the gate — and RefreshAsync must still report changed=true.
+    /// #332 (replaces the scheduling-dependent RefreshAsync_DetectsChange_DespiteConcurrentGetAsync):
+    /// the GetAsync-wins interleaving of the #214 TOCTOU scenario, forced deterministically instead
+    /// of racing a cold thread pool. The correct outcome for THIS ordering is <c>changed=false</c>:
+    /// GetAsync's load already detected the change INSIDE the per-source gate, updated the cache,
+    /// and fired <c>onSourceChanged</c> — the change is consumed, and RefreshAsync's own in-gate
+    /// compare then legitimately sees identical lists. What must NOT happen is the change being
+    /// silently lost: exactly one push for it (via GetAsync) is the observable contract.
     /// </summary>
     [Fact]
-    public async Task RefreshAsync_DetectsChange_DespiteConcurrentGetAsync()
+    public async Task RefreshAsync_AfterConcurrentGetAsyncConsumedChange_ReportsFalse_PushFiresOnce()
     {
         var provider = new SequenceProvider([(1u, (byte)24)], [(1u, (byte)24), (2u, (byte)16)]);
+        var pushed = new List<string>();
+        var gate = new object();
         var svc = new PrefixSourceService(
             ConfigWith("ru"),
             new PrefixSourceProviderFactory([provider]),
             NullLogger<PrefixSourceService>.Instance,
-            cacheTtl: TimeSpan.Zero); // TTL=0 forces GetAsync to always refetch (races RefreshAsync)
+            cacheTtl: TimeSpan.Zero, // TTL=0: GetAsync always refetches (the connect-path racer)
+            onSourceChanged: name => { lock (gate) pushed.Add(name); return Task.CompletedTask; });
 
-        await svc.GetAsync("ru"); // prime with first list
+        await svc.GetAsync("ru"); // prime: call 1 loads list1; first-ever load counts as changed (#251 push)
 
-        // Concurrent: GetAsync (TTL=0 → refetches, may grab the gate first) and RefreshAsync.
-        var getTask = Task.Run(() => svc.GetAsync("ru"));
-        var refreshTask = svc.RefreshAsync("ru");
-        await Task.WhenAll(getTask, refreshTask);
+        // The "GetAsync wins the gate" leg, sequential and deterministic: call 2 loads list2,
+        // detects the change inside the gate, updates the cache, and pushes.
+        await svc.GetAsync("ru");
 
-        // Regardless of which task loaded the new list first, RefreshAsync must report the change.
-        Assert.True(await refreshTask, "RefreshAsync must detect the change even if GetAsync raced ahead");
+        // RefreshAsync now runs third: call 3 returns list2 again (SequenceProvider clamps to the
+        // last list), the in-gate compare sees cache==fresh, and the already-consumed change is
+        // correctly reported as unchanged.
+        var changed = await svc.RefreshAsync("ru");
+
+        Assert.False(changed, "the change was consumed by the winning GetAsync; nothing new for RefreshAsync");
+        Assert.Equal(3, provider.Calls);
+        lock (gate)
+        {
+            Assert.Equal(["ru", "ru"], pushed); // prime push + exactly ONE push for the real change
+        }
     }
 
     /// <summary>#214: SourceSupportsConditional reflects the provider's SupportsConditionalRequests.</summary>
