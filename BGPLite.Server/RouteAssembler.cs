@@ -302,8 +302,10 @@ public sealed class RouteAssembler : IRouteAssembler
     /// <summary>
     /// Fetches one per-peer user URL source and appends its routes (stamped with the UserSource
     /// community) to <paramref name="routes"/>. Static so all dependencies are parameters —
-    /// unit-testable without a RouteAssembler instance. Catches all exceptions except
-    /// <see cref="OperationCanceledException"/> (#114 propagation).
+    /// unit-testable without a RouteAssembler instance. Catches all exceptions except an OCE
+    /// raised by the CALLER's cancellation (#114/#342): a per-source timeout OCE (a live token,
+    /// e.g. #320's linked CTS in HttpPrefixProvider) is a fetch failure like any other, so one
+    /// slow URL skips its source instead of aborting the whole dump.
     /// </summary>
     internal static async Task AddUserSourceRoutesAsync(
         List<Route> routes, CustomSourceView source, uint nextHop,
@@ -319,7 +321,7 @@ public sealed class RouteAssembler : IRouteAssembler
                 routes.Add(MakeRoute(prefix, length, nextHop, null, comms));
             logger.LogInformation("User-source '{Name}': {Count} prefixes for {Peer}", source.Name, prefixes.Count, peerLabel);
         }
-        catch (OperationCanceledException) { throw; }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }  // #114/#342: only CALLER cancellation — a per-source timeout OCE (#320's linked CTS, live ct) must stay a fetch failure below
         catch (Exception ex)
         {
             logger.LogWarning(ex, "User-source '{Name}' failed for {Peer}; skipped", source.Name, peerLabel);

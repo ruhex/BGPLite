@@ -96,13 +96,39 @@ public class BgpSessionUserSourceTests
     [Fact]
     public async Task OperationCanceled_Propagates()
     {
-        // Regression for #114: cancellation must NOT be swallowed by the per-source catch.
+        // Regression for #114/#342: cancellation must NOT be swallowed by the per-source catch.
+        // Propagation is keyed on the CALLER's token: an OCE arriving while the caller's token is
+        // cancelled is teardown and must unwind. An OCE with a live token is a per-source timeout
+        // (#320's linked CTS) and stays a fetch failure — see TimeoutOCE_LiveToken_SkipsSource.
         var svc = new StubPrefixService { Throw = new OperationCanceledException() };
         var routes = new List<Route>();
 
         await Assert.ThrowsAsync<OperationCanceledException>(() => RouteAssembler.AddUserSourceRoutesAsync(
             routes, new CustomSourceView("c", "https://x/c", null), 1, svc, new StubResolver(),
-            NullLogger.Instance, "peer", CancellationToken.None));
+            NullLogger.Instance, "peer", new CancellationToken(canceled: true)));
+    }
+
+    [Fact]
+    public async Task TimeoutOCE_LiveToken_SkipsSource()
+    {
+        // Regression for #342: a per-source timeout surfaces as OCE with a LIVE caller token
+        // (#320 arms it via HttpPrefixProvider's linked CTS). It must be a fetch failure like
+        // any other — the source is skipped and the dump continues — not rethrown, or one slow
+        // URL would abort the whole dump and tear down a freshly established session through
+        // RunAsync's OCE handler.
+        var routes = new List<Route>();
+        var slowSvc = new StubPrefixService { Throw = new OperationCanceledException() };
+        var okSvc = new StubPrefixService { Result = [(0x0A000000u, (byte)8)] };
+
+        await RouteAssembler.AddUserSourceRoutesAsync(
+            routes, new CustomSourceView("slow", "https://x/s", null), 1, slowSvc, new StubResolver(),
+            NullLogger.Instance, "peer", CancellationToken.None);
+        await RouteAssembler.AddUserSourceRoutesAsync(
+            routes, new CustomSourceView("good", "https://x/g", null), 1, okSvc, new StubResolver(),
+            NullLogger.Instance, "peer", CancellationToken.None);
+
+        var route = Assert.Single(routes);           // slow source skipped, good source landed
+        Assert.Equal(0x0A000000u, route.Prefix);
     }
 
     [Fact]
