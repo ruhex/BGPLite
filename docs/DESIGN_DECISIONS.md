@@ -160,3 +160,25 @@ For section-by-section RFC conformance status, see `RFC_COMPLIANCE.md` (2026-07-
   Pre-OPEN connections (remote ASN not yet known) are not matched by the (ip, asn) termination and
   may re-register the row once their OPEN arrives.
 - **Tracker:** #323.
+
+### D17. UPDATE body errors keep the session alive across BOTH reject classes
+- **Decision:** a malformed inbound UPDATE never tears down the session, in both reject classes:
+  (a) a frame-level `BgpParseException` with an Update Message Error code (body unparseable, e.g.
+  truncated NLRI — the D2 case), and (b) a `BgpNotificationException(3, …)` from the attribute
+  pipeline (malformed/missing mandatory attributes, duplicate-first-wins, AS4 reconstruction — and
+  unrecognized **well-known** attributes). The message is rejected (`UpdateRejected`), the session
+  stays Established, and no NOTIFICATION is sent.
+- **Context:** RFC baseline — RFC 4271 §6.3 prescribes NOTIFICATION + session reset for these
+  errors, and RFC 7606 revises only part of the space toward treat-as-withdraw: malformed/missing
+  attributes become treat-as-withdraw, but **unrecognized well-known stays session-reset** (7606
+  does not revise it; verified against the RFC text 2026-08-30) and §3(j) mandates session reset
+  when the NLRI itself cannot be parsed. BGPLite deviates deliberately in both places: a route
+  server must not lose a long-lived session — and every other peer's view of it — over one bad or
+  adversarial UPDATE (#94, #222, #284 lineage). No NOTIFICATION is sent because RFC 4271 §6.3
+  requires its receiver to tear down, defeating the purpose. Withdrawal semantics: class (b)
+  withdraws the peer's own NLRI (RFC 7606's "treat" half, #288); class (a) cannot — the NLRI is
+  unrecoverable — and discards only (D2).
+- **Consequence:** a peer sending structurally valid but semantically rejected UPDATEs gets them
+  silently dropped (log Warning + `UpdatesRejected` metric) instead of a session reset; operators
+  comparing against RFC-strict speakers will see BGPLite retain sessions others would close.
+- **Tracker:** #94, #222, #284, #288, #322 (closed); recorded via #344.
