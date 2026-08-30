@@ -834,8 +834,12 @@ public sealed class BgpSession : IDisposable
 
     private async Task HandleUpdateAsync(BgpUpdateMessage update)
     {
-        _logger.LogInformation("UpdateReceived from {Peer}: {Withdrawn} withdrawn, {Nlri} announced",
-            _peer, update.WithdrawnRoutes.Count, update.Nlri.Count);
+        // #344: per-UPDATE at Debug — a full-table dump sends hundreds-to-thousands of UPDATEs and
+        // a flap storm floods the log pipeline on the read loop, drowning the Warning-level
+        // signals; the per-dump aggregation summaries one level up stay at Information.
+        if (_logger.IsEnabled(LogLevel.Debug))
+            _logger.LogDebug("UpdateReceived from {Peer}: {Withdrawn} withdrawn, {Nlri} announced",
+                _peer, update.WithdrawnRoutes.Count, update.Nlri.Count);
 
         // Process withdrawals. RFC 4271 §3.2/§9: a withdrawal removes the route received FROM THIS
         // PEER, not whatever happens to sit at that prefix. BGPLite has one shared RouteTable rather

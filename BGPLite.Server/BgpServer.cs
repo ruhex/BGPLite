@@ -60,7 +60,10 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
         _listener = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
         _listener.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
         _listener.Bind(new IPEndPoint(IPAddress.Any, BgpConstants.BgpPort));
-        _listener.Listen(16);
+        // #344: after a restart every peer reconnects at once; backlog 16 dropped SYNs and pushed
+        // peers into their own retry backoff, stretching reconvergence for no benefit. A few
+        // hundred pending accepts costs nothing on a route-server host.
+        _listener.Listen(512);
 
         _logger.LogInformation("BGP server listening on port {Port}", BgpConstants.BgpPort);
         _logger.LogInformation("Local ASN={Asn}, RouterId={RouterId}", _config.Bgp.Asn, _config.Bgp.RouterId);
