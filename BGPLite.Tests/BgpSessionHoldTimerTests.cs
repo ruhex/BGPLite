@@ -89,16 +89,38 @@ public class BgpSessionHoldTimerTests
 
         public ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken cancellationToken)
         {
+            // #341 test seam: an optional write gate. When set, every WriteAsync signals entry and
+            // parks on the gate — a slow peer (TCP zero window) that accepts nothing, holding the
+            // session's _sendLock from inside the blocked write.
+            if (_writeGate is { } gate)
+            {
+                _writeEntered.TrySetResult();
+                return new ValueTask(gate.Task);
+            }
             // Capture the outbound bytes for assertions. A copy is needed because the caller
             // (SendMessageAsync) returns the ArrayPool buffer to the pool after this returns.
             _sent.Add(buffer.ToArray());
             return default;
         }
 
+        private TaskCompletionSource? _writeGate;
+        private TaskCompletionSource? _writeEntered;
+        public void BlockWrites()
+        {
+            _writeGate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            _writeEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        }
+        public void UnblockWrites() => _writeGate?.TrySetResult();
+        public Task WriteEntered => _writeEntered?.Task ?? Task.CompletedTask;
+
         public void Dispose()
         {
             Disposed = true;
             _inbound.Writer.TryComplete();
+            // Mirror the real transport: disposing a SocketBgpConnection aborts a pending
+            // WriteAsync (the stream is disposed under it). A gated fake write parked forever
+            // would otherwise pin the sending loop past Dispose — behavior production never has.
+            _writeGate?.TrySetCanceled();
         }
     }
 
@@ -619,5 +641,71 @@ public class BgpSessionHoldTimerTests
         Assert.DoesNotContain(messages, m => m.Contains("Session error"));
 
         conn.Dispose();
+    }
+
+    /// <summary>
+    /// #341: a blocked writer (a refresh send parked inside WriteAsync — the slow-peer holder of
+    /// the issue) holds <c>_sendLock</c>; the next keepalive tick queues on the semaphore with NO
+    /// token of its own; <c>Dispose</c> cancels <c>_cts</c> and then disposes the semaphore.
+    /// <c>SemaphoreSlim.Dispose</c> never wakes queued waiters, so pre-fix the keepalive waiter —
+    /// and with it <c>RunAsync</c> — hung forever. The lock WAIT must be bounded by the session's
+    /// own lifetime token so teardown unwinds it.
+    /// </summary>
+    [Fact]
+    public async Task Dispose_WhileSenderHoldsSendLock_RunAsyncCompletes()
+    {
+        var time = new FakeTimeProvider();
+        var conn = new FakeBgpConnection();
+        var bgpConfig = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1", HoldTime = 9, KeepAlive = 3 };
+        var table = new RouteTable();
+        table.AddOrUpdate(new Route { Prefix = 0x0A000000, PrefixLength = 8, NextHop = 0x01020304 });
+        using var session = new BgpSession(
+            conn,
+            new PeerConfig { Address = "127.0.0.1" },
+            bgpConfig,
+            table,
+            AllowAllFilter.Instance,
+            new BgpMetrics(),
+            new NopLogger<BgpSession>(),
+            timeProvider: time);
+
+        var runTask = await EstablishAsync(session, conn, bgpConfig, time);
+        Assert.True(session.IsEstablished, "session must reach Established");
+
+        // Wait for the initial route dump to finish (OPEN, KEEPALIVE, UPDATE) so the refresh below
+        // is what grabs the lock, not the dump.
+        for (var i = 0; i < 200 && conn.Sent.Count < 3; i++)
+        {
+            time.Advance(TimeSpan.FromMilliseconds(50));
+            await Task.Delay(2);
+        }
+        Assert.True(conn.Sent.Count >= 3, "initial route dump must have been sent");
+
+        // Freeze writes, then start a refresh — its withdraw UPDATE acquires _sendLock and parks
+        // inside WriteAsync: the slow-peer holder.
+        conn.BlockWrites();
+        var refreshTask = Task.Run(() => session.RefreshRoutesAsync());
+        await conn.WriteEntered.WaitAsync(TimeSpan.FromSeconds(5));
+
+        // Keepalive ticks queue on _sendLock — the #341 waiter (no token of its own). Two
+        // interval-steps with real-time pauses between them guarantee the tick fires (a single
+        // Advance can land exactly on the timer's due instant) and the send attempt parks.
+        for (var i = 0; i < 2; i++)
+        {
+            time.Advance(TimeSpan.FromSeconds(3));
+            await Task.Delay(50);
+        }
+
+        // Dispose mid-wait: cancels _cts, then disposes the semaphore. Pre-fix the waiter is
+        // never woken and runTask never completes; post-fix the wait unwinds on the session token.
+        session.Dispose();
+
+        var completed = await Task.WhenAny(runTask, Task.Delay(TimeSpan.FromSeconds(5)));
+        Assert.Same(runTask, completed); // RED pre-fix: the 5s timeout elapses instead
+
+        // Cleanup: release the holder — its Release() on the disposed semaphore is swallowed by
+        // SendMessageAsync's finally, and the refresh unwinds as a best-effort failure.
+        conn.UnblockWrites();
+        try { await refreshTask.WaitAsync(TimeSpan.FromSeconds(5)); } catch { /* best effort */ }
     }
 }
