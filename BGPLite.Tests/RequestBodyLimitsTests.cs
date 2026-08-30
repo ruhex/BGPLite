@@ -137,6 +137,48 @@ public class RequestBodyLimitsTests
         Assert.Equal("{\"ip\":\"1.2.3.4\"}", body);
     }
 
+    /// <summary>
+    /// #358 review (hardens #257): a per-read deadline restarts on every byte — a client trickling
+    /// one byte per window retained its slot indefinitely. The deadline must be TOTAL for the
+    /// body. This stream yields one byte every 100 ms forever; with a 500 ms total budget the read
+    /// must 408 by ~T+0.5s, not keep pace forever. The outer 5s guard doubles as the red guard
+    /// against the per-read implementation.
+    /// </summary>
+    [Fact]
+    public async Task TrickleBody_OneBytePerWindow_KilledByTotalDeadline()
+    {
+        using var input = new TrickleStream(byteInterval: TimeSpan.FromMilliseconds(100));
+
+        var (body, error) = await ManagementApi
+            .ReadBoundedBodyAsync(input, maxBytes: 1024, readTimeout: TimeSpan.FromMilliseconds(500))
+            .WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Null(body);
+        Assert.NotNull(error);
+        Assert.Equal(408, error!.StatusCode);
+    }
+
+    /// <summary>Endless one-byte trickle — each individual read is well inside any per-read window.</summary>
+    private sealed class TrickleStream(TimeSpan byteInterval) : Stream
+    {
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => long.MaxValue;
+        public override long Position { get => 0; set => throw new NotSupportedException(); }
+        public override void Flush() { }
+        public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        public override async Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken)
+        {
+            await Task.Delay(byteInterval, cancellationToken);
+            buffer[offset] = (byte)'x';
+            return 1;
+        }
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+    }
+
     /// <summary>A stream whose ReadAsync never completes — the slow-drip attacker's socket.</summary>
     private sealed class NeverCompletingStream : Stream
     {

@@ -165,8 +165,9 @@ For section-by-section RFC conformance status, see `RFC_COMPLIANCE.md` (2026-07-
 - **Decision:** a malformed inbound UPDATE never tears down the session, in both reject classes:
   (a) a frame-level `BgpParseException` with an Update Message Error code (body unparseable, e.g.
   truncated NLRI — the D2 case), and (b) a `BgpNotificationException(3, …)` from the attribute
-  pipeline (malformed/missing mandatory attributes, duplicate-first-wins, AS4 reconstruction — and
-  unrecognized **well-known** attributes). The message is rejected (`UpdateRejected`), the session
+  pipeline (malformed/missing mandatory attributes, AS4 reconstruction — and unrecognized
+  **well-known** attributes; duplicate attributes are NOT a rejection: per RFC 7606 §3(g) later
+  occurrences are discarded, the first one keeps processing). The message is rejected (`UpdateRejected`), the session
   stays Established, and no NOTIFICATION is sent.
 - **Context:** RFC baseline — RFC 4271 §6.3 prescribes NOTIFICATION + session reset for these
   errors, and RFC 7606 revises only part of the space toward treat-as-withdraw: malformed/missing
