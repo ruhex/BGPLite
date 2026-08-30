@@ -117,7 +117,9 @@ public class BgpSessionRfc6793Tests
 
         Assert.Equal(BgpConstants.Error.UpdateMessageError, ex.ErrorCode);
         Assert.Equal(BgpConstants.SubError.InvalidNextHopAttribute, ex.SubErrorCode);
-        Assert.Contains(why is "self" ? "own address" : why, ex.Message);
+        // 255.255.255.255 lands in the 240/4 bucket of the validator's message.
+        var expected = why switch { "self" => "own address", "broadcast" => "reserved", _ => why };
+        Assert.Contains(expected, ex.Message);
     }
 
     [Fact]
