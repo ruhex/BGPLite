@@ -17,6 +17,13 @@ public sealed class RouteTable
 {
     private readonly ConcurrentDictionary<(uint Prefix, byte Length), Entry> _routes = new();
 
+    // #343: maintained count — every successful mutation adjusts it exactly once (1:1 with the
+    // dictionary transition), so Count is an O(1) Volatile.Read instead of ConcurrentDictionary.Count,
+    // which acquires ALL lock strips. That read ran twice per inbound UPDATE on the session read
+    // loops, racing every writer. Transiently approximate only within a concurrent-mutation window
+    // (adjust happens after the dictionary op); exact whenever no mutation is in flight.
+    private int _count;
+
     /// <summary>
     /// A stored route plus the object that installed it. A <c>record struct</c> so the generated
     /// structural equality gives <see cref="RemoveOwnedBy"/> its compare-and-remove: both the
@@ -24,7 +31,9 @@ public sealed class RouteTable
     /// </summary>
     private readonly record struct Entry(Route Route, object? Owner);
 
-    public int Count => _routes.Count;
+    /// <summary>Current number of routes — O(1) via the maintained counter (#343). Transiently
+    /// approximate under concurrent mutation; exact when quiescent.</summary>
+    public int Count => Volatile.Read(ref _count);
 
     /// <summary>Installs a route with no owner — startup seeding and tests. Nobody can remove it via <see cref="RemoveOwnedBy"/>.</summary>
     public bool AddOrUpdate(Route route) => AddOrUpdate(route, owner: null);
@@ -38,19 +47,38 @@ public sealed class RouteTable
     {
         // #85: avoid ConcurrentDictionary.AddOrUpdate's closure allocations (two delegate lambdas
         // per call). The try-pattern is allocation-free and equivalent: TryAdd for the new-key
-        // case, indexer for the update case.
+        // case, TryUpdate for the replace case.
+        // #346 (CodeRabbit review): a plain indexer for the replace case is NOT count-safe —
+        // TryAdd returning false does not guarantee the key still exists by the write; a
+        // concurrent remove in that window let the indexer re-insert the entry without
+        // incrementing _count, drifting it permanently (negative after enough removals). The CAS
+        // pair keeps the 1:1 transition invariant: TryAdd wins the new-key transition (+1);
+        // TryGetValue+TryUpdate wins a true replace (±0) — TryUpdate succeeds only against the
+        // value just read, so a key that vanished (or was replaced) in between loops back to
+        // TryAdd, which then increments. Entry's record-struct value equality is fine here:
+        // TryUpdate success merely proves the key was present, which is all ±0 needs.
         var entry = new Entry(route, owner);
-        if (!_routes.TryAdd(route.Key, entry))
+        while (true)
         {
-            _routes[route.Key] = entry;
-            return false;
+            if (_routes.TryAdd(route.Key, entry))
+            {
+                Interlocked.Increment(ref _count);
+                return true;
+            }
+            if (_routes.TryGetValue(route.Key, out var existing) &&
+                _routes.TryUpdate(route.Key, entry, existing))
+                return false; // replaced an entry that was still present — no count transition
         }
-        return true;
     }
 
     /// <summary>Unconditional removal, regardless of owner — administrative paths only.</summary>
-    public bool Remove(uint prefix, byte length) =>
-        _routes.TryRemove((prefix, length), out _);
+    public bool Remove(uint prefix, byte length)
+    {
+        var removed = _routes.TryRemove((prefix, length), out _);
+        if (removed)
+            Interlocked.Decrement(ref _count);
+        return removed;
+    }
 
     /// <summary>
     /// Removes the route at <paramref name="prefix"/>/<paramref name="length"/> only if
@@ -73,8 +101,11 @@ public sealed class RouteTable
         if (!_routes.TryGetValue(key, out var entry) || !ReferenceEquals(entry.Owner, owner))
             return false;
 
-        return ((ICollection<KeyValuePair<(uint Prefix, byte Length), Entry>>)_routes)
+        var removed = ((ICollection<KeyValuePair<(uint Prefix, byte Length), Entry>>)_routes)
             .Remove(new KeyValuePair<(uint Prefix, byte Length), Entry>(key, entry));
+        if (removed)
+            Interlocked.Decrement(ref _count);
+        return removed;
     }
 
     /// <summary>
@@ -104,6 +135,8 @@ public sealed class RouteTable
             if (((ICollection<KeyValuePair<(uint Prefix, byte Length), Entry>>)_routes).Remove(pair))
                 removed++;
         }
+        if (removed > 0)
+            Interlocked.Add(ref _count, -removed);
         return removed;
     }
 
@@ -112,7 +145,9 @@ public sealed class RouteTable
 
     public IReadOnlyList<Route> GetAll()
     {
-        var routes = new List<Route>(_routes.Count);
+        // #346: clamp the capacity hint — a hint must never turn a hypothetical negative count
+        // into List<Route>(negative) throwing ArgumentOutOfRangeException on the API read path.
+        var routes = new List<Route>(Math.Max(0, Count));
         foreach (var entry in _routes.Values)
             routes.Add(entry.Route);
         return routes;
@@ -145,6 +180,13 @@ public sealed class RouteTable
         }
     }
 
-    public void Clear() =>
-        _routes.Clear();
+    public void Clear()
+    {
+        // TryRemove loop rather than _routes.Clear(): each successful removal decrements the
+        // maintained counter, keeping the 1:1 mutation↔transition invariant even when a writer
+        // adds concurrently with the clear (#343).
+        foreach (var key in _routes.Keys)
+            if (_routes.TryRemove(key, out _))
+                Interlocked.Decrement(ref _count);
+    }
 }
