@@ -50,11 +50,20 @@ public sealed class RipeStatProvider
 
         foreach (var element in prefixes.EnumerateArray())
         {
-            var cidr = element.GetString()!;
-            var slash = cidr.IndexOf('/');
-            var ip = IPAddress.Parse(cidr[..slash]);
-            var length = byte.Parse(cidr[(slash + 1)..]);
-            var prefix = BgpConstants.IPAddressToUint(ip);
+            var cidr = element.GetString();
+            // #319: the canonical parser every other prefix input path uses (#236): host-bit
+            // masking, /0 rejection, length 1..32, IPv4-only. RIS collectors return what third
+            // parties ANNOUNCED — non-canonical NLRI ("10.0.0.1/8") must not reach the route
+            // table under a corrupt key, and "0.0.0.0/0" must not become a default-route leak
+            // (#162 closed the same hole for URL sources). Skip + warn, like stored custom
+            // prefixes; also covers a null/garbage element without throwing (previously NRE/
+            // FormatException took the whole ASN fetch down).
+            if (!PrefixCidr.TryParse(cidr, out var prefix, out var length))
+            {
+                _logger.LogWarning("AS{Asn}: RIPEstat returned a non-canonical prefix '{Cidr}'; skipped", asn, cidr);
+                continue;
+            }
+
             result.Add((prefix, length));
         }
 
