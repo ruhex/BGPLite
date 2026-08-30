@@ -123,19 +123,39 @@ public class UserSourceCacheTests
     [Fact]
     public async Task OperationCanceled_Propagates_And_Is_Not_Negative_Cached()
     {
-        // #114: cancellation must propagate and must not be recorded as a negative entry.
+        // #114: CALLER cancellation must propagate and must not be recorded as a negative entry.
+        // #320 refined the discriminator: the cache rethrows only OCEs whose CALLER token is
+        // cancelled — a foreign-token OCE (the per-fetch budget) is a load failure and IS
+        // negative-cached (see ForeignTokenOCE_IsAFailure_NegativeCachedAndThrottled). The
+        // faithful simulation is cancellation arriving WHILE the fetch is in flight (a
+        // pre-cancelled token never even passes the gate).
         var cache = new UserSourceCache();
-        var f = new Fetcher { Throw = new OperationCanceledException() };
+        var cts = new CancellationTokenSource();
+        var calls = 0;
 
-        await Assert.ThrowsAsync<OperationCanceledException>(
-            () => cache.GetOrLoadAsync("https://example.com/l", "src", f.Invoke, default));
-        Assert.Equal(1, f.Calls);
+        static async Task<IReadOnlyList<(uint Prefix, byte Length)>> Parked(CancellationToken ct)
+        {
+            await Task.Delay(Timeout.InfiniteTimeSpan, ct);
+            return [];
+        }
+
+        Task<IReadOnlyList<(uint Prefix, byte Length)>> Invoke(CancellationToken ct)
+        {
+            calls++;
+            return Parked(ct);
+        }
+
+        var fetch = Task.Run(() => cache.GetOrLoadAsync("https://example.com/l", "src", Invoke, cts.Token));
+        await Task.Delay(50);   // let the caller enter the parked loader
+        cts.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => fetch);
+        Assert.Equal(1, calls);
 
         // No negative cache → the next call reaches the fetcher again.
-        f.Throw = null;
-        f.OnSuccess = () => P((1u, 1));
+        var f = new Fetcher { OnSuccess = () => P((1u, 1)) };
         var served = await cache.GetOrLoadAsync("https://example.com/l", "src", f.Invoke, default);
-        Assert.Equal(2, f.Calls);
+        Assert.Equal(1, f.Calls); // a fresh fetcher ran once more
         Assert.Single(served);
     }
 
@@ -216,5 +236,29 @@ public class UserSourceCacheTests
         var a = await cache.GetOrLoadAsync("https://example.com/a", "a", ct => Load("a"), CancellationToken.None);
         Assert.NotNull(a);
         lock (calls) Assert.Equal(2, calls["a"]); // evicted earlier → refetched
+    }
+
+    /// <summary>
+    /// #320: a fetch budget fires as a foreign-token OCE (live caller token). It is a load
+    /// FAILURE, not teardown: it still throws (the caller's #342 boundary treats it as a
+    /// per-source failure), it is negative-cached, and the negative entry throttles the next
+    /// call — no loader invocation, no re-paying the budget.
+    /// </summary>
+    [Fact]
+    public async Task ForeignTokenOCE_IsAFailure_NegativeCachedAndThrottled()
+    {
+        var cache = new UserSourceCache(negativeTtl: TimeSpan.FromSeconds(5));
+        var f = new Fetcher { Throw = new OperationCanceledException() }; // no live caller token attached
+
+        // First call: the budget fired → OCE propagates (failure semantics), entry negative-cached.
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => cache.GetOrLoadAsync("https://example.com/l", "src", f.Invoke, CancellationToken.None));
+
+        // Second call within the negative TTL: throttled — the loader is NOT invoked again and
+        // the negative entry reports "no prefixes" instead of re-paying the budget.
+        var second = await cache.GetOrLoadAsync("https://example.com/l", "src", f.Invoke, CancellationToken.None);
+
+        Assert.Empty(second);
+        Assert.Equal(1, f.Calls);
     }
 }

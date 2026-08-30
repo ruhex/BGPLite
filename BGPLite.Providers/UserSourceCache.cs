@@ -79,7 +79,15 @@ internal sealed class UserSourceCache
             {
                 prefixes = await loadAsync(ct);
             }
-            catch (OperationCanceledException) { throw; }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                // #114: CALLER-initiated cancellation always propagates and is never cached — it
+                // is teardown, not a property of the source. A foreign-token OCE (e.g. the #320
+                // per-fetch budget's linked CTS firing on a live caller token) falls through to
+                // the failure handling below instead: stale-on-failure serve if possible, else a
+                // brief negative-cache so repeated refreshes do not re-pay the full budget.
+                throw;
+            }
             catch (Exception ex)
             {
                 // Serve the last good copy if we have one (regardless of its age).
