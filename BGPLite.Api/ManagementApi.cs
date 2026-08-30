@@ -50,7 +50,17 @@ public sealed class ManagementApi : IHostedService, IDisposable
     /// </summary>
     private const int DefaultInflightCap = 64;
     private readonly SemaphoreSlim _inflightCap = new(DefaultInflightCap);
-    private readonly List<Task> _inflightHandlers = new();
+    // #258: in-flight tracking is a COUNT plus an idle Task (completed whenever the count is 0),
+    // not a List<Task> — the #248 design appended every handler and never removed it, so each
+    // completed request leaked its Task (and its exception, if faulted) for the process lifetime
+    // and the drain snapshot grew without bound. StopAsync drains by awaiting the idle task.
+    private readonly object _inflightSync = new();
+    private int _inflightCount;
+    private TaskCompletionSource? _inflightActive;
+    private Task _inflightIdle = Task.CompletedTask;
+
+    /// <summary>Currently in-flight request handlers (#258) — bounded by the cap, zero when idle.</summary>
+    internal int InflightRequestCount { get { lock (_inflightSync) return _inflightCount; } }
     private HttpListener? _listener;
     private Task? _listenTask;
     private readonly CancellationTokenSource _cts = new();
@@ -210,12 +220,14 @@ public sealed class ManagementApi : IHostedService, IDisposable
         }
 
         // Drain in-flight handlers, but bounded: 10 s after cancellation is enough for a response
-        // write or an orderly OCE unwind, and short of the host's 30 s shutdown grace.
-        Task[] pending;
-        lock (_inflightHandlers) pending = _inflightHandlers.ToArray();
-        if (pending.Length > 0)
+        // write or an orderly OCE unwind, and short of the host's 30 s shutdown grace. The drain
+        // awaits the in-flight idle task (#258) — it completes when the last handler's finally
+        // runs, so no per-request bookkeeping outlives the request.
+        Task idle;
+        lock (_inflightSync) idle = _inflightIdle;
+        if (!idle.IsCompleted)
         {
-            try { await Task.WhenAny(Task.WhenAll(pending), Task.Delay(TimeSpan.FromSeconds(10), cancellationToken)); }
+            try { await Task.WhenAny(idle, Task.Delay(TimeSpan.FromSeconds(10), cancellationToken)); }
             catch { /* host grace elapsed — proceed */ }
         }
 
@@ -251,10 +263,20 @@ public sealed class ManagementApi : IHostedService, IDisposable
                 // #238: acquire an in-flight slot before spawning so the default posture is
                 // bounded even when the operator has not enabled the #119 concurrency limiter.
                 await _inflightCap.WaitAsync(ct);
+                // Register BEFORE spawning: the handler's finally decrements, and a handler that
+                // completes before this thread runs would otherwise drive the count negative.
+                lock (_inflightSync)
+                {
+                    _inflightCount++;
+                    if (_inflightCount == 1)
+                    {
+                        _inflightActive = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                        _inflightIdle = _inflightActive.Task;
+                    }
+                }
                 var accepted = ctx;
                 ctx = null; // ownership transferred to the handler task
-                var handler = HandleWithInflightReleaseAsync(accepted);
-                lock (_inflightHandlers) _inflightHandlers.Add(handler);
+                _ = HandleWithInflightReleaseAsync(accepted);
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested) { break; }
             catch (HttpListenerException) when (ct.IsCancellationRequested) { break; }
@@ -301,6 +323,18 @@ public sealed class ManagementApi : IHostedService, IDisposable
             // Tolerate teardown racing the StopAsync drain (e.g. direct Dispose without StopAsync).
             try { _inflightCap.Release(); }
             catch (ObjectDisposedException) { /* cap already disposed */ }
+            // #258: a handler leaving the in-flight set completes the idle task when it was the
+            // last one — that is what StopAsync's bounded drain awaits.
+            lock (_inflightSync)
+            {
+                _inflightCount--;
+                if (_inflightCount == 0)
+                {
+                    _inflightActive?.TrySetResult();
+                    _inflightActive = null;
+                    _inflightIdle = Task.CompletedTask;
+                }
+            }
         }
     }
 
