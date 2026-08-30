@@ -198,4 +198,41 @@ public class RouteTableTests
         Assert.Equal(expected, table.GetAll().Count);   // dictionary truth
         Assert.Equal(expected, table.Count);            // maintained counter converged to it
     }
+
+    /// <summary>
+    /// #346 (CodeRabbit): TryAdd returning false does NOT guarantee the key still exists at the
+    /// replacement write — a concurrent remove in that window used to re-insert the entry via the
+    /// plain indexer without incrementing the maintained count, drifting it permanently (negative
+    /// after enough removals). Writers and removers hammering the SAME small key set hit that
+    /// window constantly. Interleaving-dependent, so a deterministic red is impossible — this is
+    /// the statistical catcher: after drain the counter must equal the dictionary's contents.
+    /// </summary>
+    [Fact]
+    public async Task Count_SameKeyConcurrentAddReplaceRemove_ExactAfterDrain()
+    {
+        var table = new RouteTable();
+        const int keys = 16, iterations = 3000, writers = 4, removers = 4;
+
+        var workers = new List<Task>();
+        for (var w = 0; w < writers; w++)
+            workers.Add(Task.Run(() =>
+            {
+                for (var i = 0; i < iterations; i++)
+                {
+                    var prefix = (uint)(0x0A000000 + i % keys);
+                    table.AddOrUpdate(new Route { Prefix = prefix, PrefixLength = 24, NextHop = (uint)i });
+                }
+            }));
+        for (var r = 0; r < removers; r++)
+            workers.Add(Task.Run(() =>
+            {
+                for (var i = 0; i < iterations; i++)
+                    table.Remove((uint)(0x0A000000 + i % keys), 24);
+            }));
+        await Task.WhenAll(workers);
+
+        var actual = table.GetAll().Count;
+        Assert.InRange(actual, 0, keys);   // sanity: some subset of the key set survived
+        Assert.Equal(actual, table.Count); // counter == dictionary truth (no drift, never negative)
+    }
 }

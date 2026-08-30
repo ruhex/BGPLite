@@ -47,15 +47,28 @@ public sealed class RouteTable
     {
         // #85: avoid ConcurrentDictionary.AddOrUpdate's closure allocations (two delegate lambdas
         // per call). The try-pattern is allocation-free and equivalent: TryAdd for the new-key
-        // case, indexer for the update case.
+        // case, TryUpdate for the replace case.
+        // #346 (CodeRabbit review): a plain indexer for the replace case is NOT count-safe —
+        // TryAdd returning false does not guarantee the key still exists by the write; a
+        // concurrent remove in that window let the indexer re-insert the entry without
+        // incrementing _count, drifting it permanently (negative after enough removals). The CAS
+        // pair keeps the 1:1 transition invariant: TryAdd wins the new-key transition (+1);
+        // TryGetValue+TryUpdate wins a true replace (±0) — TryUpdate succeeds only against the
+        // value just read, so a key that vanished (or was replaced) in between loops back to
+        // TryAdd, which then increments. Entry's record-struct value equality is fine here:
+        // TryUpdate success merely proves the key was present, which is all ±0 needs.
         var entry = new Entry(route, owner);
-        if (!_routes.TryAdd(route.Key, entry))
+        while (true)
         {
-            _routes[route.Key] = entry;
-            return false;
+            if (_routes.TryAdd(route.Key, entry))
+            {
+                Interlocked.Increment(ref _count);
+                return true;
+            }
+            if (_routes.TryGetValue(route.Key, out var existing) &&
+                _routes.TryUpdate(route.Key, entry, existing))
+                return false; // replaced an entry that was still present — no count transition
         }
-        Interlocked.Increment(ref _count);
-        return true;
     }
 
     /// <summary>Unconditional removal, regardless of owner — administrative paths only.</summary>
@@ -132,7 +145,9 @@ public sealed class RouteTable
 
     public IReadOnlyList<Route> GetAll()
     {
-        var routes = new List<Route>(Count);
+        // #346: clamp the capacity hint — a hint must never turn a hypothetical negative count
+        // into List<Route>(negative) throwing ArgumentOutOfRangeException on the API read path.
+        var routes = new List<Route>(Math.Max(0, Count));
         foreach (var entry in _routes.Values)
             routes.Add(entry.Route);
         return routes;
