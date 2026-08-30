@@ -166,4 +166,55 @@ public class UserSourceCacheTests
 
         Assert.Equal(2, f.Calls); // negative entry expired → refetched
     }
+
+    /// <summary>
+    /// #261: unique peer-supplied URLs must not grow the cache without bound — port of the #165
+    /// cap. Inserting more distinct URLs than maxCacheEntries keeps the tracked count at the cap.
+    /// </summary>
+    [Fact]
+    public async Task UniqueUrls_BeyondCap_KeepCacheBounded()
+    {
+        var cache = new UserSourceCache(maxCacheEntries: 5);
+        var f = new Fetcher { OnSuccess = () => P((0x0A000000u, (byte)8)) };
+
+        for (var i = 0; i < 12; i++)
+            await cache.GetOrLoadAsync($"https://example.com/list-{i}", "src", f.Invoke, CancellationToken.None);
+
+        Assert.Equal(5, cache.TrackedCount);
+    }
+
+    /// <summary>
+    /// #261: the sweep drops the OLDEST entries (expired-first, then by CachedAt), so a fresh
+    /// entry survives and an evicted one refetches on next use.
+    /// </summary>
+    [Fact]
+    public async Task Eviction_DropsOldest_First_FreshEntriesSurvive()
+    {
+        var cache = new UserSourceCache(maxCacheEntries: 3);
+        var calls = new Dictionary<string, int>();
+        Task<IReadOnlyList<(uint Prefix, byte Length)>> Load(string url) => Task.Run(async () =>
+        {
+            lock (calls) calls[url] = calls.TryGetValue(url, out var c) ? c + 1 : 1;
+            await Task.Yield();
+            return P((0x0A000000u, (byte)8));
+        });
+
+        await cache.GetOrLoadAsync("https://example.com/a", "a", ct => Load("a"), CancellationToken.None);
+        await cache.GetOrLoadAsync("https://example.com/b", "b", ct => Load("b"), CancellationToken.None);
+        await cache.GetOrLoadAsync("https://example.com/c", "c", ct => Load("c"), CancellationToken.None);
+        await cache.GetOrLoadAsync("https://example.com/d", "d", ct => Load("d"), CancellationToken.None); // evicts "a"
+
+        Assert.Equal(3, cache.TrackedCount);
+        lock (calls) Assert.Equal(1, calls["d"]); // fresh entry is cached
+        lock (calls) Assert.Equal(1, calls["b"]); // survivor served from cache below
+        lock (calls) Assert.Equal(1, calls["c"]);
+
+        var b = await cache.GetOrLoadAsync("https://example.com/b", "b", ct => Load("b"), CancellationToken.None);
+        Assert.NotNull(b);
+        lock (calls) Assert.Equal(1, calls["b"]); // still cached — no refetch
+
+        var a = await cache.GetOrLoadAsync("https://example.com/a", "a", ct => Load("a"), CancellationToken.None);
+        Assert.NotNull(a);
+        lock (calls) Assert.Equal(2, calls["a"]); // evicted earlier → refetched
+    }
 }
