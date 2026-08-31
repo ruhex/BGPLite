@@ -38,6 +38,9 @@ public sealed class ManagementApi : IHostedService, IDisposable
     // #256: fires once when a trusted proxy yields no usable forwarding header — all its clients
     // then share one identity (rate-limit bucket + /api/me data), which operators should see.
     private int _warnedProxyWithoutClientIp;
+    // #266 item 6: the body-size cap is read on every mutating request (ReadBodyAsync) — swapped
+    // atomically so a reload applies to subsequent requests instead of requiring a restart.
+    private long _maxRequestBodyBytes;
     private readonly BgpMetrics _metrics;
     // #263: required, not optional. Each of these was a silent feature switch: without
     // _sessionManager a peer edited in the UI was persisted but never pushed to its live session,
@@ -111,6 +114,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
             ? CreateConcurrencyLimiter(limitCfg) : null;
         _corsAllowedOrigins = config.CorsAllowedOrigins;
         _trustXRealIp = config.TrustXRealIp ? 1 : 0;
+        _maxRequestBodyBytes = config.MaxRequestBodyBytes;
     }
 
     /// <summary>
@@ -136,13 +140,14 @@ public sealed class ManagementApi : IHostedService, IDisposable
         // Swap every reloadable field atomically. A request that has already captured the old
         // references into locals finishes against them; the next request reads the new ones.
         // NOTE (#321 item 8): _config itself is NOT swapped — request-path code that must observe
-        // reloads reads the derived fields above; the fields still reading _config (e.g.
-        // MaxRequestBodyBytes, RipeStat lists) are restart-required, tracked as #266 item 6.
+        // reloads reads the derived fields swapped below; the remaining _config readers (RipeStat
+        // lists, CustomPrefixCommunity) are restart-required (#266 item 6 covered MaxRequestBodyBytes).
         var oldRateLimiter = Interlocked.Exchange(ref _rateLimiter, rateLimiter);
         var oldConcurrencyLimiter = Interlocked.Exchange(ref _concurrencyLimiter, concurrencyLimiter);
         Interlocked.Exchange(ref _trustedProxyNetworks, trusted);
         Interlocked.Exchange(ref _corsAllowedOrigins, newConfig.CorsAllowedOrigins);
         Interlocked.Exchange(ref _trustXRealIp, newConfig.TrustXRealIp ? 1 : 0);
+        Interlocked.Exchange(ref _maxRequestBodyBytes, newConfig.MaxRequestBodyBytes);
 
         // Old limiters cannot be disposed here — a concurrent HandleAsync may still be mid-acquire
         // on them (#137). Park them for StopAsync/Dispose, which run after the in-flight drain.
@@ -153,12 +158,13 @@ public sealed class ManagementApi : IHostedService, IDisposable
         }
 
         _logger.LogInformation(
-            "Soft config reloaded: trustedProxies={TrustedProxyCount}, corsOrigins={CorsOriginCount}, rateLimit={RateLimitEnabled}, concurrencyLimit={ConcurrencyEnabled}, trustXRealIp={TrustXRealIp}",
+            "Soft config reloaded: trustedProxies={TrustedProxyCount}, corsOrigins={CorsOriginCount}, rateLimit={RateLimitEnabled}, concurrencyLimit={ConcurrencyEnabled}, trustXRealIp={TrustXRealIp}, maxRequestBodyBytes={MaxRequestBodyBytes}",
             trusted.Count,
             newConfig.CorsAllowedOrigins?.Count ?? 0,
             rateLimiter is not null,
             concurrencyLimiter is not null,
-            newConfig.TrustXRealIp);
+            newConfig.TrustXRealIp,
+            newConfig.MaxRequestBodyBytes);
     }
 
     /// <summary>
@@ -184,6 +190,9 @@ public sealed class ManagementApi : IHostedService, IDisposable
 
     /// <summary>Whether a per-client rate limiter is currently active — exposed for hot-reload tests.</summary>
     internal bool IsRateLimitingEnabled => Volatile.Read(ref _rateLimiter) is not null;
+
+    /// <summary>Live body-size cap (<see cref="AppConfig.MaxRequestBodyBytes"/>) — exposed for hot-reload tests (#266 item 6).</summary>
+    internal long MaxRequestBodyBytesLive => Volatile.Read(ref _maxRequestBodyBytes);
 
     /// <summary>Whether a global concurrency limiter is currently active — exposed for hot-reload tests.</summary>
     internal bool IsConcurrencyLimitEnabled => Volatile.Read(ref _concurrencyLimiter) is not null;
@@ -574,7 +583,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
     /// </summary>
     private async Task<(string? Body, ApiResponse? Error)> ReadBodyAsync(HttpListenerContext ctx)
     {
-        var maxBytes = _config.MaxRequestBodyBytes;
+        var maxBytes = Volatile.Read(ref _maxRequestBodyBytes);
 
         // Fast path: Content-Length present and already over the cap → reject without reading.
         if (ctx.Request.ContentLength64 > maxBytes)
@@ -830,7 +839,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
 
         _logger.LogInformation("CreatePeer deserialized: AsnLists={Lists}, CustomPrefixes={Prefixes}, CustomAsns={Asns}",
             SanitizeForLog(string.Join(",", asnLists)), SanitizeForLog(string.Join(",", data.CustomPrefixes ?? [])),
-            string.Join(",", data.CustomAsns ?? []));
+            SanitizeForLog(string.Join(",", data.CustomAsns ?? [])));
 
         if (data.CustomPrefixes is not null)
         {

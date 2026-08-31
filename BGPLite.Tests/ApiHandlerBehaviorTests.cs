@@ -1,4 +1,6 @@
 using System.Net;
+using System.Text;
+using System.Text.Json;
 using BGPLite.Api;
 using BGPLite.Configuration;
 using BGPLite.Contracts;
@@ -13,8 +15,9 @@ namespace BGPLite.Tests;
 
 /// <summary>
 /// #266 handler-level behavior that needs a real listener: the txt prefix export must not be
-/// double-serialized (item 1), the CORS preflight must advertise PATCH (item 2), and OPTIONS
-/// preflights consume the client's rate bucket instead of bypassing it (item 7).
+/// double-serialized (item 1), the CORS preflight must advertise PATCH (item 2), OPTIONS
+/// preflights consume the client's rate bucket instead of bypassing it (item 7), and a reloaded
+/// MaxRequestBodyBytes applies to subsequent requests without a restart (item 6).
 /// </summary>
 public sealed class ApiHandlerBehaviorTests : IDisposable
 {
@@ -117,6 +120,36 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
         third.Headers.Add("Origin", "http://example.com");
         using var limited = await _client.SendAsync(third);
         Assert.Equal(HttpStatusCode.TooManyRequests, limited.StatusCode);   // RED pre-fix: 204 forever
+    }
+
+    [Fact]
+    public async Task MaxRequestBodyBytes_HotReloaded_AppliesToSubsequentRequests()
+    {
+        var config = new AppConfig { Bgp = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1" } };
+        _port = await StartAsync(config);
+        _client = new HttpClient();
+
+        // ~4 KB body — comfortably under the 1 MiB startup cap. The padding rides in an unknown
+        // JSON field (ignored by deserialization) so the request stays semantically valid while
+        // the reloaded cap rejects it by size alone.
+        var body = JsonSerializer.Serialize(new Dictionary<string, object>
+        {
+            ["ip"] = "198.51.100.5",
+            ["asn"] = 65010,
+            ["description"] = "hot-reload probe",
+            ["padding"] = new string('x', 4096)
+        });
+        using (var ok = await _client.PostAsync($"http://127.0.0.1:{_port}/api/peers",
+            new StringContent(body, Encoding.UTF8, "application/json")))
+            Assert.Equal(HttpStatusCode.OK, ok.StatusCode);
+
+        // Shrink the cap below the body size; the NEXT request is rejected with 413 — no restart.
+        _api!.ApplyConfig(new AppConfig { Bgp = config.Bgp, ApiPort = _port, MaxRequestBodyBytes = 1024 });
+
+        using var tooLarge = await _client.PostAsync($"http://127.0.0.1:{_port}/api/peers",
+            new StringContent(body, Encoding.UTF8, "application/json"));
+        // RED pre-fix: ReadBodyAsync kept reading the startup _config, so the same POST returned 200.
+        Assert.Equal(HttpStatusCode.RequestEntityTooLarge, tooLarge.StatusCode);
     }
 
     private static int FreeTcpPort()
