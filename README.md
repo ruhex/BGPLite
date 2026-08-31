@@ -140,6 +140,7 @@ DefaultPrefixSource: ru        # served to unconfigured/auto-registered peers
 2. The peer connects over BGP to port 179.
 3. On session establishment the server resolves the peer's subscription:
    - known peer — fetches prefixes for its subscriptions (cached) plus custom prefixes and advertises them;
+     a custom prefix overrides the source prefixes it covers: covered more-specifics are not sent (#220);
    - unknown peer — auto-registers it and advertises the default prefix source.
 4. Peer status and session timestamps are updated in the store.
 
