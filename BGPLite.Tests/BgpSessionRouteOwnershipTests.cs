@@ -666,10 +666,24 @@ public class BgpSessionRouteOwnershipTests
         aConn.EnqueueFrame(AnnounceFrame(8, 0x0A));
         await SettleAsync(aConn, () => routeTable.Count == 1);
 
-        // B takes the SAME prefix over — A no longer owns it.
-        bConn.EnqueueFrame(AnnounceFrame(8, 0x0A));
-        await SettleAsync(bConn, () => routeTable.Get(TenSlashEight, 8) is not null);
-        await Task.Delay(50);   // let the ownership-lost notification land
+        // B takes the SAME prefix over — A no longer owns it. #377 review: await the
+        // ownership-loss callback deterministically instead of a fixed delay.
+        var aLostOwnership = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        void OnLost(object owner, (uint Prefix, byte Length) key)
+        {
+            if (ReferenceEquals(owner, a) && key.Prefix == TenSlashEight)
+                aLostOwnership.TrySetResult();
+        }
+        routeTable.EntryOwnershipLost += OnLost;
+        try
+        {
+            bConn.EnqueueFrame(AnnounceFrame(8, 0x0A));
+            await aLostOwnership.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        }
+        finally
+        {
+            routeTable.EntryOwnershipLost -= OnLost;
+        }
 
         // A announces a DIFFERENT prefix with cap=1 — pre-fix this tripped the cap (A still
         // counted the taken-over 10/8) and reset A; post-fix A owns only the new prefix.
