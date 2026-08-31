@@ -155,7 +155,6 @@ public sealed class PeerStore : IPeerStore
     {
         using var db = _dbFactory.CreateDbContext();
         return db.Peers.AsNoTracking()
-            .Include(p => p.Communities)
             .Where(p => p.Ip == ip)
             .Select(p => MapToInfo(p))
             .ToList();
@@ -387,11 +386,13 @@ public sealed class PeerStore : IPeerStore
             s => s.SetProperty(p => p.Description, description));
     }
 
-    // AsNoTracking is a read-only-intent marker here — a no-op for this scalar projection (no entities are materialized to track).
+    // AsNoTracking is a read-only-intent marker here — a no-op for this scalar projection (no
+    // entities are materialized to track). #267 item 4: no Include — SelectMany over the
+    // navigation composes in SQL on its own; the Include was redundant load-hint noise.
     public HashSet<uint> GetCommunities(string peerId)
     {
         using var db = _dbFactory.CreateDbContext();
-        return db.Peers.AsNoTracking().Include(p => p.Communities)
+        return db.Peers.AsNoTracking()
             .Where(p => p.Id == peerId)
             .SelectMany(p => p.Communities)
             .Select(c => (uint)c.Community)
@@ -402,7 +403,7 @@ public sealed class PeerStore : IPeerStore
     public HashSet<uint> GetCommunities(string ip, uint asn)
     {
         using var db = _dbFactory.CreateDbContext();
-        return db.Peers.AsNoTracking().Include(p => p.Communities)
+        return db.Peers.AsNoTracking()
             .Where(p => p.Ip == ip && p.Asn == asn)
             .SelectMany(p => p.Communities)
             .Select(c => (uint)c.Community)
@@ -413,7 +414,7 @@ public sealed class PeerStore : IPeerStore
     public HashSet<uint> GetCommunitiesByIp(string ip)
     {
         using var db = _dbFactory.CreateDbContext();
-        return db.Peers.AsNoTracking().Include(p => p.Communities)
+        return db.Peers.AsNoTracking()
             .Where(p => p.Ip == ip)
             .SelectMany(p => p.Communities)
             .Select(c => (uint)c.Community)
