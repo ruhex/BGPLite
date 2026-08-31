@@ -63,8 +63,9 @@ public sealed class BgpSessionFactory : IBgpSessionFactory
         new(connection, peerConfig, _bgpConfig, _routeTable, _routeFilter, _metrics, _sessionLogger,
             // The peer row is upserted as soon as OPEN identifies the peer, so a peer that has never
             // been configured in the UI still shows up there. Previously a lambda hand-wired in
-            // Program.cs and threaded through BgpServer.
-            onPeerIdentified: _peerStore.UpsertPeer,
+            // Program.cs and threaded through BgpServer. Async since #262 — the upsert ran
+            // synchronously on the OPEN-handshake path.
+            onPeerIdentified: (ip, asn) => _peerStore.UpsertPeerAsync(ip, asn),
             peerStore: _peerStore,
             prefixAggregator: _prefixAggregator,
             routeAssembler: _routeAssembler,

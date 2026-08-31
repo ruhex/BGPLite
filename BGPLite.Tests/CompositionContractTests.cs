@@ -246,23 +246,14 @@ public class CompositionContractTests
     {
         public (string Ip, uint Asn) Upserted { get; private set; }
 
-        public void UpsertPeer(string ip, uint asn) => Upserted = (ip, asn);
-        public void UpdateSessionStatus(string ip, uint asn, bool active) { }
-
-        public string CreatePeer(string ip, uint asn, string? description) => throw new NotSupportedException();
-        public void DeletePeer(string id) => throw new NotSupportedException();
-        public PeerInfo? GetPeerByIp(string ip) => throw new NotSupportedException();
-        public PeerInfo? GetPeer(string ip, uint asn) => throw new NotSupportedException();
-        public PeerInfo? GetPeerById(string id) => throw new NotSupportedException();
-        public List<string> GetSubscriptions(string peerId) => throw new NotSupportedException();
-        public List<string> GetCustomPrefixes(string peerId) => throw new NotSupportedException();
-        public List<uint> GetCustomAsns(string peerId) => throw new NotSupportedException();
-        public HashSet<uint> GetCommunities(string peerId) => throw new NotSupportedException();
-        public HashSet<uint> GetCommunities(string ip, uint asn) => throw new NotSupportedException();
-        public void SetCommunities(string peerId, HashSet<uint> communities) => throw new NotSupportedException();
-        public void ClearCommunities(string peerId) => throw new NotSupportedException();
-        public void SetDescription(string id, string description) => throw new NotSupportedException();
-        public PeerRoutingView? LoadPeerRoutingView(string ip, uint asn) => throw new NotSupportedException();
+        public Task UpsertPeerAsync(string ip, uint asn, CancellationToken ct = default)
+        {
+            Upserted = (ip, asn);
+            return Task.CompletedTask;
+        }
+        public Task UpdateSessionStatusAsync(string ip, uint asn, bool active, CancellationToken ct = default) => Task.CompletedTask;
+        public Task<string> CreatePeerAsync(string ip, uint asn, string? description, CancellationToken ct = default) => throw new NotSupportedException();
+        public Task<PeerRoutingView?> LoadPeerRoutingViewAsync(string ip, uint asn, CancellationToken ct = default) => throw new NotSupportedException();
     }
 
     /// <summary>Drops every outbound route, so the filter's effect is unambiguous.</summary>
@@ -270,7 +261,7 @@ public class CompositionContractTests
     {
         private static readonly IReadOnlySet<uint> Empty = new HashSet<uint>();
         public bool AcceptIncoming(Route route, PeerConfig peer) => true;
-        public IReadOnlySet<uint> ResolveOutgoingAllowSet(PeerConfig peer) => Empty;
+        public Task<IReadOnlySet<uint>> ResolveOutgoingAllowSetAsync(PeerConfig peer, CancellationToken ct = default) => Task.FromResult(Empty);
         public bool AcceptOutgoing(Route route, PeerConfig peer, IReadOnlySet<uint> allowSet) => false;
     }
 

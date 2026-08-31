@@ -40,18 +40,18 @@ public class PeerStoreKeyingTests
     }
 
     [Fact]
-    public void Distinct_Asns_From_Same_Ip_Create_Separate_Peer_Records()
+    public async Task Distinct_Asns_From_Same_Ip_Create_Separate_Peer_Records()
     {
         var (store, connection) = NewStore();
         using var conn = connection;
 
-        var idA = store.CreatePeer(SharedIp, 64512, "A");
-        var idB = store.CreatePeer(SharedIp, 64513, "B"); // same source IP, different AS
+        var idA = await store.CreatePeerAsync(SharedIp, 64512, "A");
+        var idB = await store.CreatePeerAsync(SharedIp, 64513, "B"); // same source IP, different AS
 
         Assert.NotEqual(idA, idB);
 
-        var a = store.GetPeer(SharedIp, 64512);
-        var b = store.GetPeer(SharedIp, 64513);
+        var a = await store.GetPeerAsync(SharedIp, 64512);
+        var b = await store.GetPeerAsync(SharedIp, 64513);
         Assert.NotNull(a);
         Assert.NotNull(b);
         Assert.Equal((uint?)64512, a!.Asn);
@@ -59,11 +59,11 @@ public class PeerStoreKeyingTests
         Assert.NotEqual(a.Id, b.Id);
 
         // Resolving by an AS that never connected must NOT return another peer's record.
-        Assert.Null(store.GetPeer(SharedIp, 64599));
+        Assert.Null(await store.GetPeerAsync(SharedIp, 64599));
     }
 
     [Fact]
-    public void Composite_Unique_Index_Rejects_Duplicate_IpAsn()
+    public async Task Composite_Unique_Index_Rejects_Duplicate_IpAsn()
     {
         var (_, connection) = NewStore();
         using var conn = connection;
@@ -86,20 +86,20 @@ public class PeerStoreKeyingTests
     }
 
     [Fact]
-    public void UpdateSessionStatus_Is_Scoped_To_IpAsn()
+    public async Task UpdateSessionStatus_Is_Scoped_To_IpAsn()
     {
         var (store, connection) = NewStore();
         using var conn = connection;
 
-        var idA = store.CreatePeer(SharedIp, 64512, "A");
-        var idB = store.CreatePeer(SharedIp, 64513, "B");
-        store.UpdateSessionStatus(SharedIp, 64512, active: true);
+        var idA = await store.CreatePeerAsync(SharedIp, 64512, "A");
+        var idB = await store.CreatePeerAsync(SharedIp, 64513, "B");
+        await store.UpdateSessionStatusAsync(SharedIp, 64512, active: true);
 
-        Assert.Equal("active", store.GetDbPeerById(idA)!.Status);
-        Assert.Equal("inactive", store.GetDbPeerById(idB)!.Status); // untouched — different AS
+        Assert.Equal("active", (await store.GetDbPeerByIdAsync(idA))!.Status);
+        Assert.Equal("inactive", (await store.GetDbPeerByIdAsync(idB))!.Status); // untouched — different AS
 
-        store.UpdateSessionStatus(SharedIp, 64513, active: true);
-        Assert.Equal("active", store.GetDbPeerById(idB)!.Status);
+        await store.UpdateSessionStatusAsync(SharedIp, 64513, active: true);
+        Assert.Equal("active", (await store.GetDbPeerByIdAsync(idB))!.Status);
     }
 
     /// <summary>
@@ -111,18 +111,18 @@ public class PeerStoreKeyingTests
     /// drop either the read or the folded write.
     /// </summary>
     [Fact]
-    public void LoadPeerRoutingView_Matches_Standalone_Calls_And_Folds_Status_Update()
+    public async Task LoadPeerRoutingView_Matches_Standalone_Calls_And_Folds_Status_Update()
     {
         var (store, connection) = NewStore();
         using var conn = connection;
 
-        var id = store.CreatePeer(SharedIp, 64512, "routed peer");
-        store.SetSubscriptions(id, ["ru", "microsoft"]);
-        store.SetCustomPrefixes(id, [("203.0.113.0", 24), ("198.51.100.0", 25)]);
-        store.SetCustomAsns(id, [65001, 65002]);
+        var id = await store.CreatePeerAsync(SharedIp, 64512, "routed peer");
+        await store.SetSubscriptionsAsync(id, ["ru", "microsoft"]);
+        await store.SetCustomPrefixesAsync(id, [("203.0.113.0", 24), ("198.51.100.0", 25)]);
+        await store.SetCustomAsnsAsync(id, [65001, 65002]);
 
         var before = DateTime.UtcNow;
-        var view = store.LoadPeerRoutingView(SharedIp, 64512);
+        var view = await store.LoadPeerRoutingViewAsync(SharedIp, 64512);
 
         Assert.NotNull(view);
         // Same peer row.
@@ -134,9 +134,9 @@ public class PeerStoreKeyingTests
         // Same ELEMENTS as the standalone getters. Order is unspecified (neither the getters nor
         // LoadPeerRoutingView impose ORDER BY; the BGP send path treats these as sets), so compare
         // sorted to avoid a flaky test while still pinning exact contents.
-        Assert.Equal(store.GetSubscriptions(id).Order().ToArray(), view.Subscriptions.Order().ToArray());
-        Assert.Equal(store.GetCustomPrefixes(id).Order().ToArray(), view.CustomPrefixes.Order().ToArray());
-        Assert.Equal(store.GetCustomAsns(id).Order().ToArray(), view.CustomAsns.Order().ToArray());
+        Assert.Equal((await store.GetSubscriptionsAsync(id)).Order().ToArray(), view.Subscriptions.Order().ToArray());
+        Assert.Equal((await store.GetCustomPrefixesAsync(id)).Order().ToArray(), view.CustomPrefixes.Order().ToArray());
+        Assert.Equal((await store.GetCustomAsnsAsync(id)).Order().ToArray(), view.CustomAsns.Order().ToArray());
         // Explicit contents (guards against a future shape regression even if getters change).
         Assert.Equal(new[] { "microsoft", "ru" }, view.Subscriptions.Order().ToArray());
         Assert.Equal(new[] { "198.51.100.0/25", "203.0.113.0/24" }, view.CustomPrefixes.Order().ToArray());
@@ -144,36 +144,36 @@ public class PeerStoreKeyingTests
 
         // The folded status write took effect: Status="active" and LastSessionAt stamped at/after
         // the call (was a separate UpdateSessionStatus call on its own DbContext before #84).
-        var peer = store.GetDbPeerById(id)!;
+        var peer = (await store.GetDbPeerByIdAsync(id))!;
         Assert.Equal("active", peer.Status);
         Assert.NotNull(peer.LastSessionAt);
         Assert.True(peer.LastSessionAt >= before);
     }
 
     [Fact]
-    public void LoadPeerRoutingView_Returns_Null_For_Unknown_Peer()
+    public async Task LoadPeerRoutingView_Returns_Null_For_Unknown_Peer()
     {
         var (store, connection) = NewStore();
         using var conn = connection;
 
         // No CreatePeer — the send path must see null so it auto-registers the unknown peer.
-        Assert.Null(store.LoadPeerRoutingView(SharedIp, 64599));
+        Assert.Null(await store.LoadPeerRoutingViewAsync(SharedIp, 64599));
     }
 
     [Fact]
-    public void LoadPeerRoutingView_UserSources_Only_Active_Loaded()
+    public async Task LoadPeerRoutingView_UserSources_Only_Active_Loaded()
     {
         // Issue #147: paused (Active=false) sources never leave the DB — only Active ones are
         // advertised. AddCustomSource defaults Active=false; SetSourceActive toggles.
         var (store, connection) = NewStore();
         using var conn = connection;
 
-        var id = store.CreatePeer(SharedIp, 64512, "sources peer");
-        var active = store.AddCustomSource(id, "on", "https://example.com/on.txt", null);
-        store.AddCustomSource(id, "off", "https://example.com/off.txt", "65000:9");
-        Assert.True(store.SetSourceActive(id, active.Id, true));
+        var id = await store.CreatePeerAsync(SharedIp, 64512, "sources peer");
+        var active = await store.AddCustomSourceAsync(id, "on", "https://example.com/on.txt", null);
+        await store.AddCustomSourceAsync(id, "off", "https://example.com/off.txt", "65000:9");
+        Assert.True(await store.SetSourceActiveAsync(id, active.Id, true));
 
-        var view = store.LoadPeerRoutingView(SharedIp, 64512);
+        var view = await store.LoadPeerRoutingViewAsync(SharedIp, 64512);
         Assert.NotNull(view);
         var src = Assert.Single(view!.UserSources);   // the inactive "off" source is excluded
         Assert.Equal("on", src.Name);
@@ -182,31 +182,31 @@ public class PeerStoreKeyingTests
     }
 
     [Fact]
-    public void LoadPeerRoutingView_UserSources_All_Inactive_Empty()
+    public async Task LoadPeerRoutingView_UserSources_All_Inactive_Empty()
     {
         var (store, connection) = NewStore();
         using var conn = connection;
 
-        var id = store.CreatePeer(SharedIp, 64512, "all-inactive");
-        store.AddCustomSource(id, "a", "https://example.com/a.txt", null);
-        store.AddCustomSource(id, "b", "https://example.com/b.txt", "65000:1");
+        var id = await store.CreatePeerAsync(SharedIp, 64512, "all-inactive");
+        await store.AddCustomSourceAsync(id, "a", "https://example.com/a.txt", null);
+        await store.AddCustomSourceAsync(id, "b", "https://example.com/b.txt", "65000:1");
 
-        var view = store.LoadPeerRoutingView(SharedIp, 64512);
+        var view = await store.LoadPeerRoutingViewAsync(SharedIp, 64512);
         Assert.NotNull(view);
         Assert.Empty(view!.UserSources);
     }
 
     [Fact]
-    public void CreatePeer_Is_Idempotent_On_IpAsn()
+    public async Task CreatePeer_Is_Idempotent_On_IpAsn()
     {
         var (store, connection) = NewStore();
         using var conn = connection;
 
-        var id1 = store.CreatePeer(SharedIp, 64512, "first");
-        var id2 = store.CreatePeer(SharedIp, 64512, "second"); // same (Ip, Asn) → update, not a new row
+        var id1 = await store.CreatePeerAsync(SharedIp, 64512, "first");
+        var id2 = await store.CreatePeerAsync(SharedIp, 64512, "second"); // same (Ip, Asn) → update, not a new row
 
         Assert.Equal(id1, id2);
-        Assert.Equal("second", store.GetDbPeerById(id1)!.Description);
+        Assert.Equal("second", (await store.GetDbPeerByIdAsync(id1))!.Description);
     }
 
     /// <summary>
@@ -217,7 +217,7 @@ public class PeerStoreKeyingTests
     /// a different AS can now coexist).
     /// </summary>
     [Fact]
-    public void Initialize_Migrates_Legacy_Unique_Index_And_Preserves_Data()
+    public async Task Initialize_Migrates_Legacy_Unique_Index_And_Preserves_Data()
     {
         using var connection = new SqliteConnection("DataSource=:memory:");
         connection.Open();
@@ -251,7 +251,7 @@ public class PeerStoreKeyingTests
 
         // The legacy Ip-only unique index is gone: a second peer with a DIFFERENT AS now coexists.
         var store = new PeerStore(new StaticOptionsFactory(options));
-        var idB = store.CreatePeer("203.0.113.10", 64513, "new peer behind same NAT");
+        var idB = await store.CreatePeerAsync("203.0.113.10", 64513, "new peer behind same NAT");
         Assert.NotEqual("peer-1", idB);
 
         using var check2 = new BgpDbContext(options);

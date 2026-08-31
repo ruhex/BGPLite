@@ -497,7 +497,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
 
         // /api/me
         if (IsGet(method, segments, "api", "me"))
-            return HandleGetMe(ctx);
+            return await HandleGetMe(ctx);
 
         // /api/peers
         if (IsPost(method, segments, "api", "peers"))
@@ -505,7 +505,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
 
         // /api/peers/{id}
         if (segments.Length == 3 && segments[0] == "api" && segments[1] == "peers" && method == "GET")
-            return HandleGetPeer(segments[2]);
+            return await HandleGetPeer(segments[2]);
         if (segments.Length == 3 && segments[0] == "api" && segments[1] == "peers" && method == "PUT")
             return await HandleUpdatePeer(segments[2], ctx);
         if (segments.Length == 3 && segments[0] == "api" && segments[1] == "peers" && method == "DELETE")
@@ -519,7 +519,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
         if (segments.Length == 4 && segments[0] == "api" && segments[1] == "peers" && segments[3] == "sources")
         {
             if (method == "GET")
-                return HandleGetSources(segments[2]);
+                return await HandleGetSources(segments[2]);
             if (method == "POST")
                 return await HandleAddSource(segments[2], ctx);
         }
@@ -528,7 +528,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
         if (segments.Length == 5 && segments[0] == "api" && segments[1] == "peers" && segments[3] == "sources")
         {
             if (method == "DELETE")
-                return HandleDeleteSource(segments[2], segments[4]);
+                return await HandleDeleteSource(segments[2], segments[4]);
             if (method == "PATCH")
                 return await HandlePatchSource(segments[2], segments[4], ctx);
         }
@@ -736,7 +736,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
 
     #region GET /api/me
 
-    private ApiResponse HandleGetMe(HttpListenerContext ctx)
+    private async Task<ApiResponse> HandleGetMe(HttpListenerContext ctx)
     {
         var clientIp = GetClientIp(ctx);
 
@@ -753,24 +753,25 @@ public sealed class ManagementApi : IHostedService, IDisposable
         {
             if (!uint.TryParse(asnQuery, out var asn))
                 return ApiResponse.Error($"Invalid 'asn' query parameter: '{asnQuery}'. Must be a non-negative integer.", 400);
-            var single = _store.GetPeer(clientIp, asn);
+            var single = await _store.GetPeerAsync(clientIp, asn);
             peerInfos = single is null ? [] : [single];
         }
         else
         {
-            peerInfos = _store.GetPeersByIp(clientIp);
+            peerInfos = await _store.GetPeersByIpAsync(clientIp);
         }
 
-        var details = peerInfos.Select(p => BuildPeerDetail(p.Id)).Where(d => d is not null).ToList()!;
+        var details = (await Task.WhenAll(peerInfos.Select(p => BuildPeerDetail(p.Id))))
+            .Where(d => d is not null).ToList()!;
         return ApiResponse.Ok(new { ip = clientIp, peers = details });
     }
 
     /// <summary>Builds the peer-detail anonymous object for /api/me. Returns null if the peer vanished.</summary>
-    private object? BuildPeerDetail(string peerId)
+    private async Task<object?> BuildPeerDetail(string peerId)
     {
         // #228: single DbContext roundtrip via PeerStore.GetPeerDetail (was 5 separate DbContexts:
         // GetDbPeerById + GetSubscriptions + GetCustomPrefixes + GetCustomAsns + GetCommunities).
-        var peer = _store.GetPeerDetail(peerId);
+        var peer = await _store.GetPeerDetailAsync(peerId);
         if (peer is null) return null;
 
         // #212: actual advertised count from the live session (post-aggregation, post-dedup).
@@ -859,7 +860,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
         // store: a set of prefixes means the same thing whether a value appears once or twice.
         // #267 item 6: the upsert returns (Id, Status, CreatedAt) from its RETURNING clause — no
         // follow-up GetDbPeerById roundtrip for fields the caller already knows.
-        var saved = _store.SavePeerConfiguration(
+        var saved = await _store.SavePeerConfigurationAsync(
             normalizedIp, data.Asn, data.Description, asnLists, customPrefixes, data.CustomAsns ?? []);
 
         _logger.LogInformation("Created peer {Ip} AS{Asn} ({Id}): {Subs} lists, {Prefixes} custom prefixes, {Asns} custom AS",
@@ -881,10 +882,10 @@ public sealed class ManagementApi : IHostedService, IDisposable
         });
     }
 
-    private ApiResponse HandleGetPeer(string peerId)
+    private async Task<ApiResponse> HandleGetPeer(string peerId)
     {
         // #228: single DbContext roundtrip via PeerStore.GetPeerDetail (was 6 separate DbContexts).
-        var peer = _store.GetPeerDetail(peerId);
+        var peer = await _store.GetPeerDetailAsync(peerId);
         if (peer is null)
             return ApiResponse.Error("Peer not found", 404);
 
@@ -913,7 +914,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
     /// </summary>
     private async Task<ApiResponse> HandleUpdatePeer(string peerId, HttpListenerContext ctx)
     {
-        var peer = _store.GetDbPeerById(peerId);
+        var peer = await _store.GetDbPeerByIdAsync(peerId);
         if (peer is null)
             return ApiResponse.Error("Peer not found", 404);
 
@@ -963,18 +964,18 @@ public sealed class ManagementApi : IHostedService, IDisposable
                     "See /api/asn-lists for the configured names.", 400);
         }
 
-        _store.UpdatePeerConfiguration(peerId, data.Description, data.Lists, parsedPrefixes, data.CustomAsns);
+        await _store.UpdatePeerConfigurationAsync(peerId, data.Description, data.Lists, parsedPrefixes, data.CustomAsns);
 
         _logger.LogInformation("Updated peer {Id}", SanitizeForLog(peerId));
 
         _ = _sessionManager.RefreshPeerAsync(peer.Ip, peer.Asn ?? 0);
 
-        return HandleGetPeer(peerId);
+        return await HandleGetPeer(peerId);
     }
 
     internal async Task<ApiResponse> HandleDeletePeer(string peerId)
     {
-        var peer = _store.GetDbPeerById(peerId);
+        var peer = await _store.GetDbPeerByIdAsync(peerId);
         if (peer is null)
             return ApiResponse.Error("Peer not found", 404);
 
@@ -988,7 +989,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
         using var bound = new CancellationTokenSource(TimeSpan.FromSeconds(10));
         await _sessionManager.TerminatePeerAsync(peer.Ip, peer.Asn ?? 0, bound.Token);
 
-        _store.DeletePeer(peerId);
+        await _store.DeletePeerAsync(peerId);
         _logger.LogInformation("Deleted peer {Id} ({Ip})", SanitizeForLog(peerId), peer.Ip);
         return ApiResponse.Ok(new { id = peerId, deleted = true });
     }
@@ -997,18 +998,18 @@ public sealed class ManagementApi : IHostedService, IDisposable
 
     #region /api/peers/{id}/sources (#143)
 
-    private ApiResponse HandleGetSources(string peerId)
+    private async Task<ApiResponse> HandleGetSources(string peerId)
     {
-        if (_store.GetDbPeerById(peerId) is null)
+        if (await _store.GetDbPeerByIdAsync(peerId) is null)
             return ApiResponse.Error("Peer not found", 404);
 
-        var sources = _store.GetCustomSources(peerId);
+        var sources = await _store.GetCustomSourcesAsync(peerId);
         return ApiResponse.Ok(sources.Select(s => new { id = s.Id, name = s.Name, url = s.Url, community = s.Community, active = s.Active }));
     }
 
     private async Task<ApiResponse> HandleAddSource(string peerId, HttpListenerContext ctx)
     {
-        var peer = _store.GetDbPeerById(peerId);
+        var peer = await _store.GetDbPeerByIdAsync(peerId);
         if (peer is null)
             return ApiResponse.Error("Peer not found", 404);
 
@@ -1062,7 +1063,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
             return ApiResponse.Error($"Invalid URL: the host could not be reached or is not allowed", 400);
         }
 
-        var source = _store.AddCustomSource(peerId, data.Name, data.Url, data.Community);
+        var source = await _store.AddCustomSourceAsync(peerId, data.Name, data.Url, data.Community);
 
         // Trigger refresh so the peer receives the new source's prefixes immediately —
         // same pattern as CreatePeer/UpdatePeer. Pass ASN so shared-IP peers aren't refreshed (#200).
@@ -1073,13 +1074,13 @@ public sealed class ManagementApi : IHostedService, IDisposable
         return ApiResponse.Ok(new { id = source.Id, name = source.Name, url = source.Url, community = source.Community, active = source.Active });
     }
 
-    private ApiResponse HandleDeleteSource(string peerId, string sourceId)
+    private async Task<ApiResponse> HandleDeleteSource(string peerId, string sourceId)
     {
-        var peer = _store.GetDbPeerById(peerId);
+        var peer = await _store.GetDbPeerByIdAsync(peerId);
         if (peer is null)
             return ApiResponse.Error("Peer not found", 404);
 
-        if (!_store.DeleteCustomSource(peerId, sourceId))
+        if (!await _store.DeleteCustomSourceAsync(peerId, sourceId))
             return ApiResponse.Error($"Source '{sourceId}' not found", 404);
 
         // Trigger refresh so the source's prefixes are withdrawn immediately (#200: ASN-scoped).
@@ -1091,7 +1092,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
 
     private async Task<ApiResponse> HandlePatchSource(string peerId, string sourceId, HttpListenerContext ctx)
     {
-        var peer = _store.GetDbPeerById(peerId);
+        var peer = await _store.GetDbPeerByIdAsync(peerId);
         if (peer is null)
             return ApiResponse.Error("Peer not found", 404);
 
@@ -1102,7 +1103,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
         if (data is null || data.Active is null)
             return ApiResponse.Error("PATCH body must contain { \"active\": true/false }", 400);
 
-        if (!_store.SetSourceActive(peerId, sourceId, data.Active.Value))
+        if (!await _store.SetSourceActiveAsync(peerId, sourceId, data.Active.Value))
             return ApiResponse.Error($"Source '{sourceId}' not found", 404);
 
         // Trigger refresh so toggling active/inactive takes effect immediately (#200: ASN-scoped).
@@ -1118,7 +1119,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
 
     private async Task<ApiResponse> HandleExportPrefixes(string peerId, HttpListenerContext ctx)
     {
-        var peer = _store.GetDbPeerById(peerId);
+        var peer = await _store.GetDbPeerByIdAsync(peerId);
         if (peer is null)
             return ApiResponse.Error("Peer not found", 404);
 
@@ -1137,9 +1138,9 @@ public sealed class ManagementApi : IHostedService, IDisposable
         var prefixes = new List<string>();
 
         // Custom prefixes
-        prefixes.AddRange(_store.GetCustomPrefixes(peerId));
+        prefixes.AddRange(await _store.GetCustomPrefixesAsync(peerId, ct));
 
-        var subscriptions = _store.GetSubscriptions(peerId);
+        var subscriptions = await _store.GetSubscriptionsAsync(peerId, ct);
         var subscribedLists = _config.RipeStat?.AsnLists
             .Where(l => subscriptions.Contains(l.Name))
             .ToList() ?? [];

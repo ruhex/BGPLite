@@ -25,10 +25,10 @@ public sealed class PeerDeleteTeardownTests
     {
         using var connection = NewOpenConnection();
         var store = NewStore(connection);
-        var peerId = store.CreatePeer("203.0.113.7", 65002, null);
+        var peerId = await store.CreatePeerAsync("203.0.113.7", 65002, null);
         // At terminate time the row must still exist — that ordering is what keeps a dying
         // session's in-flight refresh away from the auto-register branch.
-        var manager = new RecordingSessionManager((_, _) => Assert.NotNull(store.GetDbPeerById(peerId)));
+        var manager = new RecordingSessionManager(async (_, _) => Assert.NotNull(await store.GetDbPeerByIdAsync(peerId)));
         using var api = NewApi(store, manager);
 
         var response = await api.HandleDeletePeer(peerId);
@@ -37,7 +37,7 @@ public sealed class PeerDeleteTeardownTests
         var terminated = Assert.Single(manager.Terminated);
         Assert.Equal("203.0.113.7", terminated.Ip);
         Assert.Equal(65002u, terminated.Asn);
-        Assert.Null(store.GetDbPeerById(peerId));
+        Assert.Null(await store.GetDbPeerByIdAsync(peerId));
     }
 
     [Fact]
@@ -117,11 +117,14 @@ public sealed class PeerDeleteTeardownTests
         using var cts = new CancellationTokenSource();
         cts.Cancel();
 
-        var routes = await NewAssembler(store).BuildOutboundRoutesAsync(
-            "203.0.113.9", 65002, new PeerConfig { Address = "203.0.113.9" }, "203.0.113.9", cts.Token);
+        // #262: the async store surfaces an already-cancelled token as OCE from the load itself
+        // (previously the sync read ran through and the assembler returned an empty set). Either
+        // way the auto-register branch must not be reached — that is the #323 resurrection guard.
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            NewAssembler(store).BuildOutboundRoutesAsync(
+                "203.0.113.9", 65002, new PeerConfig { Address = "203.0.113.9" }, "203.0.113.9", cts.Token));
 
-        Assert.Empty(routes);
-        Assert.Empty(store.GetPeersByIp("203.0.113.9"));   // no resurrection of a deleted peer
+        Assert.Empty(await store.GetPeersByIpAsync("203.0.113.9"));   // no resurrection of a deleted peer
     }
 
     [Fact]
@@ -134,7 +137,7 @@ public sealed class PeerDeleteTeardownTests
             "203.0.113.9", 65002, new PeerConfig { Address = "203.0.113.9" }, "203.0.113.9", CancellationToken.None);
 
         // Control (D11 behavior): a live unknown peer is still auto-registered.
-        Assert.Single(store.GetPeersByIp("203.0.113.9"));
+        Assert.Single(await store.GetPeersByIpAsync("203.0.113.9"));
     }
 
     // ---- harness ----
@@ -217,7 +220,7 @@ public sealed class PeerDeleteTeardownTests
     }
 
     /// <summary>Records TerminatePeerAsync calls; the optional hook runs at call time (row-state assertions).</summary>
-    private sealed class RecordingSessionManager(Action<string, uint>? onTerminate = null) : ISessionManager
+    private sealed class RecordingSessionManager(Func<string, uint, Task>? onTerminate = null) : ISessionManager
     {
         public List<(string Ip, uint Asn)> Terminated { get; } = [];
 
@@ -226,11 +229,10 @@ public sealed class PeerDeleteTeardownTests
         public int GetAdvertisedPrefixCount(string peerIp, uint asn) => 0;
         public Task RefreshAllEstablishedAsync() => Task.CompletedTask;
 
-        public Task TerminatePeerAsync(string peerIp, uint asn, CancellationToken ct = default)
+        public async Task TerminatePeerAsync(string peerIp, uint asn, CancellationToken ct = default)
         {
             Terminated.Add((peerIp, asn));
-            onTerminate?.Invoke(peerIp, asn);
-            return Task.CompletedTask;
+            if (onTerminate is not null) await onTerminate(peerIp, asn);
         }
     }
 

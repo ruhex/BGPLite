@@ -32,7 +32,7 @@ public sealed class SharedTableRouteAssembler : IRouteAssembler
     }
 
     /// <inheritdoc />
-    public Task<List<Route>> BuildOutboundRoutesAsync(
+    public async Task<List<Route>> BuildOutboundRoutesAsync(
         string peerIp, uint remoteAsn, PeerConfig filterPeerConfig, string peerLabel, CancellationToken ct)
     {
         if (Interlocked.Exchange(ref _announced, 1) == 0)
@@ -48,7 +48,7 @@ public sealed class SharedTableRouteAssembler : IRouteAssembler
         // same table owned by its session (#289). Advertising those here would hand one peer's
         // injected routes to every other peer — a tenant-isolation failure, not just a wrong list.
         // The startup seed is written with no owner and is what this fallback is meant to serve.
-        var allowSet = _routeFilter.ResolveOutgoingAllowSet(filterPeerConfig);
+        var allowSet = await _routeFilter.ResolveOutgoingAllowSetAsync(filterPeerConfig, ct);
         var filtered = new List<Route>();
         foreach (var route in _routeTable.EnumerateUnowned())
         {
@@ -56,6 +56,6 @@ public sealed class SharedTableRouteAssembler : IRouteAssembler
                 filtered.Add(route);
         }
 
-        return Task.FromResult(filtered);
+        return filtered;
     }
 }

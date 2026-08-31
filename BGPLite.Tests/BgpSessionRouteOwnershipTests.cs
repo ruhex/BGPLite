@@ -505,22 +505,15 @@ public class BgpSessionRouteOwnershipTests
     private sealed class RecordingPeerStore : IPeerStore
     {
         public List<(string Ip, uint Asn, bool Active)> StatusWrites = [];
-        public string CreatePeer(string ip, uint asn, string? description) => "id";
-        public void UpsertPeer(string ip, uint asn) { }
-        public void UpdateSessionStatus(string ip, uint asn, bool active) => StatusWrites.Add((ip, asn, active));
-        public void DeletePeer(string id) { }
-        public PeerInfo? GetPeerByIp(string ip) => null;
-        public PeerInfo? GetPeer(string ip, uint asn) => null;
-        public PeerInfo? GetPeerById(string id) => null;
-        public List<string> GetSubscriptions(string peerId) => [];
-        public List<string> GetCustomPrefixes(string peerId) => [];
-        public List<uint> GetCustomAsns(string peerId) => [];
-        public HashSet<uint> GetCommunities(string peerId) => [];
-        public HashSet<uint> GetCommunities(string ip, uint asn) => [];
-        public void SetCommunities(string peerId, HashSet<uint> communities) { }
-        public void ClearCommunities(string peerId) { }
-        public void SetDescription(string id, string description) { }
-        public PeerRoutingView? LoadPeerRoutingView(string ip, uint asn) => new("id", [], [], [], []);
+        public Task<string> CreatePeerAsync(string ip, uint asn, string? description, CancellationToken ct = default) => Task.FromResult("id");
+        public Task UpsertPeerAsync(string ip, uint asn, CancellationToken ct = default) => Task.CompletedTask;
+        public Task UpdateSessionStatusAsync(string ip, uint asn, bool active, CancellationToken ct = default)
+        {
+            StatusWrites.Add((ip, asn, active));
+            return Task.CompletedTask;
+        }
+        public Task<PeerRoutingView?> LoadPeerRoutingViewAsync(string ip, uint asn, CancellationToken ct = default)
+            => Task.FromResult<PeerRoutingView?>(new("id", [], [], [], []));
     }
 
     private static async Task<(BgpSession Session, Task Run, RecordingPeerStore Store)> EstablishWithStoreAsync(
@@ -778,7 +771,7 @@ public class BgpSessionRouteOwnershipTests
     {
         private static readonly IReadOnlySet<uint> Empty = new HashSet<uint>();
         public bool AcceptIncoming(Route route, PeerConfig peer) => false;
-        public IReadOnlySet<uint> ResolveOutgoingAllowSet(PeerConfig peer) => Empty;
+        public Task<IReadOnlySet<uint>> ResolveOutgoingAllowSetAsync(PeerConfig peer, CancellationToken ct = default) => Task.FromResult(Empty);
         public bool AcceptOutgoing(Route route, PeerConfig peer, IReadOnlySet<uint> allowSet) => true;
     }
 }
