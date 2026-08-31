@@ -32,6 +32,11 @@ public sealed class BgpSession : IDisposable
     private readonly CancellationTokenSource _cts = new();
     private readonly Action<string, uint>? _onPeerIdentified;
     private readonly IPeerStore? _peerStore;
+    // #265 item 1: set by BgpServer right after creation — "is this session still the registered
+    // one?" A false answer at teardown-time means a replacement took the slot and owns the
+    // (Ip, Asn) status now; this session must not overwrite it back to inactive.
+    private Func<BgpSession, bool>? _stillRegisteredProbe;
+    internal Func<BgpSession, bool>? StillRegisteredProbe { set => _stillRegisteredProbe = value; }
     private readonly IPrefixAggregator _prefixAggregator;
     // #93 Phase 2: the outbound route-assembly policy lives here, not in the session. The session
     // delegates to BuildOutboundRoutesAsync and keeps the send/withdraw mirror (_advertisedPrefixes)
@@ -538,8 +543,20 @@ public sealed class BgpSession : IDisposable
                 // store failure (SQLite "database is locked" past busy_timeout) must not escape —
                 // it would fault RunAsync unobserved, skip PeerDisconnected() below, and leak
                 // PeerCount plus the row's Status=active forever (#325).
-                try { _peerStore?.UpdateSessionStatus(_peerConfig.Address, _remoteAsn, false); }
-                catch (Exception ex) { _logger.LogWarning(ex, "Failed to persist session status for {Peer}", _peer); }
+                // #265 item 1: the write must not clobber a REPLACEMENT session's Status=active.
+                // Two guards: (a) SilentClose teardowns (session replacement, GR-aware shutdown —
+                // RFC 4724 §4) skip the write outright; (b) when a registration probe is wired
+                // (BgpServer), a session no longer present in the registry was replaced mid-unwind
+                // and also skips. Covers the slow-unwind race (e.g. a sender parked on _sendLock
+                // inside the #285 budget) whose finally runs after the new session's first
+                // LoadPeerRoutingView already wrote active.
+                var silent = (TeardownReason)Interlocked.CompareExchange(ref _teardownReason, 0, 0) == TeardownReason.SilentClose;
+                var stillRegistered = _stillRegisteredProbe?.Invoke(this) ?? true;
+                if (!silent && stillRegistered)
+                {
+                    try { _peerStore?.UpdateSessionStatus(_peerConfig.Address, _remoteAsn, false); }
+                    catch (Exception ex) { _logger.LogWarning(ex, "Failed to persist session status for {Peer}", _peer); }
+                }
             }
             _metrics.PeerDisconnected();
             _logger.LogInformation("SessionClosed with {Peer}", _peer);
