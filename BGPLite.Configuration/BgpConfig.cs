@@ -18,21 +18,23 @@ public sealed class BgpConfig
     [YamlMember(Alias = "HoldTime")]
     public int HoldTime { get; init; } = 180;
 
-    /// <summary>Advertise Graceful Restart (RFC 4724) and send an End-of-RIB marker after the
-    /// initial route dump, so GR-capable peers retain our routes across our restart.</summary>
+    /// <summary>Sending-side Graceful Restart conveniences (RFC 4724): an End-of-RIB marker after
+    /// the initial route dump, and a silent TCP close (no NOTIFICATION) on server shutdown. The GR
+    /// capability itself is NOT advertised (#318, D6): the receiving-speaker half of RFC 4724 §4.2
+    /// (retaining and stale-marking a restarting peer's routes) is not implemented, and advertising
+    /// the &lt;AFI, SAFI, F&gt; tuple promised behavior the code does not have.</summary>
     [YamlMember(Alias = "GracefulRestart")]
     public bool GracefulRestart { get; init; } = true;
 
-    /// <summary>Restart Time (seconds) advertised in the GR capability. Clamped to
-    /// min(HoldTime, 4095) — the RFC 4724 §2.2 field is 12 bits.</summary>
+    /// <summary>Restart Time intended for the GR capability's 12-bit field. Currently unused —
+    /// the capability is not advertised while the receiving-speaker half of RFC 4724 is
+    /// unimplemented (#318, D6). Accepted for config compatibility.</summary>
     [YamlMember(Alias = "RestartTime")]
     public int RestartTime { get; init; } = 120;
 
-    /// <summary>Forwarding State (F) bit for IPv4/Unicast. When true, GR-capable peers keep our
-    /// stale routes through the restart window (smoothest — prefixes never visibly disappear).
-    /// Only keep true if the deployment preserves forwarding at the advertised next-hop (the
-    /// router-id); otherwise a peer could forward to a non-forwarding speaker during the window.
-    /// See RFC 4724 §3/§4.2.</summary>
+    /// <summary>Forwarding State (F) bit for IPv4/Unicast, intended for the GR capability.
+    /// Currently unused — the capability is not advertised while the receiving-speaker half of
+    /// RFC 4724 is unimplemented (#318, D6). Accepted for config compatibility.</summary>
     [YamlMember(Alias = "GracefulRestartForwardingState")]
     public bool GracefulRestartForwardingState { get; init; } = true;
 

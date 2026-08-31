@@ -56,15 +56,23 @@ For section-by-section RFC conformance status, see `RFC_COMPLIANCE.md` (2026-07-
 - **Consequence:** an UPDATE a conformant peer might accept is treated-as-withdraw.
 - **Tracker:** #238 (deliberate, kept).
 
-### D6. Graceful Restart advertised without receiving-side retention
-- **Decision:** the GR capability (with IPv4/Unicast tuple) is advertised by default, but routes of a
-  silently-disconnecting GR peer are flushed immediately; no stale-marking, no Restart-Time timer,
-  no receive-side EoR handling.
-- **Context:** RFC 4724 §4.2 requires the receiving speaker to retain and mark stale; implementing
-  the full receiving half was deferred.
-- **Consequence:** the capability promises behavior the code does not have; peer routes flap during
-  peer restarts. Either stop advertising or implement retention.
-- **Tracker:** #318 (open).
+### D6. Graceful Restart capability is not advertised
+- **Decision:** the OPEN does not include the GR capability. The receiving-speaker half of RFC 4724
+  (§4.2: retain and stale-mark a restarting peer's routes for its Restart Time, flush on expiry or
+  End-of-RIB) is not implemented, and advertising the `<AFI=1, SAFI=1, F>` tuple promised behavior
+  the code does not have. The sending-side conveniences gated on the `GracefulRestart` config are
+  unchanged: an End-of-RIB marker after the initial route dump, and the GR-aware silent close on
+  server shutdown (`StopAsync`).
+- **Context:** the capability was previously advertised by default while routes of a
+  silently-disconnecting peer were flushed immediately (`RemoveAllOwnedBy`, #314) — a wire promise
+  the code did not honor. RFC 4724 §4.2's MUST binds a speaker to the procedures it engages;
+  stopping the advertisement is the honest half-measure until retention exists (#318 direction 1).
+- **Consequence:** GR-capable peers no longer retain our routes across our restart — they flush on
+  session end like any non-GR peer. The peer's GR advertisement is still parsed and logged.
+  `RestartTime` / `GracefulRestartForwardingState` are accepted for config compatibility but unused
+  while the capability is not advertised. Re-advertise only together with receiving-speaker
+  retention.
+- **Tracker:** #318 (open for direction 2 — implement the receiving half).
 
 ### D7. Hold time semantics
 - **Decision:** negotiated hold time = `min(local, peer)` with 0 on either side disabling timers;
