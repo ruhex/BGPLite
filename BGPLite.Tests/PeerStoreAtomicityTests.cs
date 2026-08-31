@@ -34,7 +34,7 @@ public class PeerStoreAtomicityTests
         public BgpDbContext CreateDbContext() => new(_options);
     }
 
-    private static string SeedPeer(PeerStore store) => store.CreatePeer(Ip, Asn, "test");
+    private static async Task<string> SeedPeer(PeerStore store) => await store.CreatePeerAsync(Ip, Asn, "test");
 
     // ---- #226: Set* atomicity ----
 
@@ -43,56 +43,56 @@ public class PeerStoreAtomicityTests
     /// delete+insert pair committed atomically, so there is never an empty-collection window.
     /// </summary>
     [Fact]
-    public void SetCommunities_Replaces_Atomiclly()
+    public async Task SetCommunities_Replaces_Atomiclly()
     {
         var (store, connection) = NewStore();
         using var conn = connection;
-        var peerId = SeedPeer(store);
+        var peerId = await SeedPeer(store);
 
-        store.SetCommunities(peerId, [0x65001000, 0x65002000]);
-        store.SetCommunities(peerId, [0x65003000]);
+        await store.SetCommunitiesAsync(peerId, [0x65001000, 0x65002000]);
+        await store.SetCommunitiesAsync(peerId, [0x65003000]);
 
-        var communities = store.GetCommunities(peerId).OrderBy(c => c).ToArray();
+        var communities = (await store.GetCommunitiesAsync(peerId)).OrderBy(c => c).ToArray();
         Assert.Equal([0x65003000u], communities);
     }
 
     [Fact]
-    public void SetSubscriptions_Replaces_Atomiclly()
+    public async Task SetSubscriptions_Replaces_Atomiclly()
     {
         var (store, connection) = NewStore();
         using var conn = connection;
-        var peerId = SeedPeer(store);
+        var peerId = await SeedPeer(store);
 
-        store.SetSubscriptions(peerId, ["list-a", "list-b"]);
-        store.SetSubscriptions(peerId, ["list-c"]);
+        await store.SetSubscriptionsAsync(peerId, ["list-a", "list-b"]);
+        await store.SetSubscriptionsAsync(peerId, ["list-c"]);
 
-        Assert.Equal(["list-c"], store.GetSubscriptions(peerId));
+        Assert.Equal(["list-c"], await store.GetSubscriptionsAsync(peerId));
     }
 
     [Fact]
-    public void SetCustomPrefixes_Replaces_Atomiclly()
+    public async Task SetCustomPrefixes_Replaces_Atomiclly()
     {
         var (store, connection) = NewStore();
         using var conn = connection;
-        var peerId = SeedPeer(store);
+        var peerId = await SeedPeer(store);
 
-        store.SetCustomPrefixes(peerId, [("10.0.0.0", (byte)24), ("10.1.0.0", (byte)24)]);
-        store.SetCustomPrefixes(peerId, [("192.168.0.0", (byte)16)]);
+        await store.SetCustomPrefixesAsync(peerId, [("10.0.0.0", (byte)24), ("10.1.0.0", (byte)24)]);
+        await store.SetCustomPrefixesAsync(peerId, [("192.168.0.0", (byte)16)]);
 
-        Assert.Equal(["192.168.0.0/16"], store.GetCustomPrefixes(peerId));
+        Assert.Equal(["192.168.0.0/16"], await store.GetCustomPrefixesAsync(peerId));
     }
 
     [Fact]
-    public void SetCustomAsns_Replaces_Atomiclly()
+    public async Task SetCustomAsns_Replaces_Atomiclly()
     {
         var (store, connection) = NewStore();
         using var conn = connection;
-        var peerId = SeedPeer(store);
+        var peerId = await SeedPeer(store);
 
-        store.SetCustomAsns(peerId, [64512, 64513]);
-        store.SetCustomAsns(peerId, [64514]);
+        await store.SetCustomAsnsAsync(peerId, [64512, 64513]);
+        await store.SetCustomAsnsAsync(peerId, [64514]);
 
-        Assert.Equal([64514u], store.GetCustomAsns(peerId));
+        Assert.Equal([64514u], await store.GetCustomAsnsAsync(peerId));
     }
 
     /// <summary>
@@ -101,18 +101,18 @@ public class PeerStoreAtomicityTests
     /// the transaction is dropped and an empty-collection window corrupts the state.
     /// </summary>
     [Fact]
-    public void SetCustomPrefixes_Empty_Then_Refill_Roundtrips()
+    public async Task SetCustomPrefixes_Empty_Then_Refill_Roundtrips()
     {
         var (store, connection) = NewStore();
         using var conn = connection;
-        var peerId = SeedPeer(store);
+        var peerId = await SeedPeer(store);
 
-        store.SetCustomPrefixes(peerId, [("10.0.0.0", (byte)8)]);
-        store.SetCustomPrefixes(peerId, []);
-        Assert.Empty(store.GetCustomPrefixes(peerId));
+        await store.SetCustomPrefixesAsync(peerId, [("10.0.0.0", (byte)8)]);
+        await store.SetCustomPrefixesAsync(peerId, []);
+        Assert.Empty(await store.GetCustomPrefixesAsync(peerId));
 
-        store.SetCustomPrefixes(peerId, [("172.16.0.0", (byte)12)]);
-        Assert.Equal(["172.16.0.0/12"], store.GetCustomPrefixes(peerId));
+        await store.SetCustomPrefixesAsync(peerId, [("172.16.0.0", (byte)12)]);
+        Assert.Equal(["172.16.0.0/12"], await store.GetCustomPrefixesAsync(peerId));
     }
 
     /// <summary>
@@ -123,12 +123,12 @@ public class PeerStoreAtomicityTests
     /// collection. Drives the regression directly: a fault mid-mutation must not corrupt prior state.
     /// </summary>
     [Fact]
-    public void SetCustomPrefixes_RollsBack_On_Insert_Failure()
+    public async Task SetCustomPrefixes_RollsBack_On_Insert_Failure()
     {
         var (store, connection) = NewStore();
         using var conn = connection;
-        var peerId = SeedPeer(store);
-        store.SetCustomPrefixes(peerId, [("10.0.0.0", (byte)24)]);
+        var peerId = await SeedPeer(store);
+        await store.SetCustomPrefixesAsync(peerId, [("10.0.0.0", (byte)24)]);
 
         // Reproduce the exact delete+insert shape of SetCustomPrefixes, then fault the insert side
         // with a SQLite UNIQUE violation. ExecuteSqlRaw bypasses the EF change tracker (which would
@@ -152,7 +152,7 @@ public class PeerStoreAtomicityTests
         }
 
         // The original prefix survives — the delete was rolled back together with the failed insert.
-        Assert.Equal(["10.0.0.0/24"], store.GetCustomPrefixes(peerId));
+        Assert.Equal(["10.0.0.0/24"], await store.GetCustomPrefixesAsync(peerId));
     }
 
     // ---- #227: atomic upsert ----
@@ -162,16 +162,16 @@ public class PeerStoreAtomicityTests
     /// upsert). Guards against the upsert accidentally keying on Ip only.
     /// </summary>
     [Fact]
-    public void CreatePeer_DistinctAsns_Coexist()
+    public async Task CreatePeer_DistinctAsns_Coexist()
     {
         var (store, connection) = NewStore();
         using var conn = connection;
 
-        var id1 = store.CreatePeer(Ip, 64512, "a");
-        var id2 = store.CreatePeer(Ip, 64513, "b");
+        var id1 = await store.CreatePeerAsync(Ip, 64512, "a");
+        var id2 = await store.CreatePeerAsync(Ip, 64513, "b");
 
         Assert.NotEqual(id1, id2);
-        Assert.Equal(2, store.GetPeersByIp(Ip).Count);
+        Assert.Equal(2, (await store.GetPeersByIpAsync(Ip)).Count);
     }
 
     /// <summary>
@@ -179,13 +179,13 @@ public class PeerStoreAtomicityTests
     /// a second call (update path). Called from the BGP connect path — must never throw.
     /// </summary>
     [Fact]
-    public void UpsertPeer_SetsActive_And_StampsLastSessionAt()
+    public async Task UpsertPeer_SetsActive_And_StampsLastSessionAt()
     {
         var (store, connection) = NewStore();
         using var conn = connection;
 
-        store.UpsertPeer(Ip, Asn);
-        var peer = store.GetPeer(Ip, Asn);
+        await store.UpsertPeerAsync(Ip, Asn);
+        var peer = await store.GetPeerAsync(Ip, Asn);
         Assert.NotNull(peer);
         Assert.Equal("active", peer!.Status);
         Assert.NotNull(peer.LastSessionAt);
@@ -198,8 +198,8 @@ public class PeerStoreAtomicityTests
         Thread.Sleep(15);
 
         // Second call (update path) — must refresh LastSessionAt, not throw.
-        store.UpsertPeer(Ip, Asn);
-        var peer2 = store.GetPeer(Ip, Asn);
+        await store.UpsertPeerAsync(Ip, Asn);
+        var peer2 = await store.GetPeerAsync(Ip, Asn);
         Assert.NotNull(peer2);
         Assert.Equal("active", peer2!.Status);
         Assert.NotNull(peer2.LastSessionAt);
@@ -213,22 +213,22 @@ public class PeerStoreAtomicityTests
     /// concurrently-deleted peer; now the UPDATE matches 0 rows silently).
     /// </summary>
     [Fact]
-    public void UpdateSessionStatus_FlipsStatus_And_Is_NoOp_For_Missing_Peer()
+    public async Task UpdateSessionStatus_FlipsStatus_And_Is_NoOp_For_Missing_Peer()
     {
         var (store, connection) = NewStore();
         using var conn = connection;
-        store.UpsertPeer(Ip, Asn);
+        await store.UpsertPeerAsync(Ip, Asn);
 
-        store.UpdateSessionStatus(Ip, Asn, active: false);
-        Assert.Equal("inactive", store.GetPeer(Ip, Asn)!.Status);
+        await store.UpdateSessionStatusAsync(Ip, Asn, active: false);
+        Assert.Equal("inactive", (await store.GetPeerAsync(Ip, Asn))!.Status);
 
-        store.UpdateSessionStatus(Ip, Asn, active: true);
-        var peer = store.GetPeer(Ip, Asn);
+        await store.UpdateSessionStatusAsync(Ip, Asn, active: true);
+        var peer = await store.GetPeerAsync(Ip, Asn);
         Assert.Equal("active", peer!.Status);
         Assert.NotNull(peer.LastSessionAt);
 
         // No-op for a peer that does not exist — must not throw.
-        store.UpdateSessionStatus("203.0.113.99", 99999, active: true);
+        await store.UpdateSessionStatusAsync("203.0.113.99", 99999, active: true);
     }
 
     // ---- #228: single-roundtrip GetPeerDetail equivalence ----
@@ -241,24 +241,24 @@ public class PeerStoreAtomicityTests
     /// GetCommunities calls returned. This is the contract BuildPeerDetail/HandleGetPeer now rely on.
     /// </summary>
     [Fact]
-    public void GetPeerDetail_Matches_Standalone_Getters()
+    public async Task GetPeerDetail_Matches_Standalone_Getters()
     {
         var (store, connection) = NewStore();
         using var conn = connection;
-        var peerId = store.CreatePeer(Ip, Asn, "test peer");
-        store.SetSubscriptions(peerId, ["list-a", "list-b"]);
-        store.SetCustomPrefixes(peerId, [("10.0.0.0", (byte)24), ("172.16.0.0", (byte)12)]);
-        store.SetCustomAsns(peerId, [64512u, 64513u]);
-        store.SetCommunities(peerId, [0x65001000u]);
+        var peerId = await store.CreatePeerAsync(Ip, Asn, "test peer");
+        await store.SetSubscriptionsAsync(peerId, ["list-a", "list-b"]);
+        await store.SetCustomPrefixesAsync(peerId, [("10.0.0.0", (byte)24), ("172.16.0.0", (byte)12)]);
+        await store.SetCustomAsnsAsync(peerId, [64512u, 64513u]);
+        await store.SetCommunitiesAsync(peerId, [0x65001000u]);
         // AddCustomSource creates sources inactive by default (Active=false); activate one explicitly
         // so the test exercises both Active states. GetPeerDetail carries ALL sources regardless of
         // Active — unlike PeerRoutingView which filters Active at the SQL level.
-        var activeSource = store.AddCustomSource(peerId, "src-active", "https://example.com/list.txt", "65000:100");
-        store.SetSourceActive(peerId, activeSource.Id, active: true);
+        var activeSource = await store.AddCustomSourceAsync(peerId, "src-active", "https://example.com/list.txt", "65000:100");
+        await store.SetSourceActiveAsync(peerId, activeSource.Id, active: true);
         // An inactive source must STILL appear in CustomSources (the API shows the toggle state).
-        store.AddCustomSource(peerId, "src-paused", "https://example.com/other.txt", null);
+        await store.AddCustomSourceAsync(peerId, "src-paused", "https://example.com/other.txt", null);
 
-        var detail = store.GetPeerDetail(peerId);
+        var detail = await store.GetPeerDetailAsync(peerId);
         Assert.NotNull(detail);
 
         // Scalar fields match the row.
@@ -268,16 +268,16 @@ public class PeerStoreAtomicityTests
         Assert.Equal("test peer", detail.Description);
 
         // Collection fields match the standalone getters exactly.
-        Assert.Equal(store.GetSubscriptions(peerId), detail.Subscriptions);
-        Assert.Equal(store.GetCustomPrefixes(peerId), detail.CustomPrefixes);
-        Assert.Equal(store.GetCustomAsns(peerId), detail.CustomAsns);
-        Assert.Equal(store.GetCommunities(peerId).Select(c => (long)c), detail.Communities);
+        Assert.Equal(await store.GetSubscriptionsAsync(peerId), detail.Subscriptions);
+        Assert.Equal(await store.GetCustomPrefixesAsync(peerId), detail.CustomPrefixes);
+        Assert.Equal(await store.GetCustomAsnsAsync(peerId), detail.CustomAsns);
+        Assert.Equal((await store.GetCommunitiesAsync(peerId)).Select(c => (long)c), detail.Communities);
 
         // CustomSources carries ALL fields (incl. Active) for ALL sources (incl. inactive) — matches
         // GetCustomSources exactly. Guards against a regression that filters inactive sources.
         // Compare as a set keyed by Name: the two load paths (EF projection vs GetCustomSources) do
         // not guarantee the same row order, so an index-based compare would be order-dependent.
-        var standalone = store.GetCustomSources(peerId).ToDictionary(s => s.Name);
+        var standalone = (await store.GetCustomSourcesAsync(peerId)).ToDictionary(s => s.Name);
         Assert.Equal(standalone.Count, detail.CustomSources.Count);
         Assert.Equal(2, detail.CustomSources.Count); // active + inactive both present
         Assert.Contains(detail.CustomSources, s => s.Name == "src-active" && s.Active);
@@ -297,10 +297,10 @@ public class PeerStoreAtomicityTests
     /// of HandleGetPeer / the null-fallback of BuildPeerDetail).
     /// </summary>
     [Fact]
-    public void GetPeerDetail_Returns_Null_For_Missing_Peer()
+    public async Task GetPeerDetail_Returns_Null_For_Missing_Peer()
     {
         var (store, connection) = NewStore();
         using var conn = connection;
-        Assert.Null(store.GetPeerDetail("does-not-exist"));
+        Assert.Null(await store.GetPeerDetailAsync("does-not-exist"));
     }
 }

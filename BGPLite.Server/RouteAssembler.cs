@@ -63,7 +63,7 @@ public sealed class RouteAssembler : IRouteAssembler
         var defaultComms = _communityResolver.Resolve(
             new CommunitySource(CommunitySourceKind.PrefixSource, _appConfig.DefaultPrefixSource));
 
-        var peer = _peerStore.LoadPeerRoutingView(peerIp, remoteAsn);
+        var peer = await _peerStore.LoadPeerRoutingViewAsync(peerIp, remoteAsn, ct);
         if (peer is not null)
         {
             var subscriptionIds = peer.Subscriptions;
@@ -90,7 +90,7 @@ public sealed class RouteAssembler : IRouteAssembler
                     _logger.LogError(ex, "Failed to fetch RU prefixes for {Peer}", peerLabel);
                 }
 
-                return FilterAndReturn(routes, filterPeerConfig);
+                return await FilterAndReturnAsync(routes, filterPeerConfig, ct);
             }
 
             _logger.LogInformation("Peer {Peer} subscriptions: [{Subs}]", peerLabel, string.Join(", ", subscriptionIds));
@@ -254,7 +254,7 @@ public sealed class RouteAssembler : IRouteAssembler
                 }
             }
 
-            return FilterAndReturn(routes, filterPeerConfig);
+            return await FilterAndReturnAsync(routes, filterPeerConfig, ct);
         }
         else
         {
@@ -265,12 +265,12 @@ public sealed class RouteAssembler : IRouteAssembler
             if (ct.IsCancellationRequested)
             {
                 _logger.LogInformation("Cancelled build for unknown peer {Ip} — not auto-registering", peerLabel);
-                return FilterAndReturn(routes, filterPeerConfig);
+                return await FilterAndReturnAsync(routes, filterPeerConfig, ct);
             }
 
             // Unknown peer — auto-register and send default RU list.
             _logger.LogInformation("Unknown peer {Ip}, auto-registering with RU defaults", peerLabel);
-            _peerStore.CreatePeer(peerIp, remoteAsn, null);
+            await _peerStore.CreatePeerAsync(peerIp, remoteAsn, null, ct);
 
             try
             {
@@ -286,15 +286,15 @@ public sealed class RouteAssembler : IRouteAssembler
                 _logger.LogError(ex, "Failed to fetch RU prefixes for {Peer}", peerLabel);
             }
 
-            return FilterAndReturn(routes, filterPeerConfig);
+            return await FilterAndReturnAsync(routes, filterPeerConfig, ct);
         }
     }
 
     /// <summary>Applies the per-peer outgoing community filter and returns the filtered list.</summary>
-    private List<Route> FilterAndReturn(List<Route> routes, PeerConfig filterPeerConfig)
+    private async Task<List<Route>> FilterAndReturnAsync(List<Route> routes, PeerConfig filterPeerConfig, CancellationToken ct)
     {
         // Resolve the community allow-set ONCE for the whole send — not once per route (#79).
-        var allowSet = _routeFilter.ResolveOutgoingAllowSet(filterPeerConfig);
+        var allowSet = await _routeFilter.ResolveOutgoingAllowSetAsync(filterPeerConfig, ct);
         return routes.Where(r => _routeFilter.AcceptOutgoing(r, filterPeerConfig, allowSet)).ToList();
     }
 

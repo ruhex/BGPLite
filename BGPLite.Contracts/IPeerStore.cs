@@ -1,34 +1,18 @@
 namespace BGPLite.Contracts;
 
+/// <summary>
+/// The persistence surface the BGP session layer consumes (issues #262, #230). Every member is
+/// asynchronous — the store is invoked from session threads and the route-send path, and a sync
+/// EF call there blocks a thread-pool thread for the duration of any SQLite <c>busy_timeout</c>
+/// wait. The management API works with the concrete <c>PeerStore</c> (its surface is an API
+/// concern, not a session-layer contract) and stays out of this interface on purpose.
+/// </summary>
 public interface IPeerStore
 {
-    string CreatePeer(string ip, uint asn, string? description);
-    void UpsertPeer(string ip, uint asn);
-    void UpdateSessionStatus(string ip, uint asn, bool active);
-    void DeletePeer(string id);
-    PeerInfo? GetPeerByIp(string ip);
-    PeerInfo? GetPeer(string ip, uint asn);
-    PeerInfo? GetPeerById(string id);
-    List<string> GetSubscriptions(string peerId);
-    List<string> GetCustomPrefixes(string peerId);
-    List<uint> GetCustomAsns(string peerId);
-    HashSet<uint> GetCommunities(string peerId);
-    HashSet<uint> GetCommunities(string ip, uint asn);
-    void SetCommunities(string peerId, HashSet<uint> communities);
-    void ClearCommunities(string peerId);
-    void SetDescription(string id, string description);
-
-    /// <summary>
-    /// Loads a peer by its durable identity <c>(Ip, Asn)</c> together with the routing-relevant
-    /// child data (<see cref="PeerRoutingView.Subscriptions"/>, <see cref="PeerRoutingView.CustomPrefixes"/>,
-    /// <see cref="PeerRoutingView.CustomAsns"/>, <see cref="PeerRoutingView.UserSources"/>) in a SINGLE query,
-    /// and folds the "session active" status update (Status="active", LastSessionAt=now) into the SAME
-    /// DbContext — so the BGP send path does one read+write roundtrip instead of separate
-    /// <c>GetPeer</c>/<c>UpdateSessionStatus</c>/<c>GetSubscriptions</c>/<c>GetCustomPrefixes</c>/
-    /// <c>GetCustomAsns</c> calls (issue #84). Returns <c>null</c> when the peer is unknown (the caller
-    /// then auto-registers). The collection shapes match the standalone getters exactly (no behavior change).
-    /// </summary>
-    PeerRoutingView? LoadPeerRoutingView(string ip, uint asn);
+    Task<string> CreatePeerAsync(string ip, uint asn, string? description, CancellationToken ct = default);
+    Task UpsertPeerAsync(string ip, uint asn, CancellationToken ct = default);
+    Task UpdateSessionStatusAsync(string ip, uint asn, bool active, CancellationToken ct = default);
+    Task<PeerRoutingView?> LoadPeerRoutingViewAsync(string ip, uint asn, CancellationToken ct = default);
 }
 
 public class PeerInfo

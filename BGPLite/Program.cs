@@ -78,8 +78,9 @@ builder.Services.AddSingleton<PeerStore>();
 builder.Services.AddSingleton<IRouteFilter>(sp =>
 {
     var store = sp.GetRequiredService<PeerStore>();
-    return new PeerCommunityFilter(config.Bgp.Asn, (ip, asn) =>
-        asn.HasValue ? store.GetCommunities(ip, asn.Value) : store.GetCommunitiesByIp(ip));
+    // #262: the resolver is async — its DB read used to run synchronously on the session send path.
+    return new PeerCommunityFilter(config.Bgp.Asn, async (ip, asn, ct) =>
+        asn.HasValue ? await store.GetCommunitiesAsync(ip, asn.Value, ct) : await store.GetCommunitiesByIpAsync(ip, ct));
 });
 // Per-list community resolver: stamps a configured BGP community on prefixes by source
 // (AsnList / Country / PrefixSource). ConfigCommunityResolver reads static config; Phase 2 will

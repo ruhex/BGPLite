@@ -25,14 +25,14 @@ public class PeerStoreSplitQueryTests
     private const uint Asn = 64520;
 
     [Fact]
-    public void LoadPeerRoutingView_EmitsOneSelectPerCollection()
+    public async Task LoadPeerRoutingView_EmitsOneSelectPerCollection()
     {
         var (store, connection, selects) = NewStoreCountingSelects();
         using var _ = connection;
-        var id = SeedPeerWithChildren(store);
+        var id = await SeedPeerWithChildren(store);
 
         selects.Clear();
-        var view = store.LoadPeerRoutingView(Ip, Asn);
+        var view = await store.LoadPeerRoutingViewAsync(Ip, Asn);
 
         Assert.NotNull(view);
         // peer row + 4 collections; a single-query load would emit exactly 1 SELECT.
@@ -42,14 +42,14 @@ public class PeerStoreSplitQueryTests
     }
 
     [Fact]
-    public void GetPeerDetail_EmitsOneSelectPerCollection()
+    public async Task GetPeerDetail_EmitsOneSelectPerCollection()
     {
         var (store, connection, selects) = NewStoreCountingSelects();
         using var _ = connection;
-        var id = SeedPeerWithChildren(store);
+        var id = await SeedPeerWithChildren(store);
 
         selects.Clear();
-        var detail = store.GetPeerDetail(id);
+        var detail = await store.GetPeerDetailAsync(id);
 
         Assert.NotNull(detail);
         Assert.True(selects.Count > 1,
@@ -59,14 +59,14 @@ public class PeerStoreSplitQueryTests
 
     /// <summary>The split must not change what the reads return — the point is the SQL shape, not the data.</summary>
     [Fact]
-    public void SplitReadsReturnTheSameData()
+    public async Task SplitReadsReturnTheSameData()
     {
         var (store, connection, _) = NewStoreCountingSelects();
         using var __ = connection;
-        var id = SeedPeerWithChildren(store);
+        var id = await SeedPeerWithChildren(store);
 
-        var view = store.LoadPeerRoutingView(Ip, Asn);
-        var detail = store.GetPeerDetail(id);
+        var view = await store.LoadPeerRoutingViewAsync(Ip, Asn);
+        var detail = await store.GetPeerDetailAsync(id);
 
         Assert.NotNull(view);
         Assert.NotNull(detail);
@@ -100,15 +100,15 @@ public class PeerStoreSplitQueryTests
         return (new PeerStore(new StaticOptionsFactory(options)), connection, selects);
     }
 
-    private static string SeedPeerWithChildren(PeerStore store)
+    private static async Task<string> SeedPeerWithChildren(PeerStore store)
     {
-        var id = store.CreatePeer(Ip, Asn, "split-query test");
-        store.SetSubscriptions(id, ["list-a", "list-b"]);
-        store.SetCustomPrefixes(id, [("10.0.0.0", (byte)8), ("192.0.2.0", (byte)24)]);
-        store.SetCustomAsns(id, [64512u, 64513u]);
-        var active = store.AddCustomSource(id, "active-src", "https://example.invalid/a", null);
-        store.AddCustomSource(id, "paused-src", "https://example.invalid/b", null);
-        store.SetSourceActive(id, active.Id, true);
+        var id = await store.CreatePeerAsync(Ip, Asn, "split-query test");
+        await store.SetSubscriptionsAsync(id, ["list-a", "list-b"]);
+        await store.SetCustomPrefixesAsync(id, [("10.0.0.0", (byte)8), ("192.0.2.0", (byte)24)]);
+        await store.SetCustomAsnsAsync(id, [64512u, 64513u]);
+        var active = await store.AddCustomSourceAsync(id, "active-src", "https://example.invalid/a", null);
+        await store.AddCustomSourceAsync(id, "paused-src", "https://example.invalid/b", null);
+        await store.SetSourceActiveAsync(id, active.Id, true);
         return id;
     }
 

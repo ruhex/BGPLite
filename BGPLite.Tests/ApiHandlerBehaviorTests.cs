@@ -81,7 +81,7 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
     public async Task ExportTxt_PlaintextBody_NotJsonQuoted()
     {
         var store = new PeerStore(new StaticOptionsFactory(new DbContextOptionsBuilder<BgpDbContext>().UseSqlite(_connection).Options));
-        var id = store.SavePeerConfiguration("198.51.100.7", 65090, null, [], [("10.0.0.0", (byte)8)], []).Id;
+        var id = (await store.SavePeerConfigurationAsync("198.51.100.7", 65090, null, [], [("10.0.0.0", (byte)8)], [])).Id;
         _port = await StartAsync(new AppConfig { Bgp = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1" } });
         _client = new HttpClient();
 

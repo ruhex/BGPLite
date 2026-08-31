@@ -30,7 +30,7 @@ public sealed class BgpSession : IDisposable
     private readonly BgpMetrics _metrics;
     private readonly ILogger<BgpSession> _logger;
     private readonly CancellationTokenSource _cts = new();
-    private readonly Action<string, uint>? _onPeerIdentified;
+    private readonly Func<string, uint, Task>? _onPeerIdentified;
     private readonly IPeerStore? _peerStore;
     // #265 item 1: set by BgpServer right after creation — "is this session still the registered
     // one?" A false answer at teardown-time means a replacement took the slot and owns the
@@ -253,7 +253,7 @@ public sealed class BgpSession : IDisposable
         IRouteFilter routeFilter,
         BgpMetrics metrics,
         ILogger<BgpSession> logger,
-        Action<string, uint>? onPeerIdentified = null,
+        Func<string, uint, Task>? onPeerIdentified = null,
         IPeerStore? peerStore = null,
         IPrefixAggregator? prefixAggregator = null,
         IRouteAssembler? routeAssembler = null,
@@ -342,7 +342,7 @@ public sealed class BgpSession : IDisposable
                     ? $"{c.Code}[{Convert.ToHexString(c.Data)}]"
                     : $"{c.Code}")));
 
-            ValidateOpen(remoteOpen);
+            await ValidateOpenAsync(remoteOpen);
 
             TransitionTo(BgpFsmState.OpenSent);
 
@@ -566,8 +566,9 @@ public sealed class BgpSession : IDisposable
                 var stillRegistered = _stillRegisteredProbe?.Invoke(this) ?? true;
                 if (!silent && stillRegistered)
                 {
-                    try { _peerStore?.UpdateSessionStatus(_peerConfig.Address, _remoteAsn, false); }
-                    catch (Exception ex) { _logger.LogWarning(ex, "Failed to persist session status for {Peer}", _peer); }
+                    if (_peerStore is not null)
+                        try { await _peerStore.UpdateSessionStatusAsync(_peerConfig.Address, _remoteAsn, false); }
+                        catch (Exception ex) { _logger.LogWarning(ex, "Failed to persist session status for {Peer}", _peer); }
 
                     // #366 review: a replacement can land between the probe and the write —
                     // re-probe and REPAIR. A false second probe means the registry swapped us out
@@ -579,8 +580,9 @@ public sealed class BgpSession : IDisposable
                     if (_stillRegisteredProbe?.Invoke(this) == false)
                     {
                         _logger.LogInformation("Replacement detected after status write for {Peer} — restoring active", _peer);
-                        try { _peerStore?.UpdateSessionStatus(_peerConfig.Address, _remoteAsn, true); }
-                        catch (Exception ex) { _logger.LogWarning(ex, "Failed to restore session status for {Peer}", _peer); }
+                        if (_peerStore is not null)
+                            try { await _peerStore.UpdateSessionStatusAsync(_peerConfig.Address, _remoteAsn, true); }
+                            catch (Exception ex) { _logger.LogWarning(ex, "Failed to restore session status for {Peer}", _peer); }
                     }
                 }
             }
@@ -1503,7 +1505,7 @@ public sealed class BgpSession : IDisposable
 
     #region Validation
 
-    private void ValidateOpen(BgpOpenMessage open)
+    private async Task ValidateOpenAsync(BgpOpenMessage open)
     {
         var localRouterId = BgpConstants.IPAddressToUint(_bgpConfig.GetRouterIdAddress());
         // #269: OPEN negotiation/validation lives in the protocol library (OpenNegotiator); the
@@ -1520,7 +1522,7 @@ public sealed class BgpSession : IDisposable
         // Announce/persist the peer only after the OPEN passes validation. Previously this fired
         // before the expected-ASN check, upserting a configured peer that declared a mismatched ASN
         // (BadPeerAs) just before the session was torn down.
-        _onPeerIdentified?.Invoke(_peerConfig.Address, _remoteAsn);
+        if (_onPeerIdentified is not null) await _onPeerIdentified(_peerConfig.Address, _remoteAsn);
 
         var peerGr = CapabilityHelper.GetGracefulRestart(open);
         _logger.LogInformation("Peer {Peer} Graceful Restart: {State}",

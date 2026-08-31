@@ -23,33 +23,22 @@ public class RouteRefreshHoldTimerTests
     private sealed class GatedStore : IPeerStore
     {
         public volatile bool Armed;
-        public readonly ManualResetEventSlim Release = new(false);
+        // #262: the contract is async now, so the gate awaits instead of parking a pool thread.
+        public readonly TaskCompletionSource Release = new(TaskCreationOptions.RunContinuationsAsynchronously);
         /// <summary>Completes when a gated Load has actually ENTERED the block — the test waits
         /// for it before measuring liveness, so a delayed ROUTE_REFRESH cannot pass vacuously.</summary>
         public readonly TaskCompletionSource Entered = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
-        public string CreatePeer(string ip, uint asn, string? description) => "peer";
-        public void UpsertPeer(string ip, uint asn) { }
-        public void UpdateSessionStatus(string ip, uint asn, bool active) { }
-        public void DeletePeer(string id) { }
-        public PeerInfo? GetPeerByIp(string ip) => null;
-        public PeerInfo? GetPeer(string ip, uint asn) => null;
-        public PeerInfo? GetPeerById(string id) => null;
-        public List<string> GetSubscriptions(string peerId) => [];
-        public List<string> GetCustomPrefixes(string peerId) => [];
-        public List<uint> GetCustomAsns(string peerId) => [];
-        public HashSet<uint> GetCommunities(string peerId) => [];
-        public HashSet<uint> GetCommunities(string ip, uint asn) => [];
-        public void SetCommunities(string peerId, HashSet<uint> communities) { }
-        public void ClearCommunities(string peerId) { }
-        public void SetDescription(string id, string description) { }
+        public Task<string> CreatePeerAsync(string ip, uint asn, string? description, CancellationToken ct = default) => Task.FromResult("peer");
+        public Task UpsertPeerAsync(string ip, uint asn, CancellationToken ct = default) => Task.CompletedTask;
+        public Task UpdateSessionStatusAsync(string ip, uint asn, bool active, CancellationToken ct = default) => Task.CompletedTask;
 
-        public PeerRoutingView? LoadPeerRoutingView(string ip, uint asn)
+        public async Task<PeerRoutingView?> LoadPeerRoutingViewAsync(string ip, uint asn, CancellationToken ct = default)
         {
             if (Armed)
             {
                 Entered.TrySetResult();
-                Release.Wait(); // the refresh hangs here, mid-flight
+                await Release.Task; // the refresh hangs here, mid-flight
             }
             return new PeerRoutingView("peer", [], [], [], []);
         }
@@ -213,7 +202,7 @@ public class RouteRefreshHoldTimerTests
 
         // Release the refresh and wind down cleanly.
         store.Armed = false;
-        store.Release.Set();
+        store.Release.TrySetResult();
         session.Dispose();
         await runTask.WaitAsync(TimeSpan.FromSeconds(10));
     }
