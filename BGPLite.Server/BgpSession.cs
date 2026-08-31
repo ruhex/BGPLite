@@ -68,8 +68,11 @@ public sealed class BgpSession : IDisposable
     private ushort _negotiatedHoldTime;
     private List<IpPrefix> _advertisedPrefixes = [];
     // #304: distinct NLRI this session currently owns in the shared table — drives the per-peer
-    // prefix cap (Bgp.MaxPrefixesPerPeer) and its 75% warning.
-    private readonly HashSet<IpPrefix> _installedPrefixes = [];
+    // prefix cap (Bgp.MaxPrefixesPerPeer) and its 75% warning. #377 review: ConcurrentDictionary,
+    // not HashSet — ownership can be taken over by ANOTHER session's install (the
+    // RouteTable.EntryOwnershipLost handler below runs on that session's thread), and the
+    // per-announce cap check reads the count on this session's read loop.
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<IpPrefix, byte> _installedPrefixes = new();
     private bool _maxPrefixesWarned;
     // #212: actual count sent on the wire (after aggregation + dedup). Updated at the end of
     // SendRoutesAsync. Read via AdvertisedPrefixCount for the management API/UI so operators see
@@ -272,6 +275,11 @@ public sealed class BgpSession : IDisposable
         // (test-only) composition, so it gets a real, named implementation that says so out loud —
         // not a RouteAssembler quietly holding nulls.
         _routeAssembler = routeAssembler ?? new SharedTableRouteAssembler(_routeTable, _routeFilter, logger);
+
+        // #377 review: when another session takes over a key this one installed, drop it from the
+        // per-peer prefix set — otherwise the cap count drifts upward on overlapping NLRI and can
+        // trip a reset for prefixes this session no longer owns. Any thread; remove-if-present.
+        _routeTable.EntryOwnershipLost += OnEntryOwnershipLost;
     }
 
     public async Task RunAsync(CancellationToken cancellationToken = default)
@@ -975,11 +983,11 @@ public sealed class BgpSession : IDisposable
                     // BgpNotificationException handler, which sends the NOTIFICATION and tears the
                     // session down (owned routes are flushed by the finally, RFC 4271 §8.2.2).
                     var cap = _bgpConfig.MaxPrefixesPerPeer;
-                    if (cap > 0 && !_installedPrefixes.Contains(nlri) && _installedPrefixes.Count >= cap)
+                    if (cap > 0 && !_installedPrefixes.ContainsKey(nlri) && _installedPrefixes.Count >= cap)
                         throw new BgpNotificationException(
                             BgpConstants.Error.Cease, BgpConstants.SubError.CeaseMaxPrefixes,
                             $"Peer {_peer} exceeded the per-peer prefix limit ({cap}); session reset per RFC 4486");
-                    if (cap > 0 && !_maxPrefixesWarned && _installedPrefixes.Count >= cap * 3 / 4)
+                    if (cap > 0 && !_maxPrefixesWarned && _installedPrefixes.Count >= MaxPrefixWarningThreshold(cap))
                     {
                         _maxPrefixesWarned = true;
                         _logger.LogWarning("Peer {Peer} at {Count}/{Cap} of the per-peer prefix limit", _peer, _installedPrefixes.Count, cap);
@@ -989,7 +997,7 @@ public sealed class BgpSession : IDisposable
                     // remove it (#289). A route the filter dropped is never installed and therefore
                     // never owned, so a later withdrawal for it removes nothing.
                     _routeTable.AddOrUpdate(route, owner: this);
-                    _installedPrefixes.Add(nlri);
+                    _installedPrefixes.TryAdd(nlri, 0);
                     // #85: guard the UintToIPAddress allocation behind IsEnabled — LogDebug
                     // evaluates the arg eagerly even when Debug is filtered out.
                     if (_logger.IsEnabled(LogLevel.Debug))
@@ -1008,6 +1016,27 @@ public sealed class BgpSession : IDisposable
     /// one of its own that another peer has since replaced. A withdrawal that owns nothing is logged
     /// and ignored — not a protocol error, since a stale withdrawal after a reconverge is ordinary.
     /// </summary>
+    /// <summary>
+    /// #377 review: another session took over a key we installed — stop counting it. Runs on the
+    /// REPLACING session's thread (see RouteTable.EntryOwnershipLost); the concurrent set makes
+    /// that safe, and a late/duplicate notification only removes an entry already gone.
+    /// </summary>
+    private void OnEntryOwnershipLost(object previousOwner, (uint Prefix, byte Length) key)
+    {
+        if (!ReferenceEquals(previousOwner, this))
+            return;
+        _installedPrefixes.TryRemove(new IpPrefix(key.Prefix, key.Length), out _);
+    }
+
+    /// <summary>
+    /// 75% of the per-peer prefix cap, overflow-safe (#377 review): cap*3 in int arithmetic
+    /// overflows for large caps and can arm the warning at a wrong (even zero) count. 75% of any
+    /// positive int always fits int (¾·MaxValue &lt; MaxValue), so a widened multiply is exact —
+    /// no saturation branch.
+    /// </summary>
+    internal static int MaxPrefixWarningThreshold(int cap) =>
+        (int)((long)cap * 3 / 4);
+
     private void WithdrawIfOwned(IpPrefix prefix, string reason)
     {
         if (!_routeTable.RemoveOwnedBy(prefix.Address, prefix.Length, this))
@@ -1018,7 +1047,8 @@ public sealed class BgpSession : IDisposable
         }
 
         // #304: the cap counts what this session currently owns — a withdrawal frees budget.
-        _installedPrefixes.Remove(prefix);
+        // (A takeover already removed it via the ownership handler; TryRemove tolerates that.)
+        _installedPrefixes.TryRemove(prefix, out _);
 
         if (_logger.IsEnabled(LogLevel.Debug))
             _logger.LogDebug("{Reason}: {Prefix}", reason, prefix);
@@ -1510,6 +1540,7 @@ public sealed class BgpSession : IDisposable
         // #341: wake any send parked on _sendLock BEFORE the semaphore (and its waiter queue)
         // goes away — SendMessageAsync abandons such waits and reports "not sent".
         _sendLockDisposed.TrySetResult();
+        _routeTable.EntryOwnershipLost -= OnEntryOwnershipLost;
         _cts.Cancel();
         _connection.Dispose();   // owns the socket (SocketBgpConnection wraps NetworkStream ownsSocket:true)
         _cts.Dispose();

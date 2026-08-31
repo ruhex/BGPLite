@@ -95,7 +95,7 @@ public class ExceptionMappingTests
     [Fact]
     public void DbUpdateException_FkViolation_MapsTo_404()
     {
-        var ex = new DbUpdateException("constraint failed", new SqliteException("FK constraint failed", 19));
+        var ex = new DbUpdateException("constraint failed", new SqliteException("FK constraint failed", 19, 787));
         var (message, status) = ManagementApi.MapExceptionToResponse(ex);
 
         Assert.Equal(404, status);
@@ -106,7 +106,9 @@ public class ExceptionMappingTests
     public void DbUpdateException_UniqueViolation_Still409()
     {
         // SQLITE_CONSTRAINT_UNIQUE — a concurrent duplicate insert remains a genuine conflict.
-        var ex = new DbUpdateException("unique", new SqliteException("UNIQUE constraint failed: Peers.Ip", 2067));
+        // Realistic shape: BOTH classes report primary 19; the discriminator is the EXTENDED
+        // code (2067 = SQLITE_CONSTRAINT_UNIQUE).
+        var ex = new DbUpdateException("unique", new SqliteException("UNIQUE constraint failed: Peers.Ip", 19, 2067));
         var (message, status) = ManagementApi.MapExceptionToResponse(ex);
 
         Assert.Equal(409, status);
