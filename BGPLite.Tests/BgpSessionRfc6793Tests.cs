@@ -87,6 +87,60 @@ public class BgpSessionRfc6793Tests
         Assert.Equal([(64512u, 1u, 2u)], attrs.LargeCommunities);
     }
 
+    /// <summary>
+    /// #292 item 1: RFC 4271 §6.3/§6.8 — a semantically invalid NEXT_HOP MUST be rejected with
+    /// subcode 8 (Invalid NEXT_HOP Attribute) and routed through treat-as-withdraw (RFC 7606
+    /// §7.3). Previously every one of these was accepted into the route table.
+    /// </summary>
+    [Theory]
+    [InlineData(0x00000000u, "unspecified")]        // 0.0.0.0
+    [InlineData(0x7F000001u, "loopback")]           // 127.0.0.1
+    [InlineData(0xE0000001u, "multicast")]          // 224.0.0.1
+    [InlineData(0xF0FF00FFu, "reserved")]           // 240.255.0.255
+    [InlineData(0xFFFFFFFFu, "broadcast")]          // 255.255.255.255
+    [InlineData(0x0A000001u, "self")]               // == localRouterId
+    public void ParseRouteAttributes_InvalidNextHop_ThrowsSubcode8(uint nextHop, string why)
+    {
+        var update = new BgpUpdateMessage
+        {
+            PathAttributes =
+            [
+                AttributeHelper.WriteOrigin(BgpOrigin.Igp),
+                AttributeHelper.WriteAsPath([65001u], fourByteAsn: true),
+                AttributeHelper.WriteNextHop(nextHop),
+            ],
+            Nlri = []
+        };
+
+        var ex = Assert.Throws<BgpNotificationException>(
+            () => UpdateCodec.ParseRouteAttributes(update, fourByteAsnSession: true, localRouterId: 0x0A000001u));
+
+        Assert.Equal(BgpConstants.Error.UpdateMessageError, ex.ErrorCode);
+        Assert.Equal(BgpConstants.SubError.InvalidNextHopAttribute, ex.SubErrorCode);
+        // 255.255.255.255 lands in the 240/4 bucket of the validator's message.
+        var expected = why switch { "self" => "own address", "broadcast" => "reserved", _ => why };
+        Assert.Contains(expected, ex.Message);
+    }
+
+    [Fact]
+    public void ParseRouteAttributes_ValidNextHop_Accepted()
+    {
+        var update = new BgpUpdateMessage
+        {
+            PathAttributes =
+            [
+                AttributeHelper.WriteOrigin(BgpOrigin.Igp),
+                AttributeHelper.WriteAsPath([65001u], fourByteAsn: true),
+                AttributeHelper.WriteNextHop(0x0A000001u),
+            ],
+            Nlri = []
+        };
+
+        // 10.0.0.1 with no localRouterId known (optional parameter): a legitimate peer address.
+        var attrs = UpdateCodec.ParseRouteAttributes(update, fourByteAsnSession: true);
+        Assert.Equal(0x0A000001u, attrs.NextHop);
+    }
+
     [Fact]
     public void ParseRouteAttributes_MissingMandatoryAttribute_ThrowsSubcode3()
     {

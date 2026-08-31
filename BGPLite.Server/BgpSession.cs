@@ -859,7 +859,9 @@ public sealed class BgpSession : IDisposable
             UpdateCodec.RouteAttributes attrs;
             try
             {
-                attrs = UpdateCodec.ParseRouteAttributes(update, _remoteFourByteAsn);
+                // #292 item 1: local router-id for the §6.8 self-address check on NEXT_HOP.
+                attrs = UpdateCodec.ParseRouteAttributes(update, _remoteFourByteAsn,
+                    BgpConstants.IPAddressToUint(_bgpConfig.GetRouterIdAddress()));
             }
             catch (BgpNotificationException ex) when (ex.ErrorCode == BgpConstants.Error.UpdateMessageError)
             {
