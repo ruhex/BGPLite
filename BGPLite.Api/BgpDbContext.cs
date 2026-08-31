@@ -39,6 +39,10 @@ public class BgpDbContext : DbContext
         {
             if (TableExists("Peers") && !TableExists("__EFMigrationsHistory"))
             {
+                // #264: converge the Peers COLUMN set before stamping — the converger migration
+                // reconciles child tables and indexes, never Peers' own columns.
+                ConvergeLegacyPeersColumns(connection);
+
                 // Pre-Migrations deployment: create the history table and stamp Init as applied —
                 // LegacyEnsureCreated (not stamped) then converges the residual drift via Migrate.
                 var efVersion = typeof(DbContext).Assembly.GetName().Version!.ToString();
@@ -61,6 +65,53 @@ public class BgpDbContext : DbContext
         // every peer starts inactive. A single ExecuteUpdate is atomic under SQLite.
         db.Peers.Where(p => p.Status == "active").ExecuteUpdate(
             s => s.SetProperty(p => p.Status, "inactive"));
+    }
+
+    /// <summary>
+    /// Expected <c>Peers</c> columns with the Init-migration DDL (#264). Nullable/defaulted only —
+    /// a required column without a default cannot be ALTERed onto existing rows, and
+    /// <see cref="ConvergeLegacyPeersColumns"/> refuses loudly for it instead of stamping an
+    /// unusable schema.
+    /// </summary>
+    private static readonly (string Name, string Ddl)[] ExpectedPeersColumns =
+    [
+        ("Id", "\"Id\" TEXT NOT NULL"),
+        ("Ip", "\"Ip\" TEXT NOT NULL"),
+        ("Asn", "\"Asn\" INTEGER NULL"),
+        ("Description", "\"Description\" TEXT NULL"),
+        ("Status", "\"Status\" TEXT NOT NULL DEFAULT 'inactive'"),
+        ("CreatedAt", "\"CreatedAt\" TEXT NOT NULL"),
+        ("LastSessionAt", "\"LastSessionAt\" TEXT NULL"),
+    ];
+
+    /// <summary>
+    /// #264: before the legacy stamp, converge the <c>Peers</c> column set. The converger MIGRATION
+    /// reconciles child tables and indexes but never Peers' own columns, so an early EnsureCreated-era
+    /// build missing one would stamp Init and fail its first raw write at runtime ("no such column").
+    /// </summary>
+    private static void ConvergeLegacyPeersColumns(System.Data.Common.DbConnection connection)
+    {
+        var existing = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        using (var cmd = connection.CreateCommand())
+        {
+            cmd.CommandText = "PRAGMA table_info(\"Peers\")";
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read())
+                existing.Add(reader.GetString(1)); // column 1 = name
+        }
+
+        foreach (var (name, ddl) in ExpectedPeersColumns)
+        {
+            if (existing.Contains(name))
+                continue;
+            if (ddl.Contains("NOT NULL") && !ddl.Contains("DEFAULT", StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException(
+                    $"Legacy database is missing required column 'Peers.{name}' that cannot be added without a backfill. " +
+                    "Restore the database from a backup or migrate it manually before upgrading.");
+            using var alter = connection.CreateCommand();
+            alter.CommandText = $"ALTER TABLE \"Peers\" ADD COLUMN {ddl}";
+            alter.ExecuteNonQuery();
+        }
     }
 
     private const string InitMigrationId = "20260826182256_Init";

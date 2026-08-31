@@ -1,3 +1,4 @@
+using BGPLite.Configuration;
 using BGPLite.Api;
 
 namespace BGPLite.Tests;
@@ -115,5 +116,27 @@ public class PeerInputValidationTests
     public void IsConfigurablePeerAsn_ReservedValuesDoNotBleedIntoNeighbours(uint asn)
     {
         Assert.True(ManagementApi.IsConfigurablePeerAsn(asn));
+    }
+
+    /// <summary>
+    /// #266 item 4: subscription names must resolve against the configured lists — an unknown
+    /// name was stored and silently served zero prefixes forever. Both config surfaces count as
+    /// known: RipeStat.AsnLists and PrefixSources.
+    /// </summary>
+    [Fact]
+    public void FindUnknownSubscriptionNames_FlagsTypos_KnowsBothSurfaces()
+    {
+        var config = new AppConfig
+        {
+            Bgp = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1" },
+            RipeStat = new RipeStatConfig { AsnLists = [new AsnList { Name = "ru" }] },
+            PrefixSources = [new PrefixSourceConfig { Name = "cloud", Kind = "http", Url = "https://example.com/x" }],
+        };
+
+        Assert.Empty(ManagementApi.FindUnknownSubscriptionNames(["ru", "cloud"], config));
+        Assert.Empty(ManagementApi.FindUnknownSubscriptionNames([], config));
+
+        var unknown = ManagementApi.FindUnknownSubscriptionNames(["ru", "ru-backup", "Cloud"], config);
+        Assert.Equal(["ru-backup", "Cloud"], unknown);   // case-sensitive + typo both flagged
     }
 }

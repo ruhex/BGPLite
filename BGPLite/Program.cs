@@ -163,14 +163,27 @@ builder.Services.AddSingleton(sp => new RipeStatProvider(
 
 // AS-originated prefix source (Kind: "asn") — fetches an AS's prefixes via RIPEstat through the
 // provider factory, so `Kind: asn` entries under PrefixSources load like any other source.
-builder.Services.AddSingleton<AsnPrefixProvider>();
+// #267 item 5: the ONE per-ASN RIPEstat cache — shared by PrefixService (RipeStat.AsnLists,
+// custom ASNs) and AsnPrefixProvider (Kind: asn sources), so an ASN configured in both
+// mechanisms is fetched and cached once.
+builder.Services.AddSingleton(sp => new RipeStatPrefixCache(
+    sp.GetRequiredService<RipeStatProvider>(),
+    sp.GetRequiredService<ILogger<RipeStatPrefixCache>>()));
+builder.Services.AddSingleton<AsnPrefixProvider>(sp => new AsnPrefixProvider(
+    sp.GetRequiredService<RipeStatPrefixCache>(),
+    sp.GetRequiredService<ILogger<AsnPrefixProvider>>()));
 builder.Services.AddSingleton<IPrefixSourceProvider>(sp => sp.GetRequiredService<AsnPrefixProvider>());
 
 builder.Services.AddSingleton<IPrefixService>(sp =>
 {
     var ripe = sp.GetRequiredService<RipeStatProvider>();
     var sources = sp.GetRequiredService<IPrefixSourceService>();
-    return new PrefixService(config, ripe, sources, sp.GetRequiredService<HttpPrefixProvider>(), logger: sp.GetRequiredService<ILogger<PrefixService>>());
+    return new PrefixService(
+        config,
+        sp.GetRequiredService<RipeStatPrefixCache>(),
+        sources,
+        sp.GetRequiredService<HttpPrefixProvider>(),
+        logger: sp.GetRequiredService<ILogger<PrefixService>>());
 });
 
 // #263: the BGP send path's dependencies are registered explicitly and resolved with

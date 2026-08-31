@@ -60,6 +60,13 @@ public sealed class BgpConfig
     [YamlMember(Alias = "MaxAcceptsPerIpPerMinute")]
     public int MaxAcceptsPerIpPerMinute { get; init; } = 60;
 
+    /// <summary>#304: per-peer ceiling on prefixes installed from one session (distinct
+    /// NLRI this session currently owns); exceeding it tears the session down with
+    /// NOTIFICATION(Cease, MaxPrefixesExceeded) per RFC 4271 §6.7 / RFC 4486 §2.
+    /// 0 = unlimited (the convention of OpenTimeoutSeconds / MaxAcceptsPerIpPerMinute).</summary>
+    [YamlMember(Alias = "MaxPrefixesPerPeer")]
+    public int MaxPrefixesPerPeer { get; init; } = 0;
+
     public IPAddress GetRouterIdAddress() => IPAddress.Parse(RouterId);
 
     /// <summary>
@@ -116,5 +123,9 @@ public sealed class BgpConfig
         if (MaxAcceptsPerIpPerMinute < 0)
             throw new InvalidOperationException(
                 $"Invalid configuration: Bgp.MaxAcceptsPerIpPerMinute must be >= 0 (got {MaxAcceptsPerIpPerMinute}).");
+
+        if (MaxPrefixesPerPeer < 0)
+            throw new InvalidOperationException(
+                $"Invalid configuration: Bgp.MaxPrefixesPerPeer must be >= 0, 0 = unlimited (got {MaxPrefixesPerPeer}).");
     }
 }

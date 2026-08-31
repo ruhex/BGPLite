@@ -26,13 +26,19 @@ For section-by-section RFC conformance status, see `RFC_COMPLIANCE.md` (2026-07-
   deviation is recorded in `ReadLoopAsync` and here.
 - **Tracker:** documented in code (#222); intentionally kept.
 
-### D3. Malformed AGGREGATOR withdraws the whole UPDATE (temporary)
-- **Decision:** a malformed AGGREGATOR (length ≠ 6/8 by session type) is handled as treat-as-withdraw.
-- **Context:** RFC 7606 §7.7 prescribes *attribute discard* (keep the routes); BGPLite has no
-  attribute-discard mechanism yet.
-- **Consequence:** BGPLite is stricter than the RFC — routes a conformant implementation installs are
-  lost. Also blocks AS-0 rejection in AGGREGATOR (RFC 7607) from landing correctly.
-- **Tracker:** #306 (open).
+### D3. Malformed AGGREGATOR/AS4_AGGREGATOR takes attribute discard (RESOLVED)
+- **Decision:** a malformed AGGREGATOR or AS4_AGGREGATOR (length ≠ 6/8 by session type, or AS 0 per
+  RFC 7607) is DISCARDED per RFC 7606 §7.7 (AGGREGATOR) / RFC 6793 §6 (AS4_AGGREGATOR — RFC 7606 §7.8
+  is COMMUNITY and §7 excludes attribute 18) — the attribute is dropped, the UPDATE's routes stay,
+  a Warning names the dropped type codes.
+- **Context:** was temporarily treat-as-withdraw (stricter than the RFC — routes a conformant
+  implementation installs were lost) until the attribute-discard mechanism existed (#306). Flags
+  conflicts on these attributes REMAIN treat-as-withdraw per RFC 7606 §3 — discard is reserved for
+  value/length malformation of attributes with no route-selection effect (§2).
+- **Consequence:** the deferred RFC 7607 half (AS 0 in both aggregator attributes) landed with the
+  mechanism; ValidateAggregatorReconstruction tolerates a discarded AGGREGATOR so a carried-but-malformed
+  one does not trip the pairing rule.
+- **Tracker:** #306.
 
 ### D4. Per-type minimum message lengths classified as body errors
 - **Decision:** too-short OPEN/UPDATE/NOTIFICATION/ROUTE_REFRESH frames surface as Open/Update

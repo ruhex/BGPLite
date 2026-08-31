@@ -1,3 +1,4 @@
+using Microsoft.Data.Sqlite;
 using System.Text.Json;
 using BGPLite.Api;
 using Microsoft.EntityFrameworkCore;
@@ -85,5 +86,32 @@ public class ExceptionMappingTests
         var (message, status) = ManagementApi.MapExceptionToResponse(new OperationCanceledException());
         Assert.Equal(500, status);
         Assert.Equal("Internal server error", message);
+    }
+
+    /// <summary>
+    /// #266 item 8: an FK violation (SQLite code 19) after a concurrent DELETE removed the parent
+    /// peer row must answer 404 "removed", not 409 "already exists" for a resource that is gone.
+    /// </summary>
+    [Fact]
+    public void DbUpdateException_FkViolation_MapsTo_404()
+    {
+        var ex = new DbUpdateException("constraint failed", new SqliteException("FK constraint failed", 19, 787));
+        var (message, status) = ManagementApi.MapExceptionToResponse(ex);
+
+        Assert.Equal(404, status);
+        Assert.Contains("removed", message);
+    }
+
+    [Fact]
+    public void DbUpdateException_UniqueViolation_Still409()
+    {
+        // SQLITE_CONSTRAINT_UNIQUE — a concurrent duplicate insert remains a genuine conflict.
+        // Realistic shape: BOTH classes report primary 19; the discriminator is the EXTENDED
+        // code (2067 = SQLITE_CONSTRAINT_UNIQUE).
+        var ex = new DbUpdateException("unique", new SqliteException("UNIQUE constraint failed: Peers.Ip", 19, 2067));
+        var (message, status) = ManagementApi.MapExceptionToResponse(ex);
+
+        Assert.Equal(409, status);
+        Assert.Contains("exists", message);
     }
 }

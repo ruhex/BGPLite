@@ -692,6 +692,20 @@ public class BgpSessionHoldTimerTests
     }
 
     /// <summary>
+    /// #377 review: the 75% warning threshold must not overflow — cap*3 in int arithmetic wraps
+    /// for large caps and can arm the warning at a wrong (even tiny) count.
+    /// </summary>
+    [Theory]
+    [InlineData(4, 3)]
+    [InlineData(2, 1)]
+    [InlineData(100, 75)]
+    [InlineData(int.MaxValue, 1610612735)]    // exact 75% via widened arithmetic — no wrap, no saturation
+    [InlineData(1, 0)]                        // floor: with post-install logging this reads "at 1/1"
+    [InlineData(1_500_000_000, 1_125_000_000)] // would wrap as int*3
+    public void MaxPrefixWarningThreshold_NoOverflow(int cap, int expected)
+        => Assert.Equal(expected, BgpSession.MaxPrefixWarningThreshold(cap));
+
+    /// <summary>
     /// #341: a blocked writer (a refresh send parked inside WriteAsync — the slow-peer holder of
     /// the issue) holds <c>_sendLock</c>; the next keepalive tick queues on the semaphore with NO
     /// token of its own; <c>Dispose</c> cancels <c>_cts</c> and then disposes the semaphore.

@@ -8,7 +8,7 @@ public class ConfigValidationTests
     // under test. Defaults match appsettings.Example.yml: a known-good baseline.
     private static BgpConfig Bgp(
         uint asn = 65001, string routerId = "10.0.0.1", int keepAlive = 60, int holdTime = 180,
-        int openTimeoutSeconds = 30, int maxAcceptsPerIpPerMinute = 60)
+        int openTimeoutSeconds = 30, int maxAcceptsPerIpPerMinute = 60, int maxPrefixesPerPeer = 0)
         => new()
         {
             Asn = asn,
@@ -16,7 +16,8 @@ public class ConfigValidationTests
             KeepAlive = keepAlive,
             HoldTime = holdTime,
             OpenTimeoutSeconds = openTimeoutSeconds,
-            MaxAcceptsPerIpPerMinute = maxAcceptsPerIpPerMinute
+            MaxAcceptsPerIpPerMinute = maxAcceptsPerIpPerMinute,
+            MaxPrefixesPerPeer = maxPrefixesPerPeer
         };
 
     private static AppConfig Config(BgpConfig? bgp = null, int apiPort = 5001, List<PeerConfig>? peers = null,
@@ -309,6 +310,16 @@ public class ConfigValidationTests
         var ex = Assert.Throws<InvalidOperationException>(() => config.Validate());
         Assert.Contains("Bgp.HoldTime", ex.Message);
         Assert.Contains("65535", ex.Message);
+    }
+
+    /// <summary>#304: the per-peer prefix cap validates like the other 0=unlimited knobs.</summary>
+    [Fact]
+    public void Validate_RejectsNegativeMaxPrefixesPerPeer()
+    {
+        var config = Config(Bgp(maxPrefixesPerPeer: -1));
+
+        var ex = Assert.Throws<InvalidOperationException>(() => config.Validate());
+        Assert.Contains("MaxPrefixesPerPeer", ex.Message);
     }
 
     [Fact]
