@@ -768,6 +768,21 @@ public sealed class BgpSession : IDisposable
                     // further full dumps); faults log instead of tearing down the read loop.
                     _ = Task.Run(() => RefreshInBackgroundAsync(cancellationToken), CancellationToken.None);
                     break;
+
+                default:
+                    // RFC 4271 FSM: in Established only UPDATE, KEEPALIVE, NOTIFICATION and
+                    // ROUTE_REFRESH are legal inputs; anything else (e.g. an OPEN) is an FSM
+                    // error — NOTIFICATION 5/0, release resources, Idle. Previously such messages
+                    // were silently swallowed (#265 item 3). The CAS claims the teardown BEFORE
+                    // sending so the finally-block cannot double-emit a Cease (§8.1).
+                    _logger.LogWarning("Unexpected message {Type} from {Peer} in Established — FSM error",
+                        message.Type, _peer);
+                    if (Interlocked.CompareExchange(ref _teardownReason, (int)TeardownReason.LocalCease, (int)TeardownReason.None) == (int)TeardownReason.None)
+                    {
+                        try { await SendNotificationAsync(BgpConstants.Error.FiniteStateMachineError, BgpConstants.SubError.Unspecific); }
+                        catch { /* best-effort — partial write counts, see RFC 4271 §8.1 */ }
+                    }
+                    return;
             }
         }
     }
