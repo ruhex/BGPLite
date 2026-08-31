@@ -29,6 +29,10 @@ public sealed class ConfigReloader : IHostedService, IDisposable
     private Timer? _debounceTimer;
     private int _reloading; // 0 = idle, 1 = a reload is in progress (Interlocked)
     private int _stopped;    // 1 after StopAsync — a queued debounce callback must not start a reload
+    // Gate making {stop-latch, reload admission} atomic relative to each other, plus the drain task
+    // StopAsync awaits so an admitted reload finishes before the host disposes ManagementApi.
+    private readonly object _gate = new();
+    private Task _reloadDrain = Task.CompletedTask;
 
     public ConfigReloader(string configPath, ManagementApi managementApi, ILogger<ConfigReloader> logger)
     {
@@ -96,25 +100,28 @@ public sealed class ConfigReloader : IHostedService, IDisposable
         // At most one reload at a time: a slow reload (large YAML) should not overlap with a second
         // one triggered by another save during the first. ApplyConfig is itself thread-safe, but the
         // guard keeps the log output and the load+validate sequence coherent.
-        if (Volatile.Read(ref _stopped) != 0)
-            return;
-        if (Interlocked.CompareExchange(ref _reloading, 1, 0) != 0)
+        lock (_gate)
         {
-            // A save landed while a reload is still running: the one-shot debounce fired, we lost
-            // the CAS, and without re-arming the timer that save would never be applied until the
-            // NEXT save (#321 item 1). Push the fire time past the in-flight reload instead.
-            try { _debounceTimer?.Change(DebounceMs, Timeout.Infinite); }
-            catch (ObjectDisposedException) { /* StopAsync raced us — shutting down */ }
-            return;
-        }
+            if (Volatile.Read(ref _stopped) != 0)
+                return;
+            if (Interlocked.CompareExchange(ref _reloading, 1, 0) != 0)
+            {
+                // A save landed while a reload is still running: the one-shot debounce fired, we
+                // lost the CAS, and without re-arming the timer that save would never be applied
+                // until the NEXT save (#321 item 1). Push the fire time past the in-flight reload.
+                try { _debounceTimer?.Change(DebounceMs, Timeout.Infinite); }
+                catch (ObjectDisposedException) { /* StopAsync raced us — shutting down */ }
+                return;
+            }
 
-        try
-        {
-            Reload();
-        }
-        finally
-        {
-            Volatile.Write(ref _reloading, 0);
+            // Off the timer thread, and observable: StopAsync awaits _reloadDrain so an admitted
+            // reload finishes before the host tears ManagementApi down. Reload never throws by
+            // contract; the continuation only keeps a hypothetical fault from going unobserved.
+            _reloadDrain = Task.Run(() =>
+            {
+                try { Reload(); }
+                finally { Volatile.Write(ref _reloading, 0); }
+            });
         }
     }
 
@@ -153,16 +160,24 @@ public sealed class ConfigReloader : IHostedService, IDisposable
         }
     }
 
-    public Task StopAsync(CancellationToken cancellationToken)
+    public async Task StopAsync(CancellationToken cancellationToken)
     {
         // Set the stop latch BEFORE disarming the timer: a debounce callback already queued can
         // still run TriggerReload, which would re-arm and start a reload during shutdown (#321
         // review). The latch makes both the entry and the re-arm branch no-ops.
-        Volatile.Write(ref _stopped, 1);
+        Task drain;
+        lock (_gate)
+        {
+            Volatile.Write(ref _stopped, 1);
+            drain = _reloadDrain;
+        }
         _debounceTimer?.Change(Timeout.Infinite, Timeout.Infinite);
         if (_watcher is not null)
             _watcher.EnableRaisingEvents = false;
-        return Task.CompletedTask;
+        // An already-admitted reload may still be applying config — let it finish (bounded by the
+        // host token) so ApplyConfig cannot race ManagementApi.Dispose (#321 CodeRabbit review).
+        try { await drain.WaitAsync(cancellationToken); }
+        catch { /* host grace elapsed or the reload faulted — previous config stays */ }
     }
 
     public void Dispose()

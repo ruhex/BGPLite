@@ -107,7 +107,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
 
     /// <summary>
     /// Hot-reloads the SOFT (non-session-disrupting) part of the configuration (#136): the
-    /// trusted-proxy CIDR list (client-IP resolution), the CORS origin allowlist (via <c>_config</c>),
+    /// trusted-proxy CIDR list (client-IP resolution), the CORS origin allowlist (<c>_corsAllowedOrigins</c>),
     /// and the API rate / concurrency limiters. Each derived field is rebuilt from
     /// <paramref name="newConfig"/> and swapped atomically with <see cref="Interlocked.Exchange"/> so
     /// in-flight requests keep observing the previous state while subsequent requests pick up the new
@@ -160,8 +160,8 @@ public sealed class ManagementApi : IHostedService, IDisposable
         ResolveClientIp(remote, xForwardedFor, xRealIp, Volatile.Read(ref _trustedProxyNetworks));
 
     /// <summary>
-    /// Resolves the CORS origin against the CURRENT live <c>_config</c> (#136), for tests that need
-    /// to observe the effect of reloading <c>CorsAllowedOrigins</c> without an HttpListener. Mirrors
+    /// Resolves the CORS origin against the CURRENT live <c>_corsAllowedOrigins</c> (#136), for tests
+    /// that need to observe the effect of reloading <c>CorsAllowedOrigins</c> without an HttpListener. Mirrors
     /// <see cref="AddCorsHeaders"/>'s resolution.
     /// </summary>
     internal string? ResolveCorsOriginLive(string? requestOrigin) =>
