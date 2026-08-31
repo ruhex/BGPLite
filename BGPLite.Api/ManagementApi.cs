@@ -793,6 +793,14 @@ public sealed class ManagementApi : IHostedService, IDisposable
         var asnLists = data.AsnLists ?? [];
         var customPrefixes = new List<(string Prefix, byte Length)>();
 
+        // #266 item 4: reject unknown subscription names at the boundary — a stored typo silently
+        // served zero prefixes from that list forever, with no signal on either side.
+        var unknownLists = FindUnknownSubscriptionNames(asnLists, _config);
+        if (unknownLists.Count > 0)
+            return ApiResponse.Error(
+                $"Unknown list name(s): {SanitizeForLog(string.Join(", ", unknownLists))}. " +
+                "See /api/asn-lists for the configured names.", 400);
+
         _logger.LogInformation("CreatePeer deserialized: AsnLists={Lists}, CustomPrefixes={Prefixes}, CustomAsns={Asns}",
             SanitizeForLog(string.Join(",", asnLists)), SanitizeForLog(string.Join(",", data.CustomPrefixes ?? [])),
             string.Join(",", data.CustomAsns ?? []));
@@ -908,6 +916,17 @@ public sealed class ManagementApi : IHostedService, IDisposable
         // #259: one transaction for the whole update, same reasoning as the create path. A null
         // argument means "leave this alone" — the PATCH semantics this endpoint already had, now
         // expressed once in the store instead of as four conditional calls that each committed.
+        // #266 item 4: same boundary check on update — but only for names actually being SET
+        // (a null Lists field means "leave the subscriptions alone" and has nothing to validate).
+        if (data.Lists is not null)
+        {
+            var unknown = FindUnknownSubscriptionNames(data.Lists, _config);
+            if (unknown.Count > 0)
+                return ApiResponse.Error(
+                    $"Unknown list name(s): {SanitizeForLog(string.Join(", ", unknown))}. " +
+                    "See /api/asn-lists for the configured names.", 400);
+        }
+
         _store.UpdatePeerConfiguration(peerId, data.Description, data.Lists, parsedPrefixes, data.CustomAsns);
 
         _logger.LogInformation("Updated peer {Id}", SanitizeForLog(peerId));
@@ -1378,6 +1397,23 @@ public sealed class ManagementApi : IHostedService, IDisposable
         }
 
         return null;
+    }
+
+    /// <summary>
+    /// #266 item 4: subscription names must match something actually configured — an unknown
+    /// name (typo, removed list) was stored and silently served zero prefixes forever. Returns
+    /// the unknown names, or an empty list when every name resolves against the configured
+    /// <c>RipeStat.AsnLists</c> or <c>PrefixSources</c>.
+    /// </summary>
+    internal static IReadOnlyList<string> FindUnknownSubscriptionNames(IEnumerable<string> names, AppConfig config)
+    {
+        var known = new HashSet<string>(StringComparer.Ordinal);
+        if (config.RipeStat?.AsnLists is { } lists)
+            foreach (var l in lists)
+                known.Add(l.Name);
+        foreach (var source in config.PrefixSources)
+            known.Add(source.Name);
+        return names.Where(n => !known.Contains(n)).Distinct(StringComparer.Ordinal).ToList();
     }
 
     /// <summary>
