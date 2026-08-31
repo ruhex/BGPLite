@@ -567,6 +567,46 @@ public class BgpSessionRouteOwnershipTests
         Assert.DoesNotContain(store.StatusWrites, w => !w.Active);
     }
 
+    /// <summary>
+    /// #366 review (TOCTOU in the #265 item 1 guard): a replacement can land in the registry in
+    /// the window between the probe and the inactive write. A probe that flips true→false across
+    /// those two calls models exactly that; the finally must REPAIR the row back to active — the
+    /// final write must be active, not the stale inactive.
+    /// </summary>
+    [Fact]
+    public async Task ReplacementLandingDuringStatusWrite_IsRepairedToActive()
+    {
+        // Non-silent teardown so the write path runs: peer NOTIFICATION.
+        var conn = new ScriptedConnection();
+        var store = new RecordingPeerStore();
+        var config = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1", HoldTime = 0, KeepAlive = 0 };
+        var session = new BgpSession(
+            conn, new PeerConfig { Address = "127.0.0.1" }, config, new RouteTable(),
+            AllowAllFilter.Instance, new BgpMetrics(), NullLogger<BgpSession>.Instance, peerStore: store);
+        var calls = 0;
+        session.StillRegisteredProbe = _ => Interlocked.Increment(ref calls) switch { 1 => true, _ => false };
+        var run = session.RunAsync();
+        conn.EnqueueMessage(new BgpOpenMessage
+        {
+            Version = BgpConstants.BgpVersion,
+            Asn = 65002,
+            HoldTime = 0,
+            RouterId = 0x0A000002,
+            Capabilities = [BgpCapabilityInfo.FourOctetAsn(65002)],
+        });
+        conn.EnqueueMessage(BgpKeepaliveMessage.Instance);
+        for (var i = 0; i < 200 && !session.IsEstablished; i++)
+            await Task.Delay(TimeSpan.FromMilliseconds(10));
+        Assert.True(session.IsEstablished, "session must reach Established");
+
+        conn.EnqueueMessage(new BgpNotificationMessage { ErrorCode = BgpConstants.Error.Cease, SubErrorCode = 0 });
+        try { await run.WaitAsync(TimeSpan.FromSeconds(5)); } catch { /* teardown unwinds */ }
+
+        Assert.NotEmpty(store.StatusWrites);
+        Assert.True(store.StatusWrites[^1].Active, "the replacement-during-write race must end with the row ACTIVE");
+        Assert.Contains(store.StatusWrites, w => !w.Active);   // the stale inactive write happened, then the repair
+    }
+
     [Fact]
     public async Task GenuineTeardown_StillWritesInactive()
     {
