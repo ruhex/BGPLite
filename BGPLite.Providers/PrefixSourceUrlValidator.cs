@@ -37,6 +37,8 @@ public static class PrefixSourceUrlValidator
         IPNetwork.Parse("2001::/32"),           // Teredo — can embed private IPv4 in the last 32 bits
         IPNetwork.Parse("::ffff:0:0/96"),       // IPv4-mapped (also caught by IsIPv4MappedToIPv6, defense in depth)
         IPNetwork.Parse("::/96"),               // IPv4-compatible (deprecated ::a.b.c.d form)
+        IPNetwork.Parse("64:ff9b::/96"),        // NAT64 well-known — a DNS64 name can embed any IPv4 here (#321)
+        IPNetwork.Parse("64:ff8:1::/96"),       // NAT64 well-known, local scope (RFC 6052 §2.1 alternate)
     ];
 
     /// <summary>Per-address connect budget so one blackholed candidate can't consume the whole
@@ -65,7 +67,8 @@ public static class PrefixSourceUrlValidator
     /// SocketsHttpHandler.ConnectCallback: resolves DNS, validates ALL resolved IPs are public,
     /// then connects with a matching-family socket per address (IPv4 preferred) until one succeeds.
     /// No TOCTOU — every address is validated above and the connected IP is one of them.
-    /// SocketsHttpHandler does NOT follow redirects (no 302-to-internal-IP bypass).
+    /// Redirects are not followed (AllowAutoRedirect=false in Program.cs, #321); any connection a
+    /// redirect would have opened re-enters this callback anyway, so the gate holds per hop.
     /// </summary>
     public static async ValueTask<Stream> CreateValidatedConnectionAsync(
         SocketsHttpConnectionContext context, CancellationToken ct)

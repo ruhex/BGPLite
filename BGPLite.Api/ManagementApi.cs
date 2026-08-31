@@ -127,7 +127,9 @@ public sealed class ManagementApi : IHostedService, IDisposable
 
         // Swap every reloadable field atomically. A request that has already captured the old
         // references into locals finishes against them; the next request reads the new ones.
-        // _config is swapped last so CORS / client-IP and the limiters always move together.
+        // NOTE (#321 item 8): _config itself is NOT swapped — request-path code that must observe
+        // reloads reads the derived fields above; the fields still reading _config (e.g.
+        // MaxRequestBodyBytes, RipeStat lists) are restart-required, tracked as #266 item 6.
         var oldRateLimiter = Interlocked.Exchange(ref _rateLimiter, rateLimiter);
         var oldConcurrencyLimiter = Interlocked.Exchange(ref _concurrencyLimiter, concurrencyLimiter);
         Interlocked.Exchange(ref _trustedProxyNetworks, trusted);

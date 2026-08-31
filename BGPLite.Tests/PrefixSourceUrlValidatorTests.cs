@@ -140,6 +140,8 @@ public class PrefixSourceUrlValidatorTests
     [InlineData("2001:0:5ef5:79fd:d8c6:e8e9:ac10:0001")] // Teredo-style embedding 172.16.0.1
     [InlineData("::192.168.1.1")]       // IPv4-compatible (deprecated ::a.b.c.d form)
     [InlineData("::ffff:10.0.0.1")]     // IPv4-mapped private (also caught by normalize, defense in depth)
+    [InlineData("64:ff9b::0a00:0001")]  // NAT64 well-known embedding 10.0.0.1 (#321)
+    [InlineData("64:ff8:1::c0a8:0101")] // NAT64 local-scope embedding 192.168.1.1 (#321)
     public void IsBlockedAddress_Rejects_IPv4EmbeddingForms(string ip)
     {
         // Without the #158 ranges, an attacker controlling DNS returns one of these IPv6 addresses

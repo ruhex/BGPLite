@@ -125,6 +125,71 @@ public class PrefixServiceTests
     }
 
     [Fact]
+    public async Task OversizedRipeStatResponse_IsRejectedFromHeaders()
+    {
+        // #321 item 4: the RIPEstat body is bounded like every other fetch path — a huge declared
+        // ContentLength is rejected from the response headers, before any buffering.
+        var provider = new RipeStatProvider(
+            new StubFactory(new OversizedHandler()), NullLogger<RipeStatProvider>.Instance);
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => provider.GetPrefixesAsync(65001));
+
+        Assert.Contains("too large", ex.Message);
+    }
+
+    [Fact]
+    public async Task OversizedChunkedRipeStatResponse_IsRejectedDuringStream()
+    {
+        // #321 item 4: a server that LIES in its headers (no ContentLength) is caught by the
+        // streaming cap — the only bound a malicious origin cannot dodge.
+        var provider = new RipeStatProvider(
+            new StubFactory(new EndlessBodyHandler()), NullLogger<RipeStatProvider>.Instance);
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => provider.GetPrefixesAsync(65001));
+
+        Assert.Contains("exceeded", ex.Message);
+    }
+
+    private sealed class OversizedHandler : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
+        {
+            var response = new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("{}") };
+            response.Content.Headers.ContentLength = 10 * 1024 * 1024 + 1;  // just past the 10 MB cap
+            return Task.FromResult(response);
+        }
+    }
+
+    private sealed class EndlessBodyHandler : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
+            => Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StreamContent(new EndlessXStream())   // no ContentLength declared
+            });
+    }
+
+    private sealed class EndlessXStream : Stream
+    {
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => 0; set => throw new NotSupportedException(); }
+        public override void Flush() { }
+        public override int Read(byte[] buffer, int offset, int count)
+        {
+            buffer.AsSpan(offset, count).Fill((byte)'x');
+            return count;
+        }
+        public override Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken)
+            => Task.FromResult(Read(buffer, offset, count));
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+    }
+
+    [Fact]
     public async Task GetPrefixesForAsns_FailedAsn_LogsWarning()
     {
         // #330: a transient RIPEstat failure for one ASN must not be silent — its prefixes vanish

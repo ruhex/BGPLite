@@ -4,6 +4,18 @@ namespace BGPLite.Tests;
 
 public class ConfigurationTests
 {
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    [InlineData("---")]
+    public void LoadFromText_EmptyDocument_ThrowsClearError(string yaml)
+    {
+        // #321 item 6: YamlDotNet deserializes an empty/whitespace document to null — previously
+        // that surfaced as an opaque NRE at the first config use instead of a clear message.
+        var ex = Assert.Throws<InvalidOperationException>(() => ConfigLoader.LoadFromText(yaml));
+        Assert.Contains("empty", ex.Message);
+    }
+
     [Fact]
     public void LoadFromText_UnknownKey_Throws()
     {

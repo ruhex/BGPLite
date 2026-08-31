@@ -28,6 +28,7 @@ public sealed class ConfigReloader : IHostedService, IDisposable
     private FileSystemWatcher? _watcher;
     private Timer? _debounceTimer;
     private int _reloading; // 0 = idle, 1 = a reload is in progress (Interlocked)
+    private int _stopped;    // 1 after StopAsync — a queued debounce callback must not start a reload
 
     public ConfigReloader(string configPath, ManagementApi managementApi, ILogger<ConfigReloader> logger)
     {
@@ -95,8 +96,17 @@ public sealed class ConfigReloader : IHostedService, IDisposable
         // At most one reload at a time: a slow reload (large YAML) should not overlap with a second
         // one triggered by another save during the first. ApplyConfig is itself thread-safe, but the
         // guard keeps the log output and the load+validate sequence coherent.
-        if (Interlocked.CompareExchange(ref _reloading, 1, 0) != 0)
+        if (Volatile.Read(ref _stopped) != 0)
             return;
+        if (Interlocked.CompareExchange(ref _reloading, 1, 0) != 0)
+        {
+            // A save landed while a reload is still running: the one-shot debounce fired, we lost
+            // the CAS, and without re-arming the timer that save would never be applied until the
+            // NEXT save (#321 item 1). Push the fire time past the in-flight reload instead.
+            try { _debounceTimer?.Change(DebounceMs, Timeout.Infinite); }
+            catch (ObjectDisposedException) { /* StopAsync raced us — shutting down */ }
+            return;
+        }
 
         try
         {
@@ -145,6 +155,10 @@ public sealed class ConfigReloader : IHostedService, IDisposable
 
     public Task StopAsync(CancellationToken cancellationToken)
     {
+        // Set the stop latch BEFORE disarming the timer: a debounce callback already queued can
+        // still run TriggerReload, which would re-arm and start a reload during shutdown (#321
+        // review). The latch makes both the entry and the re-arm branch no-ops.
+        Volatile.Write(ref _stopped, 1);
         _debounceTimer?.Change(Timeout.Infinite, Timeout.Infinite);
         if (_watcher is not null)
             _watcher.EnableRaisingEvents = false;
