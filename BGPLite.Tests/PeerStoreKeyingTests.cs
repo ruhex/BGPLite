@@ -259,6 +259,58 @@ public class PeerStoreKeyingTests
     }
 
     /// <summary>
+    /// #264: a legacy EnsureCreated-era database MISSING expected Peers columns (an early build
+    /// without Description/LastSessionAt) must be converged at Initialize — the stamp alone left
+    /// the first runtime write failing with "no such column".
+    /// </summary>
+    [Fact]
+    public void Initialize_LegacyDbMissingPeersColumns_ConvergesBeforeStamp()
+    {
+        using var connection = new SqliteConnection("DataSource=:memory:");
+        connection.Open();
+        // Early-build shape: no Description, no LastSessionAt, no Status default concerns.
+        using (var cmd = connection.CreateCommand())
+        {
+            cmd.CommandText =
+                "CREATE TABLE Peers (" +
+                "\"Id\" TEXT NOT NULL PRIMARY KEY, \"Ip\" TEXT NOT NULL, \"Asn\" INTEGER NULL, " +
+                "\"Status\" TEXT NOT NULL DEFAULT 'inactive', \"CreatedAt\" TEXT NOT NULL)";
+            cmd.ExecuteNonQuery();
+        }
+        var options = new DbContextOptionsBuilder<BgpDbContext>().UseSqlite(connection).Options;
+
+        using (var boot = new BgpDbContext(options))
+            BgpDbContext.Initialize(boot);   // RED pre-fix: stamps without converging
+
+        // The columns now exist and a session-status write (the first raw write to touch
+        // LastSessionAt) succeeds instead of throwing "no such column".
+        string[] Columns()
+        {
+            using var cmd = connection.CreateCommand();
+            cmd.CommandText = "PRAGMA table_info(\"Peers\")";
+            using var reader = cmd.ExecuteReader();
+            var names = new List<string>();
+            while (reader.Read())
+                names.Add(reader.GetString(1));
+            return [.. names];
+        }
+        Assert.Contains("Description", Columns());
+        Assert.Contains("LastSessionAt", Columns());
+
+        using (var db = new BgpDbContext(options))
+        {
+            db.Peers.Add(new BGPLite.Api.Entities.Peer { Id = "p1", Ip = "198.51.100.1", Asn = 65001, Description = "converged", LastSessionAt = DateTime.UtcNow });
+            db.SaveChanges();
+        }
+        using (var check = new BgpDbContext(options))
+        {
+            var peer = check.Peers.AsNoTracking().Single();
+            Assert.Equal("converged", peer.Description);
+            Assert.NotNull(peer.LastSessionAt);
+        }
+    }
+
+    /// <summary>
     /// #237: Initialize runs the EF migration pipeline — a fresh database gets Init +
     /// LegacyEnsureCreated applied in order and recorded in __EFMigrationsHistory, and a second
     /// startup is an idempotent no-op (Migrate() finds nothing pending).
