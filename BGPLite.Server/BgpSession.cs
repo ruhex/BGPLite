@@ -1382,21 +1382,13 @@ public sealed class BgpSession : IDisposable
         if (remoteOpen.Capabilities.Any(c => c.Code == BgpConstants.Capability.RouteRefresh))
             capabilities.Add(BgpCapabilityInfo.RouteRefresh());
 
-        // Advertise Graceful Restart (RFC 4724) so GR-capable peers retain our routes across our
-        // Graceful Restart capability (RFC 4724 §2). R=0 on a fresh session — the R bit means
-        // "I am restarting, please retain my routes" and must NOT be set on the initial session
-        // establishment. It would only be set if BGPLite were recovering from a crash/restart and
-        // wanted peers to re-send their routes. BGPLite always re-advertises its full route set on
-        // reconnect, so R=0 is correct (#203). Restart Time tells peers how long to retain stale
-        // routes if BGPLite disappears (silent TCP close during docker stop). F reflects whether
-        // forwarding state is preserved (configurable, default false). Advertised unconditionally
-        // when enabled (RFC 4724 §4; non-GR peers safely ignore it per RFC 5492).
-        if (_bgpConfig.GracefulRestart)
-        {
-            var restartTime = (ushort)Math.Min(_bgpConfig.RestartTime, _negotiatedHoldTime > 0 ? _negotiatedHoldTime : 120);
-            capabilities.Add(BgpCapabilityInfo.GracefulRestart(
-                restartState: false, restartTime, forwardingState: _bgpConfig.GracefulRestartForwardingState));
-        }
+        // #318: the Graceful Restart capability is deliberately NOT advertised. RFC 4724 §4.2 obliges
+        // a speaker engaging GR procedures to retain and stale-mark a restarting peer's routes;
+        // BGPLite implements none of that receiving half, so advertising the <AFI, SAFI, F> tuple
+        // promised behavior the code does not have (D6). Reintroduce the advertisement only together
+        // with receiving-speaker retention. The sending-side conveniences gated on the
+        // GracefulRestart config (End-of-RIB after the initial dump, silent close on server
+        // shutdown) are unchanged.
 
         var asn16 = _bgpConfig.Asn > ushort.MaxValue ? (ushort)BgpConstants.AsPath.AsTrans : (ushort)_bgpConfig.Asn;
         var routerId = BgpConstants.IPAddressToUint(_bgpConfig.GetRouterIdAddress());
