@@ -463,6 +463,39 @@ public class BgpSessionRouteOwnershipTests
     }
 
     /// <summary>Rejects every inbound route, so nothing this peer announces reaches the table.</summary>
+    /// <summary>
+    /// #292 item 6: RFC 4271 §9.1.2 — a route whose AS_PATH contains the local system's ASN is
+    /// excluded from selection (loop detection). It must not be installed (and the session must
+    /// survive — route-level exclusion, not a protocol error), while an otherwise identical route
+    /// without the local ASN installs normally.
+    /// </summary>
+    [Fact]
+    public async Task Announce_WithLocalAsnInAsPath_IsExcludedNotInstalled()
+    {
+        var routeTable = new RouteTable();
+        var (session, run, conn) = await EstablishAsync(routeTable);
+
+        // AS_PATH seq [100, 65001] — 65001 is the session's own ASN (4-octet session).
+        var loopingAttributes = new byte[]
+        {
+            0x40, 0x01, 0x01, 0x00,                                                     // ORIGIN igp
+            0x40, 0x02, 0x0A, 0x02, 0x02, 0x00, 0x00, 0x00, 0x64, 0x00, 0x00, 0xFD, 0xE9, // AS_PATH [100, 65001]
+            0x40, 0x03, 0x04, 0xC0, 0x00, 0x02, 0x01,                                   // NEXT_HOP 192.0.2.1
+        };
+        conn.EnqueueFrame(BuildAnnounce(loopingAttributes, 8, [0x0A]));
+        await SettleAsync(conn); // frameless settle: the assertion is that NOTHING happened
+
+        Assert.Equal(0, routeTable.Count);                      // RED pre-fix: the looping route installed
+        Assert.True(session.IsEstablished, "a looping route is excluded, not a session error");
+
+        // The same NLRI without the local ASN installs normally — proves exclusion, not rejection.
+        conn.EnqueueFrame(AnnounceFrame(8, 0x0A));
+        await SettleAsync(conn, () => routeTable.Count == 1);
+        Assert.NotNull(routeTable.Get(TenSlashEight, 8));
+
+        await TeardownAsync(session, run);
+    }
+
     private sealed class RejectAllIncomingFilter : IRouteFilter
     {
         private static readonly IReadOnlySet<uint> Empty = new HashSet<uint>();
