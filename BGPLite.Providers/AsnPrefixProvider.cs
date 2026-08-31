@@ -5,21 +5,24 @@ namespace BGPLite.Providers;
 
 /// <summary>
 /// Loads the prefixes originated by a single AS via RIPEstat (Kind = <c>"asn"</c>).
-/// Requires <see cref="PrefixSourceConfig.Asn"/>. Shares the RIPEstat client, retry, and per-ASN
-/// caching of <see cref="RipeStatProvider"/>/PrefixService, so adding it as a <c>Kind: asn</c>
-/// source under <c>PrefixSources</c> does not multiply RIPEstat traffic.
+/// Requires <see cref="PrefixSourceConfig.Asn"/>. Goes through the SHARED per-ASN cache
+/// (<see cref="RipeStatPrefixCache"/>, #267 item 5) — the same instance PrefixService uses for
+/// <c>RipeStat.AsnLists</c> and custom ASNs — so an ASN configured in both mechanisms is fetched
+/// and cached once (the previous direct-to-wire path doubled RIPEstat traffic and served
+/// disagreeing snapshots with independent TTLs).
 /// <para>RIPEstat does not support ETag / Last-Modified — the <paramref name="etag"/> and
 /// <paramref name="lastModified"/> parameters are ignored. Content-change detection for auto-refresh
-/// (#214) is handled by hash comparison in <see cref="PrefixSourceService"/> (the cache layer).</para>
+/// (#214) stays at the source-NAME level: hash comparison in <see cref="PrefixSourceService"/> over
+/// this provider's (cache-served) result.</para>
 /// </summary>
 public sealed class AsnPrefixProvider : IPrefixSourceProvider
 {
-    private readonly RipeStatProvider _ripe;
+    private readonly RipeStatPrefixCache _cache;
     private readonly ILogger<AsnPrefixProvider> _logger;
 
-    public AsnPrefixProvider(RipeStatProvider ripe, ILogger<AsnPrefixProvider> logger)
+    public AsnPrefixProvider(RipeStatPrefixCache cache, ILogger<AsnPrefixProvider> logger)
     {
-        _ripe = ripe;
+        _cache = cache;
         _logger = logger;
     }
 
@@ -41,10 +44,10 @@ public sealed class AsnPrefixProvider : IPrefixSourceProvider
         if (!source.Asn.HasValue)
             throw new InvalidOperationException($"Prefix source '{source.Name}': Kind=asn requires an Asn.");
 
-        var prefixes = await _ripe.GetPrefixesAsync(source.Asn.Value, ct);
+        var prefixes = await _cache.GetPrefixesAsync(source.Asn.Value, ct);
         _logger.LogInformation(
             "Source '{Name}' (asn AS{Asn}): loaded {Count} prefixes via RIPEstat",
             source.Name, source.Asn.Value, prefixes.Count);
-        return SourceLoadResult.Ok(prefixes.Select(p => (Prefix: p.Prefix, Length: p.PrefixLength)).ToList());
+        return SourceLoadResult.Ok(prefixes.Select(p => (Prefix: p.Prefix, Length: p.Length)).ToList());
     }
 }

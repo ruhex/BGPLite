@@ -73,15 +73,17 @@ public class PrefixServiceTests
 
     private static PrefixService Service(PerAsnHandler handler, TimeSpan? cacheTtl = null, TimeSpan? negativeTtl = null, int? maxCacheEntries = null, int retryAttempts = 2, ILogger<PrefixService>? logger = null) =>
         new(new AppConfig(),
-            new RipeStatProvider(new StubFactory(handler),
-                NullLogger<RipeStatProvider>.Instance,
-                new RipeStatConfig { RetryAttempts = retryAttempts, RetryDelaySeconds = 0 }),
+            // #267 item 5: per-ASN TTL/negative-TTL/eviction knobs moved into the shared cache.
+            new RipeStatPrefixCache(
+                new RipeStatProvider(new StubFactory(handler),
+                    NullLogger<RipeStatProvider>.Instance,
+                    new RipeStatConfig { RetryAttempts = retryAttempts, RetryDelaySeconds = 0 }),
+                cacheTtl: cacheTtl,
+                negativeTtl: negativeTtl,
+                maxCacheEntries: maxCacheEntries),
             null!, // IPrefixSourceService is not on the GetPrefixesForAsns path
             null!, // HttpPrefixProvider is only on the per-peer user-source path (#263)
-            cacheTtl: cacheTtl ?? TimeSpan.FromHours(1),
-            logger: logger,
-            negativeTtl: negativeTtl,
-            maxCacheEntries: maxCacheEntries);
+            logger: logger);
 
     /// <summary>The single prefix uint that <see cref="PerAsnHandler"/> yields for a given ASN,
     /// computed through the same <see cref="BgpConstants.IPAddressToUint"/> the provider uses.</summary>

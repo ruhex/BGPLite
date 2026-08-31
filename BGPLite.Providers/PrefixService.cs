@@ -7,24 +7,16 @@ namespace BGPLite.Providers;
 
 public sealed class PrefixService : IPrefixService
 {
-    private readonly RipeStatProvider _ripeStat;
+    // #267 item 5: the per-ASN RIPEstat cache is a shared component — PrefixService (RipeStat
+    // AsnLists + custom ASNs) and AsnPrefixProvider (Kind: asn sources) consume ONE instance, so
+    // an ASN configured in both mechanisms is fetched and cached once. TTL/stale-on-failure/
+    // negative-cache/eviction (#163/#164/#165) live there now.
+    private readonly RipeStatPrefixCache _ripeStatCache;
     private readonly IPrefixSourceService _prefixSources;
     private readonly AppConfig _config;
     private readonly HttpPrefixProvider _httpProvider;
-    // asn → (prefix list, cached at, is negative). Negative entries (failed RIPEstat fetches) use
-    // _negativeTtl. The tuple is shaped to mirror PrefixSourceService so the resilience semantics
-    // (stale-on-failure, negative cache, bounded sweep) are identical across both caches.
-    private readonly ConcurrentDictionary<uint, (IReadOnlyList<(uint Prefix, byte Length)> Data, DateTime CachedAt, bool Negative)> _cache = new();
-    // asn → gate serializing the cache-miss fetch path (prevents thundering herd on cold/expired
-    // ASNs — #164). Mirrors PrefixSourceService._locks.
-    private readonly ConcurrentDictionary<uint, SemaphoreSlim> _locks = new();
-    private readonly TimeSpan _cacheTtl;
-    private readonly TimeSpan _negativeTtl;
-    // Upper bound on _cache/_locks entries (#165). Without a cap, a malicious or churning peer
-    // querying distinct ASNs grows the dictionaries without limit. Exceeded → least-recently-used
-    // sweep before insert. The configured ASN universe is small (operator AsnLists), so a generous
-    // default does not constrain real deployments.
-    private readonly int _maxCacheEntries;
+    // Freshness of the RU/default projection cache below (the per-ASN TTL moved to the shared cache).
+    private readonly TimeSpan _ruCacheTtl;
     private readonly ILogger<PrefixService>? _logger;
     private readonly TimeProvider _timeProvider;
     private readonly UserSourceCache _userSourceCache;
@@ -34,18 +26,13 @@ public sealed class PrefixService : IPrefixService
     // when the TTL elapses. Mirrors the per-ASN gate pattern in GetPrefixesAsync.
     private readonly SemaphoreSlim _ruGate = new(1, 1);
 
-    public PrefixService(AppConfig config, RipeStatProvider ripeStat, IPrefixSourceService prefixSources, HttpPrefixProvider httpProvider, TimeSpan? cacheTtl = null, ILogger<PrefixService>? logger = null, TimeSpan? negativeTtl = null, int? maxCacheEntries = null, TimeProvider? timeProvider = null, int? userSourceTimeoutSeconds = null)
+    public PrefixService(AppConfig config, RipeStatPrefixCache ripeStatCache, IPrefixSourceService prefixSources, HttpPrefixProvider httpProvider, TimeSpan? ruCacheTtl = null, ILogger<PrefixService>? logger = null, TimeProvider? timeProvider = null, int? userSourceTimeoutSeconds = null)
     {
         _config = config;
-        _ripeStat = ripeStat;
+        _ripeStatCache = ripeStatCache;
         _prefixSources = prefixSources;
         _httpProvider = httpProvider;
-        _cacheTtl = cacheTtl ?? TimeSpan.FromHours(1);
-        _negativeTtl = negativeTtl ?? TimeSpan.FromSeconds(30);
-        // 2× a generous operator-configured ASN universe (a route server typically tracks tens to
-        // low-hundreds of origin ASNs). The cap defends against unbounded growth from adversarial /
-        // churn traffic, not normal operation.
-        _maxCacheEntries = maxCacheEntries ?? 4096;
+        _ruCacheTtl = ruCacheTtl ?? TimeSpan.FromHours(1);
         _logger = logger;
         _timeProvider = timeProvider ?? TimeProvider.System;
         // #320: fetch budget for peer-supplied URL sources — generous for a real prefix list
@@ -94,115 +81,11 @@ public sealed class PrefixService : IPrefixService
         }, ct);
     }
 
-    public async Task<IReadOnlyList<(uint Prefix, byte Length)>> GetPrefixesAsync(uint asn, CancellationToken ct = default)
-    {
-        // Fast path: fresh entry (positive or negative within its TTL).
-        if (TryGetFresh(asn, out var fresh))
-            return fresh;
-
-        // Serialize per-ASN so concurrent callers share a single RIPEstat fetch — no thundering herd
-        // on a cold or just-expired ASN (#164). Mirrors PrefixSourceService.LoadCachedAsync.
-        var gate = _locks.GetOrAdd(asn, _ => new SemaphoreSlim(1, 1));
-        await gate.WaitAsync(ct);
-        try
-        {
-            // Re-check after acquiring the lock: another caller may have just populated the entry.
-            if (TryGetFresh(asn, out var rechecked))
-                return rechecked;
-
-            IReadOnlyList<(uint Prefix, byte Length)> prefixes;
-            try
-            {
-                prefixes = await _ripeStat.GetPrefixesAsync(asn, ct);
-            }
-            catch (OperationCanceledException) { throw; }
-            catch (Exception ex)
-            {
-                // Stale-on-failure (#163): serve the last good copy regardless of its age so a
-                // transient RIPEstat outage (429/5xx/network) does not drop the ASN's routes the
-                // instant its TTL elapses. Asymmetric with the old behavior — previously the throw
-                // propagated and (via GetPrefixesForAsns) the ASN's prefixes vanished from peers.
-                if (_cache.TryGetValue(asn, out var stale) && !stale.Negative)
-                {
-                    _logger?.LogWarning(ex,
-                        "AS{Asn}: RIPEstat fetch failed; serving cached copy ({Count} prefixes).", asn, stale.Data.Count);
-                    return stale.Data;
-                }
-
-                // No cached copy: remember the failure briefly so repeated calls don't hammer RIPEstat.
-                EvictIfAtCapacity(asn);
-                _cache[asn] = ([], _timeProvider.GetUtcNow().UtcDateTime, Negative: true);
-                throw;
-            }
-
-            EvictIfAtCapacity(asn);
-            _cache[asn] = (prefixes, _timeProvider.GetUtcNow().UtcDateTime, Negative: false);
-            return prefixes;
-        }
-        finally
-        {
-            gate.Release();
-        }
-    }
-
-    /// <summary>True if <paramref name="asn"/> has a non-expired entry (positive within _cacheTtl,
-    /// negative within _negativeTtl).</summary>
-    private bool TryGetFresh(uint asn, out IReadOnlyList<(uint Prefix, byte Length)> data)
-    {
-        data = null!;
-        if (!_cache.TryGetValue(asn, out var entry)) return false;
-
-        var ttl = entry.Negative ? _negativeTtl : _cacheTtl;
-        if (_timeProvider.GetUtcNow().UtcDateTime - entry.CachedAt < ttl)
-        {
-            data = entry.Data;
-            return true;
-        }
-        return false;
-    }
-
-    /// <summary>Enforces the _maxCacheEntries bound (#165). Called before inserting a NEW key.
-    /// Removes a few least-recently-cached entries (by CachedAt) plus any expired entries it
-    /// encounters, and drops the corresponding _locks entries. Under the lock of the caller's
-    /// per-ASN gate, so the sweep is serialized against itself; ConcurrentDictionary enumeration
-    /// is a snapshot and safe against concurrent writers.</summary>
-    private void EvictIfAtCapacity(uint insertingKey)
-    {
-        if (_cache.Count < _maxCacheEntries) return;
-        if (_cache.ContainsKey(insertingKey)) return; // already present, no insert coming
-
-        // Snapshot, drop expired entries first (cheapest eviction), then by oldest CachedAt.
-        var now = _timeProvider.GetUtcNow().UtcDateTime;
-        var toEvict = new List<uint>();
-        foreach (var (key, entry) in _cache)
-        {
-            var ttl = entry.Negative ? _negativeTtl : _cacheTtl;
-            if (now - entry.CachedAt >= ttl)
-                toEvict.Add(key);
-        }
-        // If still at/over capacity after dropping expired, evict the oldest until below the cap.
-        if (_cache.Count - toEvict.Count >= _maxCacheEntries)
-        {
-            var oldest = _cache
-                .Where(kvp => !toEvict.Contains(kvp.Key))
-                .OrderBy(kvp => kvp.Value.CachedAt)
-                .Select(kvp => kvp.Key);
-            foreach (var key in oldest)
-            {
-                toEvict.Add(key);
-                if (_cache.Count - toEvict.Count < _maxCacheEntries) break;
-            }
-        }
-
-        foreach (var key in toEvict)
-        {
-            // TryUpdate/TryRemove under no per-key lock: a concurrent fetch for this key may be
-            // racing, but that's fine — it will re-populate the entry; losing a transient cache hit
-            // is acceptable, and never losing correctness.
-            if (_cache.TryRemove(key, out _))
-                _locks.TryRemove(key, out _);
-        }
-    }
+    public Task<IReadOnlyList<(uint Prefix, byte Length)>> GetPrefixesAsync(uint asn, CancellationToken ct = default)
+        // Per-ASN caching, stale-on-failure, negative TTL, fetch gates, and the #165 eviction
+        // sweep all live in the shared cache (#267 item 5) — one wire fetch per ASN regardless
+        // of which mechanism asked.
+        => _ripeStatCache.GetPrefixesAsync(asn, ct);
 
     /// <summary>Bounds how many ASNs are resolved against RIPEstat concurrently on a cold cache
     /// (warm traffic is cache-flat). Keeps cold-start fan-out from tripping RIPEstat rate limits.</summary>
@@ -302,7 +185,7 @@ public sealed class PrefixService : IPrefixService
         // Fast path: fresh entry. A single Volatile.Read of the immutable entry reference gives a
         // consistent (projection, ticks) snapshot — no two-field torn read.
         var cached = Volatile.Read(ref _ruCache);
-        if (cached is not null && _timeProvider.GetUtcNow().UtcDateTime.Ticks - cached.CachedAtTicks < _cacheTtl.Ticks)
+        if (cached is not null && _timeProvider.GetUtcNow().UtcDateTime.Ticks - cached.CachedAtTicks < _ruCacheTtl.Ticks)
             return cached.Projected;
 
         // Serialize the cache-miss fetch so concurrent callers share one default-source fetch
@@ -312,7 +195,7 @@ public sealed class PrefixService : IPrefixService
         {
             // Re-check under the lock: another caller may have just populated the entry.
             cached = Volatile.Read(ref _ruCache);
-            if (cached is not null && _timeProvider.GetUtcNow().UtcDateTime.Ticks - cached.CachedAtTicks < _cacheTtl.Ticks)
+            if (cached is not null && _timeProvider.GetUtcNow().UtcDateTime.Ticks - cached.CachedAtTicks < _ruCacheTtl.Ticks)
                 return cached.Projected;
 
             List<(uint Prefix, byte Length, uint Asn)> projected;

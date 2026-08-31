@@ -111,10 +111,10 @@ public class PrefixCacheRaceTests
             // #263 made both required in production; neither is on the GetRuPrefixesAsync path this
             // fixture exercises, so the fake composition states that explicitly rather than relying
             // on a nullable parameter that production code could also leave unset.
-            ripeStat: null!,
+            null!, // RipeStatPrefixCache — not on the GetRuPrefixesAsync path
             prefixSources: source,
             httpProvider: null!,
-            cacheTtl: cacheTtl ?? TimeSpan.FromHours(1),
+            ruCacheTtl: cacheTtl ?? TimeSpan.FromHours(1),
             logger: NullLogger<PrefixService>.Instance,
             timeProvider: timeProvider);
 
