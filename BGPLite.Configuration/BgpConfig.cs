@@ -88,6 +88,12 @@ public sealed class BgpConfig
             throw new InvalidOperationException(
                 $"Invalid configuration: Bgp.HoldTime must be 0 (disabled) or at least 3 seconds (got {HoldTime}).");
 
+        // RFC 4271 §4.2: Hold Time is a 2-octet field — a value above 65535 cannot be carried in
+        // an OPEN; the wire write silently truncated it before ((ushort)70000 -> 4464) (#265 item 2).
+        if (HoldTime > ushort.MaxValue)
+            throw new InvalidOperationException(
+                $"Invalid configuration: Bgp.HoldTime must fit the 2-octet OPEN field (0..65535, got {HoldTime}).");
+
         // KeepAlive is only meaningful when a Hold Time is negotiated. The session computes its
         // keepalive interval as max(HoldTime/3, 1) (BgpSession OPEN negotiation), so the configured
         // value must fit within the same window: 1..max(HoldTime/3, 1).

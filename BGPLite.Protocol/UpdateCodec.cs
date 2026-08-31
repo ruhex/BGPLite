@@ -204,7 +204,7 @@ public static class UpdateCodec
     /// caller can apply treat-as-withdraw (RFC 7606) — the exact pipeline previously inlined in
     /// BgpSession.HandleUpdateAsync, moved verbatim (#270).
     /// </summary>
-    public static RouteAttributes ParseRouteAttributes(BgpUpdateMessage update, bool fourByteAsnSession)
+    public static RouteAttributes ParseRouteAttributes(BgpUpdateMessage update, bool fourByteAsnSession, uint? localRouterId = null)
     {
         try
         {
@@ -303,6 +303,12 @@ public static class UpdateCodec
             }
 
             ValidateMandatoryAttributes(originSeen, asPathSeen, nextHopSeen);
+            // RFC 4271 §6.3/§6.8: a semantically incorrect NEXT_HOP MUST be rejected with subcode 8
+            // (Invalid NEXT_HOP Attribute) — "a valid unicast host address", never multicast, never
+            // the receiving speaker's own address. Routed through the caller's treat-as-withdraw
+            // path per RFC 7606 §7.3 (#292 item 1).
+            if (nextHopSeen)
+                ValidateNextHopSemantics(nextHop, localRouterId);
             asPath = MergeAsPathWithAs4Path(asPath, as4Path);
             ValidateAggregatorReconstruction(aggregatorAsn, as4AggregatorAsn);
 
@@ -316,6 +322,34 @@ public static class UpdateCodec
             throw new BgpNotificationException(BgpConstants.Error.UpdateMessageError, ex.SubErrorCode ?? BgpConstants.SubError.Unspecific, ex.Message);
         }
     }
+
+    /// <summary>
+    /// Validates that a received NEXT_HOP is a semantically valid unicast host address
+    /// (RFC 4271 §6.3, subcode 8 "Invalid NEXT_HOP Attribute"; §6.8: "the IP address ... defined
+    /// as a valid unicast host address ... MUST NOT be ... the IP address of the receiving
+    /// speaker ... multicast ... addresses are never advertised"). Rejects: unspecified (0.0.0.0),
+    /// loopback (127/8), multicast (224/4), reserved (240/4 — includes the broadcast address),
+    /// and the local router-id when known. Throws <see cref="BgpNotificationException"/> so the
+    /// caller applies treat-as-withdraw (RFC 7606 §7.3) — the route never reaches the table with
+    /// a next hop that could blackhole or loop traffic (#292 item 1).
+    /// </summary>
+    public static void ValidateNextHopSemantics(uint nextHop, uint? localRouterId)
+    {
+        if (nextHop == 0)
+            throw InvalidNextHop(nextHop, "the unspecified address 0.0.0.0");
+        if ((nextHop >> 24) == 127)
+            throw InvalidNextHop(nextHop, "a loopback address (127/8)");
+        // 224/4 (multicast) and 240/4 (reserved, incl. 255.255.255.255) both live in the top
+        // eighth of the address space: first nibble >= 0xE.
+        if ((nextHop >> 28) >= 0xE)
+            throw InvalidNextHop(nextHop, "a multicast or reserved address (224/4, 240/4)");
+        if (localRouterId.HasValue && nextHop == localRouterId.Value)
+            throw InvalidNextHop(nextHop, "the local speaker's own address (RFC 4271 §6.8)");
+    }
+
+    private static BgpNotificationException InvalidNextHop(uint nextHop, string why) => new(
+        BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.InvalidNextHopAttribute,
+        $"Invalid NEXT_HOP attribute: {BgpConstants.UintToIPAddress(nextHop)} is {why}");
 
     /// <summary>
     /// The RFC-mandated shape of a recognized path attribute: the required Optional/Transitive flag

@@ -32,6 +32,11 @@ public sealed class BgpSession : IDisposable
     private readonly CancellationTokenSource _cts = new();
     private readonly Action<string, uint>? _onPeerIdentified;
     private readonly IPeerStore? _peerStore;
+    // #265 item 1: set by BgpServer right after creation — "is this session still the registered
+    // one?" A false answer at teardown-time means a replacement took the slot and owns the
+    // (Ip, Asn) status now; this session must not overwrite it back to inactive.
+    private Func<BgpSession, bool>? _stillRegisteredProbe;
+    internal Func<BgpSession, bool>? StillRegisteredProbe { set => _stillRegisteredProbe = value; }
     private readonly IPrefixAggregator _prefixAggregator;
     // #93 Phase 2: the outbound route-assembly policy lives here, not in the session. The session
     // delegates to BuildOutboundRoutesAsync and keeps the send/withdraw mirror (_advertisedPrefixes)
@@ -538,8 +543,34 @@ public sealed class BgpSession : IDisposable
                 // store failure (SQLite "database is locked" past busy_timeout) must not escape —
                 // it would fault RunAsync unobserved, skip PeerDisconnected() below, and leak
                 // PeerCount plus the row's Status=active forever (#325).
-                try { _peerStore?.UpdateSessionStatus(_peerConfig.Address, _remoteAsn, false); }
-                catch (Exception ex) { _logger.LogWarning(ex, "Failed to persist session status for {Peer}", _peer); }
+                // #265 item 1: the write must not clobber a REPLACEMENT session's Status=active.
+                // Two guards: (a) SilentClose teardowns (session replacement, GR-aware shutdown —
+                // RFC 4724 §4) skip the write outright; (b) when a registration probe is wired
+                // (BgpServer), a session no longer present in the registry was replaced mid-unwind
+                // and also skips. Covers the slow-unwind race (e.g. a sender parked on _sendLock
+                // inside the #285 budget) whose finally runs after the new session's first
+                // LoadPeerRoutingView already wrote active.
+                var silent = (TeardownReason)Interlocked.CompareExchange(ref _teardownReason, 0, 0) == TeardownReason.SilentClose;
+                var stillRegistered = _stillRegisteredProbe?.Invoke(this) ?? true;
+                if (!silent && stillRegistered)
+                {
+                    try { _peerStore?.UpdateSessionStatus(_peerConfig.Address, _remoteAsn, false); }
+                    catch (Exception ex) { _logger.LogWarning(ex, "Failed to persist session status for {Peer}", _peer); }
+
+                    // #366 review: a replacement can land between the probe and the write —
+                    // re-probe and REPAIR. A false second probe means the registry swapped us out
+                    // mid-write and the replacement owns the (Ip, Asn): restore the row to active.
+                    // Idempotent with the replacement's own LoadPeerRoutingView write, and
+                    // race-free in the other direction — the own-runner's registry removal happens
+                    // only AFTER RunAsync returns, so during this finally a false probe can only
+                    // mean replacement. Genuine teardowns (still registered) never repair.
+                    if (_stillRegisteredProbe?.Invoke(this) == false)
+                    {
+                        _logger.LogInformation("Replacement detected after status write for {Peer} — restoring active", _peer);
+                        try { _peerStore?.UpdateSessionStatus(_peerConfig.Address, _remoteAsn, true); }
+                        catch (Exception ex) { _logger.LogWarning(ex, "Failed to restore session status for {Peer}", _peer); }
+                    }
+                }
             }
             _metrics.PeerDisconnected();
             _logger.LogInformation("SessionClosed with {Peer}", _peer);
@@ -768,6 +799,21 @@ public sealed class BgpSession : IDisposable
                     // further full dumps); faults log instead of tearing down the read loop.
                     _ = Task.Run(() => RefreshInBackgroundAsync(cancellationToken), CancellationToken.None);
                     break;
+
+                default:
+                    // RFC 4271 FSM: in Established only UPDATE, KEEPALIVE, NOTIFICATION and
+                    // ROUTE_REFRESH are legal inputs; anything else (e.g. an OPEN) is an FSM
+                    // error — NOTIFICATION 5/0, release resources, Idle. Previously such messages
+                    // were silently swallowed (#265 item 3). The CAS claims the teardown BEFORE
+                    // sending so the finally-block cannot double-emit a Cease (§8.1).
+                    _logger.LogWarning("Unexpected message {Type} from {Peer} in Established — FSM error",
+                        message.Type, _peer);
+                    if (Interlocked.CompareExchange(ref _teardownReason, (int)TeardownReason.LocalCease, (int)TeardownReason.None) == (int)TeardownReason.None)
+                    {
+                        try { await SendNotificationAsync(BgpConstants.Error.FiniteStateMachineError, BgpConstants.SubError.Unspecific); }
+                        catch { /* best-effort — partial write counts, see RFC 4271 §8.1 */ }
+                    }
+                    return;
             }
         }
     }
@@ -859,7 +905,9 @@ public sealed class BgpSession : IDisposable
             UpdateCodec.RouteAttributes attrs;
             try
             {
-                attrs = UpdateCodec.ParseRouteAttributes(update, _remoteFourByteAsn);
+                // #292 item 1: local router-id for the §6.8 self-address check on NEXT_HOP.
+                attrs = UpdateCodec.ParseRouteAttributes(update, _remoteFourByteAsn,
+                    BgpConstants.IPAddressToUint(_bgpConfig.GetRouterIdAddress()));
             }
             catch (BgpNotificationException ex) when (ex.ErrorCode == BgpConstants.Error.UpdateMessageError)
             {
@@ -897,6 +945,21 @@ public sealed class BgpSession : IDisposable
                     Communities = attrs.Communities,
                     LargeCommunities = attrs.LargeCommunities
                 };
+
+                // RFC 4271 §9.1.2 (#292 item 6): "AS loop detection is done by scanning the full
+                // AS path ... and checking that the autonomous system number of the local system
+                // does not appear in the AS path" — such routes "should be excluded from the
+                // Phase 2 decision function". A route carrying our own ASN would loop straight
+                // back to us if re-advertised (with our ASN prepended yet again). Route-level
+                // exclusion, not a session error (the old subcode 7 is deprecated); excluded
+                // routes are never installed, so a later withdrawal for them removes nothing.
+                if (attrs.AsPath.AsSpan().Contains(_bgpConfig.Asn))
+                {
+                    if (_logger.IsEnabled(LogLevel.Debug))
+                        _logger.LogDebug("Excluded looping route {Prefix} from {Peer}: local AS {Asn} in AS_PATH",
+                            nlri, _peer, _bgpConfig.Asn);
+                    continue;
+                }
 
                 if (_routeFilter.AcceptIncoming(route, filterPeerConfig))
                 {

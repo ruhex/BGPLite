@@ -183,6 +183,11 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
                 var peerConfig = new PeerConfig { Address = peerAddress, Port = remoteEndpoint.Port };
 
                 var session = _sessionFactory.Create(new SocketBgpConnection(socket), peerConfig);
+                // #265 item 1: the session's finally-block consults this before flipping the
+                // peer row to inactive — "still the registered session for your slot?" A
+                // replacement (TryUpdate below) removes this session from the registry, so its
+                // slow unwind cannot clobber the replacement's Status=active.
+                session.StillRegisteredProbe = s => _sessions.Values.Any(v => ReferenceEquals(v, s));
 
                 if (Volatile.Read(ref _acceptingConnections) == 0)
                 {

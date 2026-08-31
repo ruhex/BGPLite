@@ -644,6 +644,54 @@ public class BgpSessionHoldTimerTests
     }
 
     /// <summary>
+    /// #265 item 3: in Established only UPDATE/KEEPALIVE/NOTIFICATION/ROUTE_REFRESH are legal
+    /// inputs (RFC 4271 FSM) — an unexpected message type (e.g. a second OPEN) is an FSM error:
+    /// NOTIFICATION 5/0, teardown, Idle. Previously the message was silently swallowed and the
+    /// session limped on in an undefined state.
+    /// </summary>
+    [Fact]
+    public async Task UnexpectedMessageInEstablished_FsmErrorNotification_AndTeardown()
+    {
+        var time = new FakeTimeProvider();
+        var conn = new FakeBgpConnection();
+        var bgpConfig = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1", HoldTime = 9, KeepAlive = 3 };
+        using var session = new BgpSession(
+            conn,
+            new PeerConfig { Address = "127.0.0.1" },
+            bgpConfig,
+            new RouteTable(),
+            AllowAllFilter.Instance,
+            new BgpMetrics(),
+            new NopLogger<BgpSession>(),
+            timeProvider: time);
+
+        var runTask = await EstablishAsync(session, conn, bgpConfig, time);
+        Assert.True(session.IsEstablished, "session must reach Established");
+        var sentBefore = conn.Sent.Count;
+
+        // A second OPEN is not a legal Established input.
+        conn.Enqueue(Serialize(new BgpOpenMessage
+        {
+            Version = BgpConstants.BgpVersion,
+            Asn = 65002,
+            HoldTime = (ushort)bgpConfig.HoldTime,
+            RouterId = 0x7F000002
+        }));
+
+        var completed = await Task.WhenAny(runTask, Task.Delay(TimeSpan.FromSeconds(5)));
+        Assert.Same(runTask, completed);   // RED pre-fix: the OPEN is swallowed, the session keeps running
+
+        var notifs = conn.Sent.Skip(sentBefore)
+            .Select(b => BgpMessageReader.ReadMessage(b.AsSpan()))
+            .OfType<BgpNotificationMessage>()
+            .ToList();
+        var fsm = Assert.Single(notifs);
+        Assert.Equal(BgpConstants.Error.FiniteStateMachineError, fsm.ErrorCode);
+        Assert.Equal(BgpConstants.SubError.Unspecific, fsm.SubErrorCode);
+        Assert.Equal(BgpFsmState.Idle, session.State);
+    }
+
+    /// <summary>
     /// #341: a blocked writer (a refresh send parked inside WriteAsync — the slow-peer holder of
     /// the issue) holds <c>_sendLock</c>; the next keepalive tick queues on the semaphore with NO
     /// token of its own; <c>Dispose</c> cancels <c>_cts</c> and then disposes the semaphore.

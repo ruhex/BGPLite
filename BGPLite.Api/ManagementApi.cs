@@ -953,6 +953,14 @@ public sealed class ManagementApi : IHostedService, IDisposable
         if (data is null || string.IsNullOrWhiteSpace(data.Name) || string.IsNullOrWhiteSpace(data.Url))
             return ApiResponse.Error("Name and Url are required", 400);
 
+        // #266 item 3: the community is peer-supplied and reaches the wire through
+        // CommunityCodec at send time — validate the SAME contract at the API boundary (#255
+        // posture). #328 made the codec reject out-of-range halves instead of masking them, so
+        // this check now catches what previously became a silently-wrong tag.
+        if (!IsValidCommunity(data.Community))
+            return ApiResponse.Error(
+                $"Invalid community '{SanitizeForLog(data.Community)}': expected 'ASN:VALUE' with each part 0-65535.", 400);
+
         // #232: full SSRF validation at save time (defence-in-depth on top of the fetch-time
         // ConnectCallback). Reject a URL that is malformed, uses a non-http(s) scheme, resolves to
         // a private/loopback/link-local address, or uses a non-80/443 port — before persisting it,
@@ -1359,6 +1367,19 @@ public sealed class ManagementApi : IHostedService, IDisposable
         }
 
         return null;
+    }
+
+    /// <summary>
+    /// Whether a peer-supplied community string satisfies the wire contract (#266 item 3): a
+    /// well-formed <c>ASN:VALUE</c> with both halves 0-65535 (RFC 1997 encoding; the same rule
+    /// <see cref="CommunityCodec.Parse"/> enforces — #328). Null/whitespace means "no community"
+    /// and is valid.
+    /// </summary>
+    internal static bool IsValidCommunity(string? community)
+    {
+        if (string.IsNullOrWhiteSpace(community)) return true;
+        try { CommunityCodec.Parse(community); return true; }
+        catch (FormatException) { return false; }
     }
 
     private string GetClientIp(HttpListenerContext ctx) =>
