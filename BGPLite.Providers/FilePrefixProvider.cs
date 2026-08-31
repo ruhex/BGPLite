@@ -13,7 +13,7 @@ public sealed class FilePrefixProvider(ILogger<FilePrefixProvider> logger) : IPr
     /// <summary>File mtime comparison is a zero-cost conditional check (#214).</summary>
     public bool SupportsConditionalRequests => true;
 
-    public Task<SourceLoadResult> LoadAsync(
+    public async Task<SourceLoadResult> LoadAsync(
         PrefixSourceConfig source,
         string? etag = null,
         DateTimeOffset? lastModified = null,
@@ -35,11 +35,15 @@ public sealed class FilePrefixProvider(ILogger<FilePrefixProvider> logger) : IPr
         if (lastModified is not null && fileMtime == lastModified)
         {
             logger.LogDebug("Source '{Name}' (file): unchanged (mtime match)", source.Name);
-            return Task.FromResult(SourceLoadResult.NotModifiedResult(lastModified: fileMtime));
+            return SourceLoadResult.NotModifiedResult(lastModified: fileMtime);
         }
 
-        var prefixes = PrefixListParser.Parse(File.ReadAllText(fullPath));
+        // #321 item 5: async read with the caller's token — the sync ReadAllText held a threadpool
+        // thread under the per-source gate for the whole file. The metadata probes above stay
+        // sync: they are single stat calls, not reads.
+        var text = await File.ReadAllTextAsync(fullPath, ct);
+        var prefixes = PrefixListParser.Parse(text);
         logger.LogInformation("Source '{Name}' (file): loaded {Count} prefixes from {Path}", source.Name, prefixes.Count, fullPath);
-        return Task.FromResult(SourceLoadResult.Ok(prefixes, lastModified: fileMtime));
+        return SourceLoadResult.Ok(prefixes, lastModified: fileMtime);
     }
 }

@@ -104,9 +104,14 @@ builder.Services.AddHttpClient(HttpPrefixProvider.ClientName, c =>
 })
 .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
 {
-    // SSRF defense (#144): validate DNS resolution at the socket level — no TOCTOU race, no
-    // redirect bypass (SocketsHttpHandler does not follow redirects, unlike HttpClientHandler).
-    ConnectCallback = PrefixSourceUrlValidator.CreateValidatedConnectionAsync
+    // SSRF defense (#144): validate DNS resolution at the socket level — no TOCTOU race (every
+    // hop of any redirect re-enters ConnectCallback, so the target IP/port are re-checked).
+    // Redirects are NOT followed (#321): SocketsHttpHandler's AllowAutoRedirect defaults to true
+    // and re-sends all per-source headers except Authorization to the redirect target — an
+    // X-API-Key on a source whose host has an open redirect would leak to the attacker's origin.
+    // A 3xx is surfaced to HttpPrefixProvider and rejected there; operators list the final URL.
+    ConnectCallback = PrefixSourceUrlValidator.CreateValidatedConnectionAsync,
+    AllowAutoRedirect = false
 })
 // #107: resilience handler — retry transient HTTP failures (429/5xx/timeouts/network errors)
 // with exponential backoff + jitter, plus a circuit breaker. A transient blip on a prefix-source

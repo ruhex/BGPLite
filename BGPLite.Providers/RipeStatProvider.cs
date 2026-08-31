@@ -12,6 +12,9 @@ public sealed class RipeStatProvider
     /// <summary>Named-client key registered with <c>IHttpClientFactory</c>.</summary>
     public const string ClientName = "ripestat";
 
+    /// <summary>Maximum response body size (10 MB) — same bound as HttpPrefixProvider (#144/#321).</summary>
+    internal const int MaxResponseBytes = 10 * 1024 * 1024;
+
     private readonly IHttpClientFactory _httpFactory;
     private readonly ILogger<RipeStatProvider> _logger;
     private readonly RipeStatConfig _config;
@@ -34,11 +37,34 @@ public sealed class RipeStatProvider
     {
         var url = $"https://stat.ripe.net/data/ris-prefixes/data.json?resource=AS{asn}&list_prefixes=true";
         var http = _httpFactory.CreateClient(ClientName);
-        using var response = await http.GetAsync(url, ct);
+        using var response = await http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, ct);
         response.EnsureSuccessStatusCode();
 
-        var json = await response.Content.ReadAsStringAsync(ct);
-        using var doc = JsonDocument.Parse(json);
+        // #321 item 4: bound the body like every other fetch path (HttpPrefixProvider caps URL
+        // sources at 10 MB, #144) — ReadAsStringAsync would fully buffer whatever arrives before
+        // parsing. Fast Content-Length check first, then a hard cap while streaming.
+        if (response.Content.Headers.ContentLength is long declared && declared > MaxResponseBytes)
+            throw new InvalidOperationException(
+                $"RIPEstat response for AS{asn} too large ({declared} bytes, max {MaxResponseBytes}).");
+        // #324 parity: the resilience pipeline clips at the response headers
+        // (ResponseHeadersRead), so the body loop needs its own deadline — a slow-dripping origin
+        // must not hold the fetch open; size alone bounds memory, not time.
+        using var bodyCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        // Math.Max mirrors the pipeline's clamp (Program.cs) — a configured 0/negative must mean
+        // "the minimum", not CancelAfter(0) silently cancelling every body read (#321 review).
+        bodyCts.CancelAfter(TimeSpan.FromSeconds(Math.Max(10, _config.TimeoutSeconds)));
+        await using var stream = await response.Content.ReadAsStreamAsync(bodyCts.Token);
+        using var buffered = new MemoryStream();
+        var readBuffer = new byte[8192];
+        int read;
+        while ((read = await stream.ReadAsync(readBuffer, bodyCts.Token)) > 0)
+        {
+            buffered.Write(readBuffer, 0, read);
+            if (buffered.Length > MaxResponseBytes)
+                throw new InvalidOperationException(
+                    $"RIPEstat response for AS{asn} exceeded {MaxResponseBytes} bytes during stream.");
+        }
+        using var doc = JsonDocument.Parse(new ReadOnlyMemory<byte>(buffered.GetBuffer(), 0, (int)buffered.Length));
 
         var prefixes = doc.RootElement
             .GetProperty("data")

@@ -94,13 +94,24 @@ internal sealed class PrefixAutoRefreshService : IHostedService, IDisposable
     public async Task StopAsync(CancellationToken cancellationToken)
     {
         _cts.Cancel();
-        _timer?.Dispose();
+        // Wait for the loop BEFORE disposing the timer: the loop may be parked in
+        // WaitForNextTickAsync on this very timer, and disposing it first faults that wait with
+        // ObjectDisposedException — the generic "loop faulted" log noise on every affected
+        // shutdown (#321 item 7). Cancellation above unwinds the wait; a stopped loop leaves no
+        // waiter behind.
         if (_loopTask is not null)
         {
             try { await _loopTask.WaitAsync(cancellationToken); }
             catch (OperationCanceledException) { }
             catch (Exception ex) { _logger.LogWarning(ex, "Auto-refresh loop faulted on shutdown"); }
+            // The host token may have fired while the loop was still parked — give it a brief
+            // token-less chance to observe _cts and exit before the timer goes away, or disposing
+            // the timer faults the parked wait with an unobserved ObjectDisposedException (#321
+            // review). It only fails to exit if cancellation itself is wedged.
+            try { await _loopTask.WaitAsync(TimeSpan.FromSeconds(5)); }
+            catch { /* loop faulted or still parked — best effort before disposal */ }
         }
+        _timer?.Dispose();
     }
 
     private async Task LoopAsync(CancellationToken ct)
