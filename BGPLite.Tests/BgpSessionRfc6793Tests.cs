@@ -122,6 +122,103 @@ public class BgpSessionRfc6793Tests
         Assert.Contains(expected, ex.Message);
     }
 
+    /// <summary>
+    /// #306 (RFC 7606 §7.7): a malformed AGGREGATOR takes ATTRIBUTE DISCARD — the attribute is
+    /// dropped and the UPDATE's routes stay. Pre-fix this was treat-as-withdraw (D3): a wrong
+    /// length (5 bytes on a 2-octet session) withdrew routes a conformant implementation installs.
+    /// </summary>
+    [Fact]
+    public void ParseRouteAttributes_MalformedAggregator_AttributeDiscarded_RouteKept()
+    {
+        var update = new BgpUpdateMessage
+        {
+            PathAttributes =
+            [
+                AttributeHelper.WriteOrigin(BgpOrigin.Igp),
+                AttributeHelper.WriteAsPath([65001u], fourByteAsn: true),
+                AttributeHelper.WriteNextHop(0x0A000001),
+                new PathAttribute { Flags = 0xC0, TypeCode = BgpConstants.Attribute.Aggregator, Data = new byte[5] }, // 5 bytes — neither 6 nor 8
+            ],
+            Nlri = [new IpPrefix(0x0A000000, 24)]
+        };
+
+        var attrs = UpdateCodec.ParseRouteAttributes(update, fourByteAsnSession: true);   // RED pre-fix: threw 3/9
+
+        Assert.Equal(0x0A000001u, attrs.NextHop);                    // route data intact
+        Assert.Equal([BgpConstants.Attribute.Aggregator], attrs.DiscardedAttributes); // ...with the attribute reported discarded
+    }
+
+    /// <summary>RFC 7607 §2 (the half #300 deferred): AS 0 in AGGREGATOR is malformed → discarded, routes kept.</summary>
+    [Fact]
+    public void ParseRouteAttributes_AsZeroAggregator_Discarded_RouteKept()
+    {
+        var update = new BgpUpdateMessage
+        {
+            PathAttributes =
+            [
+                AttributeHelper.WriteOrigin(BgpOrigin.Igp),
+                AttributeHelper.WriteAsPath([65001u], fourByteAsn: true),
+                AttributeHelper.WriteNextHop(0x0A000001),
+                new PathAttribute { Flags = 0xC0, TypeCode = BgpConstants.Attribute.Aggregator, Data = new byte[8] }, // AS 0 + 0.0.0.0
+            ],
+            Nlri = [new IpPrefix(0x0A000000, 24)]
+        };
+
+        var attrs = UpdateCodec.ParseRouteAttributes(update, fourByteAsnSession: true);
+
+        Assert.Equal([BgpConstants.Attribute.Aggregator], attrs.DiscardedAttributes);
+        Assert.Equal(0x0A000001u, attrs.NextHop);
+    }
+
+    /// <summary>
+    /// #306 interplay: a discarded AGGREGATOR must not trip "Missing AGGREGATOR for AS4_AGGREGATOR"
+    /// for an UPDATE that carried one — the consistency check tolerates the discard.
+    /// </summary>
+    [Fact]
+    public void ParseRouteAttributes_DiscardedAggregator_WithAs4Aggregator_NoPairingError()
+    {
+        var update = new BgpUpdateMessage
+        {
+            PathAttributes =
+            [
+                AttributeHelper.WriteOrigin(BgpOrigin.Igp),
+                AttributeHelper.WriteAsPath([65001u], fourByteAsn: false),
+                AttributeHelper.WriteNextHop(0x0A000001),
+                new PathAttribute { Flags = 0xC0, TypeCode = BgpConstants.Attribute.Aggregator, Data = new byte[5] },     // malformed → discarded
+                new PathAttribute { Flags = 0xC0, TypeCode = BgpConstants.Attribute.As4Aggregator, Data = new byte[8] },  // valid, AS 65001
+            ],
+            Nlri = [new IpPrefix(0x0A000000, 24)]
+        };
+
+        var attrs = UpdateCodec.ParseRouteAttributes(update, fourByteAsnSession: false);   // RED pre-fix: 3/9 pairing error
+
+        Assert.Contains(BgpConstants.Attribute.Aggregator, attrs.DiscardedAttributes);
+    }
+
+    /// <summary>
+    /// Boundary: attribute discard applies to VALUE/LENGTH malformation only — a FLAGS conflict on
+    /// AGGREGATOR stays treat-as-withdraw per RFC 7606 §3 (flags errors are never discard-eligible).
+    /// </summary>
+    [Fact]
+    public void ParseRouteAttributes_AggregatorFlagsConflict_StillTreatAsWithdraw()
+    {
+        var update = new BgpUpdateMessage
+        {
+            PathAttributes =
+            [
+                AttributeHelper.WriteOrigin(BgpOrigin.Igp),
+                AttributeHelper.WriteAsPath([65001u], fourByteAsn: true),
+                AttributeHelper.WriteNextHop(0x0A000001),
+                new PathAttribute { Flags = 0x40, TypeCode = BgpConstants.Attribute.Aggregator, Data = new byte[8] }, // well-known — flags conflict
+            ],
+            Nlri = [new IpPrefix(0x0A000000, 24)]
+        };
+
+        var ex = Assert.Throws<BgpNotificationException>(
+            () => UpdateCodec.ParseRouteAttributes(update, fourByteAsnSession: true));
+        Assert.Equal(BgpConstants.SubError.AttributeFlagsError, ex.SubErrorCode);
+    }
+
     [Fact]
     public void ParseRouteAttributes_ValidNextHop_Accepted()
     {

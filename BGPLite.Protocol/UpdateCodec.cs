@@ -169,12 +169,15 @@ public static class UpdateCodec
     /// Validates RFC 6793 AGGREGATOR/AS4_AGGREGATOR consistency: AS_TRANS in AGGREGATOR requires
     /// AS4_AGGREGATOR, and a lone AS4_AGGREGATOR without AGGREGATOR is malformed.
     /// </summary>
-    public static void ValidateAggregatorReconstruction(uint? aggregatorAsn, uint? as4AggregatorAsn)
+    public static void ValidateAggregatorReconstruction(uint? aggregatorAsn, uint? as4AggregatorAsn, bool aggregatorDiscarded = false)
     {
         if (aggregatorAsn == BgpConstants.AsPath.AsTrans && as4AggregatorAsn is null)
             throw new BgpNotificationException(BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.OptionalAttributeError, "Missing AS4_AGGREGATOR for AGGREGATOR AS_TRANS");
 
-        if (!aggregatorAsn.HasValue && as4AggregatorAsn.HasValue)
+        // #306: an UPDATE that CARRIED an AGGREGATOR which was discarded as malformed must not be
+        // penalized for the pairing rule — the AS4 value alone satisfies everything BGPLite uses
+        // these attributes for (the consistency check itself).
+        if (!aggregatorAsn.HasValue && as4AggregatorAsn.HasValue && !aggregatorDiscarded)
             throw new BgpNotificationException(BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.OptionalAttributeError, "Missing AGGREGATOR attribute for AS4_AGGREGATOR");
     }
 
@@ -191,7 +194,8 @@ public static class UpdateCodec
         uint[] AsPath,
         uint NextHop,
         uint[] Communities,
-        (uint Global, uint Local1, uint Local2)[] LargeCommunities);
+        (uint Global, uint Local1, uint Local2)[] LargeCommunities,
+        IReadOnlyList<byte> DiscardedAttributes = null!);
 
     /// <summary>
     /// Parses and validates the path attributes of an announcing UPDATE per RFC 4271 §6.3 /
@@ -218,6 +222,8 @@ public static class UpdateCodec
             uint[] as4Path = [];
             uint? aggregatorAsn = null;
             uint? as4AggregatorAsn = null;
+            // (typeCode, reason) per RFC 7606 attribute-discard — surfaced for the session's log/metric.
+            var discarded = new List<(byte TypeCode, string Reason)>();
 
             // RFC 7606 §3 (revising RFC 4271 §6.3): "If any other attribute (whether recognized or
             // unrecognized) appears more than once in an UPDATE message, then all the occurrences of
@@ -293,11 +299,19 @@ public static class UpdateCodec
                     case BgpConstants.Attribute.LargeCommunity:
                         largeCommunities = AttributeHelper.ReadLargeCommunities(attr);
                         break;
+                    // #306 (RFC 7606 §7.7/§7.8): AGGREGATOR/AS4_AGGREGATOR malformations — wrong
+                    // length by session type, AS 0 (RFC 7607) — take ATTRIBUTE DISCARD, not
+                    // treat-as-withdraw: drop the attribute, keep processing the UPDATE. Both are
+                    // read solely for the RFC 6793 consistency check and never influence route
+                    // selection or installation, which is §2's constraint on this remedy. Flags
+                    // conflicts (ValidateAttributeShape above) stay treat-as-withdraw per §3.
                     case BgpConstants.Attribute.Aggregator:
-                        aggregatorAsn = AttributeHelper.ReadAggregatorAsn(attr, fourByteAsnSession);
+                        try { aggregatorAsn = AttributeHelper.ReadAggregatorAsn(attr, fourByteAsnSession); }
+                        catch (BgpParseException ex) { discarded.Add((attr.TypeCode, ex.Message)); }
                         break;
                     case BgpConstants.Attribute.As4Aggregator when !fourByteAsnSession:
-                        as4AggregatorAsn = AttributeHelper.ReadAs4AggregatorAsn(attr);
+                        try { as4AggregatorAsn = AttributeHelper.ReadAs4AggregatorAsn(attr); }
+                        catch (BgpParseException ex) { discarded.Add((attr.TypeCode, ex.Message)); }
                         break;
                 }
             }
@@ -310,9 +324,11 @@ public static class UpdateCodec
             if (nextHopSeen)
                 ValidateNextHopSemantics(nextHop, localRouterId);
             asPath = MergeAsPathWithAs4Path(asPath, as4Path);
-            ValidateAggregatorReconstruction(aggregatorAsn, as4AggregatorAsn);
+            var aggregatorDiscarded = discarded.Any(d => d.TypeCode == BgpConstants.Attribute.Aggregator);
+            ValidateAggregatorReconstruction(aggregatorAsn, as4AggregatorAsn, aggregatorDiscarded);
 
-            return new RouteAttributes(asPath, nextHop, communities, largeCommunities);
+            return new RouteAttributes(asPath, nextHop, communities, largeCommunities,
+                discarded.Select(d => d.TypeCode).ToArray());
         }
         catch (BgpParseException ex)
         {
