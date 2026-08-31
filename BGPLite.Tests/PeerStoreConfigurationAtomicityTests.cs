@@ -35,7 +35,7 @@ public class PeerStoreConfigurationAtomicityTests
         var id = store.SavePeerConfiguration(Ip, Asn, "dup prefixes",
             asnListNames: ["ru"],
             customPrefixes: [("10.0.0.0", 8), ("10.0.0.0", 8), ("192.0.2.0", 24)],
-            customAsns: [64512]);
+            customAsns: [64512]).Id;
 
         // A set of prefixes: announcing 10.0.0.0/8 twice is the same as once, so the duplicate is
         // dropped rather than rejected.
@@ -57,7 +57,7 @@ public class PeerStoreConfigurationAtomicityTests
         var id = store.SavePeerConfiguration(Ip, Asn, "dup lists and asns",
             asnListNames: ["ru", "ru", "cdn"],
             customPrefixes: [],
-            customAsns: [64512, 64512, 64513]);
+            customAsns: [64512, 64512, 64513]).Id;
 
         Assert.Equal(["cdn", "ru"], store.GetSubscriptions(id).Order().ToList());
         Assert.Equal([64512u, 64513u], store.GetCustomAsns(id).Order().ToList());
@@ -76,7 +76,7 @@ public class PeerStoreConfigurationAtomicityTests
         var id = store.SavePeerConfiguration(Ip, Asn, "full",
             asnListNames: ["ru"],
             customPrefixes: [("10.0.0.0", 8)],
-            customAsns: [64512]);
+            customAsns: [64512]).Id;
 
         // The failure #259 describes is a peer row committed with its child collections missing.
         // Assert the whole configuration is readable through the same view the send path uses.
@@ -118,7 +118,7 @@ public class PeerStoreConfigurationAtomicityTests
         var (store, connection, transactions) = NewStoreCountingTransactions();
         using var _ = connection;
         var id = store.SavePeerConfiguration(Ip, Asn, "initial",
-            asnListNames: ["ru"], customPrefixes: [("10.0.0.0", 8)], customAsns: [64512]);
+            asnListNames: ["ru"], customPrefixes: [("10.0.0.0", 8)], customAsns: [64512]).Id;
 
         transactions.Clear();
         store.UpdatePeerConfiguration(id, "changed",
@@ -138,7 +138,7 @@ public class PeerStoreConfigurationAtomicityTests
         var (store, connection) = NewStore();
         using var _ = connection;
         var id = store.SavePeerConfiguration(Ip, Asn, "initial",
-            asnListNames: ["ru"], customPrefixes: [("10.0.0.0", 8)], customAsns: [64512]);
+            asnListNames: ["ru"], customPrefixes: [("10.0.0.0", 8)], customAsns: [64512]).Id;
 
         // Only the prefixes are supplied; the rest must survive untouched, matching the PATCH
         // semantics the management API exposes.

@@ -5,6 +5,7 @@ using BGPLite.Protocol;
 using Microsoft.Extensions.Http;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Time.Testing;
 using Xunit;
 
 namespace BGPLite.Tests;
@@ -395,6 +396,110 @@ public class PrefixServiceTests
         // throw and must correctly serialize (SemaphoreSlim is recreated via GetOrAdd).
         var result = await service.GetPrefixesAsync(100);
         Assert.Single(result);
+    }
+
+    /// <summary>
+    /// #267 item 3: the capacity sweep must not evict an ASN's entry + gate while a fetch for it is
+    /// in flight. Pre-fix, the sweep dropped the gate a fetcher held, so a concurrent caller minted
+    /// a SECOND semaphore via GetOrAdd and issued a duplicate concurrent RIPEstat fetch for the same
+    /// ASN — breaking the #164 invariant (one wire fetch per ASN at a time).
+    /// </summary>
+    [Fact]
+    public async Task Eviction_DoesNot_DuplicateFetch_While_Entry_InFlight()
+    {
+        var handler = new BlockingPerAsnHandler();
+        var clock = new FakeTimeProvider(DateTimeOffset.UtcNow);
+        // Direct cache (not through PrefixService): the test needs a custom clock + blocking handler.
+        var cache = new RipeStatPrefixCache(
+            new RipeStatProvider(new StubFactory(handler), NullLogger<RipeStatProvider>.Instance,
+                new RipeStatConfig { RetryAttempts = 0, RetryDelaySeconds = 0 }),
+            cacheTtl: TimeSpan.FromHours(1),
+            maxCacheEntries: 1,
+            timeProvider: clock);
+
+        // 1. Populate ASN 1 — its fresh entry fills the cap of 1.
+        await cache.GetPrefixesAsync(1);
+        Assert.Equal(1, handler.CallsFor(1));
+
+        // 2. Expire it; start a slow refetch that is now inside ASN 1's gate (the stale entry is
+        // still in the cache, which is what made it sweepable mid-fetch).
+        clock.Advance(TimeSpan.FromHours(2));
+        handler.Block(1);
+        var slow = cache.GetPrefixesAsync(1);
+        await handler.WaitStarted(1);
+
+        // 3. A second ASN's insert triggers the sweep while ASN 1 is mid-refetch: ASN 1 is the only
+        // cache entry and it is expired — the pre-fix sweep evicted its entry AND its held gate.
+        await cache.GetPrefixesAsync(2);
+
+        // 4. A concurrent caller for ASN 1 must share slow's gate, not mint a second one.
+        var concurrent = cache.GetPrefixesAsync(1);
+
+        handler.Unblock(1);
+        await slow;
+        var result = await concurrent;
+
+        // Two fetches for ASN 1 are expected: the initial populate + the slow refetch. The
+        // concurrent caller served from the refetch's result. RED pre-fix: the sweep had evicted
+        // the held gate, so the concurrent caller minted a second one and fetched a third time.
+        Assert.Equal(2, handler.CallsFor(1));
+        Assert.Single(result);
+    }
+
+    /// <summary>Like <see cref="PerAsnHandler"/> but able to block a specific ASN's response until
+    /// released — models a slow RIPEstat fetch holding the per-ASN gate (#267 item 3).</summary>
+    private sealed class BlockingPerAsnHandler : HttpMessageHandler
+    {
+        private readonly object _sync = new();
+        private readonly Dictionary<uint, int> _calls = [];
+        private readonly Dictionary<uint, TaskCompletionSource> _blocks = [];
+        private readonly Dictionary<uint, TaskCompletionSource> _started = [];
+
+        public int CallsFor(uint asn) { lock (_sync) return _calls.TryGetValue(asn, out var c) ? c : 0; }
+
+        public void Block(uint asn)
+        {
+            lock (_sync)
+            {
+                _blocks[asn] = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                _started[asn] = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            }
+        }
+
+        public Task WaitStarted(uint asn) { lock (_sync) return _started[asn].Task; }
+
+        public void Unblock(uint asn) { lock (_sync) _blocks[asn].TrySetResult(); }
+
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
+        {
+            var asn = ExtractAsn(request.RequestUri!);
+            Task? gate;
+            lock (_sync)
+            {
+                _calls[asn] = (_calls.TryGetValue(asn, out var c) ? c : 0) + 1;
+                if (_started.TryGetValue(asn, out var started)) started.TrySetResult();
+                gate = _blocks.TryGetValue(asn, out var t) ? t.Task : null;
+            }
+            if (gate is not null)
+                await gate;
+
+            var hi = (int)((asn >> 8) & 0xFF);
+            var lo = (int)(asn & 0xFF);
+            var body = BodyTemplate
+                .Replace("__ASN__", asn.ToString())
+                .Replace("__CIDR__", $"10.{hi}.{lo}.1/32");
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(body) };
+        }
+
+        private static uint ExtractAsn(Uri uri)
+        {
+            var s = uri.AbsoluteUri;
+            var marker = "resource=AS";
+            var i = s.IndexOf(marker, StringComparison.Ordinal) + marker.Length;
+            var end = s.IndexOf('&', i);
+            if (end < 0) end = s.Length;
+            return uint.Parse(s[i..end]);
+        }
     }
 
     /// <summary>

@@ -857,24 +857,24 @@ public sealed class ManagementApi : IHostedService, IDisposable
         // (PeerId, Prefix, PrefixLength) key — returned 500 over an already-committed peer row and
         // left the user with a half-configured peer. Duplicates are now deduplicated inside the
         // store: a set of prefixes means the same thing whether a value appears once or twice.
-        var id = _store.SavePeerConfiguration(
+        // #267 item 6: the upsert returns (Id, Status, CreatedAt) from its RETURNING clause — no
+        // follow-up GetDbPeerById roundtrip for fields the caller already knows.
+        var saved = _store.SavePeerConfiguration(
             normalizedIp, data.Asn, data.Description, asnLists, customPrefixes, data.CustomAsns ?? []);
 
-        var peer = _store.GetDbPeerById(id);
-
         _logger.LogInformation("Created peer {Ip} AS{Asn} ({Id}): {Subs} lists, {Prefixes} custom prefixes, {Asns} custom AS",
-            normalizedIp, data.Asn, id, asnLists.Count, customPrefixes.Count, data.CustomAsns?.Count ?? 0);
+            normalizedIp, data.Asn, saved.Id, asnLists.Count, customPrefixes.Count, data.CustomAsns?.Count ?? 0);
 
         _ = _sessionManager.RefreshPeerAsync(normalizedIp, data.Asn);
 
         return ApiResponse.Ok(new
         {
-            id,
+            id = saved.Id,
             ip = normalizedIp,
             asn = data.Asn,
             description = data.Description,
-            status = peer?.Status ?? "inactive",
-            createdAt = peer?.CreatedAt,
+            status = saved.Status,
+            createdAt = saved.CreatedAt,
             lists = asnLists,
             customPrefixes = data.CustomPrefixes ?? [],
             customAsns = data.CustomAsns ?? []
