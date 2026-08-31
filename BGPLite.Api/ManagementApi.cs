@@ -352,13 +352,9 @@ public sealed class ManagementApi : IHostedService, IDisposable
 
         AddCorsHeaders(ctx);
 
-        if (ctx.Request.HttpMethod == "OPTIONS")
-        {
-            ctx.Response.StatusCode = 204;
-            ctx.Response.Close();
-            return;
-        }
-
+        // #266 item 7: rate-limit FIRST — the OPTIONS short-circuit used to return before this
+        // check, so an unlimited cheap-preflight flood was bounded only by the 64 in-flight
+        // slots. Preflights now consume the client's bucket like any other request.
         // Per-client-IP rate limit (#116) — 429 once the resolved client's token bucket is drained.
         if (rateLimiter is not null)
         {
@@ -370,6 +366,13 @@ public sealed class ManagementApi : IHostedService, IDisposable
                 await WriteResponse(ctx, ApiResponse.Error("Too many requests", 429));
                 return;
             }
+        }
+
+        if (ctx.Request.HttpMethod == "OPTIONS")
+        {
+            ctx.Response.StatusCode = 204;
+            ctx.Response.Close();
+            return;
         }
 
         var path = ctx.Request.Url!.AbsolutePath;
@@ -435,10 +438,16 @@ public sealed class ManagementApi : IHostedService, IDisposable
         if (ex is JsonException)
             return ("Malformed JSON body", 400);
 
-        // EF Core unique-constraint violation (concurrent duplicate insert). SQLite's message
-        // contains "UNIQUE constraint failed"; EF wraps it in DbUpdateException. Treat as 409.
+        // EF Core constraint violation. #266 item 8: distinguish the two SQLite constraint codes —
+        // 2067 (SQLITE_CONSTRAINT_UNIQUE, a concurrent duplicate insert) is a genuine 409, while
+        // 19 (SQLITE_CONSTRAINT, in practice an FK violation after a concurrent DELETE removed the
+        // parent peer row) must not answer "already exists" for a resource that is GONE.
         if (ex is Microsoft.EntityFrameworkCore.DbUpdateException)
+        {
+            if (ex.InnerException is Microsoft.Data.Sqlite.SqliteException sqlite && sqlite.SqliteErrorCode == 19)
+                return ("The peer was removed while the change was being applied", 404);
             return ("The resource already exists or conflicts with the current state", 409);
+        }
 
         // Anything else: generic message, full detail logged server-side.
         return ("Internal server error", 500);
@@ -1508,12 +1517,23 @@ public sealed class ManagementApi : IHostedService, IDisposable
     private async Task WriteResponse(HttpListenerContext ctx, ApiResponse response)
     {
         ctx.Response.StatusCode = response.StatusCode;
-        ctx.Response.ContentType = "application/json";
-        // Pass the cached JsonSerializerOptions (#105 aot/perf) — without it, Serialize falls back to
-        // default per-call options (reflection + no caching), a perf regression on every response.
-        var json = JsonSerializer.Serialize(response.Body, _jsonOpts);
-        var bytes = Encoding.UTF8.GetBytes(json);
-        await ctx.Response.OutputStream.WriteAsync(bytes);
+        // #266 item 1: a handler may pin a content type (the txt prefix export sets text/plain);
+        // defaulting unconditionally made every such response double-serialized — JSON content
+        // type, JSON-quoted body with escaped newlines. Only JSON responses get the serializer.
+        if (string.IsNullOrEmpty(ctx.Response.ContentType))
+            ctx.Response.ContentType = "application/json";
+        if (response.Body is string raw && !string.Equals(ctx.Response.ContentType, "application/json", StringComparison.OrdinalIgnoreCase))
+        {
+            // A plain-string body with a pinned non-JSON content type is written verbatim.
+            await ctx.Response.OutputStream.WriteAsync(Encoding.UTF8.GetBytes(raw));
+        }
+        else
+        {
+            // Pass the cached JsonSerializerOptions (#105 aot/perf) — without it, Serialize falls back to
+            // default per-call options (reflection + no caching), a perf regression on every response.
+            var json = JsonSerializer.Serialize(response.Body, _jsonOpts);
+            await ctx.Response.OutputStream.WriteAsync(Encoding.UTF8.GetBytes(json));
+        }
         ctx.Response.Close();
     }
 
@@ -1550,7 +1570,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
         if (origin is null) return;
         ctx.Response.Headers.Add("Access-Control-Allow-Origin", origin);
         ctx.Response.Headers.Add("Vary", "Origin");
-        ctx.Response.Headers.Add("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
+        ctx.Response.Headers.Add("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS");
         ctx.Response.Headers.Add("Access-Control-Allow-Headers", "Content-Type");
     }
 
