@@ -67,6 +67,10 @@ public sealed class BgpSession : IDisposable
     private bool _localFourByteAsn; // derived from negotiated OPEN capability (RFC 6793)
     private ushort _negotiatedHoldTime;
     private List<IpPrefix> _advertisedPrefixes = [];
+    // #304: distinct NLRI this session currently owns in the shared table — drives the per-peer
+    // prefix cap (Bgp.MaxPrefixesPerPeer) and its 75% warning.
+    private readonly HashSet<IpPrefix> _installedPrefixes = [];
+    private bool _maxPrefixesWarned;
     // #212: actual count sent on the wire (after aggregation + dedup). Updated at the end of
     // SendRoutesAsync. Read via AdvertisedPrefixCount for the management API/UI so operators see
     // the real number their peer's router receives, not the raw pre-aggregation count.
@@ -963,10 +967,29 @@ public sealed class BgpSession : IDisposable
 
                 if (_routeFilter.AcceptIncoming(route, filterPeerConfig))
                 {
+                    // #304: per-peer prefix ceiling (RFC 4271 §6.7 / RFC 4486 §2) — counted on the
+                    // distinct NLRI this session currently owns; replacements of an owned prefix
+                    // do not grow the count, withdrawals shrink it. Exceeding the cap throws
+                    // Cease/MaxPrefixesExceeded: deliberately NOT UpdateMessageError, so the read
+                    // loop's treat-as-withdraw filter does not swallow it — it unwinds to RunAsync's
+                    // BgpNotificationException handler, which sends the NOTIFICATION and tears the
+                    // session down (owned routes are flushed by the finally, RFC 4271 §8.2.2).
+                    var cap = _bgpConfig.MaxPrefixesPerPeer;
+                    if (cap > 0 && !_installedPrefixes.Contains(nlri) && _installedPrefixes.Count >= cap)
+                        throw new BgpNotificationException(
+                            BgpConstants.Error.Cease, BgpConstants.SubError.CeaseMaxPrefixes,
+                            $"Peer {_peer} exceeded the per-peer prefix limit ({cap}); session reset per RFC 4486");
+                    if (cap > 0 && !_maxPrefixesWarned && _installedPrefixes.Count >= cap * 3 / 4)
+                    {
+                        _maxPrefixesWarned = true;
+                        _logger.LogWarning("Peer {Peer} at {Count}/{Cap} of the per-peer prefix limit", _peer, _installedPrefixes.Count, cap);
+                    }
+
                     // Tagged with this session as the owner, so only this peer's own withdrawal can
                     // remove it (#289). A route the filter dropped is never installed and therefore
                     // never owned, so a later withdrawal for it removes nothing.
                     _routeTable.AddOrUpdate(route, owner: this);
+                    _installedPrefixes.Add(nlri);
                     // #85: guard the UintToIPAddress allocation behind IsEnabled — LogDebug
                     // evaluates the arg eagerly even when Debug is filtered out.
                     if (_logger.IsEnabled(LogLevel.Debug))
@@ -993,6 +1016,9 @@ public sealed class BgpSession : IDisposable
                 _logger.LogDebug("Ignoring withdrawal of {Prefix} from {Peer}: not owned by this session", prefix, _peer);
             return;
         }
+
+        // #304: the cap counts what this session currently owns — a withdrawal frees budget.
+        _installedPrefixes.Remove(prefix);
 
         if (_logger.IsEnabled(LogLevel.Debug))
             _logger.LogDebug("{Reason}: {Prefix}", reason, prefix);
