@@ -76,6 +76,21 @@ public class ConfigHotReloadTests
             harness.Api.ResolveClientIpLive(IPAddress.Parse("127.0.0.1"), null, "198.51.100.5"));
     }
 
+    // --- ManagementApi.ApplyConfig: body-size cap (#266 item 6) -----------------------------------
+
+    [Fact]
+    public void ApplyConfig_Swaps_MaxRequestBodyBytes()
+    {
+        using var harness = NewApi(Config()); // default 1 MiB
+
+        Assert.Equal(1024 * 1024, harness.Api.MaxRequestBodyBytesLive);
+
+        harness.Api.ApplyConfig(Config(maxBodyBytes: 4096));
+
+        // ReadBodyAsync reads the same live field — the new cap applies without a restart.
+        Assert.Equal(4096, harness.Api.MaxRequestBodyBytesLive);
+    }
+
     // --- ManagementApi.ApplyConfig: rate limiter -----------------------------------------------
 
     [Fact]
@@ -256,14 +271,16 @@ public class ConfigHotReloadTests
         List<string>? trustedProxies = null,
         ApiRateLimitConfig? rateLimit = null,
         List<string>? corsOrigins = null,
-        bool trustXRealIp = false) => new()
+        bool trustXRealIp = false,
+        long maxBodyBytes = 1024 * 1024) => new()
         {
             Bgp = new BgpConfig { Asn = 65001, RouterId = "10.0.0.1", HoldTime = 180, KeepAlive = 60 },
             ApiPort = 5001,
             TrustedProxies = trustedProxies ?? [],
             ApiRateLimit = rateLimit,
             CorsAllowedOrigins = corsOrigins,
-            TrustXRealIp = trustXRealIp
+            TrustXRealIp = trustXRealIp,
+            MaxRequestBodyBytes = maxBodyBytes
         };
 
     /// <summary>Renders a VALID <c>appsettings.yml</c>-style document with the given soft fields.</summary>
