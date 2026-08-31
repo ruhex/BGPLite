@@ -496,6 +496,92 @@ public class BgpSessionRouteOwnershipTests
         await TeardownAsync(session, run);
     }
 
+    /// <summary>
+    /// #265 item 1: a REPLACED session's slow finally must not flip the peer row back to
+    /// inactive after the replacement wrote active. Two guards: the SilentClose teardown reason
+    /// (replacement / GR-aware shutdown) skips the write, and the registration probe answers
+    /// false once the session is no longer the registered one. A genuine teardown still writes.
+    /// </summary>
+    private sealed class RecordingPeerStore : IPeerStore
+    {
+        public List<(string Ip, uint Asn, bool Active)> StatusWrites = [];
+        public string CreatePeer(string ip, uint asn, string? description) => "id";
+        public void UpsertPeer(string ip, uint asn) { }
+        public void UpdateSessionStatus(string ip, uint asn, bool active) => StatusWrites.Add((ip, asn, active));
+        public void DeletePeer(string id) { }
+        public PeerInfo? GetPeerByIp(string ip) => null;
+        public PeerInfo? GetPeer(string ip, uint asn) => null;
+        public PeerInfo? GetPeerById(string id) => null;
+        public List<string> GetSubscriptions(string peerId) => [];
+        public List<string> GetCustomPrefixes(string peerId) => [];
+        public List<uint> GetCustomAsns(string peerId) => [];
+        public HashSet<uint> GetCommunities(string peerId) => [];
+        public HashSet<uint> GetCommunities(string ip, uint asn) => [];
+        public void SetCommunities(string peerId, HashSet<uint> communities) { }
+        public void ClearCommunities(string peerId) { }
+        public void SetDescription(string id, string description) { }
+        public PeerRoutingView? LoadPeerRoutingView(string ip, uint asn) => new("id", [], [], [], []);
+    }
+
+    private static async Task<(BgpSession Session, Task Run, RecordingPeerStore Store)> EstablishWithStoreAsync(
+        RouteTable routeTable, Func<BgpSession, bool>? probe = null)
+    {
+        var conn = new ScriptedConnection();
+        var store = new RecordingPeerStore();
+        var config = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1", HoldTime = 0, KeepAlive = 0 };
+        var session = new BgpSession(
+            conn,
+            new PeerConfig { Address = "127.0.0.1" },
+            config,
+            routeTable,
+            AllowAllFilter.Instance,
+            new BgpMetrics(),
+            NullLogger<BgpSession>.Instance,
+            peerStore: store);
+        session.StillRegisteredProbe = probe ?? (_ => true);
+        var run = session.RunAsync();
+        conn.EnqueueMessage(new BgpOpenMessage
+        {
+            Version = BgpConstants.BgpVersion,
+            Asn = 65002,
+            HoldTime = 0,
+            RouterId = 0x0A000002,
+            Capabilities = [BgpCapabilityInfo.FourOctetAsn(65002)],
+        });
+        conn.EnqueueMessage(BgpKeepaliveMessage.Instance);
+        for (var i = 0; i < 200 && !session.IsEstablished; i++)
+            await Task.Delay(TimeSpan.FromMilliseconds(10));
+        Assert.True(session.IsEstablished, "session must reach Established");
+        return (session, run, store);
+    }
+
+    [Fact]
+    public async Task ReplacedSession_Teardown_DoesNotOverwriteStatusInactive()
+    {
+        // The probe answers false — the registry no longer holds this session (TryUpdate
+        // swapped a replacement in). Its finally must not write inactive.
+        var (session, run, store) = await EstablishWithStoreAsync(new RouteTable(), probe: _ => false);
+
+        await TeardownAsync(session, run);   // SilentClose + probe-false — both guards skip
+
+        Assert.DoesNotContain(store.StatusWrites, w => !w.Active);
+    }
+
+    [Fact]
+    public async Task GenuineTeardown_StillWritesInactive()
+    {
+        // Registered + non-silent teardown: the write must still happen (no regression of #325).
+        var (session, run, store) = await EstablishWithStoreAsync(new RouteTable());
+
+        // A peer NOTIFICATION tears down with RemoteNotification — not SilentClose, probe true.
+        var connField = typeof(BgpSession).GetField("_connection", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!;
+        var conn = (ScriptedConnection)connField.GetValue(session)!;
+        conn.EnqueueMessage(new BgpNotificationMessage { ErrorCode = BgpConstants.Error.Cease, SubErrorCode = 0 });
+        try { await run.WaitAsync(TimeSpan.FromSeconds(5)); } catch { /* teardown unwinds */ }
+
+        Assert.Contains(store.StatusWrites, w => !w.Active);
+    }
+
     private sealed class RejectAllIncomingFilter : IRouteFilter
     {
         private static readonly IReadOnlySet<uint> Empty = new HashSet<uint>();
