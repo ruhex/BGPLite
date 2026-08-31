@@ -13,6 +13,13 @@ namespace BGPLite.Providers;
 /// separate TTLs — an ASN configured in both doubled RIPEstat traffic and could serve
 /// disagreeing snapshots.
 /// <para>
+/// <para>
+/// #377 review: the negative-entry fast path serves [] to callers that accept the
+/// "nothing this cycle" semantic (the RouteAssembler fan-out). A SOURCE provider must pass
+/// <c>serveNegativeEntries: false</c> — wrapping a cached failure into SourceLoadResult.Ok([])
+/// would store a positive empty list in the name-level cache and mark the source changed,
+/// withdrawing a previously-good advertisement over a transient RIPEstat blip.
+/// </para>
 /// Shape (moved verbatim from <see cref="PrefixService"/>): per-ASN TTL cache with
 /// stale-on-failure (#163), short negative TTL for failed fetches, per-ASN fetch gates against
 /// thundering herds (#164), and a capacity cap with the #165 eviction sweep.
@@ -57,10 +64,12 @@ public sealed class RipeStatPrefixCache
         _timeProvider = timeProvider ?? TimeProvider.System;
     }
 
-    public async Task<IReadOnlyList<(uint Prefix, byte Length)>> GetPrefixesAsync(uint asn, CancellationToken ct = default)
+    public async Task<IReadOnlyList<(uint Prefix, byte Length)>> GetPrefixesAsync(uint asn, CancellationToken ct = default, bool serveNegativeEntries = true)
     {
-        // Fast path: fresh entry (positive or negative within its TTL).
-        if (TryGetFresh(asn, out var fresh))
+        // Fast path: fresh entry (positive, or negative within its TTL when the caller accepts
+        // the []-on-recent-failure semantic — the RouteAssembler fan-out does; a source provider
+        // must NOT, see the class doc).
+        if (TryGetFresh(asn, out var fresh) && (serveNegativeEntries || !IsNegative(asn)))
             return fresh;
 
         // Serialize per-ASN so concurrent callers share a single RIPEstat fetch — no thundering herd
@@ -69,8 +78,10 @@ public sealed class RipeStatPrefixCache
         await gate.WaitAsync(ct);
         try
         {
-            // Re-check after acquiring the lock: another caller may have just populated the entry.
-            if (TryGetFresh(asn, out var rechecked))
+            // Re-check after acquiring the lock: another caller may have just populated the entry
+            // (with the same negative-entry discriminator as the outer fast path — #377 review:
+            // forgetting it here re-introduces exactly the Ok([]) hole the provider opts out of).
+            if (TryGetFresh(asn, out var rechecked) && (serveNegativeEntries || !IsNegative(asn)))
                 return rechecked;
 
             IReadOnlyList<(uint Prefix, byte Length)> prefixes;
@@ -106,6 +117,10 @@ public sealed class RipeStatPrefixCache
             gate.Release();
         }
     }
+
+    /// <summary>True when the fresh entry for <paramref name="asn"/> is a NEGATIVE (recent-failure) one.</summary>
+    private bool IsNegative(uint asn) =>
+        _cache.TryGetValue(asn, out var entry) && entry.Negative;
 
     /// <summary>True if <paramref name="asn"/> has a non-expired entry (positive within _cacheTtl,
     /// negative within _negativeTtl).</summary>

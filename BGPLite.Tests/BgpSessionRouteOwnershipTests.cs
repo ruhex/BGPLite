@@ -627,6 +627,62 @@ public class BgpSessionRouteOwnershipTests
     /// (Cease, MaxPrefixesExceeded) per RFC 4271 §6.7 / RFC 4486 §2, and the finally flushes
     /// the peer's owned routes (RFC 4271 §8.2.2) — the table does not keep the attacker's rows.
     /// </summary>
+    /// <summary>
+    /// #377 review: a session's per-peer prefix set must stay aligned with route-table OWNERSHIP —
+    /// when session B takes over a key session A installed, A stops counting it; otherwise A's
+    /// cap count drifts upward on overlaps and trips a reset for prefixes it no longer owns.
+    /// </summary>
+    private static async Task<(BgpSession Session, Task Run, ScriptedConnection Conn)> EstablishCappedAsync(RouteTable routeTable, int cap, uint routerId)
+    {
+        var conn = new ScriptedConnection();
+        var config = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1", HoldTime = 0, KeepAlive = 0, MaxPrefixesPerPeer = cap };
+        var session = new BgpSession(
+            conn, new PeerConfig { Address = "127.0.0.1" }, config, routeTable,
+            AllowAllFilter.Instance, new BgpMetrics(), NullLogger<BgpSession>.Instance);
+        var run = session.RunAsync();
+        conn.EnqueueMessage(new BgpOpenMessage
+        {
+            Version = BgpConstants.BgpVersion,
+            Asn = 65002,
+            HoldTime = 0,
+            RouterId = routerId,
+            Capabilities = [BgpCapabilityInfo.FourOctetAsn(65002)],
+        });
+        conn.EnqueueMessage(BgpKeepaliveMessage.Instance);
+        for (var i = 0; i < 200 && !session.IsEstablished; i++)
+            await Task.Delay(TimeSpan.FromMilliseconds(10));
+        Assert.True(session.IsEstablished, "session must reach Established");
+        return (session, run, conn);
+    }
+
+    [Fact]
+    public async Task TakenOverPrefix_FreesTheOriginalOwnersCapBudget()
+    {
+        var routeTable = new RouteTable();
+        var (a, aRun, aConn) = await EstablishCappedAsync(routeTable, cap: 1, routerId: 0x0A000002);
+        var (b, bRun, bConn) = await EstablishCappedAsync(routeTable, cap: 0, routerId: 0x0A000003);
+
+        // A installs 10/8 (its single budget slot).
+        aConn.EnqueueFrame(AnnounceFrame(8, 0x0A));
+        await SettleAsync(aConn, () => routeTable.Count == 1);
+
+        // B takes the SAME prefix over — A no longer owns it.
+        bConn.EnqueueFrame(AnnounceFrame(8, 0x0A));
+        await SettleAsync(bConn, () => routeTable.Get(TenSlashEight, 8) is not null);
+        await Task.Delay(50);   // let the ownership-lost notification land
+
+        // A announces a DIFFERENT prefix with cap=1 — pre-fix this tripped the cap (A still
+        // counted the taken-over 10/8) and reset A; post-fix A owns only the new prefix.
+        aConn.EnqueueFrame(AnnounceFrame(24, 0xC0, 0x00, 0x02));
+        await SettleAsync(aConn, () => routeTable.Count == 2);
+
+        Assert.True(a.IsEstablished, "the taken-over prefix must not count against A's cap");   // RED pre-fix
+        Assert.Equal(2, routeTable.Count);
+
+        await TeardownAsync(a, aRun);
+        await TeardownAsync(b, bRun);
+    }
+
     private static async Task<(BgpSession Session, Task Run, ScriptedConnection Conn, RouteTable Table)> EstablishCappedAsync(int cap)
     {
         var routeTable = new RouteTable();

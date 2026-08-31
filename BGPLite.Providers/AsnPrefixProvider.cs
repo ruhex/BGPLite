@@ -44,7 +44,9 @@ public sealed class AsnPrefixProvider : IPrefixSourceProvider
         if (!source.Asn.HasValue)
             throw new InvalidOperationException($"Prefix source '{source.Name}': Kind=asn requires an Asn.");
 
-        var prefixes = await _cache.GetPrefixesAsync(source.Asn.Value, ct);
+        // serveNegativeEntries: false (#377 review) — a cached failure must propagate (throw), not
+        // come back as an empty list the name-level cache would store as a POSITIVE result.
+        var prefixes = await _cache.GetPrefixesAsync(source.Asn.Value, ct, serveNegativeEntries: false);
         _logger.LogInformation(
             "Source '{Name}' (asn AS{Asn}): loaded {Count} prefixes via RIPEstat",
             source.Name, source.Asn.Value, prefixes.Count);

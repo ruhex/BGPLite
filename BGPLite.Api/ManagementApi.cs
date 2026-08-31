@@ -444,7 +444,10 @@ public sealed class ManagementApi : IHostedService, IDisposable
         // parent peer row) must not answer "already exists" for a resource that is GONE.
         if (ex is Microsoft.EntityFrameworkCore.DbUpdateException)
         {
-            if (ex.InnerException is Microsoft.Data.Sqlite.SqliteException sqlite && sqlite.SqliteErrorCode == 19)
+            // #377 review: BOTH constraint classes report primary code 19 in SqliteErrorCode;
+            // the discriminator is the EXTENDED code — 787 (SQLITE_CONSTRAINT_FOREIGNKEY) is the
+            // concurrent-DELETE case, anything else (2067 unique, 19 bare) is a genuine conflict.
+            if (ex.InnerException is Microsoft.Data.Sqlite.SqliteException sqlite && sqlite.SqliteExtendedErrorCode == 787)
                 return ("The peer was removed while the change was being applied", 404);
             return ("The resource already exists or conflicts with the current state", 409);
         }

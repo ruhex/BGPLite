@@ -67,9 +67,25 @@ public sealed class RouteTable
             }
             if (_routes.TryGetValue(route.Key, out var existing) &&
                 _routes.TryUpdate(route.Key, entry, existing))
+            {
+                // #377 review: ownership transferred — the PREVIOUS owner's session bookkeeping
+                // (e.g. the #304 per-peer prefix set) must learn it no longer holds this key,
+                // or its count drifts upward on overlaps and can trip the cap it no longer owns.
+                // Raised AFTER the swap wins; a stale previous-owner read only means a late
+                // notification, which the remove-if-present handlers tolerate.
+                if (!ReferenceEquals(existing.Owner, owner) && existing.Owner is not null)
+                    EntryOwnershipLost?.Invoke(existing.Owner, route.Key);
                 return false; // replaced an entry that was still present — no count transition
+            }
         }
     }
+
+    /// <summary>
+    /// Fired (on the replacing caller's thread) after an <see cref="AddOrUpdate"/> swap takes a
+    /// key away from a previous owner (#377 review). Subscribers must tolerate invocation from
+    /// any thread and duplicate/late notifications — treat it as "you MIGHT have lost this key".
+    /// </summary>
+    public event Action<object, (uint Prefix, byte Length)>? EntryOwnershipLost;
 
     /// <summary>Unconditional removal, regardless of owner — administrative paths only.</summary>
     public bool Remove(uint prefix, byte length)
