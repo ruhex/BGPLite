@@ -994,17 +994,24 @@ public sealed class BgpSession : IDisposable
                         throw new BgpNotificationException(
                             BgpConstants.Error.Cease, BgpConstants.SubError.CeaseMaxPrefixes,
                             $"Peer {_peer} exceeded the per-peer prefix limit ({cap}); session reset per RFC 4486");
-                    if (cap > 0 && !_maxPrefixesWarned && _installedPrefixes.Count >= MaxPrefixWarningThreshold(cap))
-                    {
-                        _maxPrefixesWarned = true;
-                        _logger.LogWarning("Peer {Peer} at {Count}/{Cap} of the per-peer prefix limit", _peer, _installedPrefixes.Count, cap);
-                    }
+                    // #377 review: record membership BEFORE publishing — a concurrent takeover
+                    // fires EntryOwnershipLost synchronously inside AddOrUpdate, and the handler's
+                    // remove would no-op against a key not yet recorded, leaving this session
+                    // counting a prefix it no longer owns.
+                    _installedPrefixes.TryAdd(nlri, 0);
 
                     // Tagged with this session as the owner, so only this peer's own withdrawal can
                     // remove it (#289). A route the filter dropped is never installed and therefore
                     // never owned, so a later withdrawal for it removes nothing.
                     _routeTable.AddOrUpdate(route, owner: this);
-                    _installedPrefixes.TryAdd(nlri, 0);
+
+                    // #377 review: warn AFTER the install with the actual count — the pre-install
+                    // count logged "0/1" for the very first route under cap=1 (threshold floor 0).
+                    if (cap > 0 && !_maxPrefixesWarned && _installedPrefixes.Count >= MaxPrefixWarningThreshold(cap))
+                    {
+                        _maxPrefixesWarned = true;
+                        _logger.LogWarning("Peer {Peer} at {Count}/{Cap} of the per-peer prefix limit", _peer, _installedPrefixes.Count, cap);
+                    }
                     // #85: guard the UintToIPAddress allocation behind IsEnabled — LogDebug
                     // evaluates the arg eagerly even when Debug is filtered out.
                     if (_logger.IsEnabled(LogLevel.Debug))

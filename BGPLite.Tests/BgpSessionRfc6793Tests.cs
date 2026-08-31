@@ -185,7 +185,8 @@ public class BgpSessionRfc6793Tests
                 AttributeHelper.WriteAsPath([65001u], fourByteAsn: false),
                 AttributeHelper.WriteNextHop(0x0A000001),
                 new PathAttribute { Flags = 0xC0, TypeCode = BgpConstants.Attribute.Aggregator, Data = new byte[5] },     // malformed → discarded
-                new PathAttribute { Flags = 0xC0, TypeCode = BgpConstants.Attribute.As4Aggregator, Data = new byte[8] },  // valid, AS 65001
+                new PathAttribute { Flags = 0xC0, TypeCode = BgpConstants.Attribute.As4Aggregator,
+                    Data = [0x00, 0x00, 0xFD, 0xE9, 0x00, 0x00, 0x00, 0x00] },                                            // valid, AS 65001
             ],
             Nlri = [new IpPrefix(0x0A000000, 24)]
         };
@@ -193,6 +194,35 @@ public class BgpSessionRfc6793Tests
         var attrs = UpdateCodec.ParseRouteAttributes(update, fourByteAsnSession: false);   // RED pre-fix: 3/9 pairing error
 
         Assert.Contains(BgpConstants.Attribute.Aggregator, attrs.DiscardedAttributes);
+        Assert.DoesNotContain(BgpConstants.Attribute.As4Aggregator, attrs.DiscardedAttributes);   // #377 review: the AS4 side is VALID — not silently discarded too
+    }
+
+    /// <summary>
+    /// #377 review: a valid AGGREGATOR (AS_TRANS) + malformed AS4_AGGREGATOR must not trip the
+    /// "Missing AS4_AGGREGATOR for AGGREGATOR AS_TRANS" pairing rule — the UPDATE CARRIED an
+    /// AS4_AGGREGATOR and it was discarded per RFC 6793 §6; routes stay.
+    /// </summary>
+    [Fact]
+    public void ParseRouteAttributes_AsTransAggregator_MalformedAs4Aggregator_NoPairingError()
+    {
+        var update = new BgpUpdateMessage
+        {
+            PathAttributes =
+            [
+                AttributeHelper.WriteOrigin(BgpOrigin.Igp),
+                AttributeHelper.WriteAsPath([65001u], fourByteAsn: false),
+                AttributeHelper.WriteNextHop(0x0A000001),
+                new PathAttribute { Flags = 0xC0, TypeCode = BgpConstants.Attribute.Aggregator,
+                    Data = [0x5B, 0xA0, 0x00, 0x00, 0x00, 0x00] },                        // AS_TRANS (23456 = 0x5BA0) 2-octet form
+                new PathAttribute { Flags = 0xC0, TypeCode = BgpConstants.Attribute.As4Aggregator, Data = new byte[5] }, // malformed length
+            ],
+            Nlri = [new IpPrefix(0x0A000000, 24)]
+        };
+
+        var attrs = UpdateCodec.ParseRouteAttributes(update, fourByteAsnSession: false);   // RED pre-fix: 3/9 pairing error
+
+        Assert.Contains(BgpConstants.Attribute.As4Aggregator, attrs.DiscardedAttributes);
+        Assert.Equal(0x0A000001u, attrs.NextHop);
     }
 
     /// <summary>

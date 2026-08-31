@@ -69,7 +69,7 @@ public sealed class RipeStatPrefixCache
         // Fast path: fresh entry (positive, or negative within its TTL when the caller accepts
         // the []-on-recent-failure semantic — the RouteAssembler fan-out does; a source provider
         // must NOT, see the class doc).
-        if (TryGetFresh(asn, out var fresh) && (serveNegativeEntries || !IsNegative(asn)))
+        if (TryGetFresh(asn, out var fresh, out var freshIsNegative) && (serveNegativeEntries || !freshIsNegative))
             return fresh;
 
         // Serialize per-ASN so concurrent callers share a single RIPEstat fetch — no thundering herd
@@ -81,7 +81,7 @@ public sealed class RipeStatPrefixCache
             // Re-check after acquiring the lock: another caller may have just populated the entry
             // (with the same negative-entry discriminator as the outer fast path — #377 review:
             // forgetting it here re-introduces exactly the Ok([]) hole the provider opts out of).
-            if (TryGetFresh(asn, out var rechecked) && (serveNegativeEntries || !IsNegative(asn)))
+            if (TryGetFresh(asn, out var rechecked, out var recheckIsNegative) && (serveNegativeEntries || !recheckIsNegative))
                 return rechecked;
 
             IReadOnlyList<(uint Prefix, byte Length)> prefixes;
@@ -118,21 +118,21 @@ public sealed class RipeStatPrefixCache
         }
     }
 
-    /// <summary>True when the fresh entry for <paramref name="asn"/> is a NEGATIVE (recent-failure) one.</summary>
-    private bool IsNegative(uint asn) =>
-        _cache.TryGetValue(asn, out var entry) && entry.Negative;
-
     /// <summary>True if <paramref name="asn"/> has a non-expired entry (positive within _cacheTtl,
-    /// negative within _negativeTtl).</summary>
-    private bool TryGetFresh(uint asn, out IReadOnlyList<(uint Prefix, byte Length)> data)
+    /// negative within _negativeTtl). #377 review: the negative flag comes out of the SAME read —
+    /// a separate IsNegative lookup could miss an eviction racing between the two and serve a
+    /// captured [] to a caller that opted out of negatives.</summary>
+    private bool TryGetFresh(uint asn, out IReadOnlyList<(uint Prefix, byte Length)> data, out bool isNegative)
     {
         data = null!;
+        isNegative = false;
         if (!_cache.TryGetValue(asn, out var entry)) return false;
 
         var ttl = entry.Negative ? _negativeTtl : _cacheTtl;
         if (_timeProvider.GetUtcNow().UtcDateTime - entry.CachedAt < ttl)
         {
             data = entry.Data;
+            isNegative = entry.Negative;
             return true;
         }
         return false;

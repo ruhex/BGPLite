@@ -700,6 +700,7 @@ public class BgpSessionHoldTimerTests
     [InlineData(2, 1)]
     [InlineData(100, 75)]
     [InlineData(int.MaxValue, 1610612735)]    // exact 75% via widened arithmetic — no wrap, no saturation
+    [InlineData(1, 0)]                        // floor: with post-install logging this reads "at 1/1"
     [InlineData(1_500_000_000, 1_125_000_000)] // would wrap as int*3
     public void MaxPrefixWarningThreshold_NoOverflow(int cap, int expected)
         => Assert.Equal(expected, BgpSession.MaxPrefixWarningThreshold(cap));

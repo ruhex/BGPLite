@@ -28,7 +28,8 @@ For section-by-section RFC conformance status, see `RFC_COMPLIANCE.md` (2026-07-
 
 ### D3. Malformed AGGREGATOR/AS4_AGGREGATOR takes attribute discard (RESOLVED)
 - **Decision:** a malformed AGGREGATOR or AS4_AGGREGATOR (length ≠ 6/8 by session type, or AS 0 per
-  RFC 7607) is DISCARDED per RFC 7606 §7.7/§7.8 — the attribute is dropped, the UPDATE's routes stay,
+  RFC 7607) is DISCARDED per RFC 7606 §7.7 (AGGREGATOR) / RFC 6793 §6 (AS4_AGGREGATOR — RFC 7606 §7.8
+  is COMMUNITY and §7 excludes attribute 18) — the attribute is dropped, the UPDATE's routes stay,
   a Warning names the dropped type codes.
 - **Context:** was temporarily treat-as-withdraw (stricter than the RFC — routes a conformant
   implementation installs were lost) until the attribute-discard mechanism existed (#306). Flags

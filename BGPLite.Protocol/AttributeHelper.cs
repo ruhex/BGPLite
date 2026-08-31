@@ -127,8 +127,8 @@ public static class AttributeHelper
 
         var asn = BinaryPrimitives.ReadUInt32BigEndian(attr.Data);
 
-        // RFC 7607 §2 — AS 0 in AS4_AGGREGATOR is malformed; RFC 7606 §7.8 assigns attribute
-        // discard (#306).
+        // RFC 7607 §2 — AS 0 in AS4_AGGREGATOR is malformed, handled per RFC 6793 §6:
+        // attribute discard (#306; RFC 7606 §7.8 is COMMUNITY).
         if (asn == 0)
             throw new BgpParseException("Invalid AS4_AGGREGATOR attribute: AS 0 is reserved (RFC 7607)",
                 BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.OptionalAttributeError);
