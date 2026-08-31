@@ -915,6 +915,21 @@ public sealed class BgpSession : IDisposable
                     LargeCommunities = attrs.LargeCommunities
                 };
 
+                // RFC 4271 §9.1.2 (#292 item 6): "AS loop detection is done by scanning the full
+                // AS path ... and checking that the autonomous system number of the local system
+                // does not appear in the AS path" — such routes "should be excluded from the
+                // Phase 2 decision function". A route carrying our own ASN would loop straight
+                // back to us if re-advertised (with our ASN prepended yet again). Route-level
+                // exclusion, not a session error (the old subcode 7 is deprecated); excluded
+                // routes are never installed, so a later withdrawal for them removes nothing.
+                if (attrs.AsPath.AsSpan().Contains(_bgpConfig.Asn))
+                {
+                    if (_logger.IsEnabled(LogLevel.Debug))
+                        _logger.LogDebug("Excluded looping route {Prefix} from {Peer}: local AS {Asn} in AS_PATH",
+                            nlri, _peer, _bgpConfig.Asn);
+                    continue;
+                }
+
                 if (_routeFilter.AcceptIncoming(route, filterPeerConfig))
                 {
                     // Tagged with this session as the owner, so only this peer's own withdrawal can
