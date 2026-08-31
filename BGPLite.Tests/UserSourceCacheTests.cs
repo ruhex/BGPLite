@@ -123,19 +123,43 @@ public class UserSourceCacheTests
     [Fact]
     public async Task OperationCanceled_Propagates_And_Is_Not_Negative_Cached()
     {
-        // #114: cancellation must propagate and must not be recorded as a negative entry.
+        // #114: CALLER cancellation must propagate and must not be recorded as a negative entry.
+        // #320 refined the discriminator: the cache rethrows only OCEs whose CALLER token is
+        // cancelled — a foreign-token OCE (the per-fetch budget) is a load failure and IS
+        // negative-cached (see ForeignTokenOCE_IsAFailure_NegativeCachedAndThrottled). The
+        // faithful simulation is cancellation arriving WHILE the fetch is in flight (a
+        // pre-cancelled token never even passes the gate).
         var cache = new UserSourceCache();
-        var f = new Fetcher { Throw = new OperationCanceledException() };
+        var cts = new CancellationTokenSource();
+        var calls = 0;
+        // #358 review: a fixed delay does not prove the caller entered the loader — synchronize
+        // on entry explicitly instead of racing Task.Run's start.
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 
-        await Assert.ThrowsAsync<OperationCanceledException>(
-            () => cache.GetOrLoadAsync("https://example.com/l", "src", f.Invoke, default));
-        Assert.Equal(1, f.Calls);
+        static async Task<IReadOnlyList<(uint Prefix, byte Length)>> Parked(CancellationToken ct, TaskCompletionSource entered)
+        {
+            entered.TrySetResult();
+            await Task.Delay(Timeout.InfiniteTimeSpan, ct);
+            return [];
+        }
+
+        Task<IReadOnlyList<(uint Prefix, byte Length)>> Invoke(CancellationToken ct)
+        {
+            calls++;
+            return Parked(ct, entered);
+        }
+
+        var fetch = Task.Run(() => cache.GetOrLoadAsync("https://example.com/l", "src", Invoke, cts.Token));
+        await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        cts.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => fetch);
+        Assert.Equal(1, calls);
 
         // No negative cache → the next call reaches the fetcher again.
-        f.Throw = null;
-        f.OnSuccess = () => P((1u, 1));
+        var f = new Fetcher { OnSuccess = () => P((1u, 1)) };
         var served = await cache.GetOrLoadAsync("https://example.com/l", "src", f.Invoke, default);
-        Assert.Equal(2, f.Calls);
+        Assert.Equal(1, f.Calls); // a fresh fetcher ran once more
         Assert.Single(served);
     }
 
@@ -165,5 +189,144 @@ public class UserSourceCacheTests
             () => cache.GetOrLoadAsync("https://example.com/l", "src", f.Invoke, default));
 
         Assert.Equal(2, f.Calls); // negative entry expired → refetched
+    }
+
+    /// <summary>
+    /// #261: unique peer-supplied URLs must not grow the cache without bound — port of the #165
+    /// cap. Inserting more distinct URLs than maxCacheEntries keeps the tracked count at the cap.
+    /// </summary>
+    [Fact]
+    public async Task UniqueUrls_BeyondCap_KeepCacheBounded()
+    {
+        var cache = new UserSourceCache(maxCacheEntries: 5);
+        var f = new Fetcher { OnSuccess = () => P((0x0A000000u, (byte)8)) };
+
+        for (var i = 0; i < 12; i++)
+            await cache.GetOrLoadAsync($"https://example.com/list-{i}", "src", f.Invoke, CancellationToken.None);
+
+        Assert.Equal(5, cache.TrackedCount);
+    }
+
+    /// <summary>
+    /// #261: the sweep drops the OLDEST entries (expired-first, then by CachedAt), so a fresh
+    /// entry survives and an evicted one refetches on next use.
+    /// </summary>
+    [Fact]
+    public async Task Eviction_DropsOldest_First_FreshEntriesSurvive()
+    {
+        var cache = new UserSourceCache(maxCacheEntries: 3);
+        var calls = new Dictionary<string, int>();
+        Task<IReadOnlyList<(uint Prefix, byte Length)>> Load(string url) => Task.Run(async () =>
+        {
+            lock (calls) calls[url] = calls.TryGetValue(url, out var c) ? c + 1 : 1;
+            await Task.Yield();
+            return P((0x0A000000u, (byte)8));
+        });
+
+        await cache.GetOrLoadAsync("https://example.com/a", "a", ct => Load("a"), CancellationToken.None);
+        await cache.GetOrLoadAsync("https://example.com/b", "b", ct => Load("b"), CancellationToken.None);
+        await cache.GetOrLoadAsync("https://example.com/c", "c", ct => Load("c"), CancellationToken.None);
+        await cache.GetOrLoadAsync("https://example.com/d", "d", ct => Load("d"), CancellationToken.None); // evicts "a"
+
+        Assert.Equal(3, cache.TrackedCount);
+        lock (calls) Assert.Equal(1, calls["d"]); // fresh entry is cached
+        lock (calls) Assert.Equal(1, calls["b"]); // survivor served from cache below
+        lock (calls) Assert.Equal(1, calls["c"]);
+
+        var b = await cache.GetOrLoadAsync("https://example.com/b", "b", ct => Load("b"), CancellationToken.None);
+        Assert.NotNull(b);
+        lock (calls) Assert.Equal(1, calls["b"]); // still cached — no refetch
+
+        var a = await cache.GetOrLoadAsync("https://example.com/a", "a", ct => Load("a"), CancellationToken.None);
+        Assert.NotNull(a);
+        lock (calls) Assert.Equal(2, calls["a"]); // evicted earlier → refetched
+    }
+
+    /// <summary>
+    /// #320: a fetch budget fires as a foreign-token OCE (live caller token). It is a load
+    /// FAILURE, not teardown: it still throws (the caller's #342 boundary treats it as a
+    /// per-source failure), it is negative-cached, and the negative entry throttles the next
+    /// call — no loader invocation, no re-paying the budget.
+    /// </summary>
+    [Fact]
+    public async Task ForeignTokenOCE_IsAFailure_NegativeCachedAndThrottled()
+    {
+        var cache = new UserSourceCache(negativeTtl: TimeSpan.FromSeconds(5));
+        var f = new Fetcher { Throw = new OperationCanceledException() }; // no live caller token attached
+
+        // First call: the budget fired → OCE propagates (failure semantics), entry negative-cached.
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => cache.GetOrLoadAsync("https://example.com/l", "src", f.Invoke, CancellationToken.None));
+
+        // Second call within the negative TTL: throttled — the loader is NOT invoked again and
+        // the negative entry reports "no prefixes" instead of re-paying the budget.
+        var second = await cache.GetOrLoadAsync("https://example.com/l", "src", f.Invoke, CancellationToken.None);
+
+        Assert.Empty(second);
+        Assert.Equal(1, f.Calls);
+    }
+
+    /// <summary>
+    /// #358 review (orphan-lock hygiene for #261): a caller cancelled while queued on the gate
+    /// never writes a cache entry, so its freshly-created gate had nothing to evict — cancelled
+    /// URLs accumulated SemaphoreSlims forever. The cancellation path must pair-remove its gate.
+    /// </summary>
+    [Fact]
+    public async Task CancelledWhileQueued_DoesNotLeaveAnOrphanGate()
+    {
+        var cache = new UserSourceCache();
+        Assert.Equal(0, cache.TrackedGateCount);
+
+        var holder = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var holdCts = new CancellationTokenSource();
+
+        Task<IReadOnlyList<(uint Prefix, byte Length)>> Hold(CancellationToken ct)
+        {
+            entered.TrySetResult();
+            return holder.Task.ContinueWith<IReadOnlyList<(uint Prefix, byte Length)>>(_ => [], CancellationToken.None);
+        }
+
+        // First caller holds the gate without completing.
+        var holding = cache.GetOrLoadAsync("https://example.com/l", "src", Hold, CancellationToken.None);
+        await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        // Second caller queues on the same gate, then is cancelled while queued.
+        var queuedCts = new CancellationTokenSource();
+        var queued = Task.Run(() => cache.GetOrLoadAsync("https://example.com/l", "src", Hold, queuedCts.Token));
+        await Task.Delay(50);            // let it queue behind the holder
+        queuedCts.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => queued);
+
+        // Release the holder; its load completes and caches the entry. The cancelled caller must
+        // not have left a gate dictionary that grows: still exactly one gate for one url.
+        holder.TrySetResult();
+        await holding.WaitAsync(TimeSpan.FromSeconds(5));
+
+        // The cancelled caller's pair-remove took the SHARED gate instance (the holder kept
+        // running on its own reference — the accepted duplicate-fetch tradeoff), and nothing
+        // re-adds a gate until the next call: zero gates, one cached entry, no orphan.
+        Assert.Equal(0, cache.TrackedGateCount);
+        Assert.Equal(1, cache.TrackedCount);
+    }
+
+    /// <summary>
+    /// #358 review: repeated cancelled-then-never-loaded URLs must not accumulate gates — the
+    /// observable orphan-growth case (fresh url per cancelled call, no cache entry ever written).
+    /// </summary>
+    [Fact]
+    public async Task CancelledFreshUrls_DoNotAccumulateGates()
+    {
+        var cache = new UserSourceCache();
+
+        for (var i = 0; i < 5; i++)
+        {
+            var cts = new CancellationTokenSource();
+            cts.Cancel();   // cancelled before the gate is even acquired
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+                cache.GetOrLoadAsync($"https://example.com/never-{i}", "src", ct => Task.FromResult<IReadOnlyList<(uint Prefix, byte Length)>>([]), cts.Token));
+        }
+
+        Assert.Equal(0, cache.TrackedGateCount);   // pre-fix: 5 orphan gates
     }
 }

@@ -45,7 +45,15 @@ public static class OpenNegotiator
                 $"Local hold time must be 0 (disabled) or at least 3 seconds (RFC 4271 §4.2).");
 
         if (open.Version != BgpConstants.BgpVersion)
-            throw new BgpNotificationException(BgpConstants.Error.OpenMessageError, BgpConstants.SubError.UnsupportedVersion, $"Unsupported BGP version: {open.Version}");
+            // RFC 4271 §6.2: the Data field indicates the largest locally-supported version less
+            // than the peer's bid, or the smallest locally-supported version when even that is
+            // larger. BGPLite supports only version 4, so both branches resolve to 4 (#317).
+            // Mirrors BgpMessageReader.ParseOpen byte-for-byte — one wire behavior for one
+            // condition regardless of which reject site fires.
+            throw new BgpNotificationException(
+                BgpConstants.Error.OpenMessageError, BgpConstants.SubError.UnsupportedVersion,
+                $"Unsupported BGP version: {open.Version}",
+                [(byte)(BgpConstants.BgpVersion >> 8), (byte)BgpConstants.BgpVersion]);
 
         var malformedFourOctetAsnCapability = UpdateCodec.GetMalformedFourOctetAsnCapabilityData(open);
         if (malformedFourOctetAsnCapability.Length > 0)

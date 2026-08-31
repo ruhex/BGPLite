@@ -131,6 +131,62 @@ public sealed class ManagementApiShutdownTests : IDisposable
         blocker.Stop();
     }
 
+    /// <summary>
+    /// #258: completed handlers must leave the in-flight set — the #248 bookkeeping appended
+    /// every request's Task and never removed it, so the tracking grew monotonically with request
+    /// count (a slow memory leak plus an ever-growing drain snapshot). After a burst of requests
+    /// the in-flight count must return to exactly zero.
+    /// </summary>
+    [Fact]
+    public async Task CompletedRequests_LeaveTheInFlightSet()
+    {
+        for (var attempt = 0; ; attempt++)
+        {
+            var port = FreeTcpPort();
+            var config = new AppConfig
+            {
+                ApiListen = "127.0.0.1",
+                ApiPort = port,
+                Bgp = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1" }
+            };
+            _api = new ManagementApi(
+                new PeerStore(new StaticOptionsFactory(new DbContextOptionsBuilder<BgpDbContext>().UseSqlite(_connection).Options)),
+                new RouteTable(),
+                config,
+                new BgpMetrics(),
+                NullLogger<ManagementApi>.Instance,
+                new BlockingRuPrefixService(),
+                new InertPrefixSourceService(),
+                new InertSessionManager());
+            try
+            {
+                await _api.StartAsync(CancellationToken.None);
+                _port = port;
+                break;
+            }
+            catch (HttpListenerException) when (attempt < 2)
+            {
+                _api.Dispose();
+                _api = null;
+            }
+        }
+        _client = new HttpClient();
+
+        for (var i = 0; i < 25; i++)
+        {
+            using var response = await _client.GetAsync($"http://127.0.0.1:{_port}/api/sessions");
+            Assert.True(response.IsSuccessStatusCode);
+        }
+
+        // The handler's finally (response close + slot release) runs just after the response is
+        // observed — settle within a bounded window, then demand exactly zero.
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(3);
+        while (_api.InflightRequestCount > 0 && DateTime.UtcNow < deadline)
+            await Task.Delay(20);
+
+        Assert.Equal(0, _api.InflightRequestCount);
+    }
+
     private static int FreeTcpPort()
     {
         var listener = new TcpListener(IPAddress.Loopback, 0);

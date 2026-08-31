@@ -547,6 +547,10 @@ public sealed class BgpSession : IDisposable
     }
 
     private readonly SemaphoreSlim _sendLock = new(1, 1);
+    // #341: set in Dispose() BEFORE _sendLock.Dispose() — SemaphoreSlim.Dispose never wakes
+    // queued waiters, so sends parked on _sendLock race their wait against this signal
+    // (SendMessageAsync) and unwind as "not sent" instead of hanging RunAsync forever.
+    private readonly TaskCompletionSource _sendLockDisposed = new(TaskCreationOptions.RunContinuationsAsynchronously);
     // Guards mutations of _advertisedPrefixes so initial-send and RefreshRoutesAsync can't interleave.
     // SemaphoreSlim instead of lock{} so it composes correctly with await.
     private readonly SemaphoreSlim _advertisedPrefixesLock = new(1, 1);
@@ -830,8 +834,12 @@ public sealed class BgpSession : IDisposable
 
     private async Task HandleUpdateAsync(BgpUpdateMessage update)
     {
-        _logger.LogInformation("UpdateReceived from {Peer}: {Withdrawn} withdrawn, {Nlri} announced",
-            _peer, update.WithdrawnRoutes.Count, update.Nlri.Count);
+        // #344: per-UPDATE at Debug — a full-table dump sends hundreds-to-thousands of UPDATEs and
+        // a flap storm floods the log pipeline on the read loop, drowning the Warning-level
+        // signals; the per-dump aggregation summaries one level up stay at Information.
+        if (_logger.IsEnabled(LogLevel.Debug))
+            _logger.LogDebug("UpdateReceived from {Peer}: {Withdrawn} withdrawn, {Nlri} announced",
+                _peer, update.WithdrawnRoutes.Count, update.Nlri.Count);
 
         // Process withdrawals. RFC 4271 §3.2/§9: a withdrawal removes the route received FROM THIS
         // PEER, not whatever happens to sit at that prefix. BGPLite has one shared RouteTable rather
@@ -1158,14 +1166,31 @@ public sealed class BgpSession : IDisposable
     // failure to reach RefreshCycleAsync.
     private async Task<bool> SendMessageAsync(BgpMessage message, CancellationToken ct = default)
     {
+        // #341: SemaphoreSlim.Dispose never wakes queued waiters (verified: a waiter parked with
+        // CancellationToken.None stays WaitingForActivation forever), so a send queued on
+        // _sendLock while Dispose runs would hang RunAsync. The wait is therefore raced against
+        // a dispose signal (set in Dispose BEFORE the semaphore goes away) — the loser unwinds as
+        // "not sent". The wait itself keeps the CALLER's token (None for keepalive/route sends):
+        // RunEstablishedAsync cancels _cts BEFORE RunAsync's catch blocks send their
+        // best-effort NOTIFICATION, so binding the wait to _cts would suppress those sends
+        // (regression caught by InvalidHeaderLength_OnWire…). Fast path: an uncontended
+        // WaitAsync completes synchronously and skips the WhenAny entirely.
+        Task waitTask;
         try
         {
-            await _sendLock.WaitAsync(ct);
+            waitTask = _sendLock.WaitAsync(ct);
         }
-        catch (OperationCanceledException) { return false; }
         catch (ObjectDisposedException)
         {
-            return false;
+            return false; // semaphore already disposed — nothing to send
+        }
+
+        if (!waitTask.IsCompletedSuccessfully)
+        {
+            var winner = await Task.WhenAny(waitTask, _sendLockDisposed.Task);
+            if (winner != waitTask)
+                return false; // _sendLock disposed while queued (#341) — abandon the wait
+            await waitTask; // propagate OCE (caller token) / complete the acquisition
         }
 
         try
@@ -1393,6 +1418,9 @@ public sealed class BgpSession : IDisposable
         if (Interlocked.Exchange(ref _disposed, 1) == 1)
             return;
 
+        // #341: wake any send parked on _sendLock BEFORE the semaphore (and its waiter queue)
+        // goes away — SendMessageAsync abandons such waits and reports "not sent".
+        _sendLockDisposed.TrySetResult();
         _cts.Cancel();
         _connection.Dispose();   // owns the socket (SocketBgpConnection wraps NetworkStream ownsSocket:true)
         _cts.Dispose();

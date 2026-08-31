@@ -200,6 +200,81 @@ public class HttpPrefixProviderTests
         Assert.Equal("curl/8.0", handler.LastUserAgent);
     }
 
+    /// <summary>
+    /// #324: a source with NO configured Timeout still gets a budget — the default is armed, so a
+    /// server that answers headers and then never sends the body fails by T+default instead of
+    /// hanging the fetch (and seeding/auto-refresh behind it). The outer WaitAsync guard doubles
+    /// as the red guard: on default-less code the load never completes.
+    /// </summary>
+    private sealed class HeadersThenHangHandler : HttpMessageHandler
+    {
+        public int Calls { get; private set; }
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
+        {
+            Calls++;
+            var response = new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StreamContent(new HangingBodyStream())
+            };
+            response.Content.Headers.ContentLength = 1024;
+            return Task.FromResult(response);
+        }
+    }
+
+    private sealed class HangingBodyStream : Stream
+    {
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => 1024;
+        public override long Position { get => 0; set => throw new NotSupportedException(); }
+        public override void Flush() { }
+        public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        public override async Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken)
+        {
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            return 0;
+        }
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+    }
+
+    [Fact]
+    public async Task NoTimeoutConfigured_DefaultBudgetBoundsTheFetch()
+    {
+        var handler = new HeadersThenHangHandler();
+        var provider = new HttpPrefixProvider(
+            new StubFactory(handler), NullLogger<HttpPrefixProvider>.Instance,
+            defaultFetchTimeoutSeconds: 1);
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            provider.LoadAsync(HttpSource("https://example.com/slow.txt"))
+                .WaitAsync(TimeSpan.FromSeconds(8)));
+
+        Assert.Equal(1, handler.Calls);
+    }
+
+    [Fact]
+    public async Task ConfiguredTimeout_WinsOverDefault()
+    {
+        // The configured value overrides the default (both arm the same mechanism); a small
+        // configured budget on the same hanging server fails FAST — proving the configured path
+        // still arms and is not clipped by anything.
+        var handler = new HeadersThenHangHandler();
+        var provider = new HttpPrefixProvider(
+            new StubFactory(handler), NullLogger<HttpPrefixProvider>.Instance,
+            defaultFetchTimeoutSeconds: 30);
+
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            provider.LoadAsync(new PrefixSourceConfig { Name = "t", Kind = "http", Url = "https://example.com/slow.txt", Timeout = 1 })
+                .WaitAsync(TimeSpan.FromSeconds(8)));
+        sw.Stop();
+
+        Assert.True(sw.Elapsed < TimeSpan.FromSeconds(6), $"configured 1s budget fired in {sw.Elapsed}");
+    }
+
     [Fact]
     public async Task HttpErrorThrows()
     {

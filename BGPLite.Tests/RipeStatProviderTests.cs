@@ -49,6 +49,25 @@ public class RipeStatProviderTests
     private static RipeStatProvider Provider(HttpMessageHandler handler) =>
         new(new StubFactory(handler), NullLogger<RipeStatProvider>.Instance, new RipeStatConfig());
 
+    /// <summary>
+    /// #358 review (hardens #319): a non-string element in the originating array (number/object)
+    /// used to throw InvalidOperationException out of GetString() and discard the whole ASN's
+    /// valid prefixes; it must be skipped like any other non-canonical row.
+    /// </summary>
+    [Fact]
+    public async Task NonStringJsonElement_SkippedWithoutAborting()
+    {
+        const string body =
+            """{"status":"ok","data":{"resource":"65001","prefixes":{"v4":{"originating":[42,{"bad":1},"10.0.0.0/24"]},"v6":{"originating":[]}}}}""";
+        var handler = new StubHandler(HttpStatusCode.OK, body);
+
+        var result = await Provider(handler).GetPrefixesAsync(65001);
+
+        var row = Assert.Single(result);
+        Assert.Equal(0x0A000000u, row.Prefix);
+        Assert.Equal(24, row.PrefixLength);
+    }
+
     [Fact]
     public async Task ParsesPrefixes()
     {
@@ -118,6 +137,28 @@ public class RipeStatProviderTests
             _onUrl(request.RequestUri?.ToString());
             return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(_body) });
         }
+    }
+
+
+    /// <summary>
+    /// #319: RIPEstat returns what third parties ANNOUNCED — non-canonical NLRI must go through
+    /// the canonical parser (#236): host bits masked, /0 rejected, length range enforced, garbage
+    /// skipped instead of throwing the whole fetch. Pre-fix, "10.0.0.1/8" landed unmasked under a
+    /// corrupt route-table key and "0.0.0.0/0" was a default-route leak.
+    /// </summary>
+    [Fact]
+    public async Task NonCanonicalPrefixes_MaskedOrSkipped()
+    {
+        const string body =
+            """{"status":"ok","data":{"resource":"65001","prefixes":{"v4":{"originating":["10.0.0.1/8","0.0.0.0/0","1.2.3.4/33","not-a-cidr","192.168.0.0/16"]},"v6":{"originating":[]}}}}""";
+        var handler = new StubHandler(HttpStatusCode.OK, body);
+        var result = await Provider(handler).GetPrefixesAsync(65001);
+
+        Assert.Contains((0x0A000000u, (byte)8), result);      // 10.0.0.1/8 masked to the network
+        Assert.DoesNotContain((0x0A000001u, (byte)8), result); // unmasked key never stored
+        Assert.Contains((0xC0A80000u, (byte)16), result);      // canonical row unaffected
+        Assert.DoesNotContain(result, p => p.PrefixLength is 0 or > 32); // /0 and /33 rejected
+        Assert.Equal(2, result.Count);                          // garbage skipped, not thrown
     }
 
     /// <summary>A handler that honors the CancellationToken like HttpClient's real handler does.</summary>

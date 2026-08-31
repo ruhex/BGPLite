@@ -34,7 +34,7 @@ public sealed class PrefixService : IPrefixService
     // when the TTL elapses. Mirrors the per-ASN gate pattern in GetPrefixesAsync.
     private readonly SemaphoreSlim _ruGate = new(1, 1);
 
-    public PrefixService(AppConfig config, RipeStatProvider ripeStat, IPrefixSourceService prefixSources, HttpPrefixProvider httpProvider, TimeSpan? cacheTtl = null, ILogger<PrefixService>? logger = null, TimeSpan? negativeTtl = null, int? maxCacheEntries = null, TimeProvider? timeProvider = null)
+    public PrefixService(AppConfig config, RipeStatProvider ripeStat, IPrefixSourceService prefixSources, HttpPrefixProvider httpProvider, TimeSpan? cacheTtl = null, ILogger<PrefixService>? logger = null, TimeSpan? negativeTtl = null, int? maxCacheEntries = null, TimeProvider? timeProvider = null, int? userSourceTimeoutSeconds = null)
     {
         _config = config;
         _ripeStat = ripeStat;
@@ -48,8 +48,16 @@ public sealed class PrefixService : IPrefixService
         _maxCacheEntries = maxCacheEntries ?? 4096;
         _logger = logger;
         _timeProvider = timeProvider ?? TimeProvider.System;
+        // #320: fetch budget for peer-supplied URL sources — generous for a real prefix list
+        // (10 MB cap streams in well under it), bounded enough that a dripping/hung body cannot
+        // stall the route dump behind the per-URL gate.
+        _userSourceTimeoutSeconds = userSourceTimeoutSeconds ?? DefaultUserSourceTimeoutSeconds;
         _userSourceCache = new UserSourceCache(logger: logger, timeProvider: _timeProvider);
     }
+
+    /// <summary>Default per-fetch budget for peer-supplied URL sources (#320).</summary>
+    public const int DefaultUserSourceTimeoutSeconds = 30;
+    private readonly int _userSourceTimeoutSeconds;
 
     /// <summary>
     /// Fetches a per-peer user-supplied URL prefix-list source (issues #147 / #150). The URL is
@@ -59,6 +67,15 @@ public sealed class PrefixService : IPrefixService
     /// the http provider's named client. The <c>Active</c>
     /// lifecycle is handled by the caller (LoadPeerRoutingView filters Active before this is reached),
     /// so paused sources are never advertised regardless of cache state.
+    /// <para>
+    /// #320: the config is built WITH a fetch budget. Without one, HttpPrefixProvider's linked-CTS
+    /// timeout is never armed and the body-read loop is guarded only by the session token — a
+    /// server that answers headers then drips (or never sends) the body hangs the whole route dump
+    /// behind the per-URL gate while the session stays Established (KEEPALIVEs keep the hold timer
+    /// fed). A timed-out fetch throws OCE with a live caller token — a per-source fetch failure per
+    /// the #342 boundary — and is negative-cached by <see cref="UserSourceCache"/>, so repeated
+    /// refreshes do not re-pay the budget.
+    /// </para>
     /// </summary>
     public async Task<IReadOnlyList<(uint Prefix, byte Length)>> GetUserSourcePrefixesAsync(string name, string url, string? community, CancellationToken ct = default)
     {
@@ -67,7 +84,8 @@ public sealed class PrefixService : IPrefixService
             Kind = "http",
             Name = name,
             Url = url,
-            Community = community
+            Community = community,
+            Timeout = _userSourceTimeoutSeconds
         };
         return await _userSourceCache.GetOrLoadAsync(url, name, async ct =>
         {

@@ -50,7 +50,17 @@ public sealed class ManagementApi : IHostedService, IDisposable
     /// </summary>
     private const int DefaultInflightCap = 64;
     private readonly SemaphoreSlim _inflightCap = new(DefaultInflightCap);
-    private readonly List<Task> _inflightHandlers = new();
+    // #258: in-flight tracking is a COUNT plus an idle Task (completed whenever the count is 0),
+    // not a List<Task> — the #248 design appended every handler and never removed it, so each
+    // completed request leaked its Task (and its exception, if faulted) for the process lifetime
+    // and the drain snapshot grew without bound. StopAsync drains by awaiting the idle task.
+    private readonly object _inflightSync = new();
+    private int _inflightCount;
+    private TaskCompletionSource? _inflightActive;
+    private Task _inflightIdle = Task.CompletedTask;
+
+    /// <summary>Currently in-flight request handlers (#258) — bounded by the cap, zero when idle.</summary>
+    internal int InflightRequestCount { get { lock (_inflightSync) return _inflightCount; } }
     private HttpListener? _listener;
     private Task? _listenTask;
     private readonly CancellationTokenSource _cts = new();
@@ -210,12 +220,14 @@ public sealed class ManagementApi : IHostedService, IDisposable
         }
 
         // Drain in-flight handlers, but bounded: 10 s after cancellation is enough for a response
-        // write or an orderly OCE unwind, and short of the host's 30 s shutdown grace.
-        Task[] pending;
-        lock (_inflightHandlers) pending = _inflightHandlers.ToArray();
-        if (pending.Length > 0)
+        // write or an orderly OCE unwind, and short of the host's 30 s shutdown grace. The drain
+        // awaits the in-flight idle task (#258) — it completes when the last handler's finally
+        // runs, so no per-request bookkeeping outlives the request.
+        Task idle;
+        lock (_inflightSync) idle = _inflightIdle;
+        if (!idle.IsCompleted)
         {
-            try { await Task.WhenAny(Task.WhenAll(pending), Task.Delay(TimeSpan.FromSeconds(10), cancellationToken)); }
+            try { await Task.WhenAny(idle, Task.Delay(TimeSpan.FromSeconds(10), cancellationToken)); }
             catch { /* host grace elapsed — proceed */ }
         }
 
@@ -251,10 +263,20 @@ public sealed class ManagementApi : IHostedService, IDisposable
                 // #238: acquire an in-flight slot before spawning so the default posture is
                 // bounded even when the operator has not enabled the #119 concurrency limiter.
                 await _inflightCap.WaitAsync(ct);
+                // Register BEFORE spawning: the handler's finally decrements, and a handler that
+                // completes before this thread runs would otherwise drive the count negative.
+                lock (_inflightSync)
+                {
+                    _inflightCount++;
+                    if (_inflightCount == 1)
+                    {
+                        _inflightActive = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                        _inflightIdle = _inflightActive.Task;
+                    }
+                }
                 var accepted = ctx;
                 ctx = null; // ownership transferred to the handler task
-                var handler = HandleWithInflightReleaseAsync(accepted);
-                lock (_inflightHandlers) _inflightHandlers.Add(handler);
+                _ = HandleWithInflightReleaseAsync(accepted);
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested) { break; }
             catch (HttpListenerException) when (ct.IsCancellationRequested) { break; }
@@ -301,6 +323,18 @@ public sealed class ManagementApi : IHostedService, IDisposable
             // Tolerate teardown racing the StopAsync drain (e.g. direct Dispose without StopAsync).
             try { _inflightCap.Release(); }
             catch (ObjectDisposedException) { /* cap already disposed */ }
+            // #258: a handler leaving the in-flight set completes the idle task when it was the
+            // last one — that is what StopAsync's bounded drain awaits.
+            lock (_inflightSync)
+            {
+                _inflightCount--;
+                if (_inflightCount == 0)
+                {
+                    _inflightActive?.TrySetResult();
+                    _inflightActive = null;
+                    _inflightIdle = Task.CompletedTask;
+                }
+            }
         }
     }
 
@@ -491,6 +525,14 @@ public sealed class ManagementApi : IHostedService, IDisposable
     /// deserialization. <c>HttpListener</c> has no default body limit, so without this a single
     /// client could stream gigabytes into the process. The cap also covers chunked-transfer bodies
     /// (no Content-Length) via the read-loop's running byte count.
+    /// <para>
+    /// #257: HttpListener also exposes no client-disconnect token, so a slow-drip body (a byte
+    /// every few seconds) otherwise parks the handler — and its in-flight slot — forever; 64 such
+    /// connections starve the whole API. Each read is therefore bounded by
+    /// <paramref name="readTimeout"/>; a breach surfaces as <c>408 Request Timeout</c>. The
+    /// abandoned read parks on the (dead) socket holding this call's buffer — bounded by the
+    /// in-flight cap (64 × 8 KB), never reused, collected with the socket.
+    /// </para>
     /// </summary>
     private async Task<(string? Body, ApiResponse? Error)> ReadBodyAsync(HttpListenerContext ctx)
     {
@@ -501,21 +543,56 @@ public sealed class ManagementApi : IHostedService, IDisposable
             return (null, ApiResponse.Error(
                 $"Request body too large ({ctx.Request.ContentLength64} bytes, max {maxBytes}).", 413));
 
-        return await ReadBoundedBodyAsync(ctx.Request.InputStream, maxBytes);
+        return await ReadBoundedBodyAsync(ctx.Request.InputStream, maxBytes, BodyReadTimeout);
     }
+
+    /// <summary>#257: per-read deadline for request bodies — the time dimension of the #156 size cap.</summary>
+    private static readonly TimeSpan BodyReadTimeout = TimeSpan.FromSeconds(30);
 
     /// <summary>
     /// Pure body reader with a hard byte cap — extracted for unit testing (#156). Returns
     /// <c>(null, 413-error)</c> when the stream yields more than <paramref name="maxBytes"/> bytes,
-    /// otherwise the full body decoded as UTF-8. Covers both sized and chunked/streaming bodies.
+    /// <c>(null, 408-error)</c> when the body misses <paramref name="readTimeout"/> (#257) — an
+    /// ABSOLUTE deadline for the whole body, not a per-read window: a per-read WaitAsync restarts
+    /// on every byte, and a client trickling one byte per window held its slot indefinitely
+    /// (#358 review). Otherwise the full body decoded as UTF-8. Covers sized and chunked bodies.
     /// </summary>
-    internal static async Task<(string? Body, ApiResponse? Error)> ReadBoundedBodyAsync(Stream input, long maxBytes)
+    internal static async Task<(string? Body, ApiResponse? Error)> ReadBoundedBodyAsync(
+        Stream input, long maxBytes, TimeSpan? readTimeout = null)
     {
         using var ms = new MemoryStream();
         var buffer = new byte[8192];
-        int read;
-        while ((read = await input.ReadAsync(buffer, 0, buffer.Length)) > 0)
+        var deadline = readTimeout is { } timeout ? DateTime.UtcNow + timeout : (DateTime?)null;
+        while (true)
         {
+            int read;
+            var readTask = input.ReadAsync(buffer, 0, buffer.Length);
+            try
+            {
+                if (deadline is { } byThen)
+                {
+                    // #257/#358: no client-disconnect token exists on HttpListener streams — the
+                    // deadline is the only bound on a slow-drip body, and it is TOTAL: each read
+                    // gets only the remaining budget, so trickling cannot reset the clock. The
+                    // abandoned read parks on the socket with this call's buffer (bounded by the
+                    // in-flight cap, never reused); the caller unwinds, answers 408, frees its slot.
+                    var remaining = byThen - DateTime.UtcNow;
+                    if (remaining <= TimeSpan.Zero)
+                        throw new TimeoutException();
+                    read = await readTask.WaitAsync(remaining);
+                }
+                else
+                {
+                    read = await readTask;
+                }
+            }
+            catch (TimeoutException)
+            {
+                return (null, ApiResponse.Error("Request body read timed out.", 408));
+            }
+            if (read <= 0)
+                break;
+
             ms.Write(buffer, 0, read);
             if (ms.Length > maxBytes)
                 return (null, ApiResponse.Error(

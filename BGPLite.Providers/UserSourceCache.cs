@@ -27,19 +27,33 @@ internal sealed class UserSourceCache
     private readonly TimeSpan _negativeTtl;
     private readonly ILogger? _logger;
     private readonly TimeProvider _timeProvider;
+    // Upper bound on _cache/_locks entries (#261, port of PrefixService's #165 pattern). Without a
+    // cap, every unique peer-supplied URL leaves a permanent entry — up to ~10 MB of parsed prefixes
+    // each (the HTTP body cap) plus a SemaphoreSlim — so operator churn or an API client loop grows
+    // the cache without limit. Exceeded → sweep expired entries first, then the oldest by CachedAt.
+    private readonly int _maxEntries;
 
     // url → (list, cached at, is negative). Negative entries (failed loads) use _negativeTtl.
     private readonly ConcurrentDictionary<string, (IReadOnlyList<(uint Prefix, byte Length)> List, DateTime CachedAt, bool Negative)> _cache = new();
     // url → gate serializing the cache-miss fetch path (prevents thundering herd on cold/expired keys).
     private readonly ConcurrentDictionary<string, SemaphoreSlim> _locks = new();
 
-    public UserSourceCache(TimeSpan? positiveTtl = null, TimeSpan? negativeTtl = null, ILogger? logger = null, TimeProvider? timeProvider = null)
+    public UserSourceCache(TimeSpan? positiveTtl = null, TimeSpan? negativeTtl = null, ILogger? logger = null, TimeProvider? timeProvider = null, int? maxCacheEntries = null)
     {
         _positiveTtl = positiveTtl ?? TimeSpan.FromHours(1);
         _negativeTtl = negativeTtl ?? TimeSpan.FromSeconds(30);
         _logger = logger;
         _timeProvider = timeProvider ?? TimeProvider.System;
+        // Generous vs. real deployments (peers × a few active sources each); the cap defends
+        // against unbounded growth from churn/adversarial URL variety, not normal operation.
+        _maxEntries = maxCacheEntries ?? 1024;
     }
+
+    /// <summary>Entries currently tracked (test/observability).</summary>
+    internal int TrackedCount => _cache.Count;
+
+    /// <summary>Gates currently tracked (test/observability — orphan-lock hygiene, #358 review).</summary>
+    internal int TrackedGateCount => _locks.Count;
 
     /// <param name="url">Cache key (the source URL — dedupes across peers).</param>
     /// <param name="logLabel">Safe identifier (the source <c>Name</c>) for log lines — the URL itself is
@@ -57,7 +71,21 @@ internal sealed class UserSourceCache
         // Serialize per-key so concurrent callers (e.g. several peers refreshing the same URL) share
         // a single fetch — no thundering herd.
         var gate = _locks.GetOrAdd(url, _ => new SemaphoreSlim(1, 1));
-        await gate.WaitAsync(ct);
+        try
+        {
+            await gate.WaitAsync(ct);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            // #358 review (orphan-lock hygiene for #261): a caller cancelled while queued never
+            // writes a cache entry, so its freshly-created gate would never be evicted (the sweep
+            // removes locks only for removed cache keys) — cancelled URLs accumulated semaphores.
+            // Pair-remove OUR gate instance: a concurrent waiter keeps running on its own
+            // reference, and a fresh caller GetOrAdd's a new gate — the same duplicate-fetch
+            // tradeoff the eviction sweep already accepts.
+            ((ICollection<KeyValuePair<string, SemaphoreSlim>>)_locks).Remove(new KeyValuePair<string, SemaphoreSlim>(url, gate));
+            throw;
+        }
         try
         {
             if (TryGetFresh(url, out var rechecked))
@@ -68,7 +96,15 @@ internal sealed class UserSourceCache
             {
                 prefixes = await loadAsync(ct);
             }
-            catch (OperationCanceledException) { throw; }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                // #114: CALLER-initiated cancellation always propagates and is never cached — it
+                // is teardown, not a property of the source. A foreign-token OCE (e.g. the #320
+                // per-fetch budget's linked CTS firing on a live caller token) falls through to
+                // the failure handling below instead: stale-on-failure serve if possible, else a
+                // brief negative-cache so repeated refreshes do not re-pay the full budget.
+                throw;
+            }
             catch (Exception ex)
             {
                 // Serve the last good copy if we have one (regardless of its age).
@@ -80,18 +116,62 @@ internal sealed class UserSourceCache
                 }
 
                 // Otherwise remember the failure briefly so repeated calls don't hammer the fetcher.
+                EvictIfAtCapacity(url);
                 _cache[url] = ([], _timeProvider.GetUtcNow().UtcDateTime, Negative: true);
                 _logger?.LogWarning(ex, "User-source '{Name}' load failed (no cached copy); negative-cached for {Seconds}s.",
                     logLabel, (int)_negativeTtl.TotalSeconds);
                 throw;
             }
 
+            EvictIfAtCapacity(url);
             _cache[url] = (prefixes, _timeProvider.GetUtcNow().UtcDateTime, Negative: false);
             return prefixes;
         }
         finally
         {
             gate.Release();
+        }
+    }
+
+    /// <summary>
+    /// Enforces the _maxEntries bound (#261). Called before inserting a NEW key, under the caller's
+    /// per-URL gate. Drops expired entries first (cheapest eviction), then the oldest by CachedAt
+    /// until below the cap, removing the matching _locks entries with them. Same tradeoff as
+    /// PrefixService's #165 sweep: a concurrent loader may still hold an evicted URL's semaphore — it
+    /// finishes on its own reference and a fresh caller GetOrAdd's a new gate, so the worst case is
+    /// one duplicate idempotent GET, never a correctness loss.
+    /// </summary>
+    private void EvictIfAtCapacity(string insertingUrl)
+    {
+        if (_cache.Count < _maxEntries) return;
+        if (_cache.ContainsKey(insertingUrl)) return; // already present, no insert coming
+
+        var now = _timeProvider.GetUtcNow().UtcDateTime;
+        var toEvict = new List<string>();
+        foreach (var (key, entry) in _cache)
+        {
+            var ttl = entry.Negative ? _negativeTtl : _positiveTtl;
+            if (now - entry.CachedAt >= ttl)
+                toEvict.Add(key);
+        }
+        // If still at/over capacity after dropping expired, evict the oldest until below the cap.
+        if (_cache.Count - toEvict.Count >= _maxEntries)
+        {
+            var oldest = _cache
+                .Where(kvp => !toEvict.Contains(kvp.Key))
+                .OrderBy(kvp => kvp.Value.CachedAt)
+                .Select(kvp => kvp.Key);
+            foreach (var key in oldest)
+            {
+                toEvict.Add(key);
+                if (_cache.Count - toEvict.Count < _maxEntries) break;
+            }
+        }
+
+        foreach (var key in toEvict)
+        {
+            if (_cache.TryRemove(key, out _))
+                _locks.TryRemove(key, out _);
         }
     }
 

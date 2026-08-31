@@ -103,8 +103,16 @@ public static class BgpMessageReader
 
         var version = payload[0];
         if (version != BgpConstants.BgpVersion)
+            // RFC 4271 §6.2 Unsupported Version Number: the Data field "indicates the largest,
+            // locally-supported version number less than the version the remote BGP peer bid …
+            // or if the smallest locally-supported version number is larger than the peer's bid,
+            // the smallest locally-supported version number". BGPLite supports only version 4, so
+            // both branches resolve to 4: bid>4 → largest-below-bid is 4; bid<4 → smallest is 4.
+            // Without the field a BGPv3 speaker gets no downgrade hint (#317). Byte-identical
+            // with OpenNegotiator.Validate, the other reject site for the same condition.
             throw new BgpParseException($"Unsupported BGP version: {version}",
-                BgpConstants.Error.OpenMessageError, BgpConstants.SubError.UnsupportedVersion);
+                BgpConstants.Error.OpenMessageError, BgpConstants.SubError.UnsupportedVersion,
+                notificationData: [(byte)(BgpConstants.BgpVersion >> 8), (byte)BgpConstants.BgpVersion]);
 
         var asn = BinaryPrimitives.ReadUInt16BigEndian(payload[1..]);
         var holdTime = BinaryPrimitives.ReadUInt16BigEndian(payload[3..]);
