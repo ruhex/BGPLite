@@ -556,6 +556,20 @@ public sealed class BgpSession : IDisposable
                 {
                     try { _peerStore?.UpdateSessionStatus(_peerConfig.Address, _remoteAsn, false); }
                     catch (Exception ex) { _logger.LogWarning(ex, "Failed to persist session status for {Peer}", _peer); }
+
+                    // #366 review: a replacement can land between the probe and the write —
+                    // re-probe and REPAIR. A false second probe means the registry swapped us out
+                    // mid-write and the replacement owns the (Ip, Asn): restore the row to active.
+                    // Idempotent with the replacement's own LoadPeerRoutingView write, and
+                    // race-free in the other direction — the own-runner's registry removal happens
+                    // only AFTER RunAsync returns, so during this finally a false probe can only
+                    // mean replacement. Genuine teardowns (still registered) never repair.
+                    if (_stillRegisteredProbe?.Invoke(this) == false)
+                    {
+                        _logger.LogInformation("Replacement detected after status write for {Peer} — restoring active", _peer);
+                        try { _peerStore?.UpdateSessionStatus(_peerConfig.Address, _remoteAsn, true); }
+                        catch (Exception ex) { _logger.LogWarning(ex, "Failed to restore session status for {Peer}", _peer); }
+                    }
                 }
             }
             _metrics.PeerDisconnected();
