@@ -190,6 +190,22 @@ For section-by-section RFC conformance status, see `RFC_COMPLIANCE.md` (2026-07-
   comparing against RFC-strict speakers will see BGPLite retain sessions others would close.
 - **Tracker:** #94, #222, #284, #288, #322 (closed); recorded via #344.
 
+### D19. Custom prefixes suppress the source prefixes they cover
+- **Decision:** a custom prefix is the operator's explicit override: any route STRICTLY more specific
+  than one is dropped from the peer's outbound list, regardless of its source or community set. An
+  exact custom==source duplicate is NOT suppressed — `MergeDuplicatePrefixes` (#209) unions the
+  communities, so the source's tags survive. Suppression runs in the assembler on the flat per-peer
+  list, BEFORE the per-community-set aggregation — `ExactUnionPrefixAggregator` (D15, #82) itself is
+  untouched and never merges across community sets.
+- **Context:** operators add a broader custom prefix (e.g. a /16) to override a source list whose
+  more-specifics (e.g. /24s in different communities) were still advertised alongside it — the two
+  land in different aggregator groups and both went out (#220).
+- **Consequence:** suppressed source prefixes lose their community tags on the wire — the receiving
+  peer sees the custom-prefix community; that is the override's intent. Per-send log line reports the
+  suppressed count. Idempotent across refreshes: every rebuild of the list applies the same
+  deterministic filter, so `_advertisedPrefixes` stays consistent for withdrawals.
+- **Tracker:** #220.
+
 ## Management API
 
 ### D18. `X-Real-IP` is ignored by default, even behind trusted proxies
