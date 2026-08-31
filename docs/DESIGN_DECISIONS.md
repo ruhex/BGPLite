@@ -189,3 +189,21 @@ For section-by-section RFC conformance status, see `RFC_COMPLIANCE.md` (2026-07-
   silently dropped (log Warning + `UpdatesRejected` metric) instead of a session reset; operators
   comparing against RFC-strict speakers will see BGPLite retain sessions others would close.
 - **Tracker:** #94, #222, #284, #288, #322 (closed); recorded via #344.
+
+## Management API
+
+### D18. `X-Real-IP` is ignored by default, even behind trusted proxies
+- **Decision:** a trusted proxy's `X-Real-IP` header is consulted only when the operator sets
+  `Api.TrustXRealIp: true` (hot-reloadable). `X-Forwarded-For` handling is unchanged: walked
+  right-to-left past trusted hops. Startup warns about the proxy requirements when TrustedProxies is
+  configured; a runtime warning (once) fires when a trusted proxy yields no usable forwarding header.
+- **Context:** unlike XFF, an X-Real-IP value cannot be verified against the trusted-hop chain — a
+  proxy that passes the header through instead of overwriting it (plain nginx without
+  `proxy_set_header X-Real-IP $remote_addr;`) turns it into an attacker-controlled input: fresh
+  rate-limit buckets per request (#116 bypass) and a forged `/api/me` identity, which may surface
+  token-bearing prefix-source URLs (#149). Direct (non-trusted) connections were already hardened by
+  #117 — this closes the trusted-proxy hole (#256).
+- **Consequence:** deployments that relied on an X-Real-IP-only proxy must set `TrustXRealIp: true`
+  (intentional behavior change, secure by default); such a proxy is otherwise attributed to the
+  proxy address, with the one-shot runtime warning pointing at the misconfiguration.
+- **Tracker:** #256.
