@@ -1,8 +1,14 @@
+using System.Globalization;
 using BGPLite.Api.Entities;
 using Microsoft.EntityFrameworkCore;
 using BGPLite.Contracts;
 
 namespace BGPLite.Api;
+
+/// <summary>The persisted state of a peer row right after an upsert (#267 item 6): everything the
+/// POST /api/peers response needs, returned from the upsert's RETURNING clause instead of a
+/// follow-up read.</summary>
+public sealed record SavedPeer(string Id, string Status, DateTime CreatedAt);
 
 public sealed class PeerStore : IPeerStore
 {
@@ -18,7 +24,7 @@ public sealed class PeerStore : IPeerStore
     public string CreatePeer(string ip, uint asn, string? description)
     {
         using var db = _dbFactory.CreateDbContext();
-        return UpsertPeerRow(db, ip, asn, description);
+        return UpsertPeerRow(db, ip, asn, description).Id;
     }
 
     /// <summary>
@@ -26,7 +32,7 @@ public sealed class PeerStore : IPeerStore
     /// an enclosing transaction (#259) instead of always committing on its own. Behaviour is
     /// unchanged from the #227 implementation this was extracted from.
     /// </summary>
-    private static string UpsertPeerRow(BgpDbContext db, string ip, uint asn, string? description)
+    private static SavedPeer UpsertPeerRow(BgpDbContext db, string ip, uint asn, string? description)
     {
         // #227: atomic SQLite upsert eliminates the read-then-write race on the composite unique
         // index UX_Peers_Ip_Asn. Two concurrent CreatePeer calls for the same (Ip, Asn) previously
@@ -38,8 +44,11 @@ public sealed class PeerStore : IPeerStore
         // (Microsoft.Data.Sqlite >= 6) — satisfied by the EF Core Sqlite 10 dependency.
         //
         // EF Core's SqlQuery<T> is documented only for SELECT/composable queries, so for a DML
-        // statement with RETURNING we go through the underlying ADO.NET connection (ExecuteScalar)
-        // — the documented path for a single scalar result from non-composable SQL.
+        // statement with RETURNING we go through the underlying ADO.NET connection — the documented
+        // path for results from non-composable SQL. #267 item 6: the statement returns the row's
+        // Status and CreatedAt alongside the Id so the caller can build its response without a
+        // follow-up roundtrip; neither column is touched by the ON CONFLICT branch, so the returned
+        // values describe the row exactly as it exists after the upsert.
         var id = Guid.NewGuid().ToString("N");
         var now = DateTime.UtcNow.ToString("O");
         var connection = db.Database.GetDbConnection();
@@ -56,14 +65,19 @@ public sealed class PeerStore : IPeerStore
                 "INSERT INTO Peers (Id, Ip, Asn, Description, Status, CreatedAt, LastSessionAt) " +
                 "VALUES (@id, @ip, @asn, @desc, 'inactive', @now, NULL) " +
                 "ON CONFLICT(Ip, Asn) DO UPDATE SET Description = excluded.Description " +
-                "RETURNING Id";
+                "RETURNING Id, Status, CreatedAt";
             AddParam(cmd, "@id", id);
             AddParam(cmd, "@ip", ip);
             AddParam(cmd, "@asn", (long)asn);
             AddParam(cmd, "@desc", (object?)description ?? DBNull.Value);
             AddParam(cmd, "@now", now);
-            var storedId = (string)cmd.ExecuteScalar()!;
-            return storedId;
+            using var reader = cmd.ExecuteReader();
+            reader.Read();
+            return new SavedPeer(
+                reader.GetString(0),
+                reader.GetString(1),
+                // CreatedAt is written in the "O" (round-trip) format above.
+                DateTime.Parse(reader.GetString(2), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind));
         }
         finally
         {
@@ -303,7 +317,7 @@ public sealed class PeerStore : IPeerStore
     /// thing as asking once, and a user assembling a list in the UI produces repeats by pasting.
     /// </para>
     /// </summary>
-    public string SavePeerConfiguration(
+    public SavedPeer SavePeerConfiguration(
         string ip, uint asn, string? description,
         IReadOnlyList<string> asnListNames,
         IReadOnlyList<(string Prefix, byte Length)> customPrefixes,
@@ -312,14 +326,14 @@ public sealed class PeerStore : IPeerStore
         using var db = _dbFactory.CreateDbContext();
         using var tx = db.Database.BeginTransaction();
 
-        var id = UpsertPeerRow(db, ip, asn, description);
-        ReplaceSubscriptions(db, id, asnListNames);
-        ReplaceCustomPrefixes(db, id, customPrefixes);
-        ReplaceCustomAsns(db, id, customAsns);
+        var saved = UpsertPeerRow(db, ip, asn, description);
+        ReplaceSubscriptions(db, saved.Id, asnListNames);
+        ReplaceCustomPrefixes(db, saved.Id, customPrefixes);
+        ReplaceCustomAsns(db, saved.Id, customAsns);
         db.SaveChanges();
 
         tx.Commit();
-        return id;
+        return saved;
     }
 
     /// <summary>

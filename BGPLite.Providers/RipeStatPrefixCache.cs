@@ -44,6 +44,12 @@ public sealed class RipeStatPrefixCache
     // asn → gate serializing the cache-miss fetch path (prevents thundering herd on cold/expired
     // ASNs — #164).
     private readonly ConcurrentDictionary<uint, SemaphoreSlim> _locks = new();
+    // #267 item 3: ASNs with a fetch currently in flight. The capacity sweep must never evict an
+    // in-flight ASN's entry + gate: the fetcher holds that gate, and removing it let a later
+    // GetOrAdd create a second semaphore — two concurrent RIPEstat fetches for one ASN, breaking
+    // the #164 invariant. Marked before the gate is taken and unmarked after it is released, so
+    // "holding the gate" always implies "in-flight".
+    private readonly ConcurrentDictionary<uint, byte> _inflight = new();
 
     public RipeStatPrefixCache(
         RipeStatProvider ripe,
@@ -72,6 +78,24 @@ public sealed class RipeStatPrefixCache
         if (TryGetFresh(asn, out var fresh, out var freshIsNegative) && (serveNegativeEntries || !freshIsNegative))
             return fresh;
 
+        // #267 item 3: mark in-flight BEFORE the gate is taken (and unmark only after it is
+        // released) so the capacity sweep can never drop the gate this caller is about to wait on
+        // or holds — see the _inflight note.
+        _inflight.TryAdd(asn, 0);
+        try
+        {
+            return await FetchThroughGateAsync(asn, ct, serveNegativeEntries);
+        }
+        finally
+        {
+            _inflight.TryRemove(asn, out _);
+        }
+    }
+
+    /// <summary>The gated fetch path of <see cref="GetPrefixesAsync"/> — runs under the caller's
+    /// in-flight mark, sharing a single RIPEstat fetch per ASN (#164).</summary>
+    private async Task<IReadOnlyList<(uint Prefix, byte Length)>> FetchThroughGateAsync(uint asn, CancellationToken ct, bool serveNegativeEntries)
+    {
         // Serialize per-ASN so concurrent callers share a single RIPEstat fetch — no thundering herd
         // on a cold or just-expired ASN (#164).
         var gate = _locks.GetOrAdd(asn, _ => new SemaphoreSlim(1, 1));
@@ -140,9 +164,10 @@ public sealed class RipeStatPrefixCache
 
     /// <summary>Enforces the _maxCacheEntries bound (#165). Called before inserting a NEW key,
     /// under the caller's per-ASN gate. Removes a few least-recently-cached entries (by CachedAt)
-    /// plus any expired entries it encounters, and drops the corresponding _locks entries. Under
-    /// the lock of the caller's per-ASN gate, so the sweep is serialized against itself;
-    /// ConcurrentDictionary enumeration is a snapshot and safe against concurrent writers.</summary>
+    /// plus any expired entries it encounters, and drops the corresponding _locks entries — never
+    /// for an in-flight ASN (#267 item 3). Under the lock of the caller's per-ASN gate, so the
+    /// sweep is serialized against itself; ConcurrentDictionary enumeration is a snapshot and safe
+    /// against concurrent writers.</summary>
     private void EvictIfAtCapacity(uint insertingKey)
     {
         if (_cache.Count < _maxCacheEntries) return;
@@ -150,7 +175,7 @@ public sealed class RipeStatPrefixCache
 
         // Snapshot, drop expired entries first (cheapest eviction), then by oldest CachedAt.
         var now = _timeProvider.GetUtcNow().UtcDateTime;
-        var toEvict = new List<uint>();
+        var toEvict = new HashSet<uint>();
         foreach (var (key, entry) in _cache)
         {
             var ttl = entry.Negative ? _negativeTtl : _cacheTtl;
@@ -173,9 +198,11 @@ public sealed class RipeStatPrefixCache
 
         foreach (var key in toEvict)
         {
-            // TryUpdate/TryRemove under no per-key lock: a concurrent fetch for this key may be
-            // racing, but that's fine — it will re-populate the entry; losing a transient cache hit
-            // is acceptable, and never losing correctness.
+            // #267 item 3: an in-flight ASN's entry is re-populated by its fetch — evicting both
+            // while the fetcher holds the gate made a later GetOrAdd mint a second semaphore and
+            // issue a duplicate concurrent fetch (#164). Skipping keeps the gate intact; losing a
+            // transient eviction slot is acceptable, never losing correctness.
+            if (_inflight.ContainsKey(key)) continue;
             if (_cache.TryRemove(key, out _))
                 _locks.TryRemove(key, out _);
         }
