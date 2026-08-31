@@ -944,6 +944,13 @@ public sealed class BgpSession : IDisposable
                 throw;
             }
 
+            // #306: RFC 7606 attribute-discard surfaced — the UPDATE is otherwise fine and its
+            // routes install; a Warning shows WHICH attributes were dropped (the session stays up,
+            // so this is the only trace an operator gets).
+            if (attrs.DiscardedAttributes is { Count: > 0 } dropped)
+                _logger.LogWarning("Discarded malformed attribute(s) [{Types}] from {Peer} — routes kept (RFC 7606 attribute discard)",
+                    string.Join(",", dropped), _peer);
+
             var filterPeerConfig = GetFilterPeerConfig();
 
             foreach (var nlri in update.Nlri)

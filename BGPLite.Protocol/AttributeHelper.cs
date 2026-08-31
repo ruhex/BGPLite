@@ -98,9 +98,18 @@ public static class AttributeHelper
             throw new BgpParseException($"Malformed AGGREGATOR attribute: expected {expectedLength} bytes on a {(fourByteAsn ? "4-octet" : "2-octet")}-AS session, got {attr.Data.Length}",
                 BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.OptionalAttributeError);
 
-        return fourByteAsn
+        var asn = fourByteAsn
             ? BinaryPrimitives.ReadUInt32BigEndian(attr.Data)
             : BinaryPrimitives.ReadUInt16BigEndian(attr.Data);
+
+        // RFC 7607 §2: "an UPDATE with AS 0 in the AGGREGATOR ... MUST be considered as malformed
+        // and be handled by the procedures specified in [RFC7606]" — for AGGREGATOR that remedy
+        // is attribute discard (#306; was deliberately deferred from #300 until discard existed).
+        if (asn == 0)
+            throw new BgpParseException("Invalid AGGREGATOR attribute: AS 0 is reserved (RFC 7607)",
+                BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.OptionalAttributeError);
+
+        return asn;
     }
 
     /// <summary>
@@ -116,7 +125,15 @@ public static class AttributeHelper
             throw new BgpParseException($"Malformed AS4_AGGREGATOR attribute: expected 8 bytes, got {attr.Data.Length}",
                 BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.OptionalAttributeError);
 
-        return BinaryPrimitives.ReadUInt32BigEndian(attr.Data);
+        var asn = BinaryPrimitives.ReadUInt32BigEndian(attr.Data);
+
+        // RFC 7607 §2 — AS 0 in AS4_AGGREGATOR is malformed; RFC 7606 §7.8 assigns attribute
+        // discard (#306).
+        if (asn == 0)
+            throw new BgpParseException("Invalid AS4_AGGREGATOR attribute: AS 0 is reserved (RFC 7607)",
+                BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.OptionalAttributeError);
+
+        return asn;
     }
 
     public static PathAttribute WriteNextHop(uint nextHop)
