@@ -75,12 +75,17 @@ DefaultPrefixSource: ru
 # X-Forwarded-For / X-Real-IP are honored ONLY when the immediate TCP peer is one of these trusted
 # CIDRs; otherwise the direct RemoteEndPoint is used and any client-supplied forwarding header is
 # ignored (secure default). X-Forwarded-For is walked right-to-left past trusted hops, so spoofed
-# entries injected on the left are defeated. When the API runs behind a reverse proxy, list the
-# proxy's CIDR here so /api/me (and future per-IP rate limiting, #116) see the real client.
+# entries injected on the left are defeated — the proxy MUST append the real client to
+# X-Forwarded-For (nginx: proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;). A proxy
+# that passes headers through unmodified lets clients forge their IP: fresh rate-limit buckets per
+# request and a spoofed /api/me identity (#256). X-Real-IP is ignored even from trusted proxies
+# unless you opt in via TrustXRealIp — enable it only if your proxy OVERWRITES the header
+# (nginx: proxy_set_header X-Real-IP $remote_addr;).
 # Empty/absent = never trust forwarding headers.
 # TrustedProxies:
 #   - "127.0.0.0/8"
 #   - "10.0.0.0/8"
+# TrustXRealIp: false
 
 # Management API — per-client-IP rate limiting (#116). Opt-in: absent = no limiting (live behavior
 # unchanged). When present, each resolved client IP (via TrustedProxies) gets a token bucket; a

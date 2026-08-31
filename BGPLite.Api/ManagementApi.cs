@@ -31,6 +31,13 @@ public sealed class ManagementApi : IHostedService, IDisposable
     // replenish Timer that GC never collects, so "let GC handle it" leaked one timer per reload.
     private readonly List<IDisposable> _retiredLimiters = [];
     private IReadOnlyList<string>? _corsAllowedOrigins;
+    // #256: X-Real-IP is attacker-controllable behind a proxy that passes the header through
+    // unmodified, so it is consulted only when the operator opts in via Api.TrustXRealIp.
+    // 0/1 (not bool) so ApplyConfig can swap it with Interlocked.Exchange like the fields above.
+    private int _trustXRealIp;
+    // #256: fires once when a trusted proxy yields no usable forwarding header — all its clients
+    // then share one identity (rate-limit bucket + /api/me data), which operators should see.
+    private int _warnedProxyWithoutClientIp;
     private readonly BgpMetrics _metrics;
     // #263: required, not optional. Each of these was a silent feature switch: without
     // _sessionManager a peer edited in the UI was persisted but never pushed to its live session,
@@ -103,6 +110,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
         _concurrencyLimiter = config.ApiRateLimit is { Enabled: true, MaxConcurrentRequests: > 0 } limitCfg
             ? CreateConcurrencyLimiter(limitCfg) : null;
         _corsAllowedOrigins = config.CorsAllowedOrigins;
+        _trustXRealIp = config.TrustXRealIp ? 1 : 0;
     }
 
     /// <summary>
@@ -134,6 +142,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
         var oldConcurrencyLimiter = Interlocked.Exchange(ref _concurrencyLimiter, concurrencyLimiter);
         Interlocked.Exchange(ref _trustedProxyNetworks, trusted);
         Interlocked.Exchange(ref _corsAllowedOrigins, newConfig.CorsAllowedOrigins);
+        Interlocked.Exchange(ref _trustXRealIp, newConfig.TrustXRealIp ? 1 : 0);
 
         // Old limiters cannot be disposed here — a concurrent HandleAsync may still be mid-acquire
         // on them (#137). Park them for StopAsync/Dispose, which run after the in-flight drain.
@@ -144,11 +153,12 @@ public sealed class ManagementApi : IHostedService, IDisposable
         }
 
         _logger.LogInformation(
-            "Soft config reloaded: trustedProxies={TrustedProxyCount}, corsOrigins={CorsOriginCount}, rateLimit={RateLimitEnabled}, concurrencyLimit={ConcurrencyEnabled}",
+            "Soft config reloaded: trustedProxies={TrustedProxyCount}, corsOrigins={CorsOriginCount}, rateLimit={RateLimitEnabled}, concurrencyLimit={ConcurrencyEnabled}, trustXRealIp={TrustXRealIp}",
             trusted.Count,
             newConfig.CorsAllowedOrigins?.Count ?? 0,
             rateLimiter is not null,
-            concurrencyLimiter is not null);
+            concurrencyLimiter is not null,
+            newConfig.TrustXRealIp);
     }
 
     /// <summary>
@@ -157,7 +167,12 @@ public sealed class ManagementApi : IHostedService, IDisposable
     /// Mirrors <see cref="GetClientIp"/>'s forwarding-header logic.
     /// </summary>
     internal string ResolveClientIpLive(IPAddress? remote, string? xForwardedFor, string? xRealIp) =>
-        ResolveClientIp(remote, xForwardedFor, xRealIp, Volatile.Read(ref _trustedProxyNetworks));
+        ResolveClientIp(
+            remote,
+            xForwardedFor,
+            xRealIp,
+            Volatile.Read(ref _trustedProxyNetworks),
+            Volatile.Read(ref _trustXRealIp) != 0);
 
     /// <summary>
     /// Resolves the CORS origin against the CURRENT live <c>_corsAllowedOrigins</c> (#136), for tests
@@ -200,6 +215,15 @@ public sealed class ManagementApi : IHostedService, IDisposable
                 "Management API is bound to {Address} (non-loopback) — ensure an authenticated reverse " +
                 "proxy (Caddy/nginx with TLS + auth) is in front, or the unauthenticated control plane " +
                 "is reachable from the network", _listenAddress);
+        }
+        // #256: state the hard proxy requirement at startup — a trusted proxy that neither appends
+        // X-Forwarded-For nor overwrites X-Real-IP lets clients forge their identity.
+        if (_trustedProxyNetworks.Count > 0)
+        {
+            _logger.LogWarning(
+                "TrustedProxies configured — the proxy MUST append X-Forwarded-For (real client on the " +
+                "right-most non-trusted hop); X-Real-IP is ignored unless Api.TrustXRealIp is true and " +
+                "the proxy overwrites it. A pass-through proxy lets clients spoof their IP");
         }
         _listenTask = ListenAsync(_cts.Token);
         return Task.CompletedTask;
@@ -1432,12 +1456,39 @@ public sealed class ManagementApi : IHostedService, IDisposable
         catch (FormatException) { return false; }
     }
 
-    private string GetClientIp(HttpListenerContext ctx) =>
-        ResolveClientIp(
-            ctx.Request.RemoteEndPoint?.Address,
+    private string GetClientIp(HttpListenerContext ctx)
+    {
+        var remote = ctx.Request.RemoteEndPoint?.Address;
+        var resolved = ResolveClientIp(
+            remote,
             ctx.Request.Headers["X-Forwarded-For"],
             ctx.Request.Headers["X-Real-IP"],
-            Volatile.Read(ref _trustedProxyNetworks));
+            Volatile.Read(ref _trustedProxyNetworks),
+            Volatile.Read(ref _trustXRealIp) != 0);
+        WarnWhenProxyHidesClientIp(remote, resolved);
+        return resolved;
+    }
+
+    /// <summary>
+    /// #256: a trusted proxy whose request carries no usable <c>X-Forwarded-For</c> hop (and no
+    /// opted-in <c>X-Real-IP</c>) collapses all its traffic into one client identity — the proxy
+    /// address: every client behind it shares a rate-limit bucket and <c>/api/me</c> data. Logs a
+    /// warning once so a misconfigured proxy is visible without spamming every request.
+    /// </summary>
+    private void WarnWhenProxyHidesClientIp(IPAddress? remote, string resolved)
+    {
+        if (remote is null) return;
+        var normalized = remote.IsIPv4MappedToIPv6 ? remote.MapToIPv4() : remote;
+        var trusted = Volatile.Read(ref _trustedProxyNetworks);
+        if (trusted.Count == 0 || !trusted.Any(n => n.Contains(normalized))) return;
+        if (!string.Equals(resolved, normalized.ToString(), StringComparison.Ordinal)) return;
+        if (Interlocked.Exchange(ref _warnedProxyWithoutClientIp, 1) != 0) return;
+        _logger.LogWarning(
+            "Trusted-proxy request from {Remote} carries no usable X-Forwarded-For / X-Real-IP — all its " +
+            "clients share one rate-limit bucket and /api/me identity. Configure the proxy to append " +
+            "X-Forwarded-For (or to overwrite X-Real-IP and set Api.TrustXRealIp: true).",
+            normalized.ToString());
+    }
 
     /// <summary>
     /// Builds the per-client-IP token-bucket rate limiter for the management API (#116). Each distinct
@@ -1484,10 +1535,12 @@ public sealed class ManagementApi : IHostedService, IDisposable
     /// Forwarding headers are honored ONLY when the immediate peer (<paramref name="remote"/>) is a
     /// configured trusted proxy (#91) — a direct client cannot inject <c>X-Forwarded-For</c> /
     /// <c>X-Real-IP</c>. <c>X-Forwarded-For</c> is walked right-to-left and the first hop that is not
-    /// itself a trusted proxy is returned, defeating injection through the proxy. Extracted as a pure
-    /// function so the security logic is unit-testable without an HttpListener.
+    /// itself a trusted proxy is returned, defeating injection through the proxy. <c>X-Real-IP</c> is
+    /// consulted only when <paramref name="trustXRealIp"/> is set (#256) — unlike XFF its value cannot
+    /// be verified against the trusted-hop chain. Extracted as a pure function so the security logic
+    /// is unit-testable without an HttpListener.
     /// </summary>
-    internal static string ResolveClientIp(IPAddress? remote, string? xForwardedFor, string? xRealIp, IReadOnlyList<IPNetwork> trustedProxies)
+    internal static string ResolveClientIp(IPAddress? remote, string? xForwardedFor, string? xRealIp, IReadOnlyList<IPNetwork> trustedProxies, bool trustXRealIp)
     {
         if (remote is null) return "unknown";
 
@@ -1519,10 +1572,13 @@ public sealed class ManagementApi : IHostedService, IDisposable
             }
         }
 
-        // Single-hop proxies commonly set X-Real-IP instead of (or alongside) X-Forwarded-For.
-        // Validate + normalize so a malformed header can't surface garbage (e.g. newlines for log
-        // forging) — fall back to the proxy address if it isn't a parseable IP.
-        if (!string.IsNullOrWhiteSpace(xRealIp) && IPAddress.TryParse(xRealIp.Trim(), out var realAddr))
+        // Single-hop proxies commonly set X-Real-IP instead of (or alongside) X-Forwarded-For. Unlike
+        // XFF, the value cannot be verified against the trusted-hop chain — a proxy that passes the
+        // header through instead of overwriting it turns it into an attacker-controlled input (#256),
+        // so it is consulted only when the operator opts in via Api.TrustXRealIp. Validate + normalize
+        // so a malformed header can't surface garbage (e.g. newlines for log forging) — fall back to
+        // the proxy address if it isn't a parseable IP.
+        if (trustXRealIp && !string.IsNullOrWhiteSpace(xRealIp) && IPAddress.TryParse(xRealIp.Trim(), out var realAddr))
             return Normalize(realAddr).ToString();
 
         return remote.ToString();

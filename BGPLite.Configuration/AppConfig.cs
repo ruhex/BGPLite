@@ -55,6 +55,18 @@ public sealed class AppConfig
     [YamlMember(Alias = "TrustedProxies")]
     public List<string> TrustedProxies { get; init; } = [];
 
+    /// <summary>
+    /// Opt-in (#256): when <c>true</c>, a trusted proxy's <c>X-Real-IP</c> header is accepted as a
+    /// client-IP source when no <c>X-Forwarded-For</c> hop resolves. Default <c>false</c> — unlike
+    /// X-Forwarded-For, an X-Real-IP value cannot be verified against the trusted-hop chain, so a
+    /// proxy that passes the header through instead of overwriting it (plain nginx without
+    /// <c>proxy_set_header X-Real-IP $remote_addr;</c>) turns it into an attacker-controlled input:
+    /// fresh rate-limit buckets per request and a forged <c>/api/me</c> identity. Enable only for
+    /// proxies guaranteed to overwrite the header. Hot-reloadable (applies to new requests).
+    /// </summary>
+    [YamlMember(Alias = "TrustXRealIp")]
+    public bool TrustXRealIp { get; init; }
+
     /// <summary>Per-client-IP rate limiting for the management API (#116). Null = defaults applied.</summary>
     [YamlMember(Alias = "ApiRateLimit")]
     public ApiRateLimitConfig? ApiRateLimit { get; init; }
