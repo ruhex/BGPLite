@@ -110,6 +110,14 @@ public sealed class HttpPrefixProvider(
                 return SourceLoadResult.NotModifiedResult(updatedEtag ?? etag, updatedLm ?? lastModified);
             }
 
+            // #321: redirects are not followed (AllowAutoRedirect=false on the named client) — the
+            // handler would re-send every per-source header except Authorization to the target
+            // host, so a 3xx is an operator-fixable configuration error, not something to chase.
+            if (response.StatusCode is >= HttpStatusCode.MultipleChoices and < HttpStatusCode.BadRequest)
+                throw new InvalidOperationException(
+                    $"Prefix source '{source.Name}': the URL redirects ({(int)response.StatusCode}) — " +
+                    "redirects are not followed; configure the final URL.");
+
             response.EnsureSuccessStatusCode();
 
             // Extract validators from the 200 response for next time (#214).

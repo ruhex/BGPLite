@@ -107,7 +107,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
 
     /// <summary>
     /// Hot-reloads the SOFT (non-session-disrupting) part of the configuration (#136): the
-    /// trusted-proxy CIDR list (client-IP resolution), the CORS origin allowlist (via <c>_config</c>),
+    /// trusted-proxy CIDR list (client-IP resolution), the CORS origin allowlist (<c>_corsAllowedOrigins</c>),
     /// and the API rate / concurrency limiters. Each derived field is rebuilt from
     /// <paramref name="newConfig"/> and swapped atomically with <see cref="Interlocked.Exchange"/> so
     /// in-flight requests keep observing the previous state while subsequent requests pick up the new
@@ -127,7 +127,9 @@ public sealed class ManagementApi : IHostedService, IDisposable
 
         // Swap every reloadable field atomically. A request that has already captured the old
         // references into locals finishes against them; the next request reads the new ones.
-        // _config is swapped last so CORS / client-IP and the limiters always move together.
+        // NOTE (#321 item 8): _config itself is NOT swapped — request-path code that must observe
+        // reloads reads the derived fields above; the fields still reading _config (e.g.
+        // MaxRequestBodyBytes, RipeStat lists) are restart-required, tracked as #266 item 6.
         var oldRateLimiter = Interlocked.Exchange(ref _rateLimiter, rateLimiter);
         var oldConcurrencyLimiter = Interlocked.Exchange(ref _concurrencyLimiter, concurrencyLimiter);
         Interlocked.Exchange(ref _trustedProxyNetworks, trusted);
@@ -158,8 +160,8 @@ public sealed class ManagementApi : IHostedService, IDisposable
         ResolveClientIp(remote, xForwardedFor, xRealIp, Volatile.Read(ref _trustedProxyNetworks));
 
     /// <summary>
-    /// Resolves the CORS origin against the CURRENT live <c>_config</c> (#136), for tests that need
-    /// to observe the effect of reloading <c>CorsAllowedOrigins</c> without an HttpListener. Mirrors
+    /// Resolves the CORS origin against the CURRENT live <c>_corsAllowedOrigins</c> (#136), for tests
+    /// that need to observe the effect of reloading <c>CorsAllowedOrigins</c> without an HttpListener. Mirrors
     /// <see cref="AddCorsHeaders"/>'s resolution.
     /// </summary>
     internal string? ResolveCorsOriginLive(string? requestOrigin) =>

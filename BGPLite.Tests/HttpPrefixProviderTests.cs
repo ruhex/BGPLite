@@ -283,6 +283,23 @@ public class HttpPrefixProviderTests
             provider.LoadAsync(HttpSource("https://raw.githubusercontent.com/o/r/main/x.txt")));
     }
 
+    [Theory]
+    [InlineData(HttpStatusCode.Found)]             // 302 — the classic redirect
+    [InlineData(HttpStatusCode.MultipleChoices)]   // 300 — the boundary of the 3xx class (#321 review)
+    public async Task Redirect_IsRejected_WithClearError(HttpStatusCode status)
+    {
+        // #321: redirects are not followed (AllowAutoRedirect=false on the named client) — the
+        // handler would re-send per-source headers except Authorization to the target host. The
+        // provider must surface a 3xx as an operator-fixable error naming the actual behavior.
+        var provider = Provider(new StubHandler(status, ""));
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            provider.LoadAsync(HttpSource("https://example.com/moved.txt")));
+
+        Assert.Contains("redirects are not followed", ex.Message);
+        Assert.Contains("final URL", ex.Message);
+    }
+
     [Fact]
     public async Task MissingUrlThrowsInvalidOperation()
     {
