@@ -330,7 +330,7 @@ public class PeerStoreKeyingTests
         using var check = new BgpDbContext(options);
         var applied = check.Database.SqlQueryRaw<string>(
             "SELECT \"MigrationId\" AS \"Value\" FROM __EFMigrationsHistory ORDER BY \"MigrationId\"").ToList();
-        Assert.Equal(["20260826182256_Init", "20260826182324_LegacyEnsureCreated"], applied);
+        Assert.Equal(["20260826182256_Init", "20260826182324_LegacyEnsureCreated", "20260901102233_AddPeerMaxPrefix", "20260901110154_AddPeerMd5Password"], applied);
         // The full schema is in place (spot-check a table from each era).
         Assert.NotNull(check.Peers);
     }

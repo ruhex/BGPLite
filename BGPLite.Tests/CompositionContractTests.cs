@@ -148,6 +148,10 @@ public class CompositionContractTests
         var store = new RecordingPeerStore();
         var (session, run, conn) = await EstablishThroughFactoryAsync(assembler, store);
 
+        // IsEstablished flips BEFORE the establish dump finishes, so give the (async) build a
+        // moment to reach the assembler on a loaded CI runner instead of asserting immediately.
+        for (var i = 0; i < 250 && assembler.Asked == default; i++)
+            await Task.Delay(TimeSpan.FromMilliseconds(20));
         Assert.Equal(("127.0.0.1", 65002u), assembler.Asked);
         // The label is the peer's display form, which is what every assembler log line carries.
         Assert.Contains("127.0.0.1", assembler.Label);
@@ -166,6 +170,8 @@ public class CompositionContractTests
         var store = new RecordingPeerStore();
         var (session, run, conn) = await EstablishThroughFactoryAsync(new RecordingAssembler(), store);
 
+        for (var i = 0; i < 250 && store.Upserted == default; i++)
+            await Task.Delay(TimeSpan.FromMilliseconds(20));
         Assert.Equal(("127.0.0.1", 65002u), store.Upserted);
 
         await TeardownAsync(session, run, conn);
@@ -252,6 +258,7 @@ public class CompositionContractTests
             return Task.CompletedTask;
         }
         public Task UpdateSessionStatusAsync(string ip, uint asn, bool active, CancellationToken ct = default) => Task.CompletedTask;
+        public Task<int?> GetPeerMaxPrefixAsync(string ip, uint asn, CancellationToken ct = default) => Task.FromResult<int?>(null);
         public Task<string> CreatePeerAsync(string ip, uint asn, string? description, CancellationToken ct = default) => throw new NotSupportedException();
         public Task<PeerRoutingView?> LoadPeerRoutingViewAsync(string ip, uint asn, CancellationToken ct = default) => throw new NotSupportedException();
     }

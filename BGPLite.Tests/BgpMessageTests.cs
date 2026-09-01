@@ -387,6 +387,69 @@ public class BgpMessageTests
     }
 
     [Fact]
+    public void ReadMessage_Incomplete_Throws()
+    {
+        // #392: declared length larger than the actual buffer — the frame is truncated mid-body.
+        const int declaredLength = 40;                       // header + 21 body bytes
+        var frame = new byte[BgpConstants.MessageHeaderSize + 10]; // only 10 body bytes present
+        BgpConstants.Marker.CopyTo(frame.AsSpan(0, BgpConstants.MarkerSize));
+        BinaryPrimitives.WriteUInt16BigEndian(frame.AsSpan(16, 2), declaredLength);
+        frame[18] = (byte)BgpMessageType.Keepalive;
+
+        Assert.Throws<BgpParseException>(() => BgpMessageReader.ReadMessage(frame));
+    }
+
+    private static byte[] ShortBodyFrame(BgpMessageType type, int bodyBytes)
+    {
+        // #392 review: a valid 19-byte header (marker + length + type) with a TOO-SHORT body —
+        // otherwise ReadMessage rejects the header and the body guards are never exercised.
+        var frame = new byte[BgpConstants.MessageHeaderSize + bodyBytes];
+        BgpConstants.Marker.CopyTo(frame.AsSpan(0, BgpConstants.MarkerSize));
+        BinaryPrimitives.WriteUInt16BigEndian(frame.AsSpan(16, 2), (ushort)frame.Length);
+        frame[18] = (byte)type;
+        return frame;
+    }
+
+    [Fact]
+    public void ParseUpdate_UpdateTooShort_Throws()
+    {
+        // UPDATE body must carry at least the 4-byte withdrawn-routes total length.
+        Assert.Throws<BgpParseException>(() =>
+            BgpMessageReader.ReadMessage(ShortBodyFrame(BgpMessageType.Update, bodyBytes: 2)));
+    }
+
+    [Fact]
+    public void ParseNotification_NotificationTooShort_Throws()
+    {
+        // NOTIFICATION body must carry at least the code/subcode byte pair.
+        Assert.Throws<BgpParseException>(() =>
+            BgpMessageReader.ReadMessage(ShortBodyFrame(BgpMessageType.Notification, bodyBytes: 1)));
+    }
+
+    [Fact]
+    public void Open_EmptyCapabilities_Roundtrip()
+    {
+        // #392: a well-formed OPEN with zero optional parameters (no capabilities at all) must
+        // survive the encode/decode roundtrip unchanged.
+        var open = new BgpOpenMessage
+        {
+            Asn = 65001,
+            HoldTime = 30,
+            RouterId = 0x0A000001,
+            Capabilities = []
+        };
+
+        var buf = new byte[64];
+        var n = BgpMessageWriter.WriteMessage(open, buf);
+        var read = (BgpOpenMessage)BgpMessageReader.ReadMessage(buf.AsSpan(0, n));
+
+        Assert.Equal(open.Asn, read.Asn);
+        Assert.Equal(open.HoldTime, read.HoldTime);
+        Assert.Equal(open.RouterId, read.RouterId);
+        Assert.Empty(read.Capabilities);
+    }
+
+    [Fact]
     public void RouteRefresh_RoundTrip()
     {
         var msg = new BgpRouteRefreshMessage

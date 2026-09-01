@@ -505,6 +505,9 @@ public class BgpSessionRouteOwnershipTests
     private sealed class RecordingPeerStore : IPeerStore
     {
         public List<(string Ip, uint Asn, bool Active)> StatusWrites = [];
+        /// <summary>#391: the per-peer MaxPrefix override returned by GetPeerMaxPrefixAsync
+        /// (null = no row / no override — the session falls back to the global cap).</summary>
+        public int? MaxPrefixOverride;
         public Task<string> CreatePeerAsync(string ip, uint asn, string? description, CancellationToken ct = default) => Task.FromResult("id");
         public Task UpsertPeerAsync(string ip, uint asn, CancellationToken ct = default) => Task.CompletedTask;
         public Task UpdateSessionStatusAsync(string ip, uint asn, bool active, CancellationToken ct = default)
@@ -512,6 +515,8 @@ public class BgpSessionRouteOwnershipTests
             StatusWrites.Add((ip, asn, active));
             return Task.CompletedTask;
         }
+        public Task<int?> GetPeerMaxPrefixAsync(string ip, uint asn, CancellationToken ct = default)
+            => Task.FromResult(MaxPrefixOverride);
         public Task<PeerRoutingView?> LoadPeerRoutingViewAsync(string ip, uint asn, CancellationToken ct = default)
             => Task.FromResult<PeerRoutingView?>(new("id", [], [], [], []));
     }
@@ -736,6 +741,111 @@ public class BgpSessionRouteOwnershipTests
         Assert.NotNull(notif);
         Assert.Equal(BgpConstants.SubError.CeaseMaxPrefixes, notif.SubErrorCode);
         Assert.Equal(0, routeTable.Count);                  // owned routes flushed by the finally
+    }
+
+    /// <summary>#391: waits for the route table to reach the expected size. Generous timeout:
+    /// a cold-JIT first run can take longer than SettleAsync's 2 s window to get from
+    /// Established through the establish dump to a started read loop.</summary>
+    private static async Task WaitForRouteCountAsync(RouteTable routeTable, int expected)
+    {
+        // #392 review: bound the wait so a real cap regression fails with the actual count
+        // instead of hanging the test forever.
+        var deadline = TimeSpan.FromSeconds(15);
+        while (routeTable.Count < expected)
+        {
+            if (deadline <= TimeSpan.Zero)
+                Assert.Fail($"route table never reached {expected}; actual {routeTable.Count}");
+            await Task.Delay(TimeSpan.FromMilliseconds(20));
+            deadline -= TimeSpan.FromMilliseconds(20);
+        }
+    }
+
+    /// <summary>#391: establishes a session whose peer store returns a per-peer MaxPrefix
+    /// override on top of a global cap. Exercises the effective-cap resolution in
+    /// SendAllRoutesAsync (override ?? global) on the establish path.</summary>
+    private static async Task<(BgpSession Session, Task Run, ScriptedConnection Conn, RouteTable Table, RecordingPeerStore Store)>
+        EstablishWithMaxPrefixOverrideAsync(int globalCap, int? overrideCap)
+    {
+        var routeTable = new RouteTable();
+        var conn = new ScriptedConnection();
+        var config = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1", HoldTime = 0, KeepAlive = 0, MaxPrefixesPerPeer = globalCap };
+        var store = new RecordingPeerStore { MaxPrefixOverride = overrideCap };
+        var session = new BgpSession(
+            conn, new PeerConfig { Address = "127.0.0.1" }, config, routeTable,
+            AllowAllFilter.Instance, new BgpMetrics(), NullLogger<BgpSession>.Instance,
+            peerStore: store);
+        var run = session.RunAsync();
+        conn.EnqueueMessage(new BgpOpenMessage
+        {
+            Version = BgpConstants.BgpVersion,
+            Asn = 65002,
+            HoldTime = 0,
+            RouterId = 0x0A000002,
+            Capabilities = [BgpCapabilityInfo.FourOctetAsn(65002)],
+        });
+        conn.EnqueueMessage(BgpKeepaliveMessage.Instance);
+        for (var i = 0; i < 200 && !session.IsEstablished; i++)
+            await Task.Delay(TimeSpan.FromMilliseconds(10));
+        Assert.True(session.IsEstablished, "session must reach Established");
+        return (session, run, conn, routeTable, store);
+    }
+
+    [Fact]
+    public async Task PerPeerMaxPrefixOverride_Wins_OverLooserGlobalCap()
+    {
+        // Global cap 10, peer override 1: the SECOND distinct prefix trips Cease/MaxPrefixes.
+        // RED pre-fix: the effective cap was always the global one, so both prefixes were accepted.
+        var (session, run, conn, routeTable, _) = await EstablishWithMaxPrefixOverrideAsync(globalCap: 10, overrideCap: 1);
+
+        conn.EnqueueFrame(AnnounceFrame(8, 0x0A));
+        await WaitForRouteCountAsync(routeTable, 1);
+        Assert.True(session.IsEstablished);
+
+        conn.EnqueueFrame(AnnounceFrame(24, 0xC0, 0x00, 0x02)); // 2nd distinct prefix — over the override
+        var completed = await Task.WhenAny(run, Task.Delay(TimeSpan.FromSeconds(5)));
+        Assert.Same(run, completed);
+        var notif = conn.Sent
+            .Select(b => BgpMessageReader.ReadMessage(b.AsSpan()))
+            .OfType<BgpNotificationMessage>()
+            .SingleOrDefault(n => n.ErrorCode == BgpConstants.Error.Cease);
+        Assert.NotNull(notif);
+        Assert.Equal(BgpConstants.SubError.CeaseMaxPrefixes, notif.SubErrorCode);
+    }
+
+    [Fact]
+    public async Task PerPeerMaxPrefixOverride_Zero_IsUnlimited_ForThisPeer()
+    {
+        // Global cap 2, peer override 0 ("unlimited for this peer"): three prefixes all install.
+        // RED pre-fix: the global cap was applied, so the third prefix tore the session down.
+        var (session, run, conn, routeTable, _) = await EstablishWithMaxPrefixOverrideAsync(globalCap: 2, overrideCap: 0);
+
+        for (var i = 0; i < 3; i++)
+            conn.EnqueueFrame(AnnounceFrame(24, 0xC0, 0x00, (byte)(10 + i)));
+        await SettleAsync(conn);
+
+        Assert.True(session.IsEstablished, $"override 0 = unlimited; count={routeTable.Count}; run={run.Status}; exc={run.Exception?.GetBaseException().GetType().Name}:{run.Exception?.GetBaseException().Message}");
+        await TeardownAsync(session, run);
+    }
+
+    [Fact]
+    public async Task PerPeerMaxPrefixOverride_Absent_FallsBackToGlobalCap()
+    {
+        // No override (null): the global cap applies — this pins the ?? fallback itself.
+        var (session, run, conn, routeTable, _) = await EstablishWithMaxPrefixOverrideAsync(globalCap: 1, overrideCap: null);
+
+        conn.EnqueueFrame(AnnounceFrame(8, 0x0A));
+        await WaitForRouteCountAsync(routeTable, 1);
+        Assert.True(session.IsEstablished);
+
+        conn.EnqueueFrame(AnnounceFrame(24, 0xC0, 0x00, 0x02)); // 2nd distinct prefix — over the global cap
+        var completed = await Task.WhenAny(run, Task.Delay(TimeSpan.FromSeconds(5)));
+        Assert.Same(run, completed);
+        var notif = conn.Sent
+            .Select(b => BgpMessageReader.ReadMessage(b.AsSpan()))
+            .OfType<BgpNotificationMessage>()
+            .SingleOrDefault(n => n.ErrorCode == BgpConstants.Error.Cease);
+        Assert.NotNull(notif);
+        Assert.Equal(BgpConstants.SubError.CeaseMaxPrefixes, notif.SubErrorCode);
     }
 
     [Fact]

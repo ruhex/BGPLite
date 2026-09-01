@@ -31,6 +31,9 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
     private readonly IpAcceptThrottle _acceptThrottle;
     private int _acceptingConnections = 1;
     private Socket? _listener;
+    // #36: per-peer TCP-MD5 (RFC 2385) shared keys, keyed by the peer's source IP (TCP keys the
+    // connection by address, not by (IP, ASN) — peers sharing one source IP share the key).
+    private readonly ConcurrentDictionary<IPAddress, byte[]> _md5Keys = new();
     private Task? _acceptTask;
     private PeriodicTimer? _statusTimer;
     private Task? _statusTask;
@@ -147,6 +150,55 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
         }
     }
 
+    /// <inheritdoc cref="ISessionManager.SetPeerMd5Key" />
+    public void SetPeerMd5Key(string peerIp, string? password)
+    {
+        // #36: opt-in per peer — a password enables RFC 2385 enforcement for the peer's source
+        // IP; clearing it returns the peer to plain TCP. On unsupported platforms this is a
+        // logged no-op (fail-visible, D: TCP-MD5 is Linux/macOS-only), never a crash.
+        if (!IPAddress.TryParse(peerIp, out var address))
+        {
+            _logger.LogWarning("TCP-MD5: ignoring unparseable peer IP '{PeerIp}'", peerIp);
+            return;
+        }
+
+        if (string.IsNullOrEmpty(password))
+        {
+            _md5Keys.TryRemove(address, out _);
+            ApplyMd5(_listener, address, key: null);
+            return;
+        }
+
+        if (!TcpMd5.IsValidPassword(password))
+        {
+            _logger.LogWarning("TCP-MD5: rejecting a password with an invalid length (must be 1..{Max} UTF-8 bytes)", TcpMd5.PasswordMaxBytes);
+            return;
+        }
+
+        var key = TcpMd5.KeyBytes(password);
+        _md5Keys[address] = key;
+        ApplyMd5(_listener, address, key);
+    }
+
+    private void ApplyMd5(Socket? socket, IPAddress peer, byte[]? key)
+    {
+        if (socket is null)
+            return;
+        try
+        {
+            if (key is null)
+                TcpMd5.Clear(socket, peer);
+            else
+                TcpMd5.Apply(socket, peer, key);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "TCP-MD5: could not {Verb} the key for {Peer} on this platform — the peer keeps {State} (RFC 2385 support is Linux/macOS-only)",
+                key is null ? "clear" : "set", peer, key is null ? "unprotected" : "unprotected until supported");
+        }
+    }
+
     private async Task AcceptLoopAsync(CancellationToken cancellationToken)
     {
         while (!cancellationToken.IsCancellationRequested)
@@ -181,6 +233,11 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
                 // #96: the transport seam — SocketBgpConnection owns the socket (and the 60s
                 // SendTimeout backstop from #160), so BgpSession no longer touches Socket directly.
                 var peerConfig = new PeerConfig { Address = peerAddress, Port = remoteEndpoint.Port };
+
+                // #36: the accepted socket inherits the listener's TCP-MD5 key on Linux; re-apply
+                // for the known peer so enforcement does not depend on inheritance semantics.
+                if (_md5Keys.TryGetValue(remoteEndpoint.Address, out var md5Key))
+                    ApplyMd5(socket, remoteEndpoint.Address, md5Key);
 
                 var session = _sessionFactory.Create(new SocketBgpConnection(socket), peerConfig);
                 // #265 item 1: the session's finally-block consults this before flipping the

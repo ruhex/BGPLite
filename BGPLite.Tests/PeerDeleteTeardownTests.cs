@@ -234,6 +234,7 @@ public sealed class PeerDeleteTeardownTests
             Terminated.Add((peerIp, asn));
             if (onTerminate is not null) await onTerminate(peerIp, asn);
         }
+        public void SetPeerMd5Key(string peerIp, string? password) { }
     }
 
     private sealed class StaticOptionsFactory(DbContextOptions<BgpDbContext> options) : IDbContextFactory<BgpDbContext>

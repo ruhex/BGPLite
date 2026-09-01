@@ -152,6 +152,103 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
         Assert.Equal(HttpStatusCode.RequestEntityTooLarge, tooLarge.StatusCode);
     }
 
+    [Fact]
+    public async Task MaxPrefix_CreateValidate_DetailRoundtrip()
+    {
+        var config = new AppConfig { Bgp = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1" } };
+        _port = await StartAsync(config);
+        _client = new HttpClient();
+
+        // Negative MaxPrefix is rejected at the boundary.
+        using (var bad = await _client.PostAsync($"http://127.0.0.1:{_port}/api/peers",
+            new StringContent("""{"ip":"198.51.100.8","asn":65011,"maxPrefix":-1}""", Encoding.UTF8, "application/json")))
+            Assert.Equal(HttpStatusCode.BadRequest, bad.StatusCode);
+
+        // Create with an override → the response echoes MaxPrefix and carries the durable id.
+        string peerId;
+        using (var ok = await _client.PostAsync($"http://127.0.0.1:{_port}/api/peers",
+            new StringContent("""{"ip":"198.51.100.8","asn":65011,"maxPrefix":5000}""", Encoding.UTF8, "application/json")))
+        {
+            Assert.Equal(HttpStatusCode.OK, ok.StatusCode);
+            using var doc = JsonDocument.Parse(await ok.Content.ReadAsStringAsync());
+            peerId = doc.RootElement.GetProperty("id").GetString()!;
+            Assert.Equal(5000, doc.RootElement.GetProperty("maxPrefix").GetInt32());
+        }
+
+        // Sanity: the created peer must be readable by id immediately.
+        using (var sanity = await _client.GetAsync($"http://127.0.0.1:{_port}/api/peers/{peerId}"))
+            Assert.True(sanity.IsSuccessStatusCode, $"sanity get: {(int)sanity.StatusCode}");
+
+        // PUT /api/peers/{id} — MaxPrefix PATCH-style: omitted leaves it; explicit 0 sets
+        // unlimited-for-peer. (The update route is PUT; field semantics are partial.)
+        using (var put = new HttpRequestMessage(HttpMethod.Put, $"http://127.0.0.1:{_port}/api/peers/{peerId}")
+        {
+            Content = new StringContent("""{"maxPrefix":0}""", Encoding.UTF8, "application/json")
+        })
+        using (var response = await _client.SendAsync(put))
+            Assert.True(response.IsSuccessStatusCode,
+                $"put: {(int)response.StatusCode} {await response.Content.ReadAsStringAsync()} peerId='{peerId}'");
+
+        using (var detail = await _client.GetAsync($"http://127.0.0.1:{_port}/api/peers/{peerId}"))
+        {
+            var json = await detail.Content.ReadAsStringAsync();
+            Assert.True(detail.IsSuccessStatusCode, $"detail: {(int)detail.StatusCode} {json} peerId={peerId}");
+            Assert.Contains("\"maxPrefix\":0", json);
+        }
+    }
+
+    [Fact]
+    public async Task Md5Password_CreateEnabled_SecretNeverEchoed_UpdateClears()
+    {
+        var config = new AppConfig { Bgp = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1" } };
+        _port = await StartAsync(config);
+        _client = new HttpClient();
+        const string secret = "tcp-md5-s3cret";
+
+        // Create with a password → tcpMd5 flag on; the secret itself is never echoed.
+        string peerId;
+        using (var ok = await _client.PostAsync($"http://127.0.0.1:{_port}/api/peers",
+            new StringContent($$"""{"ip":"198.51.100.9","asn":65012,"md5Password":"{{secret}}"}""", Encoding.UTF8, "application/json")))
+        {
+            Assert.Equal(HttpStatusCode.OK, ok.StatusCode);
+            var body = await ok.Content.ReadAsStringAsync();
+            Assert.Contains(""""tcpMd5":true"""", body);
+            Assert.DoesNotContain(secret, body);
+            peerId = JsonDocument.Parse(body).RootElement.GetProperty("id").GetString()!;
+        }
+
+        // Detail: flag on, secret absent.
+        using (var detail = await _client.GetAsync($"http://127.0.0.1:{_port}/api/peers/{peerId}"))
+        {
+            var json = await detail.Content.ReadAsStringAsync();
+            Assert.Contains(""""tcpMd5":true"""", json);
+            Assert.DoesNotContain(secret, json);
+        }
+
+        // Too-long password (> 80 UTF-8 bytes) → 400, and the secret is not echoed back.
+        using (var bad = await _client.PostAsync($"http://127.0.0.1:{_port}/api/peers",
+            new StringContent($$"""{"ip":"198.51.100.10","asn":65013,"md5Password":"{{new string('x', 81)}}"}""", Encoding.UTF8, "application/json")))
+        {
+            Assert.Equal(HttpStatusCode.BadRequest, bad.StatusCode);
+            Assert.DoesNotContain(new string('x', 81), await bad.Content.ReadAsStringAsync());
+        }
+
+        // Update with "" → cleared back to plain TCP.
+        using (var put = new HttpRequestMessage(HttpMethod.Put, $"http://127.0.0.1:{_port}/api/peers/{peerId}")
+        {
+            Content = new StringContent("""{"md5Password":""}""", Encoding.UTF8, "application/json")
+        })
+        using (var response = await _client.SendAsync(put))
+            Assert.True(response.IsSuccessStatusCode, await response.Content.ReadAsStringAsync());
+
+        using (var detail = await _client.GetAsync($"http://127.0.0.1:{_port}/api/peers/{peerId}"))
+        {
+            var json = await detail.Content.ReadAsStringAsync();
+            Assert.Contains(""""tcpMd5":false"""", json);
+            Assert.DoesNotContain(secret, json);
+        }
+    }
+
     private static int FreeTcpPort()
     {
         using var socket = new System.Net.Sockets.Socket(System.Net.Sockets.AddressFamily.InterNetwork, System.Net.Sockets.SocketType.Stream, System.Net.Sockets.ProtocolType.Tcp);
@@ -190,6 +287,7 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
         public Task RefreshPeerAsync(string peerIp, uint asn) => Task.CompletedTask;
         public List<string> GetActivePeerIps() => [];
         public Task TerminatePeerAsync(string peerIp, uint asn, CancellationToken ct = default) => Task.CompletedTask;
+        public void SetPeerMd5Key(string peerIp, string? password) { }
         public int GetAdvertisedPrefixCount(string peerIp, uint asn) => 0;
         public Task RefreshAllEstablishedAsync() => Task.CompletedTask;
     }

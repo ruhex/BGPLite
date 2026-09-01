@@ -22,10 +22,4 @@ public static class ConfigLoader
         // hot-reload path logs it and keeps the previous config, as with any other bad edit.
         Deserializer.Deserialize<AppConfig>(yaml)
             ?? throw new InvalidOperationException("The configuration is empty — nothing to load.");
-
-    private static readonly ISerializer Serializer = new SerializerBuilder()
-        .Build();
-
-    public static string Save(AppConfig config) =>
-        Serializer.Serialize(config);
 }

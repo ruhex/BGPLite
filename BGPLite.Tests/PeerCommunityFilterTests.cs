@@ -129,9 +129,34 @@ public class PeerCommunityFilterTests
     [Fact]
     public async Task RouteWithoutCommunity_StillPasses_WhenNoFilterConfigured()
     {
+        // No allowlist = no filter: everything passes, tagged or not (D20 fast path).
         var filter = NewFilter();
 
         Assert.True(await Outgoing(filter, RouteWith(), EbgpPeer));
+    }
+
+    [Fact]
+    public void AcceptIncoming_AlwaysTrue()
+    {
+        // #392: ingress is unfiltered by design — the community allowlist is an EGRESS policy
+        // only (outgoing updates); pin it on the real filter.
+        var filter = NewFilter((_, _, _) => Task.FromResult(new HashSet<uint> { 0x0000FF01 }));
+
+        Assert.True(filter.AcceptIncoming(RouteWith(), EbgpPeer));
+        Assert.True(filter.AcceptIncoming(RouteWith(0x0000FF01), IbgpPeer));
+        Assert.True(filter.AcceptIncoming(RouteWith(), IbgpPeer));
+    }
+
+    [Fact]
+    public async Task RouteWithoutCommunity_IsRejected_WhenAllowlistActive()
+    {
+        // #389 (D20): a community-less route carries no consent tag — under an ACTIVE allowlist
+        // it is denied, not unconditionally admitted. RED pre-fix: it passed the filter.
+        var allowed = new HashSet<uint> { 0x0000FF01 };
+        var filter = NewFilter((_, _, _) => Task.FromResult(allowed));
+
+        Assert.False(await Outgoing(filter, RouteWith(), EbgpPeer));
+        Assert.False(await Outgoing(filter, RouteWith(), IbgpPeer));
     }
 
     [Fact]

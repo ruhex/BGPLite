@@ -13,6 +13,14 @@ public interface IPeerStore
     Task UpsertPeerAsync(string ip, uint asn, CancellationToken ct = default);
     Task UpdateSessionStatusAsync(string ip, uint asn, bool active, CancellationToken ct = default);
     Task<PeerRoutingView?> LoadPeerRoutingViewAsync(string ip, uint asn, CancellationToken ct = default);
+
+    /// <summary>
+    /// Resolves the peer's effective per-peer prefix ceiling (#391): the row's <c>MaxPrefix</c>
+    /// override, or <c>null</c> when the peer is unknown / has no override (the caller then uses
+    /// the global <c>Bgp.MaxPrefixesPerPeer</c>). Read once per establish/refresh cycle by the
+    /// session — never per UPDATE.
+    /// </summary>
+    Task<int?> GetPeerMaxPrefixAsync(string ip, uint asn, CancellationToken ct = default);
 }
 
 public class PeerInfo
@@ -45,4 +53,5 @@ public sealed record PeerRoutingView(
     List<string> Subscriptions,
     List<string> CustomPrefixes,
     List<uint> CustomAsns,
-    List<CustomSourceView> UserSources);
+    List<CustomSourceView> UserSources,
+    int? MaxPrefix = null);

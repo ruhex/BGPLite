@@ -118,7 +118,7 @@ RFC policy:
 
 - When changing BGP protocol behavior, consult the applicable RFC before implementing or modifying behavior. Do not infer protocol semantics from existing code alone.
 - RFC requirements take precedence over assumptions, existing implementation patterns, or comments when determining protocol behavior.
-- Applicable RFCs beyond the base spec (RFC 4271): RFC 5492 (capabilities advertisement), RFC 6793 (4-octet AS number), RFC 7606 (revised UPDATE error handling), RFC 7607 (AS 0 rejection), RFC 4486 (Cease subcodes), RFC 1997 (communities), RFC 8092 (large communities), RFC 2918 (route refresh), RFC 4724 (graceful restart).
+- Applicable RFCs beyond the base spec (RFC 4271): RFC 5492 (capabilities advertisement), RFC 6793 (4-octet AS number), RFC 7606 (revised UPDATE error handling), RFC 7607 (AS 0 rejection), RFC 4486 (Cease subcodes), RFC 1997 (communities), RFC 8092 (large communities), RFC 2918 (route refresh), RFC 4724 (graceful restart), RFC 2385 (TCP-MD5, optional per peer — never log or echo the password).
 
 Rules:
 
