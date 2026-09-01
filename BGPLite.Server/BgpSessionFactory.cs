@@ -65,7 +65,7 @@ public sealed class BgpSessionFactory : IBgpSessionFactory
             // been configured in the UI still shows up there. Previously a lambda hand-wired in
             // Program.cs and threaded through BgpServer. Async since #262 — the upsert ran
             // synchronously on the OPEN-handshake path.
-            onPeerIdentified: (ip, asn) => _peerStore.UpsertPeerAsync(ip, asn),
+            onPeerIdentified: (ip, asn, ct) => _peerStore.UpsertPeerAsync(ip, asn, ct),
             peerStore: _peerStore,
             prefixAggregator: _prefixAggregator,
             routeAssembler: _routeAssembler,

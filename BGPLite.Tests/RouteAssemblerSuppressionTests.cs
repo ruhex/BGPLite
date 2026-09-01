@@ -88,6 +88,24 @@ public class RouteAssemblerSuppressionTests
     }
 
     [Fact]
+    public void NestedCustomPrefixes_DoNotSuppressEachOther()
+    {
+        // CodeRabbit (integration review): both are CONFIGURED custom prefixes — the operator's
+        // deliberate /16 must survive its own broader /8. Only source routes are suppressed.
+        var customs = new List<(uint, byte)> { (Net("10.0.0.0"), 8), (Net("10.1.0.0"), 16) };
+        var routes = new List<Route>
+        {
+            R("10.0.0.0", 8), R("10.1.0.0", 16),          // the two configured customs
+            R("10.2.0.0", 16), R("10.1.1.0", 24)          // source routes covered by them
+        };
+
+        var result = RouteAssembler.SuppressCoveredByCustomPrefixes(routes, customs);
+
+        Assert.Equal([(Net("10.0.0.0"), (byte)8), (Net("10.1.0.0"), (byte)16)],
+            result.Select(r => (r.Prefix, r.PrefixLength)));
+    }
+
+    [Fact]
     public void ZeroLengthCustom_Covers_Everything()
     {
         var customs = new List<(uint, byte)> { (Net("0.0.0.0"), 0) };
@@ -107,7 +125,7 @@ public class RouteAssemblerSuppressionTests
         // (arriving here through the custom-ASN path) sit inside it.
         var config = new AppConfig { Bgp = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1" } };
         var assembler = new RouteAssembler(
-            new StubPrefixService(),
+            new StubPrefixService(("91.108.4.0", 22), ("91.108.8.0", 22)),
             new ConfiguredPeerStore(["91.108.0.0/16"], [64512]),
             new ConfigCommunityResolver(config, config.Bgp),
             AllowAllFilter.Instance,
@@ -122,17 +140,37 @@ public class RouteAssemblerSuppressionTests
         Assert.Equal([(Net("91.108.0.0"), (byte)16)], routes.Select(r => ((uint)r.Prefix, (byte)r.PrefixLength)));
     }
 
-    /// <summary>Serves two YouTube-like /22s for the custom ASN; nothing else.</summary>
-    private sealed class StubPrefixService : IPrefixService
+    [Fact]
+    public async Task BuildOutboundRoutes_NestedCustomPrefixes_BothAdvertised_SourceSuppressed()
+    {
+        var config = new AppConfig { Bgp = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1" } };
+        var assembler = new RouteAssembler(
+            new StubPrefixService(("10.2.3.0", 24)),
+            new ConfiguredPeerStore(["10.0.0.0/8", "10.1.0.0/16"], [64512]),
+            new ConfigCommunityResolver(config, config.Bgp),
+            AllowAllFilter.Instance,
+            config,
+            config.Bgp,
+            NullLogger<RouteAssembler>.Instance);
+
+        var routes = await assembler.BuildOutboundRoutesAsync(
+            "203.0.113.9", 65002, new PeerConfig { Address = "203.0.113.9" }, "203.0.113.9",
+            CancellationToken.None);
+
+        // The /24 (from the custom-ASN fetch) is suppressed as a source route; BOTH configured
+        // customs — including the nested /16 — are advertised.
+        Assert.Equal(
+            [(Net("10.0.0.0"), (byte)8), (Net("10.1.0.0"), (byte)16)],
+            routes.Select(r => ((uint)r.Prefix, (byte)r.PrefixLength)));
+    }
+
+    /// <summary>Serves the configured prefixes for the custom-ASN fetch; nothing else.</summary>
+    private sealed class StubPrefixService(params (string Ip, byte Length)[] prefixes) : IPrefixService
     {
         public Task<IReadOnlyList<(uint Prefix, byte Length)>> GetPrefixesAsync(uint asn, CancellationToken ct = default)
             => Task.FromResult<IReadOnlyList<(uint Prefix, byte Length)>>([]);
         public Task<List<(uint Prefix, byte Length, uint Asn)>> GetPrefixesForAsns(IEnumerable<uint> asns, CancellationToken ct = default)
-            => Task.FromResult(new List<(uint, byte, uint)>
-            {
-                (Net("91.108.4.0"), 22, 64512),
-                (Net("91.108.8.0"), 22, 64512)
-            });
+            => Task.FromResult(prefixes.Select(p => (Net(p.Ip), p.Length, 64512u)).ToList());
         public Task<int> GetPrefixCountAsync(uint asn, CancellationToken ct = default) => Task.FromResult(0);
         public Task<List<(uint Prefix, byte Length, uint Asn)>> GetRuPrefixesAsync(CancellationToken ct = default)
             => Task.FromResult(new List<(uint, byte, uint)>());
