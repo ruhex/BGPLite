@@ -21,7 +21,7 @@ Protocol:
 
 - BGP-4 messages: OPEN / UPDATE / KEEPALIVE / NOTIFICATION; route refresh (RFC 2918, capability-gated, rate-limited)
 - 4-octet ASN (RFC 6793): AS_TRANS, AS4_PATH/AS4_AGGREGATOR tunneling for 2-octet-only peers
-- Capability negotiation (RFC 5492), Graceful Restart advertisement (RFC 4724)
+- Capability negotiation (RFC 5492); Graceful Restart (RFC 4724): not advertised, receiving-side retention not implemented (D6/#318)
 - Communities (RFC 1997) and Large Communities (RFC 8092): per-peer tagging and outgoing filters
 - UPDATE batching (≤100 NLRI) and exact-union CIDR aggregation
 
@@ -140,6 +140,7 @@ DefaultPrefixSource: ru        # served to unconfigured/auto-registered peers
 2. The peer connects over BGP to port 179.
 3. On session establishment the server resolves the peer's subscription:
    - known peer — fetches prefixes for its subscriptions (cached) plus custom prefixes and advertises them;
+     a custom prefix overrides the source prefixes it covers: covered more-specifics are not sent (#220);
    - unknown peer — auto-registers it and advertises the default prefix source.
 4. Peer status and session timestamps are updated in the store.
 
@@ -176,7 +177,7 @@ A section-by-section audit lives in [`docs/RFC_COMPLIANCE.md`](docs/RFC_COMPLIAN
 | [4893](https://www.rfc-editor.org/rfc/rfc4893) / [6793](https://www.rfc-editor.org/rfc/rfc6793) | 4-byte ASN, AS4_PATH | implemented |
 | [5492](https://www.rfc-editor.org/rfc/rfc5492) | Capabilities | implemented |
 | [1997](https://www.rfc-editor.org/rfc/rfc1997) | Communities | implemented |
-| [4724](https://www.rfc-editor.org/rfc/rfc4724) | Graceful Restart | advertised; receiving-side retention open (#318) |
+| [4724](https://www.rfc-editor.org/rfc/rfc4724) | Graceful Restart | not advertised; receiving-side retention open (#318, D6) |
 | [2918](https://www.rfc-editor.org/rfc/rfc2918) | Route Refresh | implemented |
 | [2385](https://www.rfc-editor.org/rfc/rfc2385) | TCP-MD5 auth | open (#36) |
 | [4760](https://www.rfc-editor.org/rfc/rfc4760) / [2545](https://www.rfc-editor.org/rfc/rfc2545) | MP-BGP / IPv6 | roadmap (#14/#15) |

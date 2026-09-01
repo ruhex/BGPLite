@@ -1,8 +1,14 @@
+using System.Globalization;
 using BGPLite.Api.Entities;
 using Microsoft.EntityFrameworkCore;
 using BGPLite.Contracts;
 
 namespace BGPLite.Api;
+
+/// <summary>The persisted state of a peer row right after an upsert (#267 item 6): everything the
+/// POST /api/peers response needs, returned from the upsert's RETURNING clause instead of a
+/// follow-up read.</summary>
+public sealed record SavedPeer(string Id, string Status, DateTime CreatedAt);
 
 public sealed class PeerStore : IPeerStore
 {
@@ -12,13 +18,13 @@ public sealed class PeerStore : IPeerStore
 
     /// <summary>
     /// Creates or upserts the peer row alone. Callers configuring a peer in full should use
-    /// <see cref="SavePeerConfiguration"/> instead, so the row and its collections commit together
+    /// <see cref="SavePeerConfigurationAsync"/> instead, so the row and its collections commit together
     /// (#259).
     /// </summary>
-    public string CreatePeer(string ip, uint asn, string? description)
+    public async Task<string> CreatePeerAsync(string ip, uint asn, string? description, CancellationToken ct = default)
     {
         using var db = _dbFactory.CreateDbContext();
-        return UpsertPeerRow(db, ip, asn, description);
+        return (await UpsertPeerRowAsync(db, ip, asn, description, ct)).Id;
     }
 
     /// <summary>
@@ -26,7 +32,7 @@ public sealed class PeerStore : IPeerStore
     /// an enclosing transaction (#259) instead of always committing on its own. Behaviour is
     /// unchanged from the #227 implementation this was extracted from.
     /// </summary>
-    private static string UpsertPeerRow(BgpDbContext db, string ip, uint asn, string? description)
+    private static async Task<SavedPeer> UpsertPeerRowAsync(BgpDbContext db, string ip, uint asn, string? description, CancellationToken ct)
     {
         // #227: atomic SQLite upsert eliminates the read-then-write race on the composite unique
         // index UX_Peers_Ip_Asn. Two concurrent CreatePeer calls for the same (Ip, Asn) previously
@@ -38,8 +44,11 @@ public sealed class PeerStore : IPeerStore
         // (Microsoft.Data.Sqlite >= 6) — satisfied by the EF Core Sqlite 10 dependency.
         //
         // EF Core's SqlQuery<T> is documented only for SELECT/composable queries, so for a DML
-        // statement with RETURNING we go through the underlying ADO.NET connection (ExecuteScalar)
-        // — the documented path for a single scalar result from non-composable SQL.
+        // statement with RETURNING we go through the underlying ADO.NET connection — the documented
+        // path for results from non-composable SQL. #267 item 6: the statement returns the row's
+        // Status and CreatedAt alongside the Id so the caller can build its response without a
+        // follow-up roundtrip; neither column is touched by the ON CONFLICT branch, so the returned
+        // values describe the row exactly as it exists after the upsert.
         var id = Guid.NewGuid().ToString("N");
         var now = DateTime.UtcNow.ToString("O");
         var connection = db.Database.GetDbConnection();
@@ -56,14 +65,19 @@ public sealed class PeerStore : IPeerStore
                 "INSERT INTO Peers (Id, Ip, Asn, Description, Status, CreatedAt, LastSessionAt) " +
                 "VALUES (@id, @ip, @asn, @desc, 'inactive', @now, NULL) " +
                 "ON CONFLICT(Ip, Asn) DO UPDATE SET Description = excluded.Description " +
-                "RETURNING Id";
+                "RETURNING Id, Status, CreatedAt";
             AddParam(cmd, "@id", id);
             AddParam(cmd, "@ip", ip);
             AddParam(cmd, "@asn", (long)asn);
             AddParam(cmd, "@desc", (object?)description ?? DBNull.Value);
             AddParam(cmd, "@now", now);
-            var storedId = (string)cmd.ExecuteScalar()!;
-            return storedId;
+            using var reader = await cmd.ExecuteReaderAsync(ct);
+            await reader.ReadAsync(ct);
+            return new SavedPeer(
+                reader.GetString(0),
+                reader.GetString(1),
+                // CreatedAt is written in the "O" (round-trip) format above.
+                DateTime.Parse(reader.GetString(2), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind));
         }
         finally
         {
@@ -79,21 +93,21 @@ public sealed class PeerStore : IPeerStore
         cmd.Parameters.Add(p);
     }
 
-    public void UpsertPeer(string ip, uint asn)
+    public async Task UpsertPeerAsync(string ip, uint asn, CancellationToken ct = default)
     {
         using var db = _dbFactory.CreateDbContext();
-        // #227: atomic upsert — see CreatePeer. UpsertPeer is called from the BGP connect path
+        // #227: atomic upsert — see CreatePeerAsync. UpsertPeer is called from the BGP connect path
         // (Program.cs _onPeerIdentified), where there is no HTTP caller to receive a 409, so the
         // previous read-then-write race could throw DbUpdateException into the session handler.
         var id = Guid.NewGuid().ToString("N");
         var now = DateTime.UtcNow.ToString("O");
-        db.Database.ExecuteSqlInterpolated($@"
+        await db.Database.ExecuteSqlInterpolatedAsync($@"
             INSERT INTO Peers (Id, Ip, Asn, Description, Status, CreatedAt, LastSessionAt)
             VALUES ({id}, {ip}, {asn}, NULL, 'active', {now}, {now})
-            ON CONFLICT(Ip, Asn) DO UPDATE SET Status = 'active', LastSessionAt = {now}");
+            ON CONFLICT(Ip, Asn) DO UPDATE SET Status = 'active', LastSessionAt = {now}", ct);
     }
 
-    public void UpdateSessionStatus(string ip, uint asn, bool active)
+    public async Task UpdateSessionStatusAsync(string ip, uint asn, bool active, CancellationToken ct = default)
     {
         using var db = _dbFactory.CreateDbContext();
         // #227: single-statement UPDATE avoids the read-then-write race and is a no-op (0 rows
@@ -102,48 +116,28 @@ public sealed class PeerStore : IPeerStore
         var now = DateTime.UtcNow.ToString("O");
         if (active)
         {
-            db.Database.ExecuteSqlInterpolated($@"
+            await db.Database.ExecuteSqlInterpolatedAsync($@"
                 UPDATE Peers SET Status = {status}, LastSessionAt = {now}
-                WHERE Ip = {ip} AND Asn = {asn}");
+                WHERE Ip = {ip} AND Asn = {asn}", ct);
         }
         else
         {
-            db.Database.ExecuteSqlInterpolated($@"
+            await db.Database.ExecuteSqlInterpolatedAsync($@"
                 UPDATE Peers SET Status = {status}
-                WHERE Ip = {ip} AND Asn = {asn}");
+                WHERE Ip = {ip} AND Asn = {asn}", ct);
         }
     }
 
-    public void DeletePeer(string id)
+    public async Task DeletePeerAsync(string id, CancellationToken ct = default)
     {
         using var db = _dbFactory.CreateDbContext();
-        db.Peers.Where(p => p.Id == id).ExecuteDelete();
+        await db.Peers.Where(p => p.Id == id).ExecuteDeleteAsync(ct);
     }
 
-    public List<Peer> GetAllPeers()
+    public async Task<Peer?> GetDbPeerByIdAsync(string id, CancellationToken ct = default)
     {
         using var db = _dbFactory.CreateDbContext();
-        return db.Peers.AsNoTracking().Include(p => p.Communities).ToList();
-    }
-
-    public Peer? GetDbPeerById(string id)
-    {
-        using var db = _dbFactory.CreateDbContext();
-        return db.Peers.AsNoTracking().Include(p => p.Communities).FirstOrDefault(p => p.Id == id);
-    }
-
-    PeerInfo? IPeerStore.GetPeerById(string id)
-    {
-        using var db = _dbFactory.CreateDbContext();
-        var peer = db.Peers.AsNoTracking().Include(p => p.Communities).FirstOrDefault(p => p.Id == id);
-        return peer is null ? null : MapToInfo(peer);
-    }
-
-    public PeerInfo? GetPeerByIp(string ip)
-    {
-        using var db = _dbFactory.CreateDbContext();
-        var peer = db.Peers.AsNoTracking().Include(p => p.Communities).FirstOrDefault(p => p.Ip == ip);
-        return peer is null ? null : MapToInfo(peer);
+        return await db.Peers.AsNoTracking().Include(p => p.Communities).FirstOrDefaultAsync(p => p.Id == id, ct);
     }
 
     /// <summary>
@@ -151,24 +145,24 @@ public sealed class PeerStore : IPeerStore
     /// each is a distinct record with its own Id, subscriptions, and communities. Used by /api/me
     /// to return a multi-peer array when disambiguation is needed.
     /// </summary>
-    public List<PeerInfo> GetPeersByIp(string ip)
+    public async Task<List<PeerInfo>> GetPeersByIpAsync(string ip, CancellationToken ct = default)
     {
         using var db = _dbFactory.CreateDbContext();
-        return db.Peers.AsNoTracking()
+        return await db.Peers.AsNoTracking()
             .Where(p => p.Ip == ip)
             .Select(p => MapToInfo(p))
-            .ToList();
+            .ToListAsync(ct);
     }
 
     /// <summary>
     /// Resolves a peer by its durable identity <c>(Ip, Asn)</c> — the form a BGP session knows once
     /// it has parsed the peer's OPEN (issue #19). Several peers may share a source IP with distinct
-    /// AS; this returns the specific one, unlike the Ip-only <see cref="GetPeerByIp"/>.
+    /// AS; this returns the specific one, unlike the Ip-only lookup.
     /// </summary>
-    public PeerInfo? GetPeer(string ip, uint asn)
+    public async Task<PeerInfo?> GetPeerAsync(string ip, uint asn, CancellationToken ct = default)
     {
         using var db = _dbFactory.CreateDbContext();
-        var peer = db.Peers.AsNoTracking().Include(p => p.Communities).FirstOrDefault(p => p.Ip == ip && p.Asn == asn);
+        var peer = await db.Peers.AsNoTracking().Include(p => p.Communities).FirstOrDefaultAsync(p => p.Ip == ip && p.Asn == asn, ct);
         return peer is null ? null : MapToInfo(peer);
     }
 
@@ -182,7 +176,7 @@ public sealed class PeerStore : IPeerStore
     /// so the whole read+update is one connection (six statements on five connections → two
     /// statements on one). The returned collection shapes match the standalone getters exactly.
     /// </summary>
-    public PeerRoutingView? LoadPeerRoutingView(string ip, uint asn)
+    public async Task<PeerRoutingView?> LoadPeerRoutingViewAsync(string ip, uint asn, CancellationToken ct = default)
     {
         using var db = _dbFactory.CreateDbContext();
 
@@ -201,25 +195,25 @@ public sealed class PeerStore : IPeerStore
         // and a UI edit landing between them would advertise a mixed configuration. SQLite runs in
         // WAL here (#95), so a read transaction takes no write lock and does not block writers.
         Peer? peer;
-        using (var read = db.Database.BeginTransaction())
+        using (var read = await db.Database.BeginTransactionAsync(ct))
         {
-            peer = db.Peers.AsNoTracking()
+            peer = await db.Peers.AsNoTracking()
                 .Include(p => p.Subscriptions)
                 .Include(p => p.CustomPrefixes)
                 .Include(p => p.CustomAsns)
                 .Include(p => p.CustomSources.Where(c => c.Active))
                 .AsSplitQuery()
-                .FirstOrDefault(p => p.Ip == ip && p.Asn == asn);
-            read.Commit();
+                .FirstOrDefaultAsync(p => p.Ip == ip && p.Asn == asn, ct);
+            await read.CommitAsync(ct);
         }
         if (peer is null) return null;
 
         // Fold the status update (was UpdateSessionStatus(active:true) on its own DbContext) into
         // this one. ExecuteUpdate is scoped by (Ip, Asn) — identical effect, no extra connection.
-        db.Peers.Where(p => p.Ip == ip && p.Asn == asn)
-            .ExecuteUpdate(s => s
+        await db.Peers.Where(p => p.Ip == ip && p.Asn == asn)
+            .ExecuteUpdateAsync(s => s
                 .SetProperty(p => p.Status, "active")
-                .SetProperty(p => p.LastSessionAt, DateTime.UtcNow));
+                .SetProperty(p => p.LastSessionAt, DateTime.UtcNow), ct);
 
         return new PeerRoutingView(
             peer.Id,
@@ -253,14 +247,14 @@ public sealed class PeerStore : IPeerStore
     /// does NOT fold a status update (the GET path does not mutate). Returns null if the peer does
     /// not exist. Field shapes match the prior standalone getters byte-for-byte.
     /// </summary>
-    public PeerDetailDto? GetPeerDetail(string peerId)
+    public async Task<PeerDetailDto?> GetPeerDetailAsync(string peerId, CancellationToken ct = default)
     {
         using var db = _dbFactory.CreateDbContext();
         // AsSplitQuery is what makes each collection its own SELECT — a projection alone does not
-        // split (#260). Read transaction for the same reason as LoadPeerRoutingView: the six
+        // split (#260). Read transaction for the same reason as LoadPeerRoutingViewAsync: the six
         // statements must see one snapshot, and in WAL a read transaction blocks nobody.
-        using var read = db.Database.BeginTransaction();
-        var detail = db.Peers.AsNoTracking()
+        using var read = await db.Database.BeginTransactionAsync(ct);
+        var detail = await db.Peers.AsNoTracking()
             .Where(p => p.Id == peerId)
             .Select(p => new PeerDetailDto(
                 p.Id,
@@ -280,8 +274,8 @@ public sealed class PeerStore : IPeerStore
                 // Communities stored as long (PeerCommunity.Community); the API formats to "ASN:VAL".
                 p.Communities.Select(c => c.Community).ToList()))
             .AsSplitQuery()
-            .FirstOrDefault();
-        read.Commit();
+            .FirstOrDefaultAsync(ct);
+        await read.CommitAsync(ct);
         return detail;
     }
 
@@ -303,23 +297,23 @@ public sealed class PeerStore : IPeerStore
     /// thing as asking once, and a user assembling a list in the UI produces repeats by pasting.
     /// </para>
     /// </summary>
-    public string SavePeerConfiguration(
+    public async Task<SavedPeer> SavePeerConfigurationAsync(
         string ip, uint asn, string? description,
         IReadOnlyList<string> asnListNames,
         IReadOnlyList<(string Prefix, byte Length)> customPrefixes,
-        IReadOnlyList<uint> customAsns)
+        IReadOnlyList<uint> customAsns, CancellationToken ct = default)
     {
         using var db = _dbFactory.CreateDbContext();
-        using var tx = db.Database.BeginTransaction();
+        using var tx = await db.Database.BeginTransactionAsync(ct);
 
-        var id = UpsertPeerRow(db, ip, asn, description);
-        ReplaceSubscriptions(db, id, asnListNames);
-        ReplaceCustomPrefixes(db, id, customPrefixes);
-        ReplaceCustomAsns(db, id, customAsns);
-        db.SaveChanges();
+        var saved = await UpsertPeerRowAsync(db, ip, asn, description, ct);
+        await ReplaceSubscriptionsAsync(db, saved.Id, asnListNames, ct);
+        await ReplaceCustomPrefixesAsync(db, saved.Id, customPrefixes, ct);
+        await ReplaceCustomAsnsAsync(db, saved.Id, customAsns, ct);
+        await db.SaveChangesAsync(ct);
 
-        tx.Commit();
-        return id;
+        await tx.CommitAsync(ct);
+        return saved;
     }
 
     /// <summary>
@@ -327,26 +321,26 @@ public sealed class PeerStore : IPeerStore
     /// this alone", matching the PATCH semantics the management API exposes — an empty list means
     /// "clear it", which is a different request and is honoured as such.
     /// </summary>
-    public void UpdatePeerConfiguration(
+    public async Task UpdatePeerConfigurationAsync(
         string peerId, string? description,
         IReadOnlyList<string>? asnListNames,
         IReadOnlyList<(string Prefix, byte Length)>? customPrefixes,
-        IReadOnlyList<uint>? customAsns)
+        IReadOnlyList<uint>? customAsns, CancellationToken ct = default)
     {
         using var db = _dbFactory.CreateDbContext();
-        using var tx = db.Database.BeginTransaction();
+        using var tx = await db.Database.BeginTransactionAsync(ct);
 
         if (description is not null)
         {
-            db.Peers.Where(p => p.Id == peerId)
-                .ExecuteUpdate(s => s.SetProperty(p => p.Description, description));
+            await db.Peers.Where(p => p.Id == peerId)
+                .ExecuteUpdateAsync(s => s.SetProperty(p => p.Description, description), ct);
         }
-        if (asnListNames is not null) ReplaceSubscriptions(db, peerId, asnListNames);
-        if (customPrefixes is not null) ReplaceCustomPrefixes(db, peerId, customPrefixes);
-        if (customAsns is not null) ReplaceCustomAsns(db, peerId, customAsns);
-        db.SaveChanges();
+        if (asnListNames is not null) await ReplaceSubscriptionsAsync(db, peerId, asnListNames, ct);
+        if (customPrefixes is not null) await ReplaceCustomPrefixesAsync(db, peerId, customPrefixes, ct);
+        if (customAsns is not null) await ReplaceCustomAsnsAsync(db, peerId, customAsns, ct);
+        await db.SaveChangesAsync(ct);
 
-        tx.Commit();
+        await tx.CommitAsync(ct);
     }
 
     // The Replace* helpers stage a delete + insert on the CALLER's DbContext without committing, so
@@ -354,174 +348,161 @@ public sealed class PeerStore : IPeerStore
     // Set* methods keep their own DbContext + transaction for single-field callers.
 
     /// <summary>Stages the subscription set, deduplicated — keyed <c>(PeerId, AsnListName)</c>.</summary>
-    private static void ReplaceSubscriptions(BgpDbContext db, string peerId, IReadOnlyList<string> names)
+    private static async Task ReplaceSubscriptionsAsync(BgpDbContext db, string peerId, IReadOnlyList<string> names, CancellationToken ct)
     {
-        db.Set<PeerSubscription>().Where(s => s.PeerId == peerId).ExecuteDelete();
+        await db.Set<PeerSubscription>().Where(s => s.PeerId == peerId).ExecuteDeleteAsync(ct);
         db.Set<PeerSubscription>().AddRange(
             names.Distinct(StringComparer.Ordinal)
                  .Select(n => new PeerSubscription { PeerId = peerId, AsnListName = n }));
     }
 
     /// <summary>Stages the custom-prefix set, deduplicated — keyed <c>(PeerId, Prefix, PrefixLength)</c>.</summary>
-    private static void ReplaceCustomPrefixes(BgpDbContext db, string peerId, IReadOnlyList<(string Prefix, byte Length)> prefixes)
+    private static async Task ReplaceCustomPrefixesAsync(BgpDbContext db, string peerId, IReadOnlyList<(string Prefix, byte Length)> prefixes, CancellationToken ct)
     {
-        db.Set<PeerCustomPrefix>().Where(c => c.PeerId == peerId).ExecuteDelete();
+        await db.Set<PeerCustomPrefix>().Where(c => c.PeerId == peerId).ExecuteDeleteAsync(ct);
         db.Set<PeerCustomPrefix>().AddRange(
             prefixes.Distinct()
                     .Select(p => new PeerCustomPrefix { PeerId = peerId, Prefix = p.Prefix, PrefixLength = p.Length }));
     }
 
     /// <summary>Stages the custom-ASN set, deduplicated — keyed <c>(PeerId, Asn)</c>.</summary>
-    private static void ReplaceCustomAsns(BgpDbContext db, string peerId, IReadOnlyList<uint> asns)
+    private static async Task ReplaceCustomAsnsAsync(BgpDbContext db, string peerId, IReadOnlyList<uint> asns, CancellationToken ct)
     {
-        db.Set<PeerCustomAsn>().Where(c => c.PeerId == peerId).ExecuteDelete();
+        await db.Set<PeerCustomAsn>().Where(c => c.PeerId == peerId).ExecuteDeleteAsync(ct);
         db.Set<PeerCustomAsn>().AddRange(
             asns.Distinct().Select(a => new PeerCustomAsn { PeerId = peerId, Asn = a }));
-    }
-
-    public void SetDescription(string id, string description)
-    {
-        using var db = _dbFactory.CreateDbContext();
-        db.Peers.Where(p => p.Id == id).ExecuteUpdate(
-            s => s.SetProperty(p => p.Description, description));
     }
 
     // AsNoTracking is a read-only-intent marker here — a no-op for this scalar projection (no
     // entities are materialized to track). #267 item 4: no Include — SelectMany over the
     // navigation composes in SQL on its own; the Include was redundant load-hint noise.
-    public HashSet<uint> GetCommunities(string peerId)
+    public async Task<HashSet<uint>> GetCommunitiesAsync(string peerId, CancellationToken ct = default)
     {
         using var db = _dbFactory.CreateDbContext();
-        return db.Peers.AsNoTracking()
+        return await db.Peers.AsNoTracking()
             .Where(p => p.Id == peerId)
             .SelectMany(p => p.Communities)
             .Select(c => (uint)c.Community)
-            .ToHashSet();
+            .ToHashSetAsync(ct);
     }
 
     // AsNoTracking is a read-only-intent marker here — a no-op for this scalar projection (no entities are materialized to track).
-    public HashSet<uint> GetCommunities(string ip, uint asn)
+    public async Task<HashSet<uint>> GetCommunitiesAsync(string ip, uint asn, CancellationToken ct = default)
     {
         using var db = _dbFactory.CreateDbContext();
-        return db.Peers.AsNoTracking()
+        return await db.Peers.AsNoTracking()
             .Where(p => p.Ip == ip && p.Asn == asn)
             .SelectMany(p => p.Communities)
             .Select(c => (uint)c.Community)
-            .ToHashSet();
+            .ToHashSetAsync(ct);
     }
 
     // AsNoTracking is a read-only-intent marker here — a no-op for this scalar projection (no entities are materialized to track).
-    public HashSet<uint> GetCommunitiesByIp(string ip)
+    public async Task<HashSet<uint>> GetCommunitiesByIpAsync(string ip, CancellationToken ct = default)
     {
         using var db = _dbFactory.CreateDbContext();
-        return db.Peers.AsNoTracking()
+        return await db.Peers.AsNoTracking()
             .Where(p => p.Ip == ip)
             .SelectMany(p => p.Communities)
             .Select(c => (uint)c.Community)
-            .ToHashSet();
+            .ToHashSetAsync(ct);
     }
 
-    public void SetCommunities(string peerId, HashSet<uint> communities)
+    public async Task SetCommunitiesAsync(string peerId, HashSet<uint> communities, CancellationToken ct = default)
     {
         using var db = _dbFactory.CreateDbContext();
         // #226: ExecuteDelete runs in its own implicit transaction and AddRange/SaveChanges in
         // another; without an explicit transaction a failure between them leaves the peer with an
         // EMPTY collection (delete committed, insert did not). Wrap both in one transaction so the
         // replace is atomic.
-        using var tx = db.Database.BeginTransaction();
-        db.Set<PeerCommunity>().Where(c => c.PeerId == peerId).ExecuteDelete();
+        using var tx = await db.Database.BeginTransactionAsync(ct);
+        await db.Set<PeerCommunity>().Where(c => c.PeerId == peerId).ExecuteDeleteAsync(ct);
         db.Set<PeerCommunity>().AddRange(
             communities.Select(c => new PeerCommunity { PeerId = peerId, Community = c }));
-        db.SaveChanges();
-        tx.Commit();
-    }
-
-    public void ClearCommunities(string peerId)
-    {
-        using var db = _dbFactory.CreateDbContext();
-        db.Set<PeerCommunity>().Where(c => c.PeerId == peerId).ExecuteDelete();
+        await db.SaveChangesAsync(ct);
+        await tx.CommitAsync(ct);
     }
 
     // AsNoTracking is a read-only-intent marker here — a no-op for this scalar projection (no entities are materialized to track).
-    public List<string> GetSubscriptions(string peerId)
+    public async Task<List<string>> GetSubscriptionsAsync(string peerId, CancellationToken ct = default)
     {
         using var db = _dbFactory.CreateDbContext();
-        return db.Set<PeerSubscription>().AsNoTracking()
+        return await db.Set<PeerSubscription>().AsNoTracking()
             .Where(s => s.PeerId == peerId)
             .Select(s => s.AsnListName)
-            .ToList();
+            .ToListAsync(ct);
     }
 
-    public void SetSubscriptions(string peerId, List<string> asnListNames)
+    public async Task SetSubscriptionsAsync(string peerId, List<string> asnListNames, CancellationToken ct = default)
     {
         using var db = _dbFactory.CreateDbContext();
-        // #226: wrap delete+insert in a transaction — see SetCommunities.
-        using var tx = db.Database.BeginTransaction();
-        db.Set<PeerSubscription>().Where(s => s.PeerId == peerId).ExecuteDelete();
+        // #226: wrap delete+insert in a transaction — see SetCommunitiesAsync.
+        using var tx = await db.Database.BeginTransactionAsync(ct);
+        await db.Set<PeerSubscription>().Where(s => s.PeerId == peerId).ExecuteDeleteAsync(ct);
         db.Set<PeerSubscription>().AddRange(
             asnListNames.Select(n => new PeerSubscription { PeerId = peerId, AsnListName = n }));
-        db.SaveChanges();
-        tx.Commit();
+        await db.SaveChangesAsync(ct);
+        await tx.CommitAsync(ct);
     }
 
     // AsNoTracking is a read-only-intent marker here — a no-op for this scalar projection (no entities are materialized to track).
-    public List<string> GetCustomPrefixes(string peerId)
+    public async Task<List<string>> GetCustomPrefixesAsync(string peerId, CancellationToken ct = default)
     {
         using var db = _dbFactory.CreateDbContext();
-        return db.Set<PeerCustomPrefix>().AsNoTracking()
+        return await db.Set<PeerCustomPrefix>().AsNoTracking()
             .Where(c => c.PeerId == peerId)
             .Select(c => c.Prefix + "/" + c.PrefixLength)
-            .ToList();
+            .ToListAsync(ct);
     }
 
-    public void SetCustomPrefixes(string peerId, List<(string Prefix, byte Length)> prefixes)
+    public async Task SetCustomPrefixesAsync(string peerId, List<(string Prefix, byte Length)> prefixes, CancellationToken ct = default)
     {
         using var db = _dbFactory.CreateDbContext();
-        // #226: wrap delete+insert in a transaction — see SetCommunities.
-        using var tx = db.Database.BeginTransaction();
-        db.Set<PeerCustomPrefix>().Where(c => c.PeerId == peerId).ExecuteDelete();
+        // #226: wrap delete+insert in a transaction — see SetCommunitiesAsync.
+        using var tx = await db.Database.BeginTransactionAsync(ct);
+        await db.Set<PeerCustomPrefix>().Where(c => c.PeerId == peerId).ExecuteDeleteAsync(ct);
         db.Set<PeerCustomPrefix>().AddRange(
             prefixes.Select(p => new PeerCustomPrefix { PeerId = peerId, Prefix = p.Prefix, PrefixLength = p.Length }));
-        db.SaveChanges();
-        tx.Commit();
+        await db.SaveChangesAsync(ct);
+        await tx.CommitAsync(ct);
     }
 
     // AsNoTracking is a read-only-intent marker here — a no-op for this scalar projection (no entities are materialized to track).
-    public List<uint> GetCustomAsns(string peerId)
+    public async Task<List<uint>> GetCustomAsnsAsync(string peerId, CancellationToken ct = default)
     {
         using var db = _dbFactory.CreateDbContext();
-        return db.Set<PeerCustomAsn>().AsNoTracking()
+        return await db.Set<PeerCustomAsn>().AsNoTracking()
             .Where(c => c.PeerId == peerId)
             .Select(c => c.Asn)
-            .ToList();
+            .ToListAsync(ct);
     }
 
-    public void SetCustomAsns(string peerId, List<uint> asns)
+    public async Task SetCustomAsnsAsync(string peerId, List<uint> asns, CancellationToken ct = default)
     {
         using var db = _dbFactory.CreateDbContext();
-        // #226: wrap delete+insert in a transaction — see SetCommunities.
-        using var tx = db.Database.BeginTransaction();
-        db.Set<PeerCustomAsn>().Where(c => c.PeerId == peerId).ExecuteDelete();
+        // #226: wrap delete+insert in a transaction — see SetCommunitiesAsync.
+        using var tx = await db.Database.BeginTransactionAsync(ct);
+        await db.Set<PeerCustomAsn>().Where(c => c.PeerId == peerId).ExecuteDeleteAsync(ct);
         db.Set<PeerCustomAsn>().AddRange(
             asns.Select(a => new PeerCustomAsn { PeerId = peerId, Asn = a }));
-        db.SaveChanges();
-        tx.Commit();
+        await db.SaveChangesAsync(ct);
+        await tx.CommitAsync(ct);
     }
 
     /// <summary>
     /// Lists all user-supplied URL-based prefix-list sources for a peer (#143). Sources are stored as
     /// URLs (not parsed); fetched at send time in SendAllRoutesAsync.
     /// </summary>
-    public List<PeerCustomSource> GetCustomSources(string peerId)
+    public async Task<List<PeerCustomSource>> GetCustomSourcesAsync(string peerId, CancellationToken ct = default)
     {
         using var db = _dbFactory.CreateDbContext();
-        return db.Set<PeerCustomSource>().AsNoTracking()
+        return await db.Set<PeerCustomSource>().AsNoTracking()
             .Where(c => c.PeerId == peerId)
-            .ToList();
+            .ToListAsync(ct);
     }
 
     /// <summary>Adds a URL-based prefix-list source to a peer. Returns the created entity (with Id).</summary>
-    public PeerCustomSource AddCustomSource(string peerId, string name, string url, string? community)
+    public async Task<PeerCustomSource> AddCustomSourceAsync(string peerId, string name, string url, string? community, CancellationToken ct = default)
     {
         using var db = _dbFactory.CreateDbContext();
         var source = new PeerCustomSource
@@ -532,27 +513,27 @@ public sealed class PeerStore : IPeerStore
             Community = community
         };
         db.Set<PeerCustomSource>().Add(source);
-        db.SaveChanges();
+        await db.SaveChangesAsync(ct);
         return source;
     }
 
     /// <summary>Removes a URL-based source by its Id, scoped to a peer. Returns true if found and removed.</summary>
-    public bool DeleteCustomSource(string peerId, string sourceId)
+    public async Task<bool> DeleteCustomSourceAsync(string peerId, string sourceId, CancellationToken ct = default)
     {
         using var db = _dbFactory.CreateDbContext();
-        var deleted = db.Set<PeerCustomSource>()
+        var deleted = await db.Set<PeerCustomSource>()
             .Where(c => c.Id == sourceId && c.PeerId == peerId)
-            .ExecuteDelete();
+            .ExecuteDeleteAsync(ct);
         return deleted > 0;
     }
 
     /// <summary>Toggles a source's active state, scoped to a peer. Returns true if found and updated.</summary>
-    public bool SetSourceActive(string peerId, string sourceId, bool active)
+    public async Task<bool> SetSourceActiveAsync(string peerId, string sourceId, bool active, CancellationToken ct = default)
     {
         using var db = _dbFactory.CreateDbContext();
-        var updated = db.Set<PeerCustomSource>()
+        var updated = await db.Set<PeerCustomSource>()
             .Where(c => c.Id == sourceId && c.PeerId == peerId)
-            .ExecuteUpdate(s => s.SetProperty(c => c.Active, active));
+            .ExecuteUpdateAsync(s => s.SetProperty(c => c.Active, active), ct);
         return updated > 0;
     }
 

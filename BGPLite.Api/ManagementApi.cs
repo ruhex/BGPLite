@@ -31,6 +31,16 @@ public sealed class ManagementApi : IHostedService, IDisposable
     // replenish Timer that GC never collects, so "let GC handle it" leaked one timer per reload.
     private readonly List<IDisposable> _retiredLimiters = [];
     private IReadOnlyList<string>? _corsAllowedOrigins;
+    // #256: X-Real-IP is attacker-controllable behind a proxy that passes the header through
+    // unmodified, so it is consulted only when the operator opts in via Api.TrustXRealIp.
+    // 0/1 (not bool) so ApplyConfig can swap it with Interlocked.Exchange like the fields above.
+    private int _trustXRealIp;
+    // #256: fires once when a trusted proxy yields no usable forwarding header — all its clients
+    // then share one identity (rate-limit bucket + /api/me data), which operators should see.
+    private int _warnedProxyWithoutClientIp;
+    // #266 item 6: the body-size cap is read on every mutating request (ReadBodyAsync) — swapped
+    // atomically so a reload applies to subsequent requests instead of requiring a restart.
+    private long _maxRequestBodyBytes;
     private readonly BgpMetrics _metrics;
     // #263: required, not optional. Each of these was a silent feature switch: without
     // _sessionManager a peer edited in the UI was persisted but never pushed to its live session,
@@ -103,6 +113,8 @@ public sealed class ManagementApi : IHostedService, IDisposable
         _concurrencyLimiter = config.ApiRateLimit is { Enabled: true, MaxConcurrentRequests: > 0 } limitCfg
             ? CreateConcurrencyLimiter(limitCfg) : null;
         _corsAllowedOrigins = config.CorsAllowedOrigins;
+        _trustXRealIp = config.TrustXRealIp ? 1 : 0;
+        _maxRequestBodyBytes = config.MaxRequestBodyBytes;
     }
 
     /// <summary>
@@ -128,12 +140,14 @@ public sealed class ManagementApi : IHostedService, IDisposable
         // Swap every reloadable field atomically. A request that has already captured the old
         // references into locals finishes against them; the next request reads the new ones.
         // NOTE (#321 item 8): _config itself is NOT swapped — request-path code that must observe
-        // reloads reads the derived fields above; the fields still reading _config (e.g.
-        // MaxRequestBodyBytes, RipeStat lists) are restart-required, tracked as #266 item 6.
+        // reloads reads the derived fields swapped below; the remaining _config readers (RipeStat
+        // lists, CustomPrefixCommunity) are restart-required (#266 item 6 covered MaxRequestBodyBytes).
         var oldRateLimiter = Interlocked.Exchange(ref _rateLimiter, rateLimiter);
         var oldConcurrencyLimiter = Interlocked.Exchange(ref _concurrencyLimiter, concurrencyLimiter);
         Interlocked.Exchange(ref _trustedProxyNetworks, trusted);
         Interlocked.Exchange(ref _corsAllowedOrigins, newConfig.CorsAllowedOrigins);
+        Interlocked.Exchange(ref _trustXRealIp, newConfig.TrustXRealIp ? 1 : 0);
+        Interlocked.Exchange(ref _maxRequestBodyBytes, newConfig.MaxRequestBodyBytes);
 
         // Old limiters cannot be disposed here — a concurrent HandleAsync may still be mid-acquire
         // on them (#137). Park them for StopAsync/Dispose, which run after the in-flight drain.
@@ -144,11 +158,13 @@ public sealed class ManagementApi : IHostedService, IDisposable
         }
 
         _logger.LogInformation(
-            "Soft config reloaded: trustedProxies={TrustedProxyCount}, corsOrigins={CorsOriginCount}, rateLimit={RateLimitEnabled}, concurrencyLimit={ConcurrencyEnabled}",
+            "Soft config reloaded: trustedProxies={TrustedProxyCount}, corsOrigins={CorsOriginCount}, rateLimit={RateLimitEnabled}, concurrencyLimit={ConcurrencyEnabled}, trustXRealIp={TrustXRealIp}, maxRequestBodyBytes={MaxRequestBodyBytes}",
             trusted.Count,
             newConfig.CorsAllowedOrigins?.Count ?? 0,
             rateLimiter is not null,
-            concurrencyLimiter is not null);
+            concurrencyLimiter is not null,
+            newConfig.TrustXRealIp,
+            newConfig.MaxRequestBodyBytes);
     }
 
     /// <summary>
@@ -157,7 +173,12 @@ public sealed class ManagementApi : IHostedService, IDisposable
     /// Mirrors <see cref="GetClientIp"/>'s forwarding-header logic.
     /// </summary>
     internal string ResolveClientIpLive(IPAddress? remote, string? xForwardedFor, string? xRealIp) =>
-        ResolveClientIp(remote, xForwardedFor, xRealIp, Volatile.Read(ref _trustedProxyNetworks));
+        ResolveClientIp(
+            remote,
+            xForwardedFor,
+            xRealIp,
+            Volatile.Read(ref _trustedProxyNetworks),
+            Volatile.Read(ref _trustXRealIp) != 0);
 
     /// <summary>
     /// Resolves the CORS origin against the CURRENT live <c>_corsAllowedOrigins</c> (#136), for tests
@@ -169,6 +190,9 @@ public sealed class ManagementApi : IHostedService, IDisposable
 
     /// <summary>Whether a per-client rate limiter is currently active — exposed for hot-reload tests.</summary>
     internal bool IsRateLimitingEnabled => Volatile.Read(ref _rateLimiter) is not null;
+
+    /// <summary>Live body-size cap (<see cref="AppConfig.MaxRequestBodyBytes"/>) — exposed for hot-reload tests (#266 item 6).</summary>
+    internal long MaxRequestBodyBytesLive => Volatile.Read(ref _maxRequestBodyBytes);
 
     /// <summary>Whether a global concurrency limiter is currently active — exposed for hot-reload tests.</summary>
     internal bool IsConcurrencyLimitEnabled => Volatile.Read(ref _concurrencyLimiter) is not null;
@@ -200,6 +224,15 @@ public sealed class ManagementApi : IHostedService, IDisposable
                 "Management API is bound to {Address} (non-loopback) — ensure an authenticated reverse " +
                 "proxy (Caddy/nginx with TLS + auth) is in front, or the unauthenticated control plane " +
                 "is reachable from the network", _listenAddress);
+        }
+        // #256: state the hard proxy requirement at startup — a trusted proxy that neither appends
+        // X-Forwarded-For nor overwrites X-Real-IP lets clients forge their identity.
+        if (_trustedProxyNetworks.Count > 0)
+        {
+            _logger.LogWarning(
+                "TrustedProxies configured — the proxy MUST append X-Forwarded-For (real client on the " +
+                "right-most non-trusted hop); X-Real-IP is ignored unless Api.TrustXRealIp is true and " +
+                "the proxy overwrites it. A pass-through proxy lets clients spoof their IP");
         }
         _listenTask = ListenAsync(_cts.Token);
         return Task.CompletedTask;
@@ -464,7 +497,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
 
         // /api/me
         if (IsGet(method, segments, "api", "me"))
-            return HandleGetMe(ctx);
+            return await HandleGetMe(ctx);
 
         // /api/peers
         if (IsPost(method, segments, "api", "peers"))
@@ -472,7 +505,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
 
         // /api/peers/{id}
         if (segments.Length == 3 && segments[0] == "api" && segments[1] == "peers" && method == "GET")
-            return HandleGetPeer(segments[2]);
+            return await HandleGetPeer(segments[2]);
         if (segments.Length == 3 && segments[0] == "api" && segments[1] == "peers" && method == "PUT")
             return await HandleUpdatePeer(segments[2], ctx);
         if (segments.Length == 3 && segments[0] == "api" && segments[1] == "peers" && method == "DELETE")
@@ -486,7 +519,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
         if (segments.Length == 4 && segments[0] == "api" && segments[1] == "peers" && segments[3] == "sources")
         {
             if (method == "GET")
-                return HandleGetSources(segments[2]);
+                return await HandleGetSources(segments[2]);
             if (method == "POST")
                 return await HandleAddSource(segments[2], ctx);
         }
@@ -495,7 +528,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
         if (segments.Length == 5 && segments[0] == "api" && segments[1] == "peers" && segments[3] == "sources")
         {
             if (method == "DELETE")
-                return HandleDeleteSource(segments[2], segments[4]);
+                return await HandleDeleteSource(segments[2], segments[4]);
             if (method == "PATCH")
                 return await HandlePatchSource(segments[2], segments[4], ctx);
         }
@@ -550,7 +583,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
     /// </summary>
     private async Task<(string? Body, ApiResponse? Error)> ReadBodyAsync(HttpListenerContext ctx)
     {
-        var maxBytes = _config.MaxRequestBodyBytes;
+        var maxBytes = Volatile.Read(ref _maxRequestBodyBytes);
 
         // Fast path: Content-Length present and already over the cap → reject without reading.
         if (ctx.Request.ContentLength64 > maxBytes)
@@ -703,7 +736,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
 
     #region GET /api/me
 
-    private ApiResponse HandleGetMe(HttpListenerContext ctx)
+    private async Task<ApiResponse> HandleGetMe(HttpListenerContext ctx)
     {
         var clientIp = GetClientIp(ctx);
 
@@ -720,24 +753,25 @@ public sealed class ManagementApi : IHostedService, IDisposable
         {
             if (!uint.TryParse(asnQuery, out var asn))
                 return ApiResponse.Error($"Invalid 'asn' query parameter: '{asnQuery}'. Must be a non-negative integer.", 400);
-            var single = _store.GetPeer(clientIp, asn);
+            var single = await _store.GetPeerAsync(clientIp, asn);
             peerInfos = single is null ? [] : [single];
         }
         else
         {
-            peerInfos = _store.GetPeersByIp(clientIp);
+            peerInfos = await _store.GetPeersByIpAsync(clientIp);
         }
 
-        var details = peerInfos.Select(p => BuildPeerDetail(p.Id)).Where(d => d is not null).ToList()!;
+        var details = (await Task.WhenAll(peerInfos.Select(p => BuildPeerDetail(p.Id))))
+            .Where(d => d is not null).ToList()!;
         return ApiResponse.Ok(new { ip = clientIp, peers = details });
     }
 
     /// <summary>Builds the peer-detail anonymous object for /api/me. Returns null if the peer vanished.</summary>
-    private object? BuildPeerDetail(string peerId)
+    private async Task<object?> BuildPeerDetail(string peerId)
     {
         // #228: single DbContext roundtrip via PeerStore.GetPeerDetail (was 5 separate DbContexts:
         // GetDbPeerById + GetSubscriptions + GetCustomPrefixes + GetCustomAsns + GetCommunities).
-        var peer = _store.GetPeerDetail(peerId);
+        var peer = await _store.GetPeerDetailAsync(peerId);
         if (peer is null) return null;
 
         // #212: actual advertised count from the live session (post-aggregation, post-dedup).
@@ -806,7 +840,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
 
         _logger.LogInformation("CreatePeer deserialized: AsnLists={Lists}, CustomPrefixes={Prefixes}, CustomAsns={Asns}",
             SanitizeForLog(string.Join(",", asnLists)), SanitizeForLog(string.Join(",", data.CustomPrefixes ?? [])),
-            string.Join(",", data.CustomAsns ?? []));
+            SanitizeForLog(string.Join(",", data.CustomAsns ?? [])));
 
         if (data.CustomPrefixes is not null)
         {
@@ -824,34 +858,34 @@ public sealed class ManagementApi : IHostedService, IDisposable
         // (PeerId, Prefix, PrefixLength) key — returned 500 over an already-committed peer row and
         // left the user with a half-configured peer. Duplicates are now deduplicated inside the
         // store: a set of prefixes means the same thing whether a value appears once or twice.
-        var id = _store.SavePeerConfiguration(
+        // #267 item 6: the upsert returns (Id, Status, CreatedAt) from its RETURNING clause — no
+        // follow-up GetDbPeerById roundtrip for fields the caller already knows.
+        var saved = await _store.SavePeerConfigurationAsync(
             normalizedIp, data.Asn, data.Description, asnLists, customPrefixes, data.CustomAsns ?? []);
 
-        var peer = _store.GetDbPeerById(id);
-
         _logger.LogInformation("Created peer {Ip} AS{Asn} ({Id}): {Subs} lists, {Prefixes} custom prefixes, {Asns} custom AS",
-            normalizedIp, data.Asn, id, asnLists.Count, customPrefixes.Count, data.CustomAsns?.Count ?? 0);
+            normalizedIp, data.Asn, saved.Id, asnLists.Count, customPrefixes.Count, data.CustomAsns?.Count ?? 0);
 
         _ = _sessionManager.RefreshPeerAsync(normalizedIp, data.Asn);
 
         return ApiResponse.Ok(new
         {
-            id,
+            id = saved.Id,
             ip = normalizedIp,
             asn = data.Asn,
             description = data.Description,
-            status = peer?.Status ?? "inactive",
-            createdAt = peer?.CreatedAt,
+            status = saved.Status,
+            createdAt = saved.CreatedAt,
             lists = asnLists,
             customPrefixes = data.CustomPrefixes ?? [],
             customAsns = data.CustomAsns ?? []
         });
     }
 
-    private ApiResponse HandleGetPeer(string peerId)
+    private async Task<ApiResponse> HandleGetPeer(string peerId)
     {
         // #228: single DbContext roundtrip via PeerStore.GetPeerDetail (was 6 separate DbContexts).
-        var peer = _store.GetPeerDetail(peerId);
+        var peer = await _store.GetPeerDetailAsync(peerId);
         if (peer is null)
             return ApiResponse.Error("Peer not found", 404);
 
@@ -880,7 +914,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
     /// </summary>
     private async Task<ApiResponse> HandleUpdatePeer(string peerId, HttpListenerContext ctx)
     {
-        var peer = _store.GetDbPeerById(peerId);
+        var peer = await _store.GetDbPeerByIdAsync(peerId);
         if (peer is null)
             return ApiResponse.Error("Peer not found", 404);
 
@@ -930,18 +964,18 @@ public sealed class ManagementApi : IHostedService, IDisposable
                     "See /api/asn-lists for the configured names.", 400);
         }
 
-        _store.UpdatePeerConfiguration(peerId, data.Description, data.Lists, parsedPrefixes, data.CustomAsns);
+        await _store.UpdatePeerConfigurationAsync(peerId, data.Description, data.Lists, parsedPrefixes, data.CustomAsns);
 
         _logger.LogInformation("Updated peer {Id}", SanitizeForLog(peerId));
 
         _ = _sessionManager.RefreshPeerAsync(peer.Ip, peer.Asn ?? 0);
 
-        return HandleGetPeer(peerId);
+        return await HandleGetPeer(peerId);
     }
 
     internal async Task<ApiResponse> HandleDeletePeer(string peerId)
     {
-        var peer = _store.GetDbPeerById(peerId);
+        var peer = await _store.GetDbPeerByIdAsync(peerId);
         if (peer is null)
             return ApiResponse.Error("Peer not found", 404);
 
@@ -955,7 +989,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
         using var bound = new CancellationTokenSource(TimeSpan.FromSeconds(10));
         await _sessionManager.TerminatePeerAsync(peer.Ip, peer.Asn ?? 0, bound.Token);
 
-        _store.DeletePeer(peerId);
+        await _store.DeletePeerAsync(peerId);
         _logger.LogInformation("Deleted peer {Id} ({Ip})", SanitizeForLog(peerId), peer.Ip);
         return ApiResponse.Ok(new { id = peerId, deleted = true });
     }
@@ -964,18 +998,18 @@ public sealed class ManagementApi : IHostedService, IDisposable
 
     #region /api/peers/{id}/sources (#143)
 
-    private ApiResponse HandleGetSources(string peerId)
+    private async Task<ApiResponse> HandleGetSources(string peerId)
     {
-        if (_store.GetDbPeerById(peerId) is null)
+        if (await _store.GetDbPeerByIdAsync(peerId) is null)
             return ApiResponse.Error("Peer not found", 404);
 
-        var sources = _store.GetCustomSources(peerId);
+        var sources = await _store.GetCustomSourcesAsync(peerId);
         return ApiResponse.Ok(sources.Select(s => new { id = s.Id, name = s.Name, url = s.Url, community = s.Community, active = s.Active }));
     }
 
     private async Task<ApiResponse> HandleAddSource(string peerId, HttpListenerContext ctx)
     {
-        var peer = _store.GetDbPeerById(peerId);
+        var peer = await _store.GetDbPeerByIdAsync(peerId);
         if (peer is null)
             return ApiResponse.Error("Peer not found", 404);
 
@@ -1029,7 +1063,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
             return ApiResponse.Error($"Invalid URL: the host could not be reached or is not allowed", 400);
         }
 
-        var source = _store.AddCustomSource(peerId, data.Name, data.Url, data.Community);
+        var source = await _store.AddCustomSourceAsync(peerId, data.Name, data.Url, data.Community);
 
         // Trigger refresh so the peer receives the new source's prefixes immediately —
         // same pattern as CreatePeer/UpdatePeer. Pass ASN so shared-IP peers aren't refreshed (#200).
@@ -1040,13 +1074,13 @@ public sealed class ManagementApi : IHostedService, IDisposable
         return ApiResponse.Ok(new { id = source.Id, name = source.Name, url = source.Url, community = source.Community, active = source.Active });
     }
 
-    private ApiResponse HandleDeleteSource(string peerId, string sourceId)
+    private async Task<ApiResponse> HandleDeleteSource(string peerId, string sourceId)
     {
-        var peer = _store.GetDbPeerById(peerId);
+        var peer = await _store.GetDbPeerByIdAsync(peerId);
         if (peer is null)
             return ApiResponse.Error("Peer not found", 404);
 
-        if (!_store.DeleteCustomSource(peerId, sourceId))
+        if (!await _store.DeleteCustomSourceAsync(peerId, sourceId))
             return ApiResponse.Error($"Source '{sourceId}' not found", 404);
 
         // Trigger refresh so the source's prefixes are withdrawn immediately (#200: ASN-scoped).
@@ -1058,7 +1092,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
 
     private async Task<ApiResponse> HandlePatchSource(string peerId, string sourceId, HttpListenerContext ctx)
     {
-        var peer = _store.GetDbPeerById(peerId);
+        var peer = await _store.GetDbPeerByIdAsync(peerId);
         if (peer is null)
             return ApiResponse.Error("Peer not found", 404);
 
@@ -1069,7 +1103,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
         if (data is null || data.Active is null)
             return ApiResponse.Error("PATCH body must contain { \"active\": true/false }", 400);
 
-        if (!_store.SetSourceActive(peerId, sourceId, data.Active.Value))
+        if (!await _store.SetSourceActiveAsync(peerId, sourceId, data.Active.Value))
             return ApiResponse.Error($"Source '{sourceId}' not found", 404);
 
         // Trigger refresh so toggling active/inactive takes effect immediately (#200: ASN-scoped).
@@ -1085,7 +1119,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
 
     private async Task<ApiResponse> HandleExportPrefixes(string peerId, HttpListenerContext ctx)
     {
-        var peer = _store.GetDbPeerById(peerId);
+        var peer = await _store.GetDbPeerByIdAsync(peerId);
         if (peer is null)
             return ApiResponse.Error("Peer not found", 404);
 
@@ -1104,9 +1138,9 @@ public sealed class ManagementApi : IHostedService, IDisposable
         var prefixes = new List<string>();
 
         // Custom prefixes
-        prefixes.AddRange(_store.GetCustomPrefixes(peerId));
+        prefixes.AddRange(await _store.GetCustomPrefixesAsync(peerId, ct));
 
-        var subscriptions = _store.GetSubscriptions(peerId);
+        var subscriptions = await _store.GetSubscriptionsAsync(peerId, ct);
         var subscribedLists = _config.RipeStat?.AsnLists
             .Where(l => subscriptions.Contains(l.Name))
             .ToList() ?? [];
@@ -1432,12 +1466,39 @@ public sealed class ManagementApi : IHostedService, IDisposable
         catch (FormatException) { return false; }
     }
 
-    private string GetClientIp(HttpListenerContext ctx) =>
-        ResolveClientIp(
-            ctx.Request.RemoteEndPoint?.Address,
+    private string GetClientIp(HttpListenerContext ctx)
+    {
+        var remote = ctx.Request.RemoteEndPoint?.Address;
+        var resolved = ResolveClientIp(
+            remote,
             ctx.Request.Headers["X-Forwarded-For"],
             ctx.Request.Headers["X-Real-IP"],
-            Volatile.Read(ref _trustedProxyNetworks));
+            Volatile.Read(ref _trustedProxyNetworks),
+            Volatile.Read(ref _trustXRealIp) != 0);
+        WarnWhenProxyHidesClientIp(remote, resolved);
+        return resolved;
+    }
+
+    /// <summary>
+    /// #256: a trusted proxy whose request carries no usable <c>X-Forwarded-For</c> hop (and no
+    /// opted-in <c>X-Real-IP</c>) collapses all its traffic into one client identity — the proxy
+    /// address: every client behind it shares a rate-limit bucket and <c>/api/me</c> data. Logs a
+    /// warning once so a misconfigured proxy is visible without spamming every request.
+    /// </summary>
+    private void WarnWhenProxyHidesClientIp(IPAddress? remote, string resolved)
+    {
+        if (remote is null) return;
+        var normalized = remote.IsIPv4MappedToIPv6 ? remote.MapToIPv4() : remote;
+        var trusted = Volatile.Read(ref _trustedProxyNetworks);
+        if (trusted.Count == 0 || !trusted.Any(n => n.Contains(normalized))) return;
+        if (!string.Equals(resolved, normalized.ToString(), StringComparison.Ordinal)) return;
+        if (Interlocked.Exchange(ref _warnedProxyWithoutClientIp, 1) != 0) return;
+        _logger.LogWarning(
+            "Trusted-proxy request from {Remote} carries no usable X-Forwarded-For / X-Real-IP — all its " +
+            "clients share one rate-limit bucket and /api/me identity. Configure the proxy to append " +
+            "X-Forwarded-For (or to overwrite X-Real-IP and set Api.TrustXRealIp: true).",
+            normalized.ToString());
+    }
 
     /// <summary>
     /// Builds the per-client-IP token-bucket rate limiter for the management API (#116). Each distinct
@@ -1484,10 +1545,12 @@ public sealed class ManagementApi : IHostedService, IDisposable
     /// Forwarding headers are honored ONLY when the immediate peer (<paramref name="remote"/>) is a
     /// configured trusted proxy (#91) — a direct client cannot inject <c>X-Forwarded-For</c> /
     /// <c>X-Real-IP</c>. <c>X-Forwarded-For</c> is walked right-to-left and the first hop that is not
-    /// itself a trusted proxy is returned, defeating injection through the proxy. Extracted as a pure
-    /// function so the security logic is unit-testable without an HttpListener.
+    /// itself a trusted proxy is returned, defeating injection through the proxy. <c>X-Real-IP</c> is
+    /// consulted only when <paramref name="trustXRealIp"/> is set (#256) — unlike XFF its value cannot
+    /// be verified against the trusted-hop chain. Extracted as a pure function so the security logic
+    /// is unit-testable without an HttpListener.
     /// </summary>
-    internal static string ResolveClientIp(IPAddress? remote, string? xForwardedFor, string? xRealIp, IReadOnlyList<IPNetwork> trustedProxies)
+    internal static string ResolveClientIp(IPAddress? remote, string? xForwardedFor, string? xRealIp, IReadOnlyList<IPNetwork> trustedProxies, bool trustXRealIp)
     {
         if (remote is null) return "unknown";
 
@@ -1519,10 +1582,13 @@ public sealed class ManagementApi : IHostedService, IDisposable
             }
         }
 
-        // Single-hop proxies commonly set X-Real-IP instead of (or alongside) X-Forwarded-For.
-        // Validate + normalize so a malformed header can't surface garbage (e.g. newlines for log
-        // forging) — fall back to the proxy address if it isn't a parseable IP.
-        if (!string.IsNullOrWhiteSpace(xRealIp) && IPAddress.TryParse(xRealIp.Trim(), out var realAddr))
+        // Single-hop proxies commonly set X-Real-IP instead of (or alongside) X-Forwarded-For. Unlike
+        // XFF, the value cannot be verified against the trusted-hop chain — a proxy that passes the
+        // header through instead of overwriting it turns it into an attacker-controlled input (#256),
+        // so it is consulted only when the operator opts in via Api.TrustXRealIp. Validate + normalize
+        // so a malformed header can't surface garbage (e.g. newlines for log forging) — fall back to
+        // the proxy address if it isn't a parseable IP.
+        if (trustXRealIp && !string.IsNullOrWhiteSpace(xRealIp) && IPAddress.TryParse(xRealIp.Trim(), out var realAddr))
             return Normalize(realAddr).ToString();
 
         return remote.ToString();

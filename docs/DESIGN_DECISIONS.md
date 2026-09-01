@@ -56,15 +56,23 @@ For section-by-section RFC conformance status, see `RFC_COMPLIANCE.md` (2026-07-
 - **Consequence:** an UPDATE a conformant peer might accept is treated-as-withdraw.
 - **Tracker:** #238 (deliberate, kept).
 
-### D6. Graceful Restart advertised without receiving-side retention
-- **Decision:** the GR capability (with IPv4/Unicast tuple) is advertised by default, but routes of a
-  silently-disconnecting GR peer are flushed immediately; no stale-marking, no Restart-Time timer,
-  no receive-side EoR handling.
-- **Context:** RFC 4724 §4.2 requires the receiving speaker to retain and mark stale; implementing
-  the full receiving half was deferred.
-- **Consequence:** the capability promises behavior the code does not have; peer routes flap during
-  peer restarts. Either stop advertising or implement retention.
-- **Tracker:** #318 (open).
+### D6. Graceful Restart capability is not advertised
+- **Decision:** the OPEN does not include the GR capability. The receiving-speaker half of RFC 4724
+  (§4.2: retain and stale-mark a restarting peer's routes for its Restart Time, flush on expiry or
+  End-of-RIB) is not implemented, and advertising the `<AFI=1, SAFI=1, F>` tuple promised behavior
+  the code does not have. The sending-side conveniences gated on the `GracefulRestart` config are
+  unchanged: an End-of-RIB marker after the initial route dump, and the GR-aware silent close on
+  server shutdown (`StopAsync`).
+- **Context:** the capability was previously advertised by default while routes of a
+  silently-disconnecting peer were flushed immediately (`RemoveAllOwnedBy`, #314) — a wire promise
+  the code did not honor. RFC 4724 §4.2's MUST binds a speaker to the procedures it engages;
+  stopping the advertisement is the honest half-measure until retention exists (#318 direction 1).
+- **Consequence:** GR-capable peers no longer retain our routes across our restart — they flush on
+  session end like any non-GR peer. The peer's GR advertisement is still parsed and logged.
+  `RestartTime` / `GracefulRestartForwardingState` are accepted for config compatibility but unused
+  while the capability is not advertised. Re-advertise only together with receiving-speaker
+  retention.
+- **Tracker:** #318 (open for direction 2 — implement the receiving half).
 
 ### D7. Hold time semantics
 - **Decision:** negotiated hold time = `min(local, peer)` with 0 on either side disabling timers;
@@ -157,10 +165,10 @@ For section-by-section RFC conformance status, see `RFC_COMPLIANCE.md` (2026-07-
 - **Decision:** `ISessionManager.TerminatePeerAsync` (management-API peer deletion) sends a Cease
   (Administrative Reset) to the peer's established sessions even when Graceful Restart is enabled —
   unlike `StopAsync`, which silent-closes under GR.
-- **Context:** GR retention exists so peers keep our routes across a restart we will return from
-  (RFC 4724 §4). Deleting a peer is a permanent removal, not a restart — retention would leave stale
-  routes at the peer until its restart timer expired, so the NOTIFICATION termination (which bypasses
-  GR and makes the peer flush) is the correct signal (#323).
+- **Context:** the sending-side GR conveniences (End-of-RIB, the GR-aware silent close in
+  `StopAsync`) signal "this is a restart, retain" — but deletion is a permanent removal, not a
+  restart, so the NOTIFICATION termination is the correct signal there regardless (and since D6 the
+  capability is not advertised, so no peer retains our routes across ANY of our disconnects) (#323).
 - **Consequence:** deletion is not a revocation: nothing stops the peer from reconnecting, and D11
   auto-registration serves it again on the next OPEN (a deny-list is a separate product decision).
   Pre-OPEN connections (remote ASN not yet known) are not matched by the (ip, asn) termination and
@@ -189,3 +197,37 @@ For section-by-section RFC conformance status, see `RFC_COMPLIANCE.md` (2026-07-
   silently dropped (log Warning + `UpdatesRejected` metric) instead of a session reset; operators
   comparing against RFC-strict speakers will see BGPLite retain sessions others would close.
 - **Tracker:** #94, #222, #284, #288, #322 (closed); recorded via #344.
+
+### D19. Custom prefixes suppress the source prefixes they cover
+- **Decision:** a custom prefix is the operator's explicit override: any route STRICTLY more specific
+  than one is dropped from the peer's outbound list, regardless of its source or community set. An
+  exact custom==source duplicate is NOT suppressed — `MergeDuplicatePrefixes` (#209) unions the
+  communities, so the source's tags survive. Suppression runs in the assembler on the flat per-peer
+  list, BEFORE the per-community-set aggregation — `ExactUnionPrefixAggregator` (D15, #82) itself is
+  untouched and never merges across community sets.
+- **Context:** operators add a broader custom prefix (e.g. a /16) to override a source list whose
+  more-specifics (e.g. /24s in different communities) were still advertised alongside it — the two
+  land in different aggregator groups and both went out (#220).
+- **Consequence:** suppressed source prefixes lose their community tags on the wire — the receiving
+  peer sees the custom-prefix community; that is the override's intent. Per-send log line reports the
+  suppressed count. Idempotent across refreshes: every rebuild of the list applies the same
+  deterministic filter, so `_advertisedPrefixes` stays consistent for withdrawals.
+- **Tracker:** #220.
+
+## Management API
+
+### D18. `X-Real-IP` is ignored by default, even behind trusted proxies
+- **Decision:** a trusted proxy's `X-Real-IP` header is consulted only when the operator sets
+  `Api.TrustXRealIp: true` (hot-reloadable). `X-Forwarded-For` handling is unchanged: walked
+  right-to-left past trusted hops. Startup warns about the proxy requirements when TrustedProxies is
+  configured; a runtime warning (once) fires when a trusted proxy yields no usable forwarding header.
+- **Context:** unlike XFF, an X-Real-IP value cannot be verified against the trusted-hop chain — a
+  proxy that passes the header through instead of overwriting it (plain nginx without
+  `proxy_set_header X-Real-IP $remote_addr;`) turns it into an attacker-controlled input: fresh
+  rate-limit buckets per request (#116 bypass) and a forged `/api/me` identity, which may surface
+  token-bearing prefix-source URLs (#149). Direct (non-trusted) connections were already hardened by
+  #117 — this closes the trusted-proxy hole (#256).
+- **Consequence:** deployments that relied on an X-Real-IP-only proxy must set `TrustXRealIp: true`
+  (intentional behavior change, secure by default); such a proxy is otherwise attributed to the
+  proxy address, with the one-shot runtime warning pointing at the misconfiguration.
+- **Tracker:** #256.

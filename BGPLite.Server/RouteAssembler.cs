@@ -63,7 +63,7 @@ public sealed class RouteAssembler : IRouteAssembler
         var defaultComms = _communityResolver.Resolve(
             new CommunitySource(CommunitySourceKind.PrefixSource, _appConfig.DefaultPrefixSource));
 
-        var peer = _peerStore.LoadPeerRoutingView(peerIp, remoteAsn);
+        var peer = await _peerStore.LoadPeerRoutingViewAsync(peerIp, remoteAsn, ct);
         if (peer is not null)
         {
             var subscriptionIds = peer.Subscriptions;
@@ -90,7 +90,7 @@ public sealed class RouteAssembler : IRouteAssembler
                     _logger.LogError(ex, "Failed to fetch RU prefixes for {Peer}", peerLabel);
                 }
 
-                return FilterAndReturn(routes, filterPeerConfig);
+                return await FilterAndReturnAsync(routes, filterPeerConfig, ct);
             }
 
             _logger.LogInformation("Peer {Peer} subscriptions: [{Subs}]", peerLabel, string.Join(", ", subscriptionIds));
@@ -184,6 +184,7 @@ public sealed class RouteAssembler : IRouteAssembler
             // write time (ParseCustomPrefix), but a corrupt row or a write path that bypassed the
             // API must not throw a FormatException out of the BGP send path — skip + log instead.
             var customPrefixComms = _communityResolver.Resolve(new CommunitySource(CommunitySourceKind.Custom));
+            var customRanges = new List<(uint Network, byte Length)>();
             foreach (var cidr in customPrefixes)
             {
                 if (!PrefixCidr.TryParse(cidr, out var prefix, out var length))
@@ -191,6 +192,7 @@ public sealed class RouteAssembler : IRouteAssembler
                     _logger.LogWarning("Skipping malformed custom prefix '{Cidr}' for {Peer}", cidr, peerLabel);
                     continue;
                 }
+                customRanges.Add((prefix, length));
                 routes.Add(MakeRoute(prefix, length, nextHop, null, customPrefixComms));
             }
 
@@ -220,6 +222,19 @@ public sealed class RouteAssembler : IRouteAssembler
                     routes, source, nextHop, _prefixService, _communityResolver, _logger, peerLabel, ct);
             }
 
+            // #220 "suppress more-specifics": a custom prefix is an explicit operator override, so
+            // any other route it covers is dropped before aggregation — the operator's broader
+            // prefix wins over the source lists.
+            if (customRanges.Count > 0)
+            {
+                var before = routes.Count;
+                routes = SuppressCoveredByCustomPrefixes(routes, customRanges);
+                if (routes.Count < before)
+                    _logger.LogInformation(
+                        "Suppressed {Suppressed} source prefixes covered by custom prefixes for {Peer}",
+                        before - routes.Count, peerLabel);
+            }
+
             _logger.LogInformation("Sending {Count} total routes to {Peer}", routes.Count, peerLabel);
 
             // Configured peer resolved 0 prefixes — fall back to RU.
@@ -239,7 +254,7 @@ public sealed class RouteAssembler : IRouteAssembler
                 }
             }
 
-            return FilterAndReturn(routes, filterPeerConfig);
+            return await FilterAndReturnAsync(routes, filterPeerConfig, ct);
         }
         else
         {
@@ -250,12 +265,12 @@ public sealed class RouteAssembler : IRouteAssembler
             if (ct.IsCancellationRequested)
             {
                 _logger.LogInformation("Cancelled build for unknown peer {Ip} — not auto-registering", peerLabel);
-                return FilterAndReturn(routes, filterPeerConfig);
+                return await FilterAndReturnAsync(routes, filterPeerConfig, ct);
             }
 
             // Unknown peer — auto-register and send default RU list.
             _logger.LogInformation("Unknown peer {Ip}, auto-registering with RU defaults", peerLabel);
-            _peerStore.CreatePeer(peerIp, remoteAsn, null);
+            await _peerStore.CreatePeerAsync(peerIp, remoteAsn, null, ct);
 
             try
             {
@@ -271,16 +286,43 @@ public sealed class RouteAssembler : IRouteAssembler
                 _logger.LogError(ex, "Failed to fetch RU prefixes for {Peer}", peerLabel);
             }
 
-            return FilterAndReturn(routes, filterPeerConfig);
+            return await FilterAndReturnAsync(routes, filterPeerConfig, ct);
         }
     }
 
     /// <summary>Applies the per-peer outgoing community filter and returns the filtered list.</summary>
-    private List<Route> FilterAndReturn(List<Route> routes, PeerConfig filterPeerConfig)
+    private async Task<List<Route>> FilterAndReturnAsync(List<Route> routes, PeerConfig filterPeerConfig, CancellationToken ct)
     {
         // Resolve the community allow-set ONCE for the whole send — not once per route (#79).
-        var allowSet = _routeFilter.ResolveOutgoingAllowSet(filterPeerConfig);
+        var allowSet = await _routeFilter.ResolveOutgoingAllowSetAsync(filterPeerConfig, ct);
         return routes.Where(r => _routeFilter.AcceptOutgoing(r, filterPeerConfig, allowSet)).ToList();
+    }
+
+    /// <summary>
+    /// #220 "suppress more-specifics": a custom prefix is an explicit operator override, so any
+    /// SOURCE route covered by one is dropped from the outbound list, regardless of its source or
+    /// community set. Two things survive: an exact custom==source duplicate (its communities get
+    /// unioned by <c>BgpSession.MergeDuplicatePrefixes</c>, #209) and every CONFIGURED CUSTOM
+    /// prefix itself — nested customs (e.g. /8 + a deliberate /16) must not suppress each other
+    /// (CodeRabbit on the integration review). Runs on the flat per-peer list BEFORE the
+    /// per-community-set aggregator sees it. Extracted as a pure function for unit tests.
+    /// </summary>
+    internal static List<Route> SuppressCoveredByCustomPrefixes(
+        List<Route> routes, List<(uint Network, byte Length)> customRanges)
+    {
+        // A route is covered when its length is strictly greater than the custom prefix's and its
+        // network, masked to the custom length, equals the (already host-bit-normalized) custom
+        // network — the repo's masking idiom (PrefixCidr, ExactUnionPrefixAggregator).
+        // Mask(0) must be 0, not 0xFFFFFFFF << 32 (a shift-by-32 is a no-op on uint, not a wipe).
+        static uint Mask(byte length) => length == 0 ? 0u : 0xFFFFFFFFu << (32 - length);
+        return routes
+            .Where(r =>
+                // A configured custom prefix is never suppressed — including by a broader
+                // custom prefix of the same peer. Exact (network, length) == custom match.
+                customRanges.Contains((r.Prefix, r.PrefixLength))
+                || !customRanges.Any(cr => r.PrefixLength > cr.Length
+                                           && (r.Prefix & Mask(cr.Length)) == cr.Network))
+            .ToList();
     }
 
     /// <summary>

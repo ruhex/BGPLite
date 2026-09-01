@@ -136,7 +136,7 @@ Deliberate deviations from the RFCs are catalogued in `docs/DESIGN_DECISIONS.md`
 
 - `BgpServer` owns live session state; callers should receive snapshots, not shared mutable pointers.
 - Do not hold the session lock while sending data or writing to listeners.
-- Avoid blocking synchronous I/O on BGP session threads (the send/read paths are async end-to-end; the known exception — sync `PeerStore` — is tracked in #262, don't add more).
+- Avoid blocking synchronous I/O on BGP session threads (the send/read paths are async end-to-end, including the persistence contract: `IPeerStore` is async-only since #262 — keep new store members async).
 - CancellationToken must propagate through long-running network and background operations; OCE from caller cancellation is never swallowed or cached as a failure (#114/#225/#254).
 - Timer callbacks and session shutdown must be safe when executed concurrently — cross-thread teardown coordination goes through atomic latches (see the `_teardownReason` CAS in `BgpSession`), not read-then-write flags.
 - Session disposal must be idempotent — use the `Interlocked.Exchange` test-and-set pattern (`BgpSession.Dispose`, `SocketBgpConnection.Dispose`); a second `Dispose` must be a no-op, not a double-release.

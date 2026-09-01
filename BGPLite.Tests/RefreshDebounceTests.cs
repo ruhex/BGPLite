@@ -24,29 +24,18 @@ public class RefreshDebounceTests
     {
         public volatile bool Armed;
         public int LoadCalls;
-        public readonly ManualResetEventSlim Release = new(false);
+        // #262: the contract is async now, so the gate awaits instead of parking a pool thread.
+        public readonly TaskCompletionSource Release = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
-        public string CreatePeer(string ip, uint asn, string? description) => "peer";
-        public void UpsertPeer(string ip, uint asn) { }
-        public void UpdateSessionStatus(string ip, uint asn, bool active) { }
-        public void DeletePeer(string id) { }
-        public PeerInfo? GetPeerByIp(string ip) => null;
-        public PeerInfo? GetPeer(string ip, uint asn) => null;
-        public PeerInfo? GetPeerById(string id) => null;
-        public List<string> GetSubscriptions(string peerId) => [];
-        public List<string> GetCustomPrefixes(string peerId) => [];
-        public List<uint> GetCustomAsns(string peerId) => [];
-        public HashSet<uint> GetCommunities(string peerId) => [];
-        public HashSet<uint> GetCommunities(string ip, uint asn) => [];
-        public void SetCommunities(string peerId, HashSet<uint> communities) { }
-        public void ClearCommunities(string peerId) { }
-        public void SetDescription(string id, string description) { }
+        public Task<string> CreatePeerAsync(string ip, uint asn, string? description, CancellationToken ct = default) => Task.FromResult("peer");
+        public Task UpsertPeerAsync(string ip, uint asn, CancellationToken ct = default) => Task.CompletedTask;
+        public Task UpdateSessionStatusAsync(string ip, uint asn, bool active, CancellationToken ct = default) => Task.CompletedTask;
 
-        public PeerRoutingView? LoadPeerRoutingView(string ip, uint asn)
+        public async Task<PeerRoutingView?> LoadPeerRoutingViewAsync(string ip, uint asn, CancellationToken ct = default)
         {
             Interlocked.Increment(ref LoadCalls);
             if (Armed)
-                Release.Wait(); // block the refresh cycle mid-flight (sync contract)
+                await Release.Task; // hold the refresh cycle mid-flight
             return new PeerRoutingView("peer", [], [], [], []);
         }
     }
@@ -193,7 +182,7 @@ public class RefreshDebounceTests
             Assert.Equal(baseline + 1, Volatile.Read(ref store.LoadCalls)); // exactly ONE in-flight cycle
 
             store.Armed = false;
-            store.Release.Set();
+            store.Release.TrySetResult();
             await Task.WhenAll(tasks).WaitAsync(TimeSpan.FromSeconds(10));
 
             var total = Volatile.Read(ref store.LoadCalls) - baseline;
@@ -202,7 +191,7 @@ public class RefreshDebounceTests
         finally
         {
             store.Armed = false;
-            store.Release.Set(); // never leak a blocked pool thread on an assertion failure
+            store.Release.TrySetResult(); // never leak a blocked pool thread on an assertion failure
         }
     }
 

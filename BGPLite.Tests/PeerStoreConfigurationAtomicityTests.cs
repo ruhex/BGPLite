@@ -27,21 +27,21 @@ public class PeerStoreConfigurationAtomicityTests
     /// Deduplicated rather than rejected — a set of prefixes means the same thing either way.
     /// </summary>
     [Fact]
-    public void SavePeerConfiguration_DuplicatePrefixes_AreAcceptedIdempotently()
+    public async Task SavePeerConfiguration_DuplicatePrefixes_AreAcceptedIdempotently()
     {
         var (store, connection) = NewStore();
         using var _ = connection;
 
-        var id = store.SavePeerConfiguration(Ip, Asn, "dup prefixes",
+        var id = (await store.SavePeerConfigurationAsync(Ip, Asn, "dup prefixes",
             asnListNames: ["ru"],
             customPrefixes: [("10.0.0.0", 8), ("10.0.0.0", 8), ("192.0.2.0", 24)],
-            customAsns: [64512]);
+            customAsns: [64512])).Id;
 
         // A set of prefixes: announcing 10.0.0.0/8 twice is the same as once, so the duplicate is
         // dropped rather than rejected.
-        Assert.Equal(["10.0.0.0/8", "192.0.2.0/24"], store.GetCustomPrefixes(id).Order().ToList());
-        Assert.Equal(["ru"], store.GetSubscriptions(id));
-        Assert.Equal([64512u], store.GetCustomAsns(id));
+        Assert.Equal(["10.0.0.0/8", "192.0.2.0/24"], (await store.GetCustomPrefixesAsync(id)).Order().ToList());
+        Assert.Equal(["ru"], await store.GetSubscriptionsAsync(id));
+        Assert.Equal([64512u], await store.GetCustomAsnsAsync(id));
     }
 
     /// <summary>
@@ -49,18 +49,18 @@ public class PeerStoreConfigurationAtomicityTests
     /// composite keys, so a pasted-twice list name or ASN threw exactly as a repeated CIDR did.
     /// </summary>
     [Fact]
-    public void SavePeerConfiguration_DuplicateListNamesAndAsns_AreAcceptedIdempotently()
+    public async Task SavePeerConfiguration_DuplicateListNamesAndAsns_AreAcceptedIdempotently()
     {
         var (store, connection) = NewStore();
         using var _ = connection;
 
-        var id = store.SavePeerConfiguration(Ip, Asn, "dup lists and asns",
+        var id = (await store.SavePeerConfigurationAsync(Ip, Asn, "dup lists and asns",
             asnListNames: ["ru", "ru", "cdn"],
             customPrefixes: [],
-            customAsns: [64512, 64512, 64513]);
+            customAsns: [64512, 64512, 64513])).Id;
 
-        Assert.Equal(["cdn", "ru"], store.GetSubscriptions(id).Order().ToList());
-        Assert.Equal([64512u, 64513u], store.GetCustomAsns(id).Order().ToList());
+        Assert.Equal(["cdn", "ru"], (await store.GetSubscriptionsAsync(id)).Order().ToList());
+        Assert.Equal([64512u, 64513u], (await store.GetCustomAsnsAsync(id)).Order().ToList());
     }
 
     /// <summary>
@@ -68,19 +68,19 @@ public class PeerStoreConfigurationAtomicityTests
     /// asserts the peer is complete where it actually matters, not merely in the store.
     /// </summary>
     [Fact]
-    public void SavePeerConfiguration_AppliesEveryPartOrNothing()
+    public async Task SavePeerConfiguration_AppliesEveryPartOrNothing()
     {
         var (store, connection) = NewStore();
         using var _ = connection;
 
-        var id = store.SavePeerConfiguration(Ip, Asn, "full",
+        var id = (await store.SavePeerConfigurationAsync(Ip, Asn, "full",
             asnListNames: ["ru"],
             customPrefixes: [("10.0.0.0", 8)],
-            customAsns: [64512]);
+            customAsns: [64512])).Id;
 
         // The failure #259 describes is a peer row committed with its child collections missing.
         // Assert the whole configuration is readable through the same view the send path uses.
-        var view = store.LoadPeerRoutingView(Ip, Asn);
+        var view = await store.LoadPeerRoutingViewAsync(Ip, Asn);
         Assert.NotNull(view);
         Assert.Equal(["ru"], view!.Subscriptions);
         Assert.Equal(["10.0.0.0/8"], view.CustomPrefixes);
@@ -95,13 +95,13 @@ public class PeerStoreConfigurationAtomicityTests
     /// composition into separate Set* calls.
     /// </summary>
     [Fact]
-    public void SavePeerConfiguration_RunsInASingleTransaction()
+    public async Task SavePeerConfiguration_RunsInASingleTransaction()
     {
         var (store, connection, transactions) = NewStoreCountingTransactions();
         using var _ = connection;
 
         transactions.Clear();
-        store.SavePeerConfiguration(Ip, Asn, "one transaction",
+        await store.SavePeerConfigurationAsync(Ip, Asn, "one transaction",
             asnListNames: ["ru", "cdn"],
             customPrefixes: [("10.0.0.0", 8), ("192.0.2.0", 24)],
             customAsns: [64512, 64513]);
@@ -113,15 +113,15 @@ public class PeerStoreConfigurationAtomicityTests
     /// The update path carries the same guarantee as the create path.
     /// </summary>
     [Fact]
-    public void UpdatePeerConfiguration_RunsInASingleTransaction()
+    public async Task UpdatePeerConfiguration_RunsInASingleTransaction()
     {
         var (store, connection, transactions) = NewStoreCountingTransactions();
         using var _ = connection;
-        var id = store.SavePeerConfiguration(Ip, Asn, "initial",
-            asnListNames: ["ru"], customPrefixes: [("10.0.0.0", 8)], customAsns: [64512]);
+        var id = (await store.SavePeerConfigurationAsync(Ip, Asn, "initial",
+            asnListNames: ["ru"], customPrefixes: [("10.0.0.0", 8)], customAsns: [64512])).Id;
 
         transactions.Clear();
-        store.UpdatePeerConfiguration(id, "changed",
+        await store.UpdatePeerConfigurationAsync(id, "changed",
             asnListNames: ["cdn"],
             customPrefixes: [("192.0.2.0", 24)],
             customAsns: [64514]);
@@ -133,24 +133,24 @@ public class PeerStoreConfigurationAtomicityTests
     /// PATCH semantics: <c>null</c> means "leave this alone", while an empty list means "clear it".
     /// </summary>
     [Fact]
-    public void UpdatePeerConfiguration_NullsLeaveTheExistingValueAlone()
+    public async Task UpdatePeerConfiguration_NullsLeaveTheExistingValueAlone()
     {
         var (store, connection) = NewStore();
         using var _ = connection;
-        var id = store.SavePeerConfiguration(Ip, Asn, "initial",
-            asnListNames: ["ru"], customPrefixes: [("10.0.0.0", 8)], customAsns: [64512]);
+        var id = (await store.SavePeerConfigurationAsync(Ip, Asn, "initial",
+            asnListNames: ["ru"], customPrefixes: [("10.0.0.0", 8)], customAsns: [64512])).Id;
 
         // Only the prefixes are supplied; the rest must survive untouched, matching the PATCH
         // semantics the management API exposes.
-        store.UpdatePeerConfiguration(id, description: null,
+        await store.UpdatePeerConfigurationAsync(id, description: null,
             asnListNames: null,
             customPrefixes: [("192.0.2.0", 24), ("192.0.2.0", 24)],
             customAsns: null);
 
-        Assert.Equal(["192.0.2.0/24"], store.GetCustomPrefixes(id));
-        Assert.Equal(["ru"], store.GetSubscriptions(id));
-        Assert.Equal([64512u], store.GetCustomAsns(id));
-        Assert.Equal("initial", store.GetDbPeerById(id)!.Description);
+        Assert.Equal(["192.0.2.0/24"], await store.GetCustomPrefixesAsync(id));
+        Assert.Equal(["ru"], await store.GetSubscriptionsAsync(id));
+        Assert.Equal([64512u], await store.GetCustomAsnsAsync(id));
+        Assert.Equal("initial", (await store.GetDbPeerByIdAsync(id))!.Description);
     }
 
     /// <summary>A store over an in-memory SQLite DB that records every transaction EF opens.</summary>

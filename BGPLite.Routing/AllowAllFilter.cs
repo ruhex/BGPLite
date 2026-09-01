@@ -10,7 +10,8 @@ public sealed class AllowAllFilter : IRouteFilter
 
     public bool AcceptIncoming(Route route, PeerConfig peer) => true;
 
-    public IReadOnlySet<uint> ResolveOutgoingAllowSet(PeerConfig peer) => EmptyAllowSet;
+    public Task<IReadOnlySet<uint>> ResolveOutgoingAllowSetAsync(PeerConfig peer, CancellationToken ct = default)
+        => Task.FromResult(EmptyAllowSet);
 
     public bool AcceptOutgoing(Route route, PeerConfig peer, IReadOnlySet<uint> allowSet) => true;
 }

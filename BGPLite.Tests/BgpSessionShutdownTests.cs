@@ -122,23 +122,11 @@ public class BgpSessionShutdownTests
     /// <summary>Every member throws; UpdateSessionStatus simulates the transient DB failure from #325.</summary>
     private sealed class ThrowingUpdateStatusStore : IPeerStore
     {
-        public string CreatePeer(string ip, uint asn, string? description) => throw new NotSupportedException();
-        public void UpsertPeer(string ip, uint asn) => throw new NotSupportedException();
-        public void UpdateSessionStatus(string ip, uint asn, bool active) =>
+        public Task<string> CreatePeerAsync(string ip, uint asn, string? description, CancellationToken ct = default) => throw new NotSupportedException();
+        public Task UpsertPeerAsync(string ip, uint asn, CancellationToken ct = default) => throw new NotSupportedException();
+        public Task UpdateSessionStatusAsync(string ip, uint asn, bool active, CancellationToken ct = default) =>
             throw new InvalidOperationException("simulated: database is locked");
-        public void DeletePeer(string id) => throw new NotSupportedException();
-        public PeerInfo? GetPeerByIp(string ip) => throw new NotSupportedException();
-        public PeerInfo? GetPeer(string ip, uint asn) => throw new NotSupportedException();
-        public PeerInfo? GetPeerById(string id) => throw new NotSupportedException();
-        public List<string> GetSubscriptions(string peerId) => throw new NotSupportedException();
-        public List<string> GetCustomPrefixes(string peerId) => throw new NotSupportedException();
-        public List<uint> GetCustomAsns(string peerId) => throw new NotSupportedException();
-        public HashSet<uint> GetCommunities(string peerId) => throw new NotSupportedException();
-        public HashSet<uint> GetCommunities(string ip, uint asn) => throw new NotSupportedException();
-        public void SetCommunities(string peerId, HashSet<uint> communities) => throw new NotSupportedException();
-        public void ClearCommunities(string peerId) => throw new NotSupportedException();
-        public void SetDescription(string id, string description) => throw new NotSupportedException();
-        public PeerRoutingView? LoadPeerRoutingView(string ip, uint asn) => throw new NotSupportedException();
+        public Task<PeerRoutingView?> LoadPeerRoutingViewAsync(string ip, uint asn, CancellationToken ct = default) => throw new NotSupportedException();
     }
 
     [Fact]

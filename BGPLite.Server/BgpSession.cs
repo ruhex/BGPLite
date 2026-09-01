@@ -30,7 +30,7 @@ public sealed class BgpSession : IDisposable
     private readonly BgpMetrics _metrics;
     private readonly ILogger<BgpSession> _logger;
     private readonly CancellationTokenSource _cts = new();
-    private readonly Action<string, uint>? _onPeerIdentified;
+    private readonly Func<string, uint, CancellationToken, Task>? _onPeerIdentified;
     private readonly IPeerStore? _peerStore;
     // #265 item 1: set by BgpServer right after creation — "is this session still the registered
     // one?" A false answer at teardown-time means a replacement took the slot and owns the
@@ -253,7 +253,7 @@ public sealed class BgpSession : IDisposable
         IRouteFilter routeFilter,
         BgpMetrics metrics,
         ILogger<BgpSession> logger,
-        Action<string, uint>? onPeerIdentified = null,
+        Func<string, uint, CancellationToken, Task>? onPeerIdentified = null,
         IPeerStore? peerStore = null,
         IPrefixAggregator? prefixAggregator = null,
         IRouteAssembler? routeAssembler = null,
@@ -342,7 +342,7 @@ public sealed class BgpSession : IDisposable
                     ? $"{c.Code}[{Convert.ToHexString(c.Data)}]"
                     : $"{c.Code}")));
 
-            ValidateOpen(remoteOpen);
+            await ValidateOpenAsync(remoteOpen, linkedCts.Token);
 
             TransitionTo(BgpFsmState.OpenSent);
 
@@ -566,8 +566,9 @@ public sealed class BgpSession : IDisposable
                 var stillRegistered = _stillRegisteredProbe?.Invoke(this) ?? true;
                 if (!silent && stillRegistered)
                 {
-                    try { _peerStore?.UpdateSessionStatus(_peerConfig.Address, _remoteAsn, false); }
-                    catch (Exception ex) { _logger.LogWarning(ex, "Failed to persist session status for {Peer}", _peer); }
+                    if (_peerStore is not null)
+                        try { await _peerStore.UpdateSessionStatusAsync(_peerConfig.Address, _remoteAsn, false); }
+                        catch (Exception ex) { _logger.LogWarning(ex, "Failed to persist session status for {Peer}", _peer); }
 
                     // #366 review: a replacement can land between the probe and the write —
                     // re-probe and REPAIR. A false second probe means the registry swapped us out
@@ -579,8 +580,9 @@ public sealed class BgpSession : IDisposable
                     if (_stillRegisteredProbe?.Invoke(this) == false)
                     {
                         _logger.LogInformation("Replacement detected after status write for {Peer} — restoring active", _peer);
-                        try { _peerStore?.UpdateSessionStatus(_peerConfig.Address, _remoteAsn, true); }
-                        catch (Exception ex) { _logger.LogWarning(ex, "Failed to restore session status for {Peer}", _peer); }
+                        if (_peerStore is not null)
+                            try { await _peerStore.UpdateSessionStatusAsync(_peerConfig.Address, _remoteAsn, true); }
+                            catch (Exception ex) { _logger.LogWarning(ex, "Failed to restore session status for {Peer}", _peer); }
                     }
                 }
             }
@@ -1382,21 +1384,13 @@ public sealed class BgpSession : IDisposable
         if (remoteOpen.Capabilities.Any(c => c.Code == BgpConstants.Capability.RouteRefresh))
             capabilities.Add(BgpCapabilityInfo.RouteRefresh());
 
-        // Advertise Graceful Restart (RFC 4724) so GR-capable peers retain our routes across our
-        // Graceful Restart capability (RFC 4724 §2). R=0 on a fresh session — the R bit means
-        // "I am restarting, please retain my routes" and must NOT be set on the initial session
-        // establishment. It would only be set if BGPLite were recovering from a crash/restart and
-        // wanted peers to re-send their routes. BGPLite always re-advertises its full route set on
-        // reconnect, so R=0 is correct (#203). Restart Time tells peers how long to retain stale
-        // routes if BGPLite disappears (silent TCP close during docker stop). F reflects whether
-        // forwarding state is preserved (configurable, default false). Advertised unconditionally
-        // when enabled (RFC 4724 §4; non-GR peers safely ignore it per RFC 5492).
-        if (_bgpConfig.GracefulRestart)
-        {
-            var restartTime = (ushort)Math.Min(_bgpConfig.RestartTime, _negotiatedHoldTime > 0 ? _negotiatedHoldTime : 120);
-            capabilities.Add(BgpCapabilityInfo.GracefulRestart(
-                restartState: false, restartTime, forwardingState: _bgpConfig.GracefulRestartForwardingState));
-        }
+        // #318: the Graceful Restart capability is deliberately NOT advertised. RFC 4724 §4.2 obliges
+        // a speaker engaging GR procedures to retain and stale-mark a restarting peer's routes;
+        // BGPLite implements none of that receiving half, so advertising the <AFI, SAFI, F> tuple
+        // promised behavior the code does not have (D6). Reintroduce the advertisement only together
+        // with receiving-speaker retention. The sending-side conveniences gated on the
+        // GracefulRestart config (End-of-RIB after the initial dump, silent close on server
+        // shutdown) are unchanged.
 
         var asn16 = _bgpConfig.Asn > ushort.MaxValue ? (ushort)BgpConstants.AsPath.AsTrans : (ushort)_bgpConfig.Asn;
         var routerId = BgpConstants.IPAddressToUint(_bgpConfig.GetRouterIdAddress());
@@ -1511,7 +1505,7 @@ public sealed class BgpSession : IDisposable
 
     #region Validation
 
-    private void ValidateOpen(BgpOpenMessage open)
+    private async Task ValidateOpenAsync(BgpOpenMessage open, CancellationToken ct)
     {
         var localRouterId = BgpConstants.IPAddressToUint(_bgpConfig.GetRouterIdAddress());
         // #269: OPEN negotiation/validation lives in the protocol library (OpenNegotiator); the
@@ -1528,7 +1522,9 @@ public sealed class BgpSession : IDisposable
         // Announce/persist the peer only after the OPEN passes validation. Previously this fired
         // before the expected-ASN check, upserting a configured peer that declared a mismatched ASN
         // (BadPeerAs) just before the session was torn down.
-        _onPeerIdentified?.Invoke(_peerConfig.Address, _remoteAsn);
+        // CodeRabbit (integration review): propagate the session token into the upsert so a
+        // locked SQLite cannot out-wait shutdown/replacement before cancellation is observed.
+        if (_onPeerIdentified is not null) await _onPeerIdentified(_peerConfig.Address, _remoteAsn, ct);
 
         var peerGr = CapabilityHelper.GetGracefulRestart(open);
         _logger.LogInformation("Peer {Peer} Graceful Restart: {State}",

@@ -6,9 +6,9 @@ namespace BGPLite.Routing;
 public sealed class PeerCommunityFilter : IRouteFilter
 {
     private readonly uint _localAsn;
-    private readonly Func<string, uint?, HashSet<uint>> _getCommunities;
+    private readonly Func<string, uint?, CancellationToken, Task<HashSet<uint>>> _getCommunities;
 
-    public PeerCommunityFilter(uint localAsn, Func<string, uint?, HashSet<uint>> getCommunities)
+    public PeerCommunityFilter(uint localAsn, Func<string, uint?, CancellationToken, Task<HashSet<uint>>> getCommunities)
     {
         _localAsn = localAsn;
         _getCommunities = getCommunities;
@@ -19,9 +19,10 @@ public sealed class PeerCommunityFilter : IRouteFilter
     /// <summary>
     /// Resolves the peer's community allow-set once per send. This is the only place the
     /// (potentially database-backed) resolver runs on the advertise path — never per route.
+    /// Asynchronous since #262: the resolver's DB read ran synchronously on the session send path.
     /// </summary>
-    public IReadOnlySet<uint> ResolveOutgoingAllowSet(PeerConfig peer)
-        => _getCommunities(peer.Address, peer.RemoteAsn);
+    public async Task<IReadOnlySet<uint>> ResolveOutgoingAllowSetAsync(PeerConfig peer, CancellationToken ct = default)
+        => await _getCommunities(peer.Address, peer.RemoteAsn, ct);
 
     public bool AcceptOutgoing(Route route, PeerConfig peer, IReadOnlySet<uint> allowSet)
     {

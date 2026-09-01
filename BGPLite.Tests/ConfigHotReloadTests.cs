@@ -58,6 +58,39 @@ public class ConfigHotReloadTests
             harness.Api.ResolveClientIpLive(IPAddress.Parse("127.0.0.1"), "198.51.100.5", null));
     }
 
+    // --- ManagementApi.ApplyConfig: X-Real-IP opt-in (#256) --------------------------------------
+
+    [Fact]
+    public void ApplyConfig_Swaps_TrustXRealIp()
+    {
+        using var harness = NewApi(Config(trustedProxies: ["127.0.0.0/8"]));
+
+        // Secure default: a spoofed X-Real-IP is ignored even behind a trusted proxy.
+        Assert.Equal("127.0.0.1",
+            harness.Api.ResolveClientIpLive(IPAddress.Parse("127.0.0.1"), null, "198.51.100.5"));
+
+        harness.Api.ApplyConfig(Config(trustedProxies: ["127.0.0.0/8"], trustXRealIp: true));
+
+        // Reload flipped the opt-in on; no restart required.
+        Assert.Equal("198.51.100.5",
+            harness.Api.ResolveClientIpLive(IPAddress.Parse("127.0.0.1"), null, "198.51.100.5"));
+    }
+
+    // --- ManagementApi.ApplyConfig: body-size cap (#266 item 6) -----------------------------------
+
+    [Fact]
+    public void ApplyConfig_Swaps_MaxRequestBodyBytes()
+    {
+        using var harness = NewApi(Config()); // default 1 MiB
+
+        Assert.Equal(1024 * 1024, harness.Api.MaxRequestBodyBytesLive);
+
+        harness.Api.ApplyConfig(Config(maxBodyBytes: 4096));
+
+        // ReadBodyAsync reads the same live field — the new cap applies without a restart.
+        Assert.Equal(4096, harness.Api.MaxRequestBodyBytesLive);
+    }
+
     // --- ManagementApi.ApplyConfig: rate limiter -----------------------------------------------
 
     [Fact]
@@ -147,6 +180,28 @@ public class ConfigHotReloadTests
         finally { TryDelete(path); }
     }
 
+    [Fact]
+    public void Reload_Valid_Config_Applies_TrustXRealIp()
+    {
+        var path = TempConfigPath();
+        try
+        {
+            File.WriteAllText(path, Yaml(trustedProxies: ["127.0.0.0/8"], trustXRealIp: true));
+            using var harness = NewApi(Config(trustedProxies: ["127.0.0.0/8"]));
+            var reloader = new ConfigReloader(path, harness.Api, new CapturingLogger<ConfigReloader>());
+
+            // Initial state: opt-in off, the spoofed X-Real-IP is ignored.
+            Assert.Equal("127.0.0.1",
+                harness.Api.ResolveClientIpLive(IPAddress.Parse("127.0.0.1"), null, "198.51.100.5"));
+
+            reloader.Reload();
+
+            Assert.Equal("198.51.100.5",
+                harness.Api.ResolveClientIpLive(IPAddress.Parse("127.0.0.1"), null, "198.51.100.5"));
+        }
+        finally { TryDelete(path); }
+    }
+
     // --- ConfigReloader.Reload: invalid edits never crash, keep previous -----------------------
 
     [Fact]
@@ -215,20 +270,25 @@ public class ConfigHotReloadTests
     private static AppConfig Config(
         List<string>? trustedProxies = null,
         ApiRateLimitConfig? rateLimit = null,
-        List<string>? corsOrigins = null) => new()
+        List<string>? corsOrigins = null,
+        bool trustXRealIp = false,
+        long maxBodyBytes = 1024 * 1024) => new()
         {
             Bgp = new BgpConfig { Asn = 65001, RouterId = "10.0.0.1", HoldTime = 180, KeepAlive = 60 },
             ApiPort = 5001,
             TrustedProxies = trustedProxies ?? [],
             ApiRateLimit = rateLimit,
-            CorsAllowedOrigins = corsOrigins
+            CorsAllowedOrigins = corsOrigins,
+            TrustXRealIp = trustXRealIp,
+            MaxRequestBodyBytes = maxBodyBytes
         };
 
     /// <summary>Renders a VALID <c>appsettings.yml</c>-style document with the given soft fields.</summary>
     private static string Yaml(
         List<string>? trustedProxies = null,
         List<string>? corsOrigins = null,
-        int apiPort = 5001)
+        int apiPort = 5001,
+        bool trustXRealIp = false)
     {
         var sb = new StringBuilder();
         sb.AppendLine("Bgp:");
@@ -242,6 +302,7 @@ public class ConfigHotReloadTests
             sb.AppendLine("TrustedProxies:");
             foreach (var p in trustedProxies) sb.AppendLine($"  - \"{p}\"");
         }
+        if (trustXRealIp) sb.AppendLine("TrustXRealIp: true");
         if (corsOrigins is { Count: > 0 })
         {
             sb.AppendLine("CorsAllowedOrigins:");
