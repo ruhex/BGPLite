@@ -240,9 +240,17 @@ public sealed class ManagementApi : IHostedService, IDisposable
         // BgpServer (registration order), so the listener already exists; the sub-second window
         // before this runs is the only unprotected moment (documented in #36).
         var md5Bootstrapped = 0;
-        foreach (var (peerIp, md5Password) in await _store.GetPeerMd5CredentialsAsync(cancellationToken))
+        // TCP keys by source IP: if two peer rows share an IP with DIFFERENT keys, the last one
+        // would win non-deterministically — sort for determinism and warn (values never logged).
+        foreach (var group in (await _store.GetPeerMd5CredentialsAsync(cancellationToken))
+                     .GroupBy(c => c.Ip).OrderBy(g => g.Key, StringComparer.Ordinal))
         {
-            _sessionManager.SetPeerMd5Key(peerIp, md5Password);
+            var creds = group.OrderBy(c => c.Md5Password, StringComparer.Ordinal).ToList();
+            if (creds.Select(c => c.Md5Password).Distinct().Count() > 1)
+                _logger.LogWarning(
+                    "TCP-MD5: {Count} peer rows on source IP {Ip} configure DIFFERENT keys — TCP-MD5 keys by IP, so one key applies to all of them (peers: {Peers})",
+                    creds.Count, group.Key, string.Join(", ", creds.Select(c => c.Ip)));
+            _sessionManager.SetPeerMd5Key(group.Key, creds[0].Md5Password);
             md5Bootstrapped++;
         }
         if (md5Bootstrapped > 0)
@@ -862,7 +870,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
 
         // #36: optional per-peer TCP-MD5 (RFC 2385) — a password enables kernel-level signature
         // enforcement for this peer's source IP. The password is never logged or echoed.
-        if (data.Md5Password is not null && !TcpMd5.IsValidPassword(data.Md5Password))
+        if (!string.IsNullOrEmpty(data.Md5Password) && !TcpMd5.IsValidPassword(data.Md5Password))
             return ApiResponse.Error($"Invalid Md5Password: must be 1..{TcpMd5.PasswordMaxBytes} UTF-8 bytes (empty means plain TCP).", 400);
 
         if (data.CustomPrefixes is not null)
@@ -1038,10 +1046,9 @@ public sealed class ManagementApi : IHostedService, IDisposable
 
         await _store.DeletePeerAsync(peerId);
 
-        // #36: disarm the deleted peer's TCP-MD5 key (the peer row carrying it is gone).
-        var deletedPeer = await _store.GetDbPeerByIdAsync(peerId);
-        if (deletedPeer is not null)
-            _sessionManager.SetPeerMd5Key(deletedPeer.Ip, null);
+        // #36: disarm the deleted peer's TCP-MD5 key. Uses the row loaded BEFORE the delete —
+        // a post-delete re-read always returned null (CodeRabbit on #398).
+        _sessionManager.SetPeerMd5Key(peer.Ip, null);
         _logger.LogInformation("Deleted peer {Id} ({Ip})", SanitizeForLog(peerId), peer.Ip);
         return ApiResponse.Ok(new { id = peerId, deleted = true });
     }

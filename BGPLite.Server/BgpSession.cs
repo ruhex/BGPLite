@@ -1090,8 +1090,21 @@ public sealed class BgpSession : IDisposable
         // and keep the global cap until their row exists.
         if (_peerStore is not null)
         {
-            var overrideCap = await _peerStore.GetPeerMaxPrefixAsync(_peerConfig.Address, _remoteAsn, _cts.Token);
-            Volatile.Write(ref _effectiveMaxPrefix, overrideCap ?? _bgpConfig.MaxPrefixesPerPeer);
+            // Best-effort (#398 review): on the refresh path WithdrawAllAsync has ALREADY run, so
+            // a throw here (e.g. transient "database is locked") would leave the peer withdrawn
+            // until some later successful refresh. Keep the last known cap instead.
+            try
+            {
+                var overrideCap = await _peerStore.GetPeerMaxPrefixAsync(_peerConfig.Address, _remoteAsn, _cts.Token);
+                Volatile.Write(ref _effectiveMaxPrefix, overrideCap ?? _bgpConfig.MaxPrefixesPerPeer);
+            }
+            catch (OperationCanceledException) when (_cts.IsCancellationRequested) { throw; }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex,
+                    "Could not resolve the per-peer MaxPrefix override for {Peer} — enforcing the last known cap {Cap}",
+                    _peer, Volatile.Read(ref _effectiveMaxPrefix));
+            }
         }
 
         var nextHop = BgpConstants.IPAddressToUint(_bgpConfig.GetRouterIdAddress());

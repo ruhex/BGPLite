@@ -748,8 +748,16 @@ public class BgpSessionRouteOwnershipTests
     /// Established through the establish dump to a started read loop.</summary>
     private static async Task WaitForRouteCountAsync(RouteTable routeTable, int expected)
     {
+        // #392 review: bound the wait so a real cap regression fails with the actual count
+        // instead of hanging the test forever.
+        var deadline = TimeSpan.FromSeconds(15);
         while (routeTable.Count < expected)
+        {
+            if (deadline <= TimeSpan.Zero)
+                Assert.Fail($"route table never reached {expected}; actual {routeTable.Count}");
             await Task.Delay(TimeSpan.FromMilliseconds(20));
+            deadline -= TimeSpan.FromMilliseconds(20);
+        }
     }
 
     /// <summary>#391: establishes a session whose peer store returns a per-peer MaxPrefix
@@ -809,8 +817,7 @@ public class BgpSessionRouteOwnershipTests
     {
         // Global cap 2, peer override 0 ("unlimited for this peer"): three prefixes all install.
         // RED pre-fix: the global cap was applied, so the third prefix tore the session down.
-        var routeTable = new RouteTable();
-        var (session, run, conn, _, _) = await EstablishWithMaxPrefixOverrideAsync(globalCap: 2, overrideCap: 0);
+        var (session, run, conn, routeTable, _) = await EstablishWithMaxPrefixOverrideAsync(globalCap: 2, overrideCap: 0);
 
         for (var i = 0; i < 3; i++)
             conn.EnqueueFrame(AnnounceFrame(24, 0xC0, 0x00, (byte)(10 + i)));
