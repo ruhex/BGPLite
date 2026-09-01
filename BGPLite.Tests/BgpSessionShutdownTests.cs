@@ -126,6 +126,7 @@ public class BgpSessionShutdownTests
         public Task UpsertPeerAsync(string ip, uint asn, CancellationToken ct = default) => throw new NotSupportedException();
         public Task UpdateSessionStatusAsync(string ip, uint asn, bool active, CancellationToken ct = default) =>
             throw new InvalidOperationException("simulated: database is locked");
+        public Task<int?> GetPeerMaxPrefixAsync(string ip, uint asn, CancellationToken ct = default) => Task.FromResult<int?>(null);
         public Task<PeerRoutingView?> LoadPeerRoutingViewAsync(string ip, uint asn, CancellationToken ct = default) => throw new NotSupportedException();
     }
 

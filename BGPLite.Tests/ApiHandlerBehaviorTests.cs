@@ -152,6 +152,51 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
         Assert.Equal(HttpStatusCode.RequestEntityTooLarge, tooLarge.StatusCode);
     }
 
+    [Fact]
+    public async Task MaxPrefix_CreateValidate_DetailRoundtrip()
+    {
+        var config = new AppConfig { Bgp = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1" } };
+        _port = await StartAsync(config);
+        _client = new HttpClient();
+
+        // Negative MaxPrefix is rejected at the boundary.
+        using (var bad = await _client.PostAsync($"http://127.0.0.1:{_port}/api/peers",
+            new StringContent("""{"ip":"198.51.100.8","asn":65011,"maxPrefix":-1}""", Encoding.UTF8, "application/json")))
+            Assert.Equal(HttpStatusCode.BadRequest, bad.StatusCode);
+
+        // Create with an override → the response echoes MaxPrefix and carries the durable id.
+        string peerId;
+        using (var ok = await _client.PostAsync($"http://127.0.0.1:{_port}/api/peers",
+            new StringContent("""{"ip":"198.51.100.8","asn":65011,"maxPrefix":5000}""", Encoding.UTF8, "application/json")))
+        {
+            Assert.Equal(HttpStatusCode.OK, ok.StatusCode);
+            using var doc = JsonDocument.Parse(await ok.Content.ReadAsStringAsync());
+            peerId = doc.RootElement.GetProperty("id").GetString()!;
+            Assert.Equal(5000, doc.RootElement.GetProperty("maxPrefix").GetInt32());
+        }
+
+        // Sanity: the created peer must be readable by id immediately.
+        using (var sanity = await _client.GetAsync($"http://127.0.0.1:{_port}/api/peers/{peerId}"))
+            Assert.True(sanity.IsSuccessStatusCode, $"sanity get: {(int)sanity.StatusCode}");
+
+        // PUT /api/peers/{id} — MaxPrefix PATCH-style: omitted leaves it; explicit 0 sets
+        // unlimited-for-peer. (The update route is PUT; field semantics are partial.)
+        using (var put = new HttpRequestMessage(HttpMethod.Put, $"http://127.0.0.1:{_port}/api/peers/{peerId}")
+        {
+            Content = new StringContent("""{"maxPrefix":0}""", Encoding.UTF8, "application/json")
+        })
+        using (var response = await _client.SendAsync(put))
+            Assert.True(response.IsSuccessStatusCode,
+                $"put: {(int)response.StatusCode} {await response.Content.ReadAsStringAsync()} peerId='{peerId}'");
+
+        using (var detail = await _client.GetAsync($"http://127.0.0.1:{_port}/api/peers/{peerId}"))
+        {
+            var json = await detail.Content.ReadAsStringAsync();
+            Assert.True(detail.IsSuccessStatusCode, $"detail: {(int)detail.StatusCode} {json} peerId={peerId}");
+            Assert.Contains("\"maxPrefix\":0", json);
+        }
+    }
+
     private static int FreeTcpPort()
     {
         using var socket = new System.Net.Sockets.Socket(System.Net.Sockets.AddressFamily.InterNetwork, System.Net.Sockets.SocketType.Stream, System.Net.Sockets.ProtocolType.Tcp);

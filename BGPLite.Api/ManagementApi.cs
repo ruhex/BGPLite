@@ -787,6 +787,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
             description = peer.Description,
             status = peer.Status,
             createdAt = peer.CreatedAt,
+            maxPrefix = peer.MaxPrefix,
             lastSessionAt = peer.LastSessionAt,
             lists = peer.Subscriptions,
             customPrefixes = peer.CustomPrefixes,
@@ -842,6 +843,11 @@ public sealed class ManagementApi : IHostedService, IDisposable
             SanitizeForLog(string.Join(",", asnLists)), SanitizeForLog(string.Join(",", data.CustomPrefixes ?? [])),
             SanitizeForLog(string.Join(",", data.CustomAsns ?? [])));
 
+        // #391: the per-peer prefix ceiling — an optional override of Bgp.MaxPrefixesPerPeer;
+        // 0 means "unlimited for this peer". Reject negatives at the boundary.
+        if (data.MaxPrefix is < 0)
+            return ApiResponse.Error("Invalid MaxPrefix: must be 0 (unlimited) or a positive prefix count.", 400);
+
         if (data.CustomPrefixes is not null)
         {
             foreach (var cidr in data.CustomPrefixes)
@@ -861,7 +867,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
         // #267 item 6: the upsert returns (Id, Status, CreatedAt) from its RETURNING clause — no
         // follow-up GetDbPeerById roundtrip for fields the caller already knows.
         var saved = await _store.SavePeerConfigurationAsync(
-            normalizedIp, data.Asn, data.Description, asnLists, customPrefixes, data.CustomAsns ?? []);
+            normalizedIp, data.Asn, data.Description, asnLists, customPrefixes, data.CustomAsns ?? [], data.MaxPrefix);
 
         _logger.LogInformation("Created peer {Ip} AS{Asn} ({Id}): {Subs} lists, {Prefixes} custom prefixes, {Asns} custom AS",
             normalizedIp, data.Asn, saved.Id, asnLists.Count, customPrefixes.Count, data.CustomAsns?.Count ?? 0);
@@ -876,6 +882,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
             description = data.Description,
             status = saved.Status,
             createdAt = saved.CreatedAt,
+            maxPrefix = saved.MaxPrefix,
             lists = asnLists,
             customPrefixes = data.CustomPrefixes ?? [],
             customAsns = data.CustomAsns ?? []
@@ -897,6 +904,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
             description = peer.Description,
             status = peer.Status,
             createdAt = peer.CreatedAt,
+            maxPrefix = peer.MaxPrefix,
             lastSessionAt = peer.LastSessionAt,
             lists = peer.Subscriptions,
             customPrefixes = peer.CustomPrefixes,
@@ -964,7 +972,12 @@ public sealed class ManagementApi : IHostedService, IDisposable
                     "See /api/asn-lists for the configured names.", 400);
         }
 
-        await _store.UpdatePeerConfigurationAsync(peerId, data.Description, data.Lists, parsedPrefixes, data.CustomAsns);
+        // #391: PATCH semantics — MaxPrefix omitted means "leave it alone"; an explicit value
+        // (including 0 = unlimited for this peer) is set. Reject negatives at the boundary.
+        if (data.MaxPrefix is < 0)
+            return ApiResponse.Error("Invalid MaxPrefix: must be 0 (unlimited) or a positive prefix count.", 400);
+
+        await _store.UpdatePeerConfigurationAsync(peerId, data.Description, data.Lists, parsedPrefixes, data.CustomAsns, data.MaxPrefix);
 
         _logger.LogInformation("Updated peer {Id}", SanitizeForLog(peerId));
 
@@ -1703,8 +1716,8 @@ public sealed class ManagementApi : IHostedService, IDisposable
         _listener?.Close();
     }
 
-    private record CreatePeerRequest(string Ip, uint Asn, string? Description, [property: JsonPropertyName("lists")] List<string>? AsnLists, List<string>? CustomPrefixes, List<uint>? CustomAsns);
-    private record UpdatePeerRequest(string? Description, [property: JsonPropertyName("lists")] List<string>? Lists, List<string>? CustomPrefixes, List<uint>? CustomAsns);
+    private record CreatePeerRequest(string Ip, uint Asn, string? Description, [property: JsonPropertyName("lists")] List<string>? AsnLists, List<string>? CustomPrefixes, List<uint>? CustomAsns, int? MaxPrefix);
+    private record UpdatePeerRequest(string? Description, [property: JsonPropertyName("lists")] List<string>? Lists, List<string>? CustomPrefixes, List<uint>? CustomAsns, int? MaxPrefix);
     private record AddSourceRequest(string Name, string Url, string? Community);
     private record PatchSourceRequest([property: JsonPropertyName("active")] bool? Active);
 

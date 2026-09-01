@@ -153,6 +153,40 @@ public class PeerStoreConfigurationAtomicityTests
         Assert.Equal("initial", (await store.GetDbPeerByIdAsync(id))!.Description);
     }
 
+    /// <summary>
+    /// #391: the per-peer MaxPrefix override persists through the create/update paths: create
+    /// writes it (NULL when omitted = inherit the global cap), update follows PATCH semantics
+    /// (null = leave alone, explicit value including 0 = set), and the light session read
+    /// (<c>GetPeerMaxPrefixAsync</c>) sees the effective value.
+    /// </summary>
+    [Fact]
+    public async Task MaxPrefix_CreateUpdate_Roundtrip()
+    {
+        var (store, connection) = NewStore();
+        using var _ = connection;
+
+        // Create without MaxPrefix → NULL (inherit global).
+        var id = (await store.SavePeerConfigurationAsync(Ip, Asn, "no override",
+            asnListNames: ["ru"], customPrefixes: [], customAsns: [])).MaxPrefix;
+        Assert.Null(id);
+        Assert.Null(await store.GetPeerMaxPrefixAsync(Ip, Asn));
+
+        // Create WITH an override.
+        var saved = await store.SavePeerConfigurationAsync("203.0.113.31", Asn, "with override",
+            asnListNames: ["ru"], customPrefixes: [], customAsns: [], maxPrefix: 5000);
+        Assert.Equal(5000, saved.MaxPrefix);
+        Assert.Equal(5000, await store.GetPeerMaxPrefixAsync("203.0.113.31", Asn));
+
+        // PATCH: null leaves it alone; explicit 0 sets "unlimited for this peer".
+        await store.UpdatePeerConfigurationAsync(saved.Id, description: null,
+            asnListNames: null, customPrefixes: null, customAsns: null, maxPrefix: null);
+        Assert.Equal(5000, await store.GetPeerMaxPrefixAsync("203.0.113.31", Asn));
+
+        await store.UpdatePeerConfigurationAsync(saved.Id, description: null,
+            asnListNames: null, customPrefixes: null, customAsns: null, maxPrefix: 0);
+        Assert.Equal(0, await store.GetPeerMaxPrefixAsync("203.0.113.31", Asn));
+    }
+
     /// <summary>A store over an in-memory SQLite DB that records every transaction EF opens.</summary>
     private static (PeerStore Store, SqliteConnection Connection, List<string> Transactions) NewStoreCountingTransactions()
     {

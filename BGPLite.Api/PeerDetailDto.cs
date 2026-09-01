@@ -24,4 +24,5 @@ public sealed record PeerDetailDto(
     List<string> CustomPrefixes,
     List<uint> CustomAsns,
     List<PeerSourceView> CustomSources,
-    List<long> Communities);
+    List<long> Communities,
+    int? MaxPrefix = null);
