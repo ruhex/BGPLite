@@ -121,13 +121,15 @@ public static class UpdateCodec
     /// Validates that a route announcement carried the mandatory well-known attributes
     /// (ORIGIN, AS_PATH, NEXT_HOP). Throws <see cref="BgpNotificationException"/> on a missing attribute.
     /// </summary>
-    public static void ValidateMandatoryAttributes(bool originSeen, bool asPathSeen, bool nextHopSeen)
+    public static void ValidateMandatoryAttributes(bool originSeen, bool asPathSeen, bool nextHopSeen, bool mpReachV6Present = false)
     {
         if (!originSeen)
             throw new BgpNotificationException(BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.MissingWellKnownAttribute, "Missing mandatory ORIGIN attribute");
         if (!asPathSeen)
             throw new BgpNotificationException(BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.MissingWellKnownAttribute, "Missing mandatory AS_PATH attribute");
-        if (!nextHopSeen)
+        // RFC 4760 §5: an UPDATE whose routes ride in MP_REACH_NLRI carries the next hop inside
+        // the attribute — the classic NEXT_HOP requirement applies only to the IPv4 NLRI field.
+        if (!nextHopSeen && !mpReachV6Present)
             throw new BgpNotificationException(BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.MissingWellKnownAttribute, "Missing mandatory NEXT_HOP attribute");
     }
 
@@ -208,7 +210,7 @@ public static class UpdateCodec
     /// caller can apply treat-as-withdraw (RFC 7606) — the exact pipeline previously inlined in
     /// BgpSession.HandleUpdateAsync, moved verbatim (#270).
     /// </summary>
-    public static RouteAttributes ParseRouteAttributes(BgpUpdateMessage update, bool fourByteAsnSession, uint? localRouterId = null)
+    public static RouteAttributes ParseRouteAttributes(BgpUpdateMessage update, bool fourByteAsnSession, uint? localRouterId = null, bool mpReachV6Present = false)
     {
         try
         {
@@ -319,7 +321,7 @@ public static class UpdateCodec
                 }
             }
 
-            ValidateMandatoryAttributes(originSeen, asPathSeen, nextHopSeen);
+            ValidateMandatoryAttributes(originSeen, asPathSeen, nextHopSeen, mpReachV6Present);
             // RFC 4271 §6.3/§6.8: a semantically incorrect NEXT_HOP MUST be rejected with subcode 8
             // (Invalid NEXT_HOP Attribute) — "a valid unicast host address", never multicast, never
             // the receiving speaker's own address. Routed through the caller's treat-as-withdraw
