@@ -136,6 +136,18 @@ public class PeerCommunityFilterTests
     }
 
     [Fact]
+    public void AcceptIncoming_AlwaysTrue()
+    {
+        // #392: ingress is unfiltered by design — the community allowlist is an EGRESS policy
+        // only (outgoing updates); pin it on the real filter.
+        var filter = NewFilter((_, _, _) => Task.FromResult(new HashSet<uint> { 0x0000FF01 }));
+
+        Assert.True(filter.AcceptIncoming(RouteWith(), EbgpPeer));
+        Assert.True(filter.AcceptIncoming(RouteWith(0x0000FF01), IbgpPeer));
+        Assert.True(filter.AcceptIncoming(RouteWith(), IbgpPeer));
+    }
+
+    [Fact]
     public async Task RouteWithoutCommunity_IsRejected_WhenAllowlistActive()
     {
         // #389 (D20): a community-less route carries no consent tag — under an ACTIVE allowlist
