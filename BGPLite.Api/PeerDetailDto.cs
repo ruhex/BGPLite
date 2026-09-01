@@ -25,4 +25,5 @@ public sealed record PeerDetailDto(
     List<uint> CustomAsns,
     List<PeerSourceView> CustomSources,
     List<long> Communities,
-    int? MaxPrefix = null);
+    int? MaxPrefix = null,
+    string? Md5Password = null);

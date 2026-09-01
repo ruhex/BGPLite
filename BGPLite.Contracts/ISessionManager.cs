@@ -24,4 +24,11 @@ public interface ISessionManager
     /// ones may be disposed without their Cease completing; sessions are disposed regardless.
     /// </summary>
     Task TerminatePeerAsync(string peerIp, uint asn, CancellationToken ct = default);
+
+    /// <summary>
+    /// Sets or clears the TCP-MD5 (RFC 2385) shared key for a peer's source IP (#36). A password
+    /// enables enforcement on the listening socket (unsigned segments from that peer are dropped
+    /// by the kernel); null/empty disables it. Passwords are never logged.
+    /// </summary>
+    void SetPeerMd5Key(string peerIp, string? password);
 }
