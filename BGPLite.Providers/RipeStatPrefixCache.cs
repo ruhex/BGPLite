@@ -44,12 +44,13 @@ public sealed class RipeStatPrefixCache
     // asn → gate serializing the cache-miss fetch path (prevents thundering herd on cold/expired
     // ASNs — #164).
     private readonly ConcurrentDictionary<uint, SemaphoreSlim> _locks = new();
-    // #267 item 3: ASNs with a fetch currently in flight. The capacity sweep must never evict an
-    // in-flight ASN's entry + gate: the fetcher holds that gate, and removing it let a later
-    // GetOrAdd create a second semaphore — two concurrent RIPEstat fetches for one ASN, breaking
-    // the #164 invariant. Marked before the gate is taken and unmarked after it is released, so
-    // "holding the gate" always implies "in-flight".
-    private readonly ConcurrentDictionary<uint, byte> _inflight = new();
+    // #267 item 3: ASNs with callers currently inside the fetch path. The capacity sweep must
+    // never evict an in-flight ASN's entry + gate: the fetcher holds that gate, and removing it
+    // let a later GetOrAdd create a second semaphore — two concurrent RIPEstat fetches for one
+    // ASN, breaking the #164 invariant. The value is an ACTIVE-CALLER COUNT (CodeRabbit on the
+    // integration review): a plain presence marker would be removed by the first caller's exit
+    // while a second caller is still inside/queued on the same gate.
+    private readonly ConcurrentDictionary<uint, int> _inflight = new();
 
     public RipeStatPrefixCache(
         RipeStatProvider ripe,
@@ -78,17 +79,20 @@ public sealed class RipeStatPrefixCache
         if (TryGetFresh(asn, out var fresh, out var freshIsNegative) && (serveNegativeEntries || !freshIsNegative))
             return fresh;
 
-        // #267 item 3: mark in-flight BEFORE the gate is taken (and unmark only after it is
-        // released) so the capacity sweep can never drop the gate this caller is about to wait on
-        // or holds — see the _inflight note.
-        _inflight.TryAdd(asn, 0);
+        // #267 item 3: register in-flight BEFORE the gate is taken (unregistered only after this
+        // caller's own turn is over) so the capacity sweep can never drop the gate this caller is
+        // about to wait on or holds — see the _inflight note. AddOrUpdate is atomic; the exit
+        // decrements and removes the key only while it still reads 0 (a concurrent re-enter wins
+        // the race: its increment lands between, and the conditional remove sees 1 and no-ops).
+        _inflight.AddOrUpdate(asn, 1, (_, count) => count + 1);
         try
         {
             return await FetchThroughGateAsync(asn, ct, serveNegativeEntries);
         }
         finally
         {
-            _inflight.TryRemove(asn, out _);
+            _inflight.AddOrUpdate(asn, 0, (_, count) => count - 1);
+            _inflight.TryRemove(new KeyValuePair<uint, int>(asn, 0));
         }
     }
 
@@ -199,10 +203,10 @@ public sealed class RipeStatPrefixCache
         foreach (var key in toEvict)
         {
             // #267 item 3: an in-flight ASN's entry is re-populated by its fetch — evicting both
-            // while the fetcher holds the gate made a later GetOrAdd mint a second semaphore and
-            // issue a duplicate concurrent fetch (#164). Skipping keeps the gate intact; losing a
-            // transient eviction slot is acceptable, never losing correctness.
-            if (_inflight.ContainsKey(key)) continue;
+            // while ANY of its callers holds/waits on the gate made a later GetOrAdd mint a second
+            // semaphore and issue a duplicate concurrent fetch (#164). Skipping keeps the gate
+            // intact; losing a transient eviction slot is acceptable, never losing correctness.
+            if (_inflight.TryGetValue(key, out var active) && active > 0) continue;
             if (_cache.TryRemove(key, out _))
                 _locks.TryRemove(key, out _);
         }

@@ -300,10 +300,11 @@ public sealed class RouteAssembler : IRouteAssembler
 
     /// <summary>
     /// #220 "suppress more-specifics": a custom prefix is an explicit operator override, so any
-    /// route covered by one is dropped from the outbound list, regardless of its source or
-    /// community set. Coverage is strictly-more-specific — an exact custom==source duplicate stays
-    /// in the list and gets its communities unioned by <c>BgpSession.MergeDuplicatePrefixes</c>
-    /// (#209), which is the desired exact-match behavior. Runs on the flat per-peer list BEFORE the
+    /// SOURCE route covered by one is dropped from the outbound list, regardless of its source or
+    /// community set. Two things survive: an exact custom==source duplicate (its communities get
+    /// unioned by <c>BgpSession.MergeDuplicatePrefixes</c>, #209) and every CONFIGURED CUSTOM
+    /// prefix itself — nested customs (e.g. /8 + a deliberate /16) must not suppress each other
+    /// (CodeRabbit on the integration review). Runs on the flat per-peer list BEFORE the
     /// per-community-set aggregator sees it. Extracted as a pure function for unit tests.
     /// </summary>
     internal static List<Route> SuppressCoveredByCustomPrefixes(
@@ -315,8 +316,12 @@ public sealed class RouteAssembler : IRouteAssembler
         // Mask(0) must be 0, not 0xFFFFFFFF << 32 (a shift-by-32 is a no-op on uint, not a wipe).
         static uint Mask(byte length) => length == 0 ? 0u : 0xFFFFFFFFu << (32 - length);
         return routes
-            .Where(r => !customRanges.Any(cr => r.PrefixLength > cr.Length
-                                                && (r.Prefix & Mask(cr.Length)) == cr.Network))
+            .Where(r =>
+                // A configured custom prefix is never suppressed — including by a broader
+                // custom prefix of the same peer. Exact (network, length) == custom match.
+                customRanges.Contains((r.Prefix, r.PrefixLength))
+                || !customRanges.Any(cr => r.PrefixLength > cr.Length
+                                           && (r.Prefix & Mask(cr.Length)) == cr.Network))
             .ToList();
     }
 

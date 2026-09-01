@@ -30,7 +30,7 @@ public sealed class BgpSession : IDisposable
     private readonly BgpMetrics _metrics;
     private readonly ILogger<BgpSession> _logger;
     private readonly CancellationTokenSource _cts = new();
-    private readonly Func<string, uint, Task>? _onPeerIdentified;
+    private readonly Func<string, uint, CancellationToken, Task>? _onPeerIdentified;
     private readonly IPeerStore? _peerStore;
     // #265 item 1: set by BgpServer right after creation — "is this session still the registered
     // one?" A false answer at teardown-time means a replacement took the slot and owns the
@@ -253,7 +253,7 @@ public sealed class BgpSession : IDisposable
         IRouteFilter routeFilter,
         BgpMetrics metrics,
         ILogger<BgpSession> logger,
-        Func<string, uint, Task>? onPeerIdentified = null,
+        Func<string, uint, CancellationToken, Task>? onPeerIdentified = null,
         IPeerStore? peerStore = null,
         IPrefixAggregator? prefixAggregator = null,
         IRouteAssembler? routeAssembler = null,
@@ -342,7 +342,7 @@ public sealed class BgpSession : IDisposable
                     ? $"{c.Code}[{Convert.ToHexString(c.Data)}]"
                     : $"{c.Code}")));
 
-            await ValidateOpenAsync(remoteOpen);
+            await ValidateOpenAsync(remoteOpen, linkedCts.Token);
 
             TransitionTo(BgpFsmState.OpenSent);
 
@@ -1505,7 +1505,7 @@ public sealed class BgpSession : IDisposable
 
     #region Validation
 
-    private async Task ValidateOpenAsync(BgpOpenMessage open)
+    private async Task ValidateOpenAsync(BgpOpenMessage open, CancellationToken ct)
     {
         var localRouterId = BgpConstants.IPAddressToUint(_bgpConfig.GetRouterIdAddress());
         // #269: OPEN negotiation/validation lives in the protocol library (OpenNegotiator); the
@@ -1522,7 +1522,9 @@ public sealed class BgpSession : IDisposable
         // Announce/persist the peer only after the OPEN passes validation. Previously this fired
         // before the expected-ASN check, upserting a configured peer that declared a mismatched ASN
         // (BadPeerAs) just before the session was torn down.
-        if (_onPeerIdentified is not null) await _onPeerIdentified(_peerConfig.Address, _remoteAsn);
+        // CodeRabbit (integration review): propagate the session token into the upsert so a
+        // locked SQLite cannot out-wait shutdown/replacement before cancellation is observed.
+        if (_onPeerIdentified is not null) await _onPeerIdentified(_peerConfig.Address, _remoteAsn, ct);
 
         var peerGr = CapabilityHelper.GetGracefulRestart(open);
         _logger.LogInformation("Peer {Peer} Graceful Restart: {State}",
