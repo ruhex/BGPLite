@@ -129,13 +129,25 @@ public sealed class AppConfig
         for (var i = 0; i < Peers.Count; i++)
         {
             var peer = Peers[i];
+            // #390: an omitted Address used to default to "0.0.0.0" and slip through — require a
+            // real unicast address and reject the all-zeros placeholder explicitly.
+            if (string.IsNullOrWhiteSpace(peer.Address))
+                throw new InvalidOperationException(
+                    $"Invalid configuration: Peers[{i}].Address is required — a configured peer must know where it connects from.");
             if (!IPAddress.TryParse(peer.Address, out var address)
-                || address.AddressFamily != AddressFamily.InterNetwork)
+                || address.AddressFamily != AddressFamily.InterNetwork
+                || IPAddress.Any.Equals(address))
             {
                 throw new InvalidOperationException(
-                    $"Invalid configuration: Peers[{i}].Address must be a valid IPv4 address " +
+                    $"Invalid configuration: Peers[{i}].Address must be a valid IPv4 address other than 0.0.0.0 " +
                     $"(got '{peer.Address}').");
             }
+            // #390: a configured peer without a remote ASN can never match an OPEN — fail loud
+            // instead of silently relying on auto-registration.
+            if (peer.RemoteAsn is null)
+                throw new InvalidOperationException(
+                    $"Invalid configuration: Peers[{i}].RemoteAsn is required for a configured peer " +
+                    "(omit the Peers entry entirely to rely on auto-registration).");
         }
 
         // #327: prefix-source errors used to surface only at load time, where LoadAllAsync absorbs
@@ -217,6 +229,34 @@ public sealed class AppConfig
                 throw new InvalidOperationException(
                     $"Invalid configuration: RipeStat.AsnLists[{i}] is empty — each item must be a mapping (Name, Asns, ...).");
             ValidateCommunity(list.Community, $"RipeStat.AsnLists[{i}] ('{list.Name}'): Community");
+        }
+
+        // #390: resilience/auto-refresh tunables were taken verbatim — a negative silently
+        // disabled retries or (worse) scheduled a zero-second timer storm. Fail loud.
+        if (RipeStat is { } ripe)
+        {
+            if (ripe.TimeoutSeconds < 0)
+                throw new InvalidOperationException(
+                    $"Invalid configuration: RipeStat.TimeoutSeconds must be >= 0 seconds (got {ripe.TimeoutSeconds}).");
+            if (ripe.RetryAttempts < 0)
+                throw new InvalidOperationException(
+                    $"Invalid configuration: RipeStat.RetryAttempts must be >= 0 (got {ripe.RetryAttempts}).");
+            if (ripe.RetryDelaySeconds < 0)
+                throw new InvalidOperationException(
+                    $"Invalid configuration: RipeStat.RetryDelaySeconds must be >= 0 seconds (got {ripe.RetryDelaySeconds}).");
+        }
+
+        if (AutoRefresh is { } auto)
+        {
+            if (auto.IntervalSeconds < 1)
+                throw new InvalidOperationException(
+                    $"Invalid configuration: AutoRefresh.IntervalSeconds must be a positive number of seconds (got {auto.IntervalSeconds}).");
+            if (auto.NoEtagIntervalSeconds < 1)
+                throw new InvalidOperationException(
+                    $"Invalid configuration: AutoRefresh.NoEtagIntervalSeconds must be a positive number of seconds (got {auto.NoEtagIntervalSeconds}).");
+            if (auto.MaxJitterMs < 0)
+                throw new InvalidOperationException(
+                    $"Invalid configuration: AutoRefresh.MaxJitterMs must be >= 0 ms (got {auto.MaxJitterMs}).");
         }
     }
 

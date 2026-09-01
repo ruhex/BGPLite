@@ -5,8 +5,10 @@ namespace BGPLite.Configuration;
 
 public sealed class PeerConfig
 {
+    // #390: empty default (was "0.0.0.0") — an omitted Address trips the fail-loud validation
+    // instead of silently configuring a peer at the invalid all-zeros address.
     [YamlMember(Alias = "Address")]
-    public string Address { get; init; } = "0.0.0.0";
+    public string Address { get; init; } = "";
 
     [YamlMember(Alias = "RemoteAsn")]
     public uint? RemoteAsn { get; init; }

@@ -20,6 +20,36 @@ public class ConfigValidationTests
             MaxPrefixesPerPeer = maxPrefixesPerPeer
         };
 
+    // --- #390: resilience/auto-refresh tunables fail loud --------------------------------------
+
+    [Theory]
+    [InlineData("TimeoutSeconds", -1)]
+    [InlineData("RetryAttempts", -1)]
+    [InlineData("RetryDelaySeconds", -5)]
+    public void Validate_RejectsNegativeRipeStatTunables(string field, int value)
+    {
+        var ripe = new RipeStatConfig();
+        typeof(RipeStatConfig).GetProperty(field)!.SetValue(ripe, value);
+        var config = new AppConfig { Bgp = Bgp(), RipeStat = ripe };
+
+        var ex = Assert.Throws<InvalidOperationException>(() => config.Validate());
+        Assert.Contains($"RipeStat.{field}", ex.Message);
+    }
+
+    [Theory]
+    [InlineData("IntervalSeconds", 0)]
+    [InlineData("NoEtagIntervalSeconds", 0)]
+    [InlineData("MaxJitterMs", -1)]
+    public void Validate_RejectsBadAutoRefreshTunables(string field, int value)
+    {
+        var auto = new AutoRefreshConfig();
+        typeof(AutoRefreshConfig).GetProperty(field)!.SetValue(auto, value);
+        var config = new AppConfig { Bgp = Bgp(), AutoRefresh = auto };
+
+        var ex = Assert.Throws<InvalidOperationException>(() => config.Validate());
+        Assert.Contains($"AutoRefresh.{field}", ex.Message);
+    }
+
     private static AppConfig Config(BgpConfig? bgp = null, int apiPort = 5001, List<PeerConfig>? peers = null,
         List<PrefixSourceConfig>? sources = null, string? defaultSource = null)
         => new()
@@ -397,6 +427,7 @@ public class ConfigValidationTests
     }
 
     [Theory]
+    [InlineData("0.0.0.0")]   // #390: the all-zeros placeholder is never a valid peer address
     [InlineData("not-an-ip")]
     [InlineData("::1")]
     public void Validate_RejectsBadPeerAddress(string address)
@@ -405,6 +436,27 @@ public class ConfigValidationTests
 
         var ex = Assert.Throws<InvalidOperationException>(() => config.Validate());
         Assert.Contains("Peers[0].Address", ex.Message);
+    }
+
+    [Fact]
+    public void Validate_RequiresPeerAddress()
+    {
+        // #390: PeerConfig.Address now defaults to "" so an omitted Address trips validation
+        // instead of silently configuring the all-zeros placeholder.
+        var config = Config(peers: [new PeerConfig { RemoteAsn = 65002 }]);
+
+        var ex = Assert.Throws<InvalidOperationException>(() => config.Validate());
+        Assert.Contains("Peers[0].Address is required", ex.Message);
+    }
+
+    [Fact]
+    public void Validate_RequiresPeerRemoteAsn()
+    {
+        // #390: a configured peer without a remote ASN can never match an OPEN — fail loud.
+        var config = Config(peers: [new PeerConfig { Address = "10.0.0.2" }]);
+
+        var ex = Assert.Throws<InvalidOperationException>(() => config.Validate());
+        Assert.Contains("Peers[0].RemoteAsn is required", ex.Message);
     }
 
     [Fact]
