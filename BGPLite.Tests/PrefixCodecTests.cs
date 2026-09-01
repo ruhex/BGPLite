@@ -57,6 +57,41 @@ public class PrefixCodecTests
     }
 
     [Fact]
+    public void Roundtrip_BoundaryLengths()
+    {
+        // #392: every byte-aligned boundary plus the non-aligned ones around it. Encode masks to
+        // the network address, so the expected value is the address & mask for each length.
+        var lengths = new[] { (byte)1, (byte)7, (byte)9, (byte)23, (byte)25, (byte)31 };
+        foreach (var length in lengths)
+        {
+            var mask = length == 0 ? 0u : 0xFFFFFFFFu << (32 - length);
+            var expected = new IpPrefix(0x0A1B2C30u & mask, length);
+
+            var buf = new byte[8];
+            var written = PrefixCodec.Encode(expected, buf);
+
+            var (decoded, consumed) = PrefixCodec.Decode(buf.AsSpan(0, written));
+
+            Assert.Equal(written, consumed);   // the whole frame is exactly one NLRI
+            Assert.Equal(expected, decoded);
+        }
+    }
+
+    [Fact]
+    public void Decode_MasksHostBits()
+    {
+        // #392: host bits on the wire are masked to the network address at the parse boundary —
+        // a /23 NLRI carries three data bytes, so its low-order bits are host bits: "10.0.1.0/23"
+        // must decode to 10.0.0.0/23 (the RouteTable key), never 10.0.1.0.
+        var nlri = new byte[] { 23, 10, 0, 1 };
+
+        var (decoded, consumed) = PrefixCodec.Decode(nlri);
+
+        Assert.Equal(new IpPrefix(0x0A000000, 23), decoded);
+        Assert.Equal(4, consumed);
+    }
+
+    [Fact]
     public void Roundtrip_VariousPrefixes()
     {
         var prefixes = new[]
