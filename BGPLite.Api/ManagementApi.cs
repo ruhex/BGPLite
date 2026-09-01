@@ -197,7 +197,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
     /// <summary>Whether a global concurrency limiter is currently active — exposed for hot-reload tests.</summary>
     internal bool IsConcurrencyLimitEnabled => Volatile.Read(ref _concurrencyLimiter) is not null;
 
-    public Task StartAsync(CancellationToken cancellationToken)
+    public async Task StartAsync(CancellationToken cancellationToken)
     {
         _listener = new HttpListener();
         // HttpListener prefix normalization:
@@ -235,7 +235,18 @@ public sealed class ManagementApi : IHostedService, IDisposable
                 "the proxy overwrites it. A pass-through proxy lets clients spoof their IP");
         }
         _listenTask = ListenAsync(_cts.Token);
-        return Task.CompletedTask;
+
+        // #36: arm the listening socket with every peer's TCP-MD5 key. ManagementApi starts after
+        // BgpServer (registration order), so the listener already exists; the sub-second window
+        // before this runs is the only unprotected moment (documented in #36).
+        var md5Bootstrapped = 0;
+        foreach (var (peerIp, md5Password) in await _store.GetPeerMd5CredentialsAsync(cancellationToken))
+        {
+            _sessionManager.SetPeerMd5Key(peerIp, md5Password);
+            md5Bootstrapped++;
+        }
+        if (md5Bootstrapped > 0)
+            _logger.LogInformation("TCP-MD5 armed for {Count} peer(s)", md5Bootstrapped);
     }
 
     public async Task StopAsync(CancellationToken cancellationToken)
@@ -788,6 +799,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
             status = peer.Status,
             createdAt = peer.CreatedAt,
             maxPrefix = peer.MaxPrefix,
+            tcpMd5 = !string.IsNullOrEmpty(peer.Md5Password),
             lastSessionAt = peer.LastSessionAt,
             lists = peer.Subscriptions,
             customPrefixes = peer.CustomPrefixes,
@@ -848,6 +860,11 @@ public sealed class ManagementApi : IHostedService, IDisposable
         if (data.MaxPrefix is < 0)
             return ApiResponse.Error("Invalid MaxPrefix: must be 0 (unlimited) or a positive prefix count.", 400);
 
+        // #36: optional per-peer TCP-MD5 (RFC 2385) — a password enables kernel-level signature
+        // enforcement for this peer's source IP. The password is never logged or echoed.
+        if (data.Md5Password is not null && !TcpMd5.IsValidPassword(data.Md5Password))
+            return ApiResponse.Error($"Invalid Md5Password: must be 1..{TcpMd5.PasswordMaxBytes} UTF-8 bytes (empty means plain TCP).", 400);
+
         if (data.CustomPrefixes is not null)
         {
             foreach (var cidr in data.CustomPrefixes)
@@ -867,7 +884,10 @@ public sealed class ManagementApi : IHostedService, IDisposable
         // #267 item 6: the upsert returns (Id, Status, CreatedAt) from its RETURNING clause — no
         // follow-up GetDbPeerById roundtrip for fields the caller already knows.
         var saved = await _store.SavePeerConfigurationAsync(
-            normalizedIp, data.Asn, data.Description, asnLists, customPrefixes, data.CustomAsns ?? [], data.MaxPrefix);
+            normalizedIp, data.Asn, data.Description, asnLists, customPrefixes, data.CustomAsns ?? [], data.MaxPrefix,
+            md5Password: string.IsNullOrEmpty(data.Md5Password) ? null : data.Md5Password);
+        if (!string.IsNullOrEmpty(data.Md5Password))
+            _sessionManager.SetPeerMd5Key(normalizedIp, data.Md5Password);
 
         _logger.LogInformation("Created peer {Ip} AS{Asn} ({Id}): {Subs} lists, {Prefixes} custom prefixes, {Asns} custom AS",
             normalizedIp, data.Asn, saved.Id, asnLists.Count, customPrefixes.Count, data.CustomAsns?.Count ?? 0);
@@ -883,6 +903,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
             status = saved.Status,
             createdAt = saved.CreatedAt,
             maxPrefix = saved.MaxPrefix,
+            tcpMd5 = !string.IsNullOrEmpty(data.Md5Password),
             lists = asnLists,
             customPrefixes = data.CustomPrefixes ?? [],
             customAsns = data.CustomAsns ?? []
@@ -905,6 +926,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
             status = peer.Status,
             createdAt = peer.CreatedAt,
             maxPrefix = peer.MaxPrefix,
+            tcpMd5 = !string.IsNullOrEmpty(peer.Md5Password),
             lastSessionAt = peer.LastSessionAt,
             lists = peer.Subscriptions,
             customPrefixes = peer.CustomPrefixes,
@@ -977,7 +999,19 @@ public sealed class ManagementApi : IHostedService, IDisposable
         if (data.MaxPrefix is < 0)
             return ApiResponse.Error("Invalid MaxPrefix: must be 0 (unlimited) or a positive prefix count.", 400);
 
-        await _store.UpdatePeerConfigurationAsync(peerId, data.Description, data.Lists, parsedPrefixes, data.CustomAsns, data.MaxPrefix);
+        // #36: Md5Password PATCH — omitted leaves it, "" clears (plain TCP), a value sets it.
+        if (data.Md5Password is not null && !TcpMd5.IsValidPassword(data.Md5Password) && data.Md5Password.Length > 0)
+            return ApiResponse.Error($"Invalid Md5Password: must be 1..{TcpMd5.PasswordMaxBytes} UTF-8 bytes, or an empty string to disable.", 400);
+
+        await _store.UpdatePeerConfigurationAsync(peerId, data.Description, data.Lists, parsedPrefixes, data.CustomAsns, data.MaxPrefix,
+            md5Password: data.Md5Password);
+        if (data.Md5Password is not null)
+        {
+            // The peer row carries the source IP the key is attached to.
+            var md5Peer = await _store.GetDbPeerByIdAsync(peerId);
+            if (md5Peer is not null)
+                _sessionManager.SetPeerMd5Key(md5Peer.Ip, md5Peer.Md5Password);
+        }
 
         _logger.LogInformation("Updated peer {Id}", SanitizeForLog(peerId));
 
@@ -1003,6 +1037,11 @@ public sealed class ManagementApi : IHostedService, IDisposable
         await _sessionManager.TerminatePeerAsync(peer.Ip, peer.Asn ?? 0, bound.Token);
 
         await _store.DeletePeerAsync(peerId);
+
+        // #36: disarm the deleted peer's TCP-MD5 key (the peer row carrying it is gone).
+        var deletedPeer = await _store.GetDbPeerByIdAsync(peerId);
+        if (deletedPeer is not null)
+            _sessionManager.SetPeerMd5Key(deletedPeer.Ip, null);
         _logger.LogInformation("Deleted peer {Id} ({Ip})", SanitizeForLog(peerId), peer.Ip);
         return ApiResponse.Ok(new { id = peerId, deleted = true });
     }
@@ -1716,8 +1755,8 @@ public sealed class ManagementApi : IHostedService, IDisposable
         _listener?.Close();
     }
 
-    private record CreatePeerRequest(string Ip, uint Asn, string? Description, [property: JsonPropertyName("lists")] List<string>? AsnLists, List<string>? CustomPrefixes, List<uint>? CustomAsns, int? MaxPrefix);
-    private record UpdatePeerRequest(string? Description, [property: JsonPropertyName("lists")] List<string>? Lists, List<string>? CustomPrefixes, List<uint>? CustomAsns, int? MaxPrefix);
+    private record CreatePeerRequest(string Ip, uint Asn, string? Description, [property: JsonPropertyName("lists")] List<string>? AsnLists, List<string>? CustomPrefixes, List<uint>? CustomAsns, int? MaxPrefix, string? Md5Password);
+    private record UpdatePeerRequest(string? Description, [property: JsonPropertyName("lists")] List<string>? Lists, List<string>? CustomPrefixes, List<uint>? CustomAsns, int? MaxPrefix, string? Md5Password);
     private record AddSourceRequest(string Name, string Url, string? Community);
     private record PatchSourceRequest([property: JsonPropertyName("active")] bool? Active);
 

@@ -183,6 +183,20 @@ public sealed class PeerStore : IPeerStore
     }
 
     /// <summary>
+    /// Returns (Ip, Md5Password) for every peer with a configured TCP-MD5 key (#36). Used once at
+    /// startup to arm the listening socket — and only the IP and key leave the store, never the
+    /// key alone (API reads use the enabled flag instead).
+    /// </summary>
+    public async Task<IReadOnlyList<(string Ip, string Md5Password)>> GetPeerMd5CredentialsAsync(CancellationToken ct = default)
+    {
+        using var db = _dbFactory.CreateDbContext();
+        return await db.Peers.AsNoTracking()
+            .Where(p => p.Md5Password != null && p.Md5Password != "")
+            .Select(p => new ValueTuple<string, string>(p.Ip, p.Md5Password!))
+            .ToListAsync(ct);
+    }
+
+    /// <summary>
     /// Single-roundtrip replacement for the <c>GetPeer</c> + <c>UpdateSessionStatus</c> +
     /// <c>GetSubscriptions</c> + <c>GetCustomPrefixes</c> + <c>GetCustomAsns</c> sequence the BGP
     /// send path used to issue as FIVE separate <c>DbContext</c>s (issue #84). Loads the peer by
@@ -291,7 +305,9 @@ public sealed class PeerStore : IPeerStore
                 // Communities stored as long (PeerCommunity.Community); the API formats to "ASN:VAL".
                 p.Communities.Select(c => c.Community).ToList(),
                 // #391: the per-peer prefix ceiling (NULL = inherit Bgp.MaxPrefixesPerPeer).
-                p.MaxPrefix))
+                p.MaxPrefix,
+                // #36: the raw TCP-MD5 key — the API projects it to a boolean flag, never the value.
+                p.Md5Password))
             .AsSplitQuery()
             .FirstOrDefaultAsync(ct);
         await read.CommitAsync(ct);
@@ -320,12 +336,16 @@ public sealed class PeerStore : IPeerStore
         string ip, uint asn, string? description,
         IReadOnlyList<string> asnListNames,
         IReadOnlyList<(string Prefix, byte Length)> customPrefixes,
-        IReadOnlyList<uint> customAsns, int? maxPrefix = null, CancellationToken ct = default)
+        IReadOnlyList<uint> customAsns, int? maxPrefix = null, CancellationToken ct = default,
+        string? md5Password = null)
     {
         using var db = _dbFactory.CreateDbContext();
         using var tx = await db.Database.BeginTransactionAsync(ct);
 
         var saved = await UpsertPeerRowAsync(db, ip, asn, description, ct, maxPrefix);
+        if (!string.IsNullOrEmpty(md5Password))
+            await db.Peers.Where(p => p.Id == saved.Id)
+                .ExecuteUpdateAsync(u => u.SetProperty(p => p.Md5Password, md5Password), ct);
         await ReplaceSubscriptionsAsync(db, saved.Id, asnListNames, ct);
         await ReplaceCustomPrefixesAsync(db, saved.Id, customPrefixes, ct);
         await ReplaceCustomAsnsAsync(db, saved.Id, customAsns, ct);
@@ -344,7 +364,8 @@ public sealed class PeerStore : IPeerStore
         string peerId, string? description,
         IReadOnlyList<string>? asnListNames,
         IReadOnlyList<(string Prefix, byte Length)>? customPrefixes,
-        IReadOnlyList<uint>? customAsns, int? maxPrefix = null, CancellationToken ct = default)
+        IReadOnlyList<uint>? customAsns, int? maxPrefix = null, CancellationToken ct = default,
+        string? md5Password = null)
     {
         using var db = _dbFactory.CreateDbContext();
         using var tx = await db.Database.BeginTransactionAsync(ct);
@@ -360,6 +381,13 @@ public sealed class PeerStore : IPeerStore
         {
             await db.Peers.Where(p => p.Id == peerId)
                 .ExecuteUpdateAsync(s => s.SetProperty(p => p.MaxPrefix, maxPrefix), ct);
+        }
+        // #36: md5Password PATCH — null leaves it, "" clears (plain TCP), a value sets it.
+        if (md5Password is not null)
+        {
+            await db.Peers.Where(p => p.Id == peerId)
+                .ExecuteUpdateAsync(s => s.SetProperty(p => p.Md5Password,
+                    md5Password.Length == 0 ? null : md5Password), ct);
         }
         if (asnListNames is not null) await ReplaceSubscriptionsAsync(db, peerId, asnListNames, ct);
         if (customPrefixes is not null) await ReplaceCustomPrefixesAsync(db, peerId, customPrefixes, ct);

@@ -246,6 +246,7 @@ public sealed class ManagementApiShutdownTests : IDisposable
         public int GetAdvertisedPrefixCount(string peerIp, uint asn) => 0;
         public Task RefreshAllEstablishedAsync() => Task.CompletedTask;
         public Task TerminatePeerAsync(string peerIp, uint asn, CancellationToken ct = default) => Task.CompletedTask;
+        public void SetPeerMd5Key(string peerIp, string? password) { }
     }
 
     private sealed class StaticOptionsFactory(DbContextOptions<BgpDbContext> options) : IDbContextFactory<BgpDbContext>

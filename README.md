@@ -22,6 +22,7 @@ Protocol:
 - BGP-4 messages: OPEN / UPDATE / KEEPALIVE / NOTIFICATION; route refresh (RFC 2918, capability-gated, rate-limited)
 - 4-octet ASN (RFC 6793): AS_TRANS, AS4_PATH/AS4_AGGREGATOR tunneling for 2-octet-only peers
 - Capability negotiation (RFC 5492); Graceful Restart (RFC 4724): not advertised, receiving-side retention not implemented (D6/#318)
+- Optional TCP-MD5 session authentication (RFC 2385): set an `md5Password` on a peer (Linux/macOS; keyed by the peer's source IP)
 - Communities (RFC 1997) and Large Communities (RFC 8092): per-peer tagging and outgoing filters
 - UPDATE batching (≤100 NLRI) and exact-union CIDR aggregation
 

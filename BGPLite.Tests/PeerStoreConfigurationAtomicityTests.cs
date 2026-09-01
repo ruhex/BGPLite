@@ -187,6 +187,39 @@ public class PeerStoreConfigurationAtomicityTests
         Assert.Equal(0, await store.GetPeerMaxPrefixAsync("203.0.113.31", Asn));
     }
 
+    /// <summary>
+    /// #36: the TCP-MD5 password persists through create (only when provided) and update
+    /// (null = leave alone, "" = clear back to plain TCP). It is read back only through the
+    /// credentials query — the API exposes a boolean flag, never the value.
+    /// </summary>
+    [Fact]
+    public async Task Md5Password_CreateUpdate_Roundtrip()
+    {
+        var (store, connection) = NewStore();
+        using var _ = connection;
+
+        // Create without → no credentials row for this peer.
+        await store.SavePeerConfigurationAsync(Ip, Asn, "plain", asnListNames: [], customPrefixes: [], customAsns: []);
+        Assert.Empty(await store.GetPeerMd5CredentialsAsync());
+
+        // Create with → present.
+        var saved = await store.SavePeerConfigurationAsync("203.0.113.32", Asn, "secured",
+            asnListNames: [], customPrefixes: [], customAsns: [], md5Password: "peer-secret");
+        var creds = await store.GetPeerMd5CredentialsAsync();
+        var cred = Assert.Single(creds);
+        Assert.Equal("203.0.113.32", cred.Ip);
+        Assert.Equal("peer-secret", cred.Md5Password);
+
+        // Update: null leaves it, "" clears it.
+        await store.UpdatePeerConfigurationAsync(saved.Id, description: null,
+            asnListNames: null, customPrefixes: null, customAsns: null, md5Password: null);
+        Assert.Equal("peer-secret", Assert.Single(await store.GetPeerMd5CredentialsAsync()).Md5Password);
+
+        await store.UpdatePeerConfigurationAsync(saved.Id, description: null,
+            asnListNames: null, customPrefixes: null, customAsns: null, md5Password: "");
+        Assert.Empty(await store.GetPeerMd5CredentialsAsync());
+    }
+
     /// <summary>A store over an in-memory SQLite DB that records every transaction EF opens.</summary>
     private static (PeerStore Store, SqliteConnection Connection, List<string> Transactions) NewStoreCountingTransactions()
     {
