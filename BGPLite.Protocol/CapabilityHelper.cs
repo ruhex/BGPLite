@@ -24,6 +24,21 @@ public static class CapabilityHelper
         return false;
     }
 
+    /// <summary>Detects the MP-BGP IPv6/Unicast capability (AFI=2/SAFI=1) in the peer's OPEN
+    /// (#15 phase 2): the peer can send IPv6 routes via MP_REACH_NLRI.</summary>
+    public static bool SupportsMultiprotocolIpv6Unicast(BgpOpenMessage open)
+    {
+        foreach (var cap in open.Capabilities)
+        {
+            if (cap.Code == BgpConstants.Capability.Multiprotocol &&
+                cap.Data.Length >= 4 &&
+                BinaryPrimitives.ReadUInt16BigEndian(cap.Data) == BgpConstants.Afi.IPv6 &&
+                cap.Data[3] == BgpConstants.Safi.Unicast)
+                return true;
+        }
+        return false;
+    }
+
     public static bool SupportsMultiprotocolIpv4Unicast(BgpOpenMessage open)
     {
         foreach (var cap in open.Capabilities)

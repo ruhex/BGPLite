@@ -1,0 +1,145 @@
+using System.Buffers.Binary;
+using System.Net;
+
+namespace BGPLite.Protocol;
+
+/// <summary>
+/// Wire codec for the MP-BGP IPv6/Unicast attributes (RFC 4760, #15 phase 2):
+/// <list type="bullet">
+/// <item><c>MP_REACH_NLRI</c> (type 14): AFI(2) + SAFI(1) + NH-Len(1) + Next Hop + Reserved(1) + NLRI.</item>
+/// <item><c>MP_UNREACH_NLRI</c> (type 15): AFI(2) + SAFI(1) + Withdrawn NLRI.</item>
+/// </list>
+/// All functions operate on the attribute VALUE (after the 2-3 byte TLV header). Malformed input
+/// throws <see cref="BgpParseException"/> with Update Message Error so the caller's treat-as-withdraw
+/// path (RFC 7606 §2 — the attribute carries NLRI) handles it: the UPDATE is discarded, the session
+/// stays up (D17). The 32-byte next-hop form of RFC 2545 §3 (global + link-local) is decoded — the
+/// global address (first 16 bytes) is used; a next-hop length other than 16/32 is a parse error.
+/// </summary>
+public static class MpReachCodec
+{
+    public const ushort AfiIpv6 = (ushort)BgpConstants.Afi.IPv6;
+    public const byte SafiUnicast = BgpConstants.Safi.Unicast;
+    public const byte MpReachNlriType = 14;
+    public const byte MpUnreachNlriType = 15;
+
+    public readonly record struct MpReachV6(UInt128 NextHop, IReadOnlyList<IpPrefix> Prefixes);
+
+    /// <summary>Builds the MP_REACH_NLRI (type 14) attribute VALUE for IPv6/Unicast:
+    /// a 16-byte global next hop plus the NLRI prefix list.</summary>
+    public static byte[] EncodeMpReachV6(UInt128 nextHop, IReadOnlyList<IpPrefix> prefixes)
+    {
+        ArgumentNullException.ThrowIfNull(prefixes);
+
+        // size = AFI(2) + SAFI(1) + NH-Len(1) + NH(16) + Reserved(1) + Σ NLRI
+        var nlriSize = 0;
+        foreach (var p in prefixes)
+            nlriSize += 1 + (p.Length + 7) / 8;
+
+        var buffer = new byte[21 + nlriSize];
+        buffer[0] = (byte)(AfiIpv6 >> 8);
+        buffer[1] = (byte)AfiIpv6;
+        buffer[2] = SafiUnicast;
+        buffer[3] = 16;                                   // next-hop length: global only
+        for (var i = 0; i < 16; i++)
+            buffer[4 + i] = (byte)(nextHop >> (120 - i * 8));
+        // buffer[20] = reserved 0x00
+        var offset = 21;
+        foreach (var p in prefixes)
+            offset += PrefixCodec.Encode(p, buffer.AsSpan(offset));
+        return buffer;
+    }
+
+    /// <summary>Decodes an MP_REACH_NLRI (type 14) VALUE for IPv6/Unicast. The next hop is the
+    /// first 16 bytes; the RFC 2545 32-byte form (global + link-local) is accepted and the
+    /// link-local half is skipped — the link-local address is only meaningful on a shared
+    /// interface, which this session is not required to have.</summary>
+    public static MpReachV6 DecodeMpReachV6(ReadOnlySpan<byte> value)
+    {
+        // AFI(2) + SAFI(1) + NH-Len(1) + Reserved(1) = 5 bytes of fixed header, plus at least
+        // 16 bytes of next hop.
+        if (value.Length < 21)
+            throw new BgpParseException(
+                $"Truncated MP_REACH_NLRI: have {value.Length} bytes, need at least 21",
+                BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.InvalidNetworkField);
+
+        var afi = BinaryPrimitives.ReadUInt16BigEndian(value);
+        var safi = value[2];
+        if (afi != AfiIpv6 || safi != SafiUnicast)
+            throw new BgpParseException(
+                $"MP_REACH_NLRI for unsupported address family: AFI={afi}, SAFI={safi} (expected 2/1)",
+                BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.InvalidNetworkField);
+
+        var nhLength = value[3];
+        if (nhLength is not 16 and not 32)
+            throw new BgpParseException(
+                $"Invalid MP_REACH_NLRI next-hop length: {nhLength} (must be 16 or 32 per RFC 2545)",
+                BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.InvalidNetworkField);
+        if (value.Length < 4 + nhLength + 1)
+            throw new BgpParseException(
+                $"Truncated MP_REACH_NLRI next hop: need {nhLength} bytes at offset 4",
+                BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.InvalidNetworkField);
+
+        UInt128 nextHop = 0;
+        for (var i = 0; i < 16; i++)
+            nextHop = (nextHop << 8) | value[4 + i];
+
+        // value[4+nhLength] is the Reserved byte — MUST be 0 per RFC 4760 §4, but tolerated on
+        // receive (some implementations send garbage there; it carries no information).
+        var nlriOffset = 4 + nhLength + 1;
+        var prefixes = new List<IpPrefix>();
+        while (nlriOffset < value.Length)
+        {
+            var (prefix, consumed) = PrefixCodec.Decode6(value[nlriOffset..]);
+            prefixes.Add(prefix);
+            nlriOffset += consumed;
+        }
+
+        return new MpReachV6(nextHop, prefixes);
+    }
+
+    /// <summary>Builds the MP_UNREACH_NLRI (type 15) attribute VALUE for IPv6/Unicast:
+    /// AFI(2) + SAFI(1) + the withdrawn NLRI prefix list.</summary>
+    public static byte[] EncodeMpUnreachV6(IReadOnlyList<IpPrefix> prefixes)
+    {
+        ArgumentNullException.ThrowIfNull(prefixes);
+
+        var nlriSize = 0;
+        foreach (var p in prefixes)
+            nlriSize += 1 + (p.Length + 7) / 8;
+
+        var buffer = new byte[3 + nlriSize];
+        buffer[0] = (byte)(AfiIpv6 >> 8);
+        buffer[1] = (byte)AfiIpv6;
+        buffer[2] = SafiUnicast;
+        var offset = 3;
+        foreach (var p in prefixes)
+            offset += PrefixCodec.Encode(p, buffer.AsSpan(offset));
+        return buffer;
+    }
+
+    /// <summary>Decodes an MP_UNREACH_NLRI (type 15) VALUE for IPv6/Unicast.</summary>
+    public static IReadOnlyList<IpPrefix> DecodeMpUnreachV6(ReadOnlySpan<byte> value)
+    {
+        if (value.Length < 3)
+            throw new BgpParseException(
+                $"Truncated MP_UNREACH_NLRI: have {value.Length} bytes, need at least 3",
+                BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.InvalidNetworkField);
+
+        var afi = BinaryPrimitives.ReadUInt16BigEndian(value);
+        var safi = value[2];
+        if (afi != AfiIpv6 || safi != SafiUnicast)
+            throw new BgpParseException(
+                $"MP_UNREACH_NLRI for unsupported address family: AFI={afi}, SAFI={safi} (expected 2/1)",
+                BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.InvalidNetworkField);
+
+        var prefixes = new List<IpPrefix>();
+        var offset = 3;
+        while (offset < value.Length)
+        {
+            var (prefix, consumed) = PrefixCodec.Decode6(value[offset..]);
+            prefixes.Add(prefix);
+            offset += consumed;
+        }
+        return prefixes;
+    }
+}
