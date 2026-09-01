@@ -214,6 +214,20 @@ For section-by-section RFC conformance status, see `RFC_COMPLIANCE.md` (2026-07-
   deterministic filter, so `_advertisedPrefixes` stays consistent for withdrawals.
 - **Tracker:** #220.
 
+### D20. Community-less routes are denied under an active per-peer allowlist
+- **Decision:** when a peer has an active outgoing community allowlist (`PeerCommunities` set), a
+  route with NO COMMUNITY attribute is rejected; only tagged routes whose tag is in the allowlist
+  pass. The no-allowlist fast path (everything passes) is unchanged.
+- **Context:** the allowlist is the peer's consent to receive specific tags (#79); a community-less
+  route carries no such consent, and the previous default-allow let untagged routes bypass an
+  operator's filter entirely (PeerCommunityFilter.cs, #7 audit). Chosen over documenting
+  default-allow after review (#389) — strictness matches the filter's purpose; in BGPLite every
+  source path stamps communities via `ConfigCommunityResolver`, so community-less routes are
+  exceptional (a failed/absent resolver override), not a legitimate class.
+- **Consequence:** behavior change for deployments that used an allowlist AND relied on untagged
+  routes flowing; such routes now stop at the filter (visible via the existing send logs).
+- **Tracker:** #389.
+
 ## Management API
 
 ### D18. `X-Real-IP` is ignored by default, even behind trusted proxies
