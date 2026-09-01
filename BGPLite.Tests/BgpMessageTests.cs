@@ -399,18 +399,31 @@ public class BgpMessageTests
         Assert.Throws<BgpParseException>(() => BgpMessageReader.ReadMessage(frame));
     }
 
+    private static byte[] ShortBodyFrame(BgpMessageType type, int bodyBytes)
+    {
+        // #392 review: a valid 19-byte header (marker + length + type) with a TOO-SHORT body —
+        // otherwise ReadMessage rejects the header and the body guards are never exercised.
+        var frame = new byte[BgpConstants.MessageHeaderSize + bodyBytes];
+        BgpConstants.Marker.CopyTo(frame.AsSpan(0, BgpConstants.MarkerSize));
+        BinaryPrimitives.WriteUInt16BigEndian(frame.AsSpan(16, 2), (ushort)frame.Length);
+        frame[18] = (byte)type;
+        return frame;
+    }
+
     [Fact]
     public void ParseUpdate_UpdateTooShort_Throws()
     {
-        // #392: an UPDATE body must carry at least the 4-byte withdrawn-routes length.
-        Assert.Throws<BgpParseException>(() => BgpMessageReader.ReadMessage(new byte[4]));
+        // UPDATE body must carry at least the 4-byte withdrawn-routes total length.
+        Assert.Throws<BgpParseException>(() =>
+            BgpMessageReader.ReadMessage(ShortBodyFrame(BgpMessageType.Update, bodyBytes: 2)));
     }
 
     [Fact]
     public void ParseNotification_NotificationTooShort_Throws()
     {
-        // #392: a NOTIFICATION body must carry at least the 2-byte code/subcode pair.
-        Assert.Throws<BgpParseException>(() => BgpMessageReader.ReadMessage(new byte[4]));
+        // NOTIFICATION body must carry at least the code/subcode byte pair.
+        Assert.Throws<BgpParseException>(() =>
+            BgpMessageReader.ReadMessage(ShortBodyFrame(BgpMessageType.Notification, bodyBytes: 1)));
     }
 
     [Fact]
