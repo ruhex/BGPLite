@@ -34,8 +34,11 @@ public sealed class PeerCommunityFilter : IRouteFilter
         if (allowSet.Count == 0)
             return true; // no filter = all routes
 
+        // #389: with an ACTIVE allowlist, a community-less route is an untagged stranger — the
+        // operator's allowlist is the peer's consent to receive specific tags, and an untagged
+        // route carries no such consent. Default-deny; documented as D20.
         if (route.Communities.Count == 0)
-            return true; // routes without community always pass
+            return false;
 
         foreach (var c in route.Communities)
         {
