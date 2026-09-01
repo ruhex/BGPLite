@@ -1043,11 +1043,11 @@ public sealed class BgpSession : IDisposable
     /// REPLACING session's thread (see RouteTable.EntryOwnershipLost); the concurrent set makes
     /// that safe, and a late/duplicate notification only removes an entry already gone.
     /// </summary>
-    private void OnEntryOwnershipLost(object previousOwner, (uint Prefix, byte Length) key)
+    private void OnEntryOwnershipLost(object previousOwner, (UInt128 Prefix, byte Length, bool IsIpv4) key)
     {
         if (!ReferenceEquals(previousOwner, this))
             return;
-        _installedPrefixes.TryRemove(new IpPrefix(key.Prefix, key.Length), out _);
+        _installedPrefixes.TryRemove(new IpPrefix(key.Prefix, key.Length, key.IsIpv4), out _);
     }
 
     /// <summary>
@@ -1061,7 +1061,9 @@ public sealed class BgpSession : IDisposable
 
     private void WithdrawIfOwned(IpPrefix prefix, string reason)
     {
-        if (!_routeTable.RemoveOwnedBy(prefix.Address, prefix.Length, this))
+        // Inbound v4 withdrawals: the NLRI address lives in the low 32 bits of the 128-bit form
+        // (IsIpv4 = true matches the install key from the UPDATE path).
+        if (!_routeTable.RemoveOwnedBy(prefix.Address, prefix.Length, isIpv4: true, owner: this))
         {
             if (_logger.IsEnabled(LogLevel.Debug))
                 _logger.LogDebug("Ignoring withdrawal of {Prefix} from {Peer}: not owned by this session", prefix, _peer);
@@ -1148,7 +1150,7 @@ public sealed class BgpSession : IDisposable
         foreach (var route in routes)
         {
             batch.Add(route);
-            _advertisedPrefixes.Add(new IpPrefix(route.Prefix, route.PrefixLength));
+            _advertisedPrefixes.Add(new IpPrefix(route.Prefix, route.PrefixLength, route.IsIpv4));
             if (batch.Count >= maxNlriPerUpdate)
             {
                 await SendRouteBatchAsync(nextHop, batch, attrCache);
@@ -1179,10 +1181,10 @@ public sealed class BgpSession : IDisposable
     {
         if (routes.Count <= 1) return routes as List<Route> ?? routes.ToList();
 
-        var merged = new Dictionary<(uint Prefix, byte Length), Route>(routes.Count);
+        var merged = new Dictionary<(UInt128 Prefix, byte Length, bool IsIpv4), Route>(routes.Count);
         foreach (var route in routes)
         {
-            var key = (route.Prefix, route.PrefixLength);
+            var key = (route.Prefix, route.PrefixLength, route.IsIpv4);
             if (merged.TryGetValue(key, out var existing))
             {
                 // Union communities — keep both source tags so the peer can filter by either.
@@ -1222,7 +1224,7 @@ public sealed class BgpSession : IDisposable
             // and only diverge in this final attribute.
             attrs = UpdateCodec.WithLargeCommunityAttribute(attrs, groupRoutes[0].LargeCommunities);
 
-            var nlri = groupRoutes.Select(r => new IpPrefix(r.Prefix, r.PrefixLength)).ToList();
+            var nlri = groupRoutes.Select(r => new IpPrefix(r.Prefix, r.PrefixLength, r.IsIpv4)).ToList();
             await SendUpdateBatchAsync(attrs, nlri);
         }
     }

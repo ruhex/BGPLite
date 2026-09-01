@@ -313,15 +313,20 @@ public sealed class RouteAssembler : IRouteAssembler
         // A route is covered when its length is strictly greater than the custom prefix's and its
         // network, masked to the custom length, equals the (already host-bit-normalized) custom
         // network — the repo's masking idiom (PrefixCidr, ExactUnionPrefixAggregator).
-        // Mask(0) must be 0, not 0xFFFFFFFF << 32 (a shift-by-32 is a no-op on uint, not a wipe).
-        static uint Mask(byte length) => length == 0 ? 0u : 0xFFFFFFFFu << (32 - length);
+        // #15 phase 1: Route.Prefix is 128-bit now. Custom prefixes are IPv4-only (PrefixCidr),
+        // so suppression applies to IPv4 routes by their low-32-bit network; an IPv6 route can
+        // never be covered by an IPv4 custom prefix and always passes.
+        // Mask is in the v4 low-32 layout; Mask(0) must be 0, not 0xFFFFFFFF << 32 (a shift-by-32
+        // is a no-op on uint, not a wipe).
+        static UInt128 Mask(byte length) => length == 0 ? 0u : (UInt128)(0xFFFFFFFFu << (32 - length));
         return routes
             .Where(r =>
                 // A configured custom prefix is never suppressed — including by a broader
                 // custom prefix of the same peer. Exact (network, length) == custom match.
-                customRanges.Contains((r.Prefix, r.PrefixLength))
+                (r.IsIpv4 && customRanges.Contains(((uint)r.Prefix, r.PrefixLength)))
+                || !r.IsIpv4
                 || !customRanges.Any(cr => r.PrefixLength > cr.Length
-                                           && (r.Prefix & Mask(cr.Length)) == cr.Network))
+                                           && ((uint)r.Prefix & Mask(cr.Length)) == cr.Network))
             .ToList();
     }
 

@@ -199,7 +199,7 @@ public class BgpSessionRouteOwnershipTests
             {
                 if (BgpMessageReader.ReadMessage(frame) is not BgpUpdateMessage update) continue;
                 foreach (var p in update.Nlri)
-                    nlri.Add((p.Address, p.Length));
+                    nlri.Add(((uint)p.Address, p.Length));
             }
             if (nlri.Count > 0) break;
             await Task.Delay(TimeSpan.FromMilliseconds(10));
@@ -667,7 +667,7 @@ public class BgpSessionRouteOwnershipTests
         // B takes the SAME prefix over — A no longer owns it. #377 review: await the
         // ownership-loss callback deterministically instead of a fixed delay.
         var aLostOwnership = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        void OnLost(object owner, (uint Prefix, byte Length) key)
+        void OnLost(object owner, (UInt128 Prefix, byte Length, bool IsIpv4) key)
         {
             if (ReferenceEquals(owner, a) && key.Prefix == TenSlashEight)
                 aLostOwnership.TrySetResult();

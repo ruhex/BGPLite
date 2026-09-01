@@ -15,7 +15,7 @@ namespace BGPLite.Routing;
 /// </summary>
 public sealed class RouteTable
 {
-    private readonly ConcurrentDictionary<(uint Prefix, byte Length), Entry> _routes = new();
+    private readonly ConcurrentDictionary<(UInt128 Prefix, byte Length, bool IsIpv4), Entry> _routes = new();
 
     // #343: maintained count — every successful mutation adjusts it exactly once (1:1 with the
     // dictionary transition), so Count is an O(1) Volatile.Read instead of ConcurrentDictionary.Count,
@@ -85,12 +85,15 @@ public sealed class RouteTable
     /// key away from a previous owner (#377 review). Subscribers must tolerate invocation from
     /// any thread and duplicate/late notifications — treat it as "you MIGHT have lost this key".
     /// </summary>
-    public event Action<object, (uint Prefix, byte Length)>? EntryOwnershipLost;
+    public event Action<object, (UInt128 Prefix, byte Length, bool IsIpv4)>? EntryOwnershipLost;
+
+    /// <summary>Unconditional removal, regardless of owner — administrative paths only (IPv4).</summary>
+    public bool Remove(uint prefix, byte length) => Remove((UInt128)prefix, length, isIpv4: true);
 
     /// <summary>Unconditional removal, regardless of owner — administrative paths only.</summary>
-    public bool Remove(uint prefix, byte length)
+    public bool Remove(UInt128 prefix, byte length, bool isIpv4 = true)
     {
-        var removed = _routes.TryRemove((prefix, length), out _);
+        var removed = _routes.TryRemove((prefix, length, isIpv4), out _);
         if (removed)
             Interlocked.Decrement(ref _count);
         return removed;
@@ -109,16 +112,19 @@ public sealed class RouteTable
     /// route.
     /// </para>
     /// </summary>
-    public bool RemoveOwnedBy(uint prefix, byte length, object owner)
+    public bool RemoveOwnedBy(uint prefix, byte length, object owner) =>
+        RemoveOwnedBy((UInt128)prefix, length, isIpv4: true, owner);
+
+    public bool RemoveOwnedBy(UInt128 prefix, byte length, bool isIpv4 = true, object owner = null!)
     {
         ArgumentNullException.ThrowIfNull(owner);
 
-        var key = (prefix, length);
+        var key = (prefix, length, isIpv4);
         if (!_routes.TryGetValue(key, out var entry) || !ReferenceEquals(entry.Owner, owner))
             return false;
 
-        var removed = ((ICollection<KeyValuePair<(uint Prefix, byte Length), Entry>>)_routes)
-            .Remove(new KeyValuePair<(uint Prefix, byte Length), Entry>(key, entry));
+        var removed = ((ICollection<KeyValuePair<(UInt128 Prefix, byte Length, bool IsIpv4), Entry>>)_routes)
+            .Remove(new KeyValuePair<(UInt128 Prefix, byte Length, bool IsIpv4), Entry>(key, entry));
         if (removed)
             Interlocked.Decrement(ref _count);
         return removed;
@@ -148,7 +154,7 @@ public sealed class RouteTable
         {
             if (!ReferenceEquals(pair.Value.Owner, owner))
                 continue;
-            if (((ICollection<KeyValuePair<(uint Prefix, byte Length), Entry>>)_routes).Remove(pair))
+            if (((ICollection<KeyValuePair<(UInt128 Prefix, byte Length, bool IsIpv4), Entry>>)_routes).Remove(pair))
                 removed++;
         }
         if (removed > 0)
@@ -156,8 +162,13 @@ public sealed class RouteTable
         return removed;
     }
 
-    public Route? Get(uint prefix, byte length) =>
-        _routes.TryGetValue((prefix, length), out var entry) ? entry.Route : null;
+    /// <summary>Removes every entry owned by <paramref name="owner"/> (session teardown) —
+    /// counts the removals for the maintained counter.</summary>
+    /// <inheritdoc/>
+
+
+    public Route? Get(UInt128 prefix, byte length, bool isIpv4 = true) =>
+        _routes.TryGetValue((prefix, length, isIpv4), out var entry) ? entry.Route : null;
 
     public IReadOnlyList<Route> GetAll()
     {
