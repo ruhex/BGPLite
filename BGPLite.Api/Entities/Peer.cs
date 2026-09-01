@@ -10,6 +10,10 @@ public class Peer
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
     public DateTime? LastSessionAt { get; set; }
 
+    /// <summary>Per-peer prefix ceiling (#391). NULL = inherit the global
+    /// <c>Bgp.MaxPrefixesPerPeer</c>; explicit 0 = unlimited for this peer.</summary>
+    public int? MaxPrefix { get; set; }
+
     public List<PeerCommunity> Communities { get; set; } = [];
     public List<PeerSubscription> Subscriptions { get; set; } = [];
     public List<PeerCustomPrefix> CustomPrefixes { get; set; } = [];

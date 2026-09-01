@@ -252,6 +252,7 @@ public class CompositionContractTests
             return Task.CompletedTask;
         }
         public Task UpdateSessionStatusAsync(string ip, uint asn, bool active, CancellationToken ct = default) => Task.CompletedTask;
+        public Task<int?> GetPeerMaxPrefixAsync(string ip, uint asn, CancellationToken ct = default) => Task.FromResult<int?>(null);
         public Task<string> CreatePeerAsync(string ip, uint asn, string? description, CancellationToken ct = default) => throw new NotSupportedException();
         public Task<PeerRoutingView?> LoadPeerRoutingViewAsync(string ip, uint asn, CancellationToken ct = default) => throw new NotSupportedException();
     }

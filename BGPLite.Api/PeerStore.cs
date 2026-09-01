@@ -8,7 +8,7 @@ namespace BGPLite.Api;
 /// <summary>The persisted state of a peer row right after an upsert (#267 item 6): everything the
 /// POST /api/peers response needs, returned from the upsert's RETURNING clause instead of a
 /// follow-up read.</summary>
-public sealed record SavedPeer(string Id, string Status, DateTime CreatedAt);
+public sealed record SavedPeer(string Id, string Status, DateTime CreatedAt, int? MaxPrefix = null);
 
 public sealed class PeerStore : IPeerStore
 {
@@ -32,7 +32,7 @@ public sealed class PeerStore : IPeerStore
     /// an enclosing transaction (#259) instead of always committing on its own. Behaviour is
     /// unchanged from the #227 implementation this was extracted from.
     /// </summary>
-    private static async Task<SavedPeer> UpsertPeerRowAsync(BgpDbContext db, string ip, uint asn, string? description, CancellationToken ct)
+    private static async Task<SavedPeer> UpsertPeerRowAsync(BgpDbContext db, string ip, uint asn, string? description, CancellationToken ct, int? maxPrefix = null)
     {
         // #227: atomic SQLite upsert eliminates the read-then-write race on the composite unique
         // index UX_Peers_Ip_Asn. Two concurrent CreatePeer calls for the same (Ip, Asn) previously
@@ -62,22 +62,24 @@ public sealed class PeerStore : IPeerStore
             }
             using var cmd = connection.CreateCommand();
             cmd.CommandText =
-                "INSERT INTO Peers (Id, Ip, Asn, Description, Status, CreatedAt, LastSessionAt) " +
-                "VALUES (@id, @ip, @asn, @desc, 'inactive', @now, NULL) " +
-                "ON CONFLICT(Ip, Asn) DO UPDATE SET Description = excluded.Description " +
-                "RETURNING Id, Status, CreatedAt";
+                "INSERT INTO Peers (Id, Ip, Asn, Description, Status, CreatedAt, LastSessionAt, MaxPrefix) " +
+                "VALUES (@id, @ip, @asn, @desc, 'inactive', @now, NULL, @maxprefix) " +
+                "ON CONFLICT(Ip, Asn) DO UPDATE SET Description = excluded.Description, MaxPrefix = excluded.MaxPrefix " +
+                "RETURNING Id, Status, CreatedAt, MaxPrefix";
             AddParam(cmd, "@id", id);
             AddParam(cmd, "@ip", ip);
             AddParam(cmd, "@asn", (long)asn);
             AddParam(cmd, "@desc", (object?)description ?? DBNull.Value);
             AddParam(cmd, "@now", now);
+            AddParam(cmd, "@maxprefix", (object?)maxPrefix ?? DBNull.Value);
             using var reader = await cmd.ExecuteReaderAsync(ct);
             await reader.ReadAsync(ct);
             return new SavedPeer(
                 reader.GetString(0),
                 reader.GetString(1),
                 // CreatedAt is written in the "O" (round-trip) format above.
-                DateTime.Parse(reader.GetString(2), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind));
+                DateTime.Parse(reader.GetString(2), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind),
+                reader.IsDBNull(3) ? null : reader.GetInt32(3));
         }
         finally
         {
@@ -167,6 +169,20 @@ public sealed class PeerStore : IPeerStore
     }
 
     /// <summary>
+    /// Resolves the peer's per-peer prefix ceiling (#391): the row's <c>MaxPrefix</c> override or
+    /// <c>null</c> when the peer is unknown / has no override. A light single-column read — the
+    /// session calls it once per establish/refresh cycle, never per UPDATE.
+    /// </summary>
+    public async Task<int?> GetPeerMaxPrefixAsync(string ip, uint asn, CancellationToken ct = default)
+    {
+        using var db = _dbFactory.CreateDbContext();
+        return await db.Peers.AsNoTracking()
+            .Where(p => p.Ip == ip && p.Asn == asn)
+            .Select(p => p.MaxPrefix)
+            .FirstOrDefaultAsync(ct);
+    }
+
+    /// <summary>
     /// Single-roundtrip replacement for the <c>GetPeer</c> + <c>UpdateSessionStatus</c> +
     /// <c>GetSubscriptions</c> + <c>GetCustomPrefixes</c> + <c>GetCustomAsns</c> sequence the BGP
     /// send path used to issue as FIVE separate <c>DbContext</c>s (issue #84). Loads the peer by
@@ -224,7 +240,8 @@ public sealed class PeerStore : IPeerStore
             // already excluded paused rows at the SQL level.
             peer.CustomSources
                 .Select(c => new CustomSourceView(c.Name, c.Url, c.Community))
-                .ToList());
+                .ToList(),
+            peer.MaxPrefix);
     }
 
     /// <summary>
@@ -272,7 +289,9 @@ public sealed class PeerStore : IPeerStore
                     .Select(c => new PeerSourceView(c.Id, c.Name, c.Url, c.Community, c.Active))
                     .ToList(),
                 // Communities stored as long (PeerCommunity.Community); the API formats to "ASN:VAL".
-                p.Communities.Select(c => c.Community).ToList()))
+                p.Communities.Select(c => c.Community).ToList(),
+                // #391: the per-peer prefix ceiling (NULL = inherit Bgp.MaxPrefixesPerPeer).
+                p.MaxPrefix))
             .AsSplitQuery()
             .FirstOrDefaultAsync(ct);
         await read.CommitAsync(ct);
@@ -301,12 +320,12 @@ public sealed class PeerStore : IPeerStore
         string ip, uint asn, string? description,
         IReadOnlyList<string> asnListNames,
         IReadOnlyList<(string Prefix, byte Length)> customPrefixes,
-        IReadOnlyList<uint> customAsns, CancellationToken ct = default)
+        IReadOnlyList<uint> customAsns, int? maxPrefix = null, CancellationToken ct = default)
     {
         using var db = _dbFactory.CreateDbContext();
         using var tx = await db.Database.BeginTransactionAsync(ct);
 
-        var saved = await UpsertPeerRowAsync(db, ip, asn, description, ct);
+        var saved = await UpsertPeerRowAsync(db, ip, asn, description, ct, maxPrefix);
         await ReplaceSubscriptionsAsync(db, saved.Id, asnListNames, ct);
         await ReplaceCustomPrefixesAsync(db, saved.Id, customPrefixes, ct);
         await ReplaceCustomAsnsAsync(db, saved.Id, customAsns, ct);
@@ -325,7 +344,7 @@ public sealed class PeerStore : IPeerStore
         string peerId, string? description,
         IReadOnlyList<string>? asnListNames,
         IReadOnlyList<(string Prefix, byte Length)>? customPrefixes,
-        IReadOnlyList<uint>? customAsns, CancellationToken ct = default)
+        IReadOnlyList<uint>? customAsns, int? maxPrefix = null, CancellationToken ct = default)
     {
         using var db = _dbFactory.CreateDbContext();
         using var tx = await db.Database.BeginTransactionAsync(ct);
@@ -334,6 +353,13 @@ public sealed class PeerStore : IPeerStore
         {
             await db.Peers.Where(p => p.Id == peerId)
                 .ExecuteUpdateAsync(s => s.SetProperty(p => p.Description, description), ct);
+        }
+        // #391: maxPrefix follows the PATCH pattern — null means "leave it alone"; an explicit
+        // value (including 0 = unlimited for this peer) is set. The create path always sets it.
+        if (maxPrefix is not null)
+        {
+            await db.Peers.Where(p => p.Id == peerId)
+                .ExecuteUpdateAsync(s => s.SetProperty(p => p.MaxPrefix, maxPrefix), ct);
         }
         if (asnListNames is not null) await ReplaceSubscriptionsAsync(db, peerId, asnListNames, ct);
         if (customPrefixes is not null) await ReplaceCustomPrefixesAsync(db, peerId, customPrefixes, ct);

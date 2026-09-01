@@ -31,6 +31,11 @@ public sealed class BgpSession : IDisposable
     private readonly ILogger<BgpSession> _logger;
     private readonly CancellationTokenSource _cts = new();
     private readonly Func<string, uint, CancellationToken, Task>? _onPeerIdentified;
+    // #391: the EFFECTIVE per-peer prefix ceiling — the peer row's MaxPrefix override when the
+    // peer is configured, else the global Bgp.MaxPrefixesPerPeer. Resolved once per
+    // establish/refresh cycle in SendAllRoutesAsync (never per UPDATE); read on the UPDATE path
+    // via Volatile.Read. Int semantics: 0 = unlimited, > 0 = the cap.
+    private int _effectiveMaxPrefix;
     private readonly IPeerStore? _peerStore;
     // #265 item 1: set by BgpServer right after creation — "is this session still the registered
     // one?" A false answer at teardown-time means a replacement took the slot and owns the
@@ -264,6 +269,7 @@ public sealed class BgpSession : IDisposable
         _peerConfig = peerConfig;
         _peer = peerConfig.ToString();
         _bgpConfig = bgpConfig;
+        _effectiveMaxPrefix = bgpConfig.MaxPrefixesPerPeer;
         _routeTable = routeTable;
         _routeFilter = routeFilter;
         _metrics = metrics;
@@ -991,7 +997,7 @@ public sealed class BgpSession : IDisposable
                     // loop's treat-as-withdraw filter does not swallow it — it unwinds to RunAsync's
                     // BgpNotificationException handler, which sends the NOTIFICATION and tears the
                     // session down (owned routes are flushed by the finally, RFC 4271 §8.2.2).
-                    var cap = _bgpConfig.MaxPrefixesPerPeer;
+                    var cap = Volatile.Read(ref _effectiveMaxPrefix);
                     if (cap > 0 && !_installedPrefixes.ContainsKey(nlri) && _installedPrefixes.Count >= cap)
                         throw new BgpNotificationException(
                             BgpConstants.Error.Cease, BgpConstants.SubError.CeaseMaxPrefixes,
@@ -1078,6 +1084,16 @@ public sealed class BgpSession : IDisposable
     /// </summary>
     private async Task SendAllRoutesAsync()
     {
+        // #391: refresh the effective per-peer prefix ceiling once per cycle — the peer row's
+        // MaxPrefix override when the peer is configured (operator edits apply on the next
+        // refresh), else the global default. Unknown peers (auto-register path) read null here
+        // and keep the global cap until their row exists.
+        if (_peerStore is not null)
+        {
+            var overrideCap = await _peerStore.GetPeerMaxPrefixAsync(_peerConfig.Address, _remoteAsn, _cts.Token);
+            Volatile.Write(ref _effectiveMaxPrefix, overrideCap ?? _bgpConfig.MaxPrefixesPerPeer);
+        }
+
         var nextHop = BgpConstants.IPAddressToUint(_bgpConfig.GetRouterIdAddress());
         var routes = await _routeAssembler.BuildOutboundRoutesAsync(
             _peerConfig.Address, _remoteAsn, GetFilterPeerConfig(), _peer, _cts.Token);
