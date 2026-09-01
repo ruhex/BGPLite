@@ -228,6 +228,13 @@ For section-by-section RFC conformance status, see `RFC_COMPLIANCE.md` (2026-07-
   routes flowing; such routes now stop at the filter (visible via the existing send logs).
 - **Tracker:** #389.
 
+### D21. IPv6 dual-stack address model (ADR 0001)
+- **Decision:** `IpPrefix` is family-aware over `UInt128` — IPv4 in the low 32 bits with an
+  explicit `IsIpv4` flag, IPv6 as the full 128 bits; the constructor masks host bits (canonical
+  keys); `Route.Key`/`RouteTable` keys carry the family; the aggregator partitions by family.
+  Full ADR: `docs/adr/0001-ipv6-address-model.md` (#15 phase 1).
+- **Tracker:** #15, #14.
+
 ## Management API
 
 ### D18. `X-Real-IP` is ignored by default, even behind trusted proxies

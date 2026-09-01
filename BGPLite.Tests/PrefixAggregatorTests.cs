@@ -19,28 +19,31 @@ public class PrefixAggregatorTests
             LargeCommunities = largeCommunities ?? []
         };
 
-    private static List<(uint Prefix, byte Length)> Pfx(IReadOnlyList<Route> routes) =>
+    private static List<(UInt128 Prefix, byte Length)> Pfx(IReadOnlyList<Route> routes) =>
         routes.Select(r => (r.Prefix, r.PrefixLength)).ToList();
 
     /// <summary>Independent reference implementation: the sorted, merged [start,end] intervals
     /// of a prefix set. Used to cross-check that aggregation adds no address and drops none.</summary>
-    private static List<(ulong Start, ulong End)> UnionRanges(IEnumerable<(uint Prefix, byte Length)> prefixes)
+    private static List<(UInt128 Start, UInt128 End)> UnionRanges(IEnumerable<(UInt128 Prefix, byte Length)> prefixes)
     {
-        var intervals = new List<(ulong Start, ulong End)>();
+        var intervals = new List<(UInt128 Start, UInt128 End)>();
         foreach (var (prefix, length) in prefixes)
         {
             if (length > 32) continue;
-            var mask = length == 0 ? 0u : (0xFFFFFFFFu << (32 - length));
-            var start = (ulong)(prefix & mask);
-            var size = length == 0 ? (1UL << 32) : (1UL << (32 - length));
+            var mask = length == 0 ? 0u : (UInt128)(0xFFFFFFFFu << (32 - length));
+            var start = prefix & mask;
+            var size = length == 0 ? ((UInt128)1 << 32) : ((UInt128)1 << (32 - length));
             intervals.Add((start, start + size - 1));
         }
         intervals.Sort((a, b) => a.Start.CompareTo(b.Start));
-        var merged = new List<(ulong Start, ulong End)>();
+        var merged = new List<(UInt128 Start, UInt128 End)>();
         foreach (var (s, e) in intervals)
         {
             if (merged.Count > 0 && s <= merged[^1].End + 1)
-                merged[^1] = (merged[^1].Start, Math.Max(merged[^1].End, e));
+            {
+                var newEnd = merged[^1].End > e ? merged[^1].End : e;
+                merged[^1] = (merged[^1].Start, newEnd);
+            }
             else
                 merged.Add((s, e));
         }
