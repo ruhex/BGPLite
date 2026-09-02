@@ -1,0 +1,6 @@
+FROM alpine:3.20
+RUN apk add --no-cache tcpdump
+# tcpdump runs in the SERVER's network namespace (network_mode: "service:server"),
+# so it sees every BGP segment on both transports; frames land in a pcap for
+# Wireshark/tshark analysis.
+ENTRYPOINT ["tcpdump"]

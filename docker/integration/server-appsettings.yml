@@ -22,6 +22,16 @@ PrefixSources:
     Path: "/app/test-nets.txt"
     Community: "65001:100"
 
+  # Real-world data through the full HTTP fetch path (SSRF validator, response cap,
+  # parser, cache). Small list (~300 prefixes) from the operator's own repo, so the
+  # subscription pipeline is exercised against live internet content.
+  - Kind: http
+    Name: openai
+    Description: "OpenAI prefixes from ruhex/prefix-lists (integration test data)"
+    Url: "https://raw.githubusercontent.com/ruhex/prefix-lists/main/openai_prefixes.txt"
+    Timeout: 30
+    Community: "65001:110"
+
 RipeStat:
   TimeoutSeconds: 5
   RetryAttempts: 0

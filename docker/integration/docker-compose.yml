@@ -43,6 +43,23 @@ services:
       bgp6:
         ipv6_address: fd00:b00b::20
 
+  # Opt-in packet capture of the BGP traffic INSIDE the server's network namespace
+  # (both transports, one pcap). Start the stand with:
+  #   docker compose --profile capture up -d
+  # or run the tests with:  ./run-tests.sh --capture
+  # The pcap lands in ./captures/ for Wireshark/tshark analysis.
+  capture:
+    build:
+      context: .
+      dockerfile: Dockerfile.capture
+    platform: linux/amd64
+    container_name: bgplite-it-capture
+    profiles: ["capture"]
+    network_mode: "service:server"
+    volumes:
+      - ./captures:/captures
+    command: ["-i", "any", "-U", "-w", "/captures/bgp.pcap", "port 179"]
+
 networks:
   bgp4:
     driver: bridge

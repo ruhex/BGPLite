@@ -19,7 +19,11 @@ cd "$(dirname "$0")"
 
 API="http://localhost:15001"
 API_PORT_HOST=15001
-COMPOSE="docker compose -f docker-compose.yml"
+CAPTURE=0
+[ "${1:-}" = "--capture" ] && CAPTURE=1
+PROFILES=""
+[ "$CAPTURE" = 1 ] && PROFILES="--profile capture"
+COMPOSE="docker compose $PROFILES -f docker-compose.yml"
 
 say() { printf '\n=== %s ===\n' "$1"; }
 fail() { printf 'FAILED: %s\n' "$1" >&2; exit 1; }
@@ -55,7 +59,7 @@ wait_for 'api_get /api/server >/dev/null' 60
 
 # --- 2. register the IPv4 peer --------------------------------------------------
 say "2. register peer 172.30.100.20 (AS65002, custom prefix 192.0.2.0/24)"
-PEER_BODY='{"ip":"172.30.100.20","asn":65002,"description":"integration-bird","customPrefixes":["192.0.2.0/24"]}'
+PEER_BODY='{"ip":"172.30.100.20","asn":65002,"description":"integration-bird","lists":["openai"],"customPrefixes":["192.0.2.0/24"]}'
 CREATE_STATUS=$(curl -s --max-time 10 -o "$TMP/create-peer.json" -w '%{http_code}' \
   -X POST -H 'Content-Type: application/json' -d "$PEER_BODY" "$API/api/peers") \
   || fail "POST /api/peers curl error"
@@ -64,8 +68,13 @@ grep -q '"error"' "$TMP/create-peer.json" && fail "POST /api/peers rejected: $(c
 echo "created: $(cat "$TMP/create-peer.json")"
 
 # --- 3. both sessions Established ----------------------------------------------
-# birdc "show protocols all <name>" prints "BGP state: Established" once established.
-say "3. BGP sessions Established (IPv4 + IPv6 transport)"
+# BIRD connects the moment the stand is up, which races the peer registration in
+# step 2 (the session's initial dump would run against a not-yet-created peer row
+# and take the unconfigured path). Restarting the protocols forces a fresh dump
+# that sees the registered peer — deterministic, no sleep-based hope.
+say "3. restart BIRD sessions, then Established (IPv4 + IPv6 transport)"
+birdc "restart bgplite4" >/dev/null 2>&1
+birdc "restart bgplite6" >/dev/null 2>&1
 wait_for 'birdc "show protocols all bgplite4" 2>/dev/null | grep -q "BGP state:.*Established"' 90
 wait_for 'birdc "show protocols all bgplite6" 2>/dev/null | grep -q "BGP state:.*Established"' 90
 
@@ -80,7 +89,12 @@ say "4. BIRD announcements reach the server route table"
 wait_for 'api_get /api/routes | grep -q "\"default\":3"' 60
 ROUTES=$(api_get /api/routes)
 echo "$ROUTES"
-echo "$ROUTES" | grep -q '"total":5' || fail "route table should hold 2 seed + 3 BIRD routes: $ROUTES"
+echo "$ROUTES" | grep -q '"65001:100":2' || fail "seed source group (65001:100) should hold 2: $ROUTES"
+# The openai HTTP-source group must hold a healthy bulk (the live list has ~300;
+# aggregation may merge some, lists may evolve — assert a conservative floor).
+HTTP_ROUTES=$(echo "$ROUTES" | grep -oE '"65001:110":[0-9]+' | grep -oE '[0-9]+$')
+[ -n "$HTTP_ROUTES" ] && [ "$HTTP_ROUTES" -ge 100 ] \
+  || fail "openai HTTP-source group should hold >=100 routes, got: $HTTP_ROUTES"
 
 # --- 5. server -> BIRD route propagation ----------------------------------------
 say "5. server advertisements reach BIRD"
@@ -89,11 +103,32 @@ say "5. server advertisements reach BIRD"
 wait_for 'birdc "show route protocol bgplite4" 2>/dev/null | grep -q "192.0.2.0/24"' 60
 birdc "show route protocol bgplite4" || true
 
+# The peer also subscribes to the "openai" HTTP source (ruhex/prefix-lists): the full
+# HTTP-fetch pipeline must deliver its ~300 real-world prefixes to BIRD. Assert a
+# conservative floor (>= 100 routes) — aggregation may merge some, lists may evolve.
+# (tail -n +2 skips the "BIRD 2.0.12 ready" banner — its digits would break the parse.)
+ROUTES4=$(birdc "show route protocol bgplite4 count" 2>/dev/null | tail -n +2 | grep -oE "[0-9]+" | head -1)
+[ -n "$ROUTES4" ] && [ "$ROUTES4" -ge 100 ] \
+  || fail "expected >=100 routes from the openai HTTP source on bgplite4, got: $ROUTES4"
+printf 'bgplite4 carries %s routes (custom + HTTP-source subscription)\n' "$ROUTES4"
+
 # The UNREGISTERED IPv6-transport peer gets the RU defaults (= the file seed source).
 # They ride as classic IPv4 NLRI over the IPv6 transport, imported by bgplite6's
 # IPv4 channel.
 wait_for 'birdc "show route protocol bgplite6" 2>/dev/null | grep -q "10.100.0.0/16"' 60
 wait_for 'birdc "show route protocol bgplite6" 2>/dev/null | grep -q "10.200.0.0/16"' 60
 birdc "show route protocol bgplite6" || true
+
+# --- 6. traffic capture (opt-in: --capture) --------------------------------------
+if [ "$CAPTURE" = 1 ]; then
+  say "6. packet capture (--capture)"
+  $COMPOSE stop capture
+  PCAP=$(ls -S captures/*.pcap 2>/dev/null | head -1)
+  [ -n "$PCAP" ] && [ -s "$PCAP" ] || fail "capture produced no pcap in captures/"
+  BGP_PKTS=$(tcpdump -r "$PCAP" 2>/dev/null | grep -c "BGP" || true)
+  [ -n "$BGP_PKTS" ] && [ "$BGP_PKTS" -ge 10 ] \
+    || fail "pcap holds $BGP_PKTS BGP packets, expected >= 10: $PCAP"
+  printf '%s: %s BGP packets captured (open in Wireshark for analysis)\n' "$PCAP" "$BGP_PKTS"
+fi
 
 say "ALL INTEGRATION TESTS PASSED"

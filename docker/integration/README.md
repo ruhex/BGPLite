@@ -26,25 +26,37 @@ amd64 CI runner.
 ## What is asserted
 
 1. The management API answers (`GET /api/server`).
-2. `POST /api/peers` registers the BIRD peer (custom prefix `192.0.2.0/24`).
+2. `POST /api/peers` registers the BIRD peer with the `openai` subscription
+   (an HTTP prefix source fed from [ruhex/prefix-lists](https://github.com/ruhex/prefix-lists)
+   raw data — the full HTTP-fetch pipeline runs against real-world lists) plus a
+   custom prefix `192.0.2.0/24`.
 3. Both sessions reach `Established` (checked from BIRD's view, `birdc`, and the
    server reports `active >= 2`).
 4. BIRD → server propagation: BIRD's 3 static announcements (2× IPv4 NLRI, 1×
    IPv6 NLRI via MP_REACH) appear in the server's route table (`GET /api/routes`
    — the untagged `default` community group must hold exactly 3).
-5. Server → BIRD propagation: the seeded prefixes `10.100.0.0/16`,
-   `10.200.0.0/16` (file source, `test-nets.txt`) are present in BIRD's BGP
-   import on the IPv4 session.
+5. Server → BIRD propagation: the custom prefix (192.0.2.0/24) plus >= 100
+   routes from the `openai` HTTP source on the IPv4 session, and the seed
+   prefixes `10.100.0.0/16`, `10.200.0.0/16` (file source, `test-nets.txt`)
+   riding as classic IPv4 NLRI over the IPv6-transport session.
 
 ## Run it
 
 ```bash
-docker/integration/run-tests.sh
+docker/integration/run-tests.sh              # core suite
+docker/integration/run-tests.sh --capture    # + packet capture for analysis
 ```
 
-Requirements: `docker` with the compose v2 plugin (daemon running), `curl`.
-The script builds, starts, polls until assertions pass, and always tears the
-stand down (`docker compose down -v`). Exit code is the test verdict.
+Requirements: `docker` with the compose v2 plugin (daemon running), `curl`,
+`tcpdump` on the host for `--capture` verification. The script builds, starts,
+polls until assertions pass, and always tears the stand down
+(`docker compose down -v`). Exit code is the test verdict.
+
+**Traffic capture (`--capture`)**: a tcpdump sidecar joins the server's network
+namespace and records everything on port 179 (both transports) to
+`docker/integration/captures/bgp.pcap` — open it in Wireshark (filter `bgp`)
+to inspect OPEN/UPDATE/KEEPALIVE exchange. The runner verifies the pcap holds
+a real BGP conversation before passing.
 
 The same script runs in CI: `.github/workflows/integration.yml` (push to
 `main`/`dev` + manual `workflow_dispatch`).
