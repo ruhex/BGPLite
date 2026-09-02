@@ -127,6 +127,7 @@ public static class BgpConstants
     public static class Afi
     {
         public const ushort IPv4 = 1;
+        public const ushort IPv6 = 2; // RFC 1700 / IANA address family numbers (#15 phase 1)
     }
 
     public static class Safi
@@ -155,4 +156,59 @@ public static class BgpConstants
 
     public static IPAddress UintToIPAddress(uint address) =>
         new([(byte)(address >> 24), (byte)(address >> 16), (byte)(address >> 8), (byte)address]);
+
+    // ---- #15 phase 1: 16-byte-aware (de)serializers -------------------------------------------
+
+    /// <summary>
+    /// Non-truncating 128-bit form of an IP address: IPv4 in the low 32 bits (family carried
+    /// separately), IPv6 as the full big-endian 128 bits. Never truncates or maps silently.
+    /// </summary>
+    public static UInt128 ToUInt128(IPAddress address)
+    {
+        ArgumentNullException.ThrowIfNull(address);
+
+        var bytes = address.GetAddressBytes();
+        if (bytes.Length is not 4 and not 16)
+            throw new ArgumentException($"Unsupported address size: {bytes.Length} bytes.", nameof(address));
+
+        UInt128 value = 0;
+        var shift = bytes.Length == 4 ? 96 : 0; // IPv4 → low 32 bits
+        foreach (var b in bytes)
+        {
+            value = (value << 8) | b;
+            _ = shift;
+        }
+        return value;
+    }
+
+    /// <summary>Rebuilds an IP address from the 128-bit form produced by <see cref="ToUInt128"/>.
+    /// <paramref name="isIpv4"/> selects the family: only the low 32 bits are read (no truncation
+    /// of a genuine 128-bit value — that would be a caller bug, and it throws).</summary>
+    public static IPAddress FromUInt128(UInt128 value, bool isIpv4)
+    {
+        if (isIpv4)
+        {
+            if (value > uint.MaxValue)
+                throw new InvalidOperationException(
+                    $"Cannot convert a 128-bit value above uint.MaxValue to an IPv4 address (got 0x{value:X}).");
+            return UintToIPAddress((uint)value);
+        }
+
+        Span<byte> bytes = stackalloc byte[16];
+        for (var i = 0; i < 16; i++)
+            bytes[i] = (byte)(value >> (120 - i * 8));
+        return new IPAddress(bytes);
+    }
+
+    /// <summary>
+    /// Wrong-family guard for the IPv4-only consumers of a 128-bit value (#13/#15): throws
+    /// instead of silently truncating the high bits.
+    /// </summary>
+    public static uint ToUint32OrThrow(UInt128 value, string field)
+    {
+        if (value > uint.MaxValue)
+            throw new InvalidOperationException(
+                $"128-bit value does not fit in 32 bits — wrong address family for {field} (got 0x{value:X}).");
+        return (uint)value;
+    }
 }

@@ -265,6 +265,8 @@ public static class BgpMessageReader
                 BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.MalformedAttributeList);
 
         var attributes = new List<PathAttribute>();
+        MpReachCodec.MpReachV6? mpReachV6 = null;
+        IReadOnlyList<IpPrefix>? mpUnreachV6 = null;
         if (attrsLen > 0)
         {
             var attrsEnd = offset + attrsLen;
@@ -274,8 +276,32 @@ public static class BgpMessageReader
                 // attribute TLV whose declared value crosses attrsEnd must be rejected instead
                 // of silently consuming NLRI bytes as attribute data (#245 review finding).
                 var (attr, consumed) = ParseAttribute(payload.Slice(offset, attrsEnd - offset));
-                attributes.Add(attr);
                 offset += consumed;
+
+                // #15 phase 2 (RFC 4760): MP_REACH_NLRI (14) / MP_UNREACH_NLRI (15) carry the
+                // IPv6 announcements/withdrawals — decode them into typed fields here and remove
+                // from the generic list so ParseRouteAttributes treats the UPDATE as v4-only.
+                // Malformed AFI=2 payloads throw BgpParseException (Update Message Error) — the
+                // whole UPDATE is discarded with the session kept (D17), matching RFC 7606 §2
+                // (the attribute carries NLRI ⇒ treat-as-withdraw).
+                if (attr.TypeCode == MpReachCodec.MpReachNlriType)
+                {
+                    // RFC 4760: only one MP_REACH per UPDATE. A duplicate is a protocol error.
+                    if (mpReachV6 is not null)
+                        throw new BgpParseException("Duplicate MP_REACH_NLRI attribute",
+                            BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.MalformedAttributeList);
+                    mpReachV6 = MpReachCodec.DecodeMpReachV6(attr.Data);
+                    continue;
+                }
+                if (attr.TypeCode == MpReachCodec.MpUnreachNlriType)
+                {
+                    if (mpUnreachV6 is not null)
+                        throw new BgpParseException("Duplicate MP_UNREACH_NLRI attribute",
+                            BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.MalformedAttributeList);
+                    mpUnreachV6 = MpReachCodec.DecodeMpUnreachV6(attr.Data);
+                    continue;
+                }
+                attributes.Add(attr);
             }
         }
 
@@ -291,7 +317,9 @@ public static class BgpMessageReader
         {
             WithdrawnRoutes = withdrawn,
             PathAttributes = attributes,
-            Nlri = nlri
+            Nlri = nlri,
+            MpReachV6 = mpReachV6,
+            MpUnreachV6 = mpUnreachV6
         };
     }
 

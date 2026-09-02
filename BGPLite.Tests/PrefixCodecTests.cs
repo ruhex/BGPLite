@@ -117,17 +117,40 @@ public class PrefixCodecTests
         }
     }
 
+    private static IpPrefix V6Prefix() =>
+        new(ToUInt128Hex("20010db8000000000000000000000001"), 128, isIpv4: false);
+
+    private static UInt128 ToUInt128Hex(string hex)
+    {
+        UInt128 value = 0;
+        foreach (var c in hex) value = (value << 4) | (UInt128)Uri.FromHex(c);
+        return value;
+    }
+
+    [Fact]
+    public void Encode_LengthAbove32_Throws()
+    {
+        // The IpPrefix constructor itself rejects IPv4 lengths above 32 — the codec never sees
+        // an out-of-domain value through a canonical prefix.
+        Assert.Throws<ArgumentOutOfRangeException>(() => new IpPrefix(0xC0A80000, (byte)33));
+    }
+
     [Theory]
-    [InlineData(33)]
+    [InlineData(0)]
+    [InlineData(32)]
     [InlineData(64)]
     [InlineData(128)]
-    [InlineData(255)]
-    public void Encode_LengthAbove32_Throws(int badLength)
+    public void Encode_Ipv6_Accepts_FullRange_AndRoundtrips(byte length)
     {
-        var prefix = new IpPrefix(0xC0A80000, (byte)badLength);
-        var buffer = new byte[8];
+        var address = ToUInt128Hex("20010db8000000000000000000000001");
+        var prefix = new IpPrefix(address, length, isIpv4: false);
+        var buf = new byte[17];
+        var written = PrefixCodec.Encode(prefix, buf);
 
-        Assert.Throws<ArgumentOutOfRangeException>(() => PrefixCodec.Encode(prefix, buffer));
+        var (decoded, consumed) = PrefixCodec.Decode6(buf.AsSpan(0, written));
+        Assert.Equal(written, consumed);
+        Assert.Equal(prefix.Address, decoded.Address);
+        Assert.False(decoded.IsIpv4);
     }
 
     [Theory]

@@ -31,6 +31,8 @@ public sealed class BgpSession : IDisposable
     private readonly ILogger<BgpSession> _logger;
     private readonly CancellationTokenSource _cts = new();
     private readonly Func<string, uint, CancellationToken, Task>? _onPeerIdentified;
+    // #15 phase 2: the peer advertised MP-BGP IPv6/Unicast.
+    private bool _peerMpIpv6Unicast;
     // #391: the EFFECTIVE per-peer prefix ceiling — the peer row's MaxPrefix override when the
     // peer is configured, else the global Bgp.MaxPrefixesPerPeer. Resolved once per
     // establish/refresh cycle in SendAllRoutesAsync (never per UPDATE); read on the UPDATE path
@@ -927,7 +929,8 @@ public sealed class BgpSession : IDisposable
             {
                 // #292 item 1: local router-id for the §6.8 self-address check on NEXT_HOP.
                 attrs = UpdateCodec.ParseRouteAttributes(update, _remoteFourByteAsn,
-                    BgpConstants.IPAddressToUint(_bgpConfig.GetRouterIdAddress()));
+                    BgpConstants.IPAddressToUint(_bgpConfig.GetRouterIdAddress()),
+                    mpReachV6Present: update.MpReachV6 is not null);
             }
             catch (BgpNotificationException ex) when (ex.ErrorCode == BgpConstants.Error.UpdateMessageError)
             {
@@ -948,6 +951,9 @@ public sealed class BgpSession : IDisposable
                 // what this peer installed, not whatever is at that prefix.
                 foreach (var nlri in update.Nlri)
                     WithdrawIfOwned(nlri, "Route withdrawn (treat-as-withdraw)");
+                if (update.MpReachV6 is { } failedReach)
+                    foreach (var p in failedReach.Prefixes)
+                        WithdrawIfOwned(p, "Route withdrawn (treat-as-withdraw, MP_REACH)");
                 _metrics.SetRouteCount(_routeTable.Count);
                 throw;
             }
@@ -1026,6 +1032,58 @@ public sealed class BgpSession : IDisposable
                         _logger.LogDebug("Route added: {Prefix} via {NextHop}", nlri, BgpConstants.UintToIPAddress(attrs.NextHop));
                 }
             }
+
+            // #15 phase 2 (RFC 4760 §7): MP_UNREACH_NLRI (AFI=2/SAFI=1) withdraws IPv6 routes
+            // this session installed — same ownership rule as the classic withdrawal path (#289).
+            if (update.MpUnreachV6 is { Count: > 0 } v6Withdrawn)
+            {
+                foreach (var prefix in v6Withdrawn)
+                    WithdrawIfOwned(prefix, "Route withdrawn (MP_UNREACH)");
+            }
+
+            // MP_REACH_NLRI (AFI=2/SAFI=1) announcements: same install pipeline as the classic
+            // IPv4 NLRI loop — AS-loop exclusion, filter, cap, ownership (#15 phase 2).
+            if (update.MpReachV6 is { } mpReach)
+            {
+                foreach (var nlri in mpReach.Prefixes)
+                {
+                    var route = new Route
+                    {
+                        Prefix = nlri.Address,
+                        IsIpv4 = false,
+                        PrefixLength = nlri.Length,
+                        NextHop = mpReach.NextHop,
+                        AsPath = attrs.AsPath,
+                        Communities = attrs.Communities,
+                        LargeCommunities = attrs.LargeCommunities
+                    };
+
+                    if (attrs.AsPath.AsSpan().Contains(_bgpConfig.Asn))
+                    {
+                        if (_logger.IsEnabled(LogLevel.Debug))
+                            _logger.LogDebug("Excluded looping route {Prefix} from {Peer}: local AS {Asn} in AS_PATH",
+                                nlri, _peer, _bgpConfig.Asn);
+                        continue;
+                    }
+
+                    if (_routeFilter.AcceptIncoming(route, filterPeerConfig))
+                    {
+                        var cap = Volatile.Read(ref _effectiveMaxPrefix);
+                        if (cap > 0 && !_installedPrefixes.ContainsKey(nlri) && _installedPrefixes.Count >= cap)
+                            throw new BgpNotificationException(
+                                BgpConstants.Error.Cease, BgpConstants.SubError.CeaseMaxPrefixes,
+                                $"Peer {_peer} exceeded the per-peer prefix limit ({cap}); session reset per RFC 4486");
+                        _installedPrefixes.TryAdd(nlri, 0);
+                        _routeTable.AddOrUpdate(route, owner: this);
+
+                        if (cap > 0 && !_maxPrefixesWarned && _installedPrefixes.Count >= MaxPrefixWarningThreshold(cap))
+                        {
+                            _maxPrefixesWarned = true;
+                            _logger.LogWarning("Peer {Peer} at {Count}/{Cap} of the per-peer prefix limit", _peer, _installedPrefixes.Count, cap);
+                        }
+                    }
+                }
+            }
         }
 
         _metrics.SetRouteCount(_routeTable.Count);
@@ -1043,11 +1101,11 @@ public sealed class BgpSession : IDisposable
     /// REPLACING session's thread (see RouteTable.EntryOwnershipLost); the concurrent set makes
     /// that safe, and a late/duplicate notification only removes an entry already gone.
     /// </summary>
-    private void OnEntryOwnershipLost(object previousOwner, (uint Prefix, byte Length) key)
+    private void OnEntryOwnershipLost(object previousOwner, (UInt128 Prefix, byte Length, bool IsIpv4) key)
     {
         if (!ReferenceEquals(previousOwner, this))
             return;
-        _installedPrefixes.TryRemove(new IpPrefix(key.Prefix, key.Length), out _);
+        _installedPrefixes.TryRemove(new IpPrefix(key.Prefix, key.Length, key.IsIpv4), out _);
     }
 
     /// <summary>
@@ -1061,7 +1119,9 @@ public sealed class BgpSession : IDisposable
 
     private void WithdrawIfOwned(IpPrefix prefix, string reason)
     {
-        if (!_routeTable.RemoveOwnedBy(prefix.Address, prefix.Length, this))
+        // Inbound v4 withdrawals: the NLRI address lives in the low 32 bits of the 128-bit form
+        // (IsIpv4 = true matches the install key from the UPDATE path).
+        if (!_routeTable.RemoveOwnedBy(prefix.Address, prefix.Length, prefix.IsIpv4, owner: this))
         {
             if (_logger.IsEnabled(LogLevel.Debug))
                 _logger.LogDebug("Ignoring withdrawal of {Prefix} from {Peer}: not owned by this session", prefix, _peer);
@@ -1148,7 +1208,7 @@ public sealed class BgpSession : IDisposable
         foreach (var route in routes)
         {
             batch.Add(route);
-            _advertisedPrefixes.Add(new IpPrefix(route.Prefix, route.PrefixLength));
+            _advertisedPrefixes.Add(new IpPrefix(route.Prefix, route.PrefixLength, route.IsIpv4));
             if (batch.Count >= maxNlriPerUpdate)
             {
                 await SendRouteBatchAsync(nextHop, batch, attrCache);
@@ -1179,10 +1239,10 @@ public sealed class BgpSession : IDisposable
     {
         if (routes.Count <= 1) return routes as List<Route> ?? routes.ToList();
 
-        var merged = new Dictionary<(uint Prefix, byte Length), Route>(routes.Count);
+        var merged = new Dictionary<(UInt128 Prefix, byte Length, bool IsIpv4), Route>(routes.Count);
         foreach (var route in routes)
         {
-            var key = (route.Prefix, route.PrefixLength);
+            var key = (route.Prefix, route.PrefixLength, route.IsIpv4);
             if (merged.TryGetValue(key, out var existing))
             {
                 // Union communities — keep both source tags so the peer can filter by either.
@@ -1222,7 +1282,7 @@ public sealed class BgpSession : IDisposable
             // and only diverge in this final attribute.
             attrs = UpdateCodec.WithLargeCommunityAttribute(attrs, groupRoutes[0].LargeCommunities);
 
-            var nlri = groupRoutes.Select(r => new IpPrefix(r.Prefix, r.PrefixLength)).ToList();
+            var nlri = groupRoutes.Select(r => new IpPrefix(r.Prefix, r.PrefixLength, r.IsIpv4)).ToList();
             await SendUpdateBatchAsync(attrs, nlri);
         }
     }
@@ -1413,6 +1473,10 @@ public sealed class BgpSession : IDisposable
         if (remoteOpen.Capabilities.Any(c => c.Code == BgpConstants.Capability.RouteRefresh))
             capabilities.Add(BgpCapabilityInfo.RouteRefresh());
 
+        // #15 phase 2: advertise MP IPv6/Unicast only when the peer also supports it.
+        if (CapabilityHelper.SupportsMultiprotocolIpv6Unicast(remoteOpen))
+            capabilities.Add(BgpCapabilityInfo.MultiprotocolIpv6Unicast());
+
         // #318: the Graceful Restart capability is deliberately NOT advertised. RFC 4724 §4.2 obliges
         // a speaker engaging GR procedures to retain and stale-mark a restarting peer's routes;
         // BGPLite implements none of that receiving half, so advertising the <AFI, SAFI, F> tuple
@@ -1554,6 +1618,9 @@ public sealed class BgpSession : IDisposable
         // CodeRabbit (integration review): propagate the session token into the upsert so a
         // locked SQLite cannot out-wait shutdown/replacement before cancellation is observed.
         if (_onPeerIdentified is not null) await _onPeerIdentified(_peerConfig.Address, _remoteAsn, ct);
+
+        // #15 phase 2: the peer can send IPv6 routes via MP_REACH_NLRI (AFI=2/SAFI=1).
+        _peerMpIpv6Unicast = CapabilityHelper.SupportsMultiprotocolIpv6Unicast(open);
 
         var peerGr = CapabilityHelper.GetGracefulRestart(open);
         _logger.LogInformation("Peer {Peer} Graceful Restart: {State}",
