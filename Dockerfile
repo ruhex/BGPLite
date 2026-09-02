@@ -12,7 +12,9 @@ COPY BGPLite.Providers/BGPLite.Providers.csproj BGPLite.Providers/
 RUN dotnet restore BGPLite/BGPLite.csproj
 
 COPY . .
-RUN dotnet publish BGPLite/BGPLite.csproj -c Release -o /app/publish
+# linux-x64 RID ("linux64"): architecture-pinned publish — the same RID the
+# integration stand (docker/integration) and CI run under via --platform linux/amd64.
+RUN dotnet publish BGPLite/BGPLite.csproj -c Release -r linux-x64 --self-contained false -o /app/publish
 
 FROM mcr.microsoft.com/dotnet/runtime:10.0 AS runtime
 WORKDIR /app
