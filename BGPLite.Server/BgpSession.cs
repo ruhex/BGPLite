@@ -917,8 +917,10 @@ public sealed class BgpSession : IDisposable
         foreach (var w in update.WithdrawnRoutes)
             WithdrawIfOwned(w, "Route withdrawn");
 
-        // Process announcements
-        if (update.Nlri.Count > 0)
+        // Process announcements. The gate must accept MP_REACH-only UPDATEs (#407): the normal
+        // wire shape for an IPv6 announcement (RFC 4760 §5) leaves the classic NLRI field EMPTY —
+        // gating on Nlri.Count alone silently dropped every such announcement.
+        if (update.Nlri.Count > 0 || update.MpReachV6 is not null)
         {
             // #270: the inbound attribute pipeline (per-attribute validation, mandatory set,
             // AS4_PATH reconstruction, aggregator consistency — subcodes 3/6/8/9/11) lives in the
@@ -1033,14 +1035,6 @@ public sealed class BgpSession : IDisposable
                 }
             }
 
-            // #15 phase 2 (RFC 4760 §7): MP_UNREACH_NLRI (AFI=2/SAFI=1) withdraws IPv6 routes
-            // this session installed — same ownership rule as the classic withdrawal path (#289).
-            if (update.MpUnreachV6 is { Count: > 0 } v6Withdrawn)
-            {
-                foreach (var prefix in v6Withdrawn)
-                    WithdrawIfOwned(prefix, "Route withdrawn (MP_UNREACH)");
-            }
-
             // MP_REACH_NLRI (AFI=2/SAFI=1) announcements: same install pipeline as the classic
             // IPv4 NLRI loop — AS-loop exclusion, filter, cap, ownership (#15 phase 2).
             if (update.MpReachV6 is { } mpReach)
@@ -1084,6 +1078,16 @@ public sealed class BgpSession : IDisposable
                     }
                 }
             }
+        }
+
+        // #15 phase 2 (RFC 4760 §7): MP_UNREACH_NLRI (AFI=2/SAFI=1) withdraws IPv6 routes this
+        // session installed — same ownership rule as the classic withdrawal path (#289). Runs
+        // OUTSIDE the announcement block (#407): an MP_UNREACH-only UPDATE (a peer withdrawing
+        // its IPv6 routes) has no classic NLRI and no MP_REACH, and must not depend on either.
+        if (update.MpUnreachV6 is { Count: > 0 } v6Withdrawn)
+        {
+            foreach (var prefix in v6Withdrawn)
+                WithdrawIfOwned(prefix, "Route withdrawn (MP_UNREACH)");
         }
 
         _metrics.SetRouteCount(_routeTable.Count);
