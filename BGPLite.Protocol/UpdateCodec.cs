@@ -321,7 +321,7 @@ public static class UpdateCodec
                 }
             }
 
-            ValidateMandatoryAttributes(originSeen, asPathSeen, nextHopSeen, mpReachV6Present);
+            ValidateMandatoryAttributes(originSeen, asPathSeen, nextHopSeen, mpReachV6Present && update.Nlri.Count == 0);
             // RFC 4271 §6.3/§6.8: a semantically incorrect NEXT_HOP MUST be rejected with subcode 8
             // (Invalid NEXT_HOP Attribute) — "a valid unicast host address", never multicast, never
             // the receiving speaker's own address. Routed through the caller's treat-as-withdraw

@@ -286,12 +286,18 @@ public static class BgpMessageReader
                 // (the attribute carries NLRI ⇒ treat-as-withdraw).
                 if (attr.TypeCode == MpReachCodec.MpReachNlriType)
                 {
-                    var reach = MpReachCodec.DecodeMpReachV6(attr.Data);
-                    mpReachV6 = reach;
+                    // RFC 4760: only one MP_REACH per UPDATE. A duplicate is a protocol error.
+                    if (mpReachV6 is not null)
+                        throw new BgpParseException("Duplicate MP_REACH_NLRI attribute",
+                            BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.MalformedAttributeList);
+                    mpReachV6 = MpReachCodec.DecodeMpReachV6(attr.Data);
                     continue;
                 }
                 if (attr.TypeCode == MpReachCodec.MpUnreachNlriType)
                 {
+                    if (mpUnreachV6 is not null)
+                        throw new BgpParseException("Duplicate MP_UNREACH_NLRI attribute",
+                            BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.MalformedAttributeList);
                     mpUnreachV6 = MpReachCodec.DecodeMpUnreachV6(attr.Data);
                     continue;
                 }
