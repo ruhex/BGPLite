@@ -98,26 +98,39 @@ public static class TcpMd5
         return buffer;
     }
 
-    /// <summary>Writes a sockaddr_storage-shaped sockaddr_in/inn6 for the peer, port 0 = "any port".</summary>
-    private static void WriteSockaddr(IPEndPoint peer, Span<byte> destination)
+    /// <summary>Writes a sockaddr_storage-shaped sockaddr_in/inn6 for the peer, port 0 = "any port".
+    /// <para>
+    /// The address family constants are the KERNEL's, not .NET's <see cref="AddressFamily"/> values
+    /// (which follow Winsock: InterNetworkV6 = 23). Linux wants AF_INET6 = 10, Darwin 28 — writing
+    /// 23 makes the kernel's md5 parse path reject the entry with EINVAL
+    /// (<c>sin6_family != AF_INET6</c>), which no v4 test could catch because AF_INET = 2 happens
+    /// to agree everywhere. The accepted-socket runtime checks are the OS guard: TCP-MD5 is only
+    /// ever applied on Linux/macOS.
+    /// </para>
+    /// </summary>
+    internal static void WriteSockaddr(IPEndPoint peer, Span<byte> destination)
     {
         destination.Clear();
         var port = (ushort)peer.Port;
         if (peer.Address.AddressFamily == AddressFamily.InterNetwork)
         {
-            destination[0] = (byte)AddressFamily.InterNetwork;        // AF_INET (little-endian host order)
+            destination[0] = AfInet;                                  // AF_INET: 2 on Linux and Darwin
             destination[2] = (byte)(port >> 8);                       // port, network byte order
             destination[3] = (byte)port;
             peer.Address.TryWriteBytes(destination.Slice(4, 4), out _);
         }
         else
         {
-            destination[0] = (byte)AddressFamily.InterNetworkV6;      // AF_INET6
+            destination[0] = AfInet6;                                 // AF_INET6: 10 (Linux) / 28 (Darwin)
             destination[2] = (byte)(port >> 8);
             destination[3] = (byte)port;
             peer.Address.TryWriteBytes(destination.Slice(8, 16), out _);
         }
     }
+
+    private static byte AfInet => 2;
+
+    private static byte AfInet6 => OperatingSystem.IsMacOS() ? (byte)28 : (byte)10;
 
     /// <summary>True when <paramref name="password"/> would be accepted as a TCP-MD5 key.</summary>
     public static bool IsValidPassword(string? password) =>

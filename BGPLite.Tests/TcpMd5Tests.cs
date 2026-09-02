@@ -25,6 +25,27 @@ public class TcpMd5Tests
         Assert.False(TcpMd5.IsValidPassword(new string('é', 41)));  // 82 UTF-8 bytes
     }
 
+    /// <summary>
+    /// The sockaddr carries the KERNEL's address family, not .NET's (Winsock-derived) enum
+    /// value: Linux wants AF_INET6 = 10, but (byte)AddressFamily.InterNetworkV6 is 23 — the
+    /// kernel's md5 parse path rejects that with EINVAL (sin6_family != AF_INET6). The v4 path
+    /// could not catch this: AF_INET = 2 everywhere. Platform-dependent for the v6 value
+    /// (Darwin = 28), so asserted per-OS; the Linux branch is what CI proves.
+    /// </summary>
+    [Fact]
+    public void WriteSockaddr_V6Peer_CarriesKernelAddressFamily()
+    {
+        Span<byte> buffer = stackalloc byte[128];
+        TcpMd5.WriteSockaddr(new IPEndPoint(IPAddress.Parse("2001:db8::1"), 0), buffer);
+
+        var expectedFamily = OperatingSystem.IsLinux() ? 10 : OperatingSystem.IsMacOS() ? (byte)28 : 23;
+        Assert.Equal(expectedFamily, buffer[0]);
+        Assert.Equal(0, buffer[1]);
+
+        TcpMd5.WriteSockaddr(new IPEndPoint(IPAddress.Loopback, 0), buffer);
+        Assert.Equal(2, buffer[0]); // AF_INET = 2 on every supported platform
+    }
+
     [Fact]
     public void InvalidKeyLength_Throws()
     {
