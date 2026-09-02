@@ -29,6 +29,9 @@ public static class MpReachCodec
     public static byte[] EncodeMpReachV6(UInt128 nextHop, IReadOnlyList<IpPrefix> prefixes)
     {
         ArgumentNullException.ThrowIfNull(prefixes);
+        foreach (var p in prefixes)
+            if (p.IsIpv4)
+                throw new ArgumentException($"IPv4 prefix {p} cannot be encoded in an IPv6 MP_REACH.", nameof(prefixes));
 
         // size = AFI(2) + SAFI(1) + NH-Len(1) + NH(16) + Reserved(1) + Σ NLRI
         var nlriSize = 0;
@@ -73,7 +76,7 @@ public static class MpReachCodec
         if (nhLength is not 16 and not 32)
             throw new BgpParseException(
                 $"Invalid MP_REACH_NLRI next-hop length: {nhLength} (must be 16 or 32 per RFC 2545)",
-                BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.InvalidNetworkField);
+                BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.MalformedAttributeList);
         if (value.Length < 4 + nhLength + 1)
             throw new BgpParseException(
                 $"Truncated MP_REACH_NLRI next hop: need {nhLength} bytes at offset 4",
@@ -102,6 +105,9 @@ public static class MpReachCodec
     public static byte[] EncodeMpUnreachV6(IReadOnlyList<IpPrefix> prefixes)
     {
         ArgumentNullException.ThrowIfNull(prefixes);
+        foreach (var p in prefixes)
+            if (p.IsIpv4)
+                throw new ArgumentException($"IPv4 prefix {p} cannot be encoded in an IPv6 MP_UNREACH.", nameof(prefixes));
 
         var nlriSize = 0;
         foreach (var p in prefixes)

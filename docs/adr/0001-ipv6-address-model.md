@@ -39,8 +39,9 @@ files and the whole test suite, so the representation choice is expensive to rev
 
 - `uint` → `UInt128` widening is implicit, so IPv4 construction sites (`Route { Prefix = 0xC0A80000u }`)
   keep compiling unchanged; narrowing reads cast explicitly.
-- The aggregator's `length > 32` skip means an IPv6 route arriving today would be dropped
-  defensively — unreachable until Phase 2 delivers IPv6 NLRI, and re-visited in Phase 3.
+- Phase 2 delivered IPv6 NLRI via MP_REACH/MP_UNREACH; the aggregator's `length > 32` skip
+  means IPv6 routes arriving via MP_REACH are defensively dropped until Phase 3 generalizes the
+  aggregator.
 - `Route.NextHop` stays IPv4 `uint` until Phase 2 (MP_REACH next-hop, RFC 2545).
 - Each later phase builds on this model without re-breaking it; the epic's phased checklist
   (#14 phases 2–5) tracks the remaining work.
