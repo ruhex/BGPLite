@@ -232,7 +232,9 @@ For section-by-section RFC conformance status, see `RFC_COMPLIANCE.md` (2026-07-
 - **Decision:** `IpPrefix` is family-aware over `UInt128` — IPv4 in the low 32 bits with an
   explicit `IsIpv4` flag, IPv6 as the full 128 bits; the constructor masks host bits (canonical
   keys); `Route.Key`/`RouteTable` keys carry the family; the aggregator partitions by family.
-  Full ADR: `docs/adr/0001-ipv6-address-model.md` (#15 phase 1).
+  Full ADR: `docs/adr/0001-ipv6-address-model.md` (#15 phase 1). The family partition and
+  128-bit interval math in `ExactUnionPrefixAggregator`, plus the `RouteTable`
+  longest-prefix-match lookup, landed with #14 phase 3.
 - **Tracker:** #15, #14.
 
 ## Management API

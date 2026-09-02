@@ -33,16 +33,18 @@ files and the whole test suite, so the representation choice is expensive to rev
    IPv4-only router-id / next-hop paths.
 6. **Aggregation**: `ExactUnionPrefixAggregator` groups by (communities, IsIpv4) — IPv4 and IPv6
    prefixes are never merged into one summary even with identical tags. Interval math is
-   generalized to UInt128. (Full 128-bit LPM and IPv6 aggregation policy remain Phase 3.)
+   generalized to UInt128. (Delivered as planned in #14 phase 3, together with the
+   longest-prefix-match lookup on `RouteTable`.)
 
 ## Consequences
 
 - `uint` → `UInt128` widening is implicit, so IPv4 construction sites (`Route { Prefix = 0xC0A80000u }`)
   keep compiling unchanged; narrowing reads cast explicitly.
-- Phase 2 delivered IPv6 NLRI via MP_REACH/MP_UNREACH; the aggregator's `length > 32` skip
-  means IPv6 routes arriving via MP_REACH are defensively dropped until Phase 3 generalizes the
-  aggregator.
-- `Route.NextHop` stays IPv4 `uint` until Phase 2 (MP_REACH next-hop, RFC 2545).
+- Phase 2 delivered IPv6 NLRI via MP_REACH/MP_UNREACH; until then the aggregator's `length > 32`
+  skip defensively dropped inbound IPv6 routes. #14 phase 3 closed the interim gap: the aggregator
+  is now fully 128-bit and family-partitioned, and `RouteTable` gained a longest-prefix-match
+  lookup.
+- `Route.NextHop` stayed IPv4 `uint` until Phase 2 delivered the MP_REACH next-hop (RFC 2545).
 - Each later phase builds on this model without re-breaking it; the epic's phased checklist
   (#14 phases 2–5) tracks the remaining work.
 
