@@ -877,6 +877,80 @@ public class BgpSessionRouteOwnershipTests
         await TeardownAsync(session, run);
     }
 
+    // ---- #407: MP_REACH/MP_UNREACH-only UPDATEs (RFC 4760 §5/§7) ----
+
+    /// <summary>2001:db8:ffff::/48 — the announced IPv6 prefix, full 128-bit form.</summary>
+    private static readonly UInt128 V6TestPrefix =
+        ((UInt128)0x2001 << 112) | ((UInt128)0x0DB8 << 96) | ((UInt128)0xFFFF << 80);
+
+    /// <summary>2001:db8::2 — the MP_REACH next hop.</summary>
+    private static readonly UInt128 V6TestNextHop =
+        ((UInt128)0x2001 << 112) | ((UInt128)0x0DB8 << 96) | 2;
+
+    /// <summary>
+    /// ORIGIN + AS_PATH + MP_REACH_NLRI carrying 2001:db8:ffff::/48, NO classic NLRI — the
+    /// normal wire shape for an IPv6 announcement (RFC 4760 §5: the next hop rides in the
+    /// attribute, the classic NLRI field stays empty).
+    /// </summary>
+    private static byte[] MpReachOnlyAnnounceFrame()
+    {
+        var value = MpReachCodec.EncodeMpReachV6(
+            V6TestNextHop, [new IpPrefix(V6TestPrefix, 48, isIpv4: false)]);
+        var attrs = new List<byte>
+        {
+            0x40, 0x01, 0x01, 0x00,                                 // ORIGIN igp
+            0x40, 0x02, 0x06, 0x02, 0x01, 0x00, 0x00, 0x00, 0x64,   // AS_PATH seq [100]
+            0x80, MpReachCodec.MpReachNlriType, (byte)value.Length, // MP_REACH: optional, non-transitive
+        };
+        attrs.AddRange(value);
+        var payload = new List<byte> { 0x00, 0x00, 0x00, (byte)attrs.Count };  // no withdrawn, no classic NLRI
+        payload.AddRange(attrs);
+        return Frame(BgpMessageType.Update, [.. payload]);
+    }
+
+    /// <summary>MP_UNREACH_NLRI-only UPDATE withdrawing 2001:db8:ffff::/48 (RFC 4760 §7).</summary>
+    private static byte[] MpUnreachOnlyWithdrawFrame()
+    {
+        var value = MpReachCodec.EncodeMpUnreachV6([new IpPrefix(V6TestPrefix, 48, isIpv4: false)]);
+        var attrs = new List<byte> { 0x80, MpReachCodec.MpUnreachNlriType, (byte)value.Length };
+        attrs.AddRange(value);
+        var payload = new List<byte> { 0x00, 0x00, 0x00, (byte)attrs.Count };  // no withdrawn, no classic NLRI
+        payload.AddRange(attrs);
+        return Frame(BgpMessageType.Update, [.. payload]);
+    }
+
+    [Fact]
+    public async Task MpReachOnly_Announcement_InstallsTheIpv6Route()
+    {
+        var routeTable = new RouteTable();
+        var (session, run, conn) = await EstablishAsync(routeTable);
+
+        conn.EnqueueFrame(MpReachOnlyAnnounceFrame());
+        await SettleAsync(conn, () => routeTable.Count == 1);
+
+        var route = routeTable.Get(V6TestPrefix, 48, isIpv4: false);
+        Assert.NotNull(route);
+        Assert.Equal(V6TestNextHop, route.NextHop);
+
+        await TeardownAsync(session, run);
+    }
+
+    [Fact]
+    public async Task MpUnreachOnly_Withdrawal_RemovesTheIpv6Route()
+    {
+        var routeTable = new RouteTable();
+        var (session, run, conn) = await EstablishAsync(routeTable);
+
+        conn.EnqueueFrame(MpReachOnlyAnnounceFrame());
+        await SettleAsync(conn, () => routeTable.Count == 1);
+
+        conn.EnqueueFrame(MpUnreachOnlyWithdrawFrame());
+        await SettleAsync(conn, () => routeTable.Count == 0);
+        Assert.Null(routeTable.Get(V6TestPrefix, 48, isIpv4: false));
+
+        await TeardownAsync(session, run);
+    }
+
     private sealed class RejectAllIncomingFilter : IRouteFilter
     {
         private static readonly IReadOnlySet<uint> Empty = new HashSet<uint>();
