@@ -60,6 +60,17 @@ services:
       - ./captures:/captures
     command: ["-i", "any", "-U", "-w", "/captures/bgp.pcap", "port 179"]
 
+  # In-network API probe: the runner talks to the server through this sidecar, so the
+  # tests never depend on host-loopback port publishing (unreachable under some CI
+  # docker configurations — userland-proxy/iptables variance).
+  probe:
+    image: curlimages/curl:8.11.0
+    platform: linux/amd64
+    container_name: bgplite-it-probe
+    networks:
+      bgp4:
+    entrypoint: ["sleep", "infinity"]
+
 networks:
   bgp4:
     driver: bridge

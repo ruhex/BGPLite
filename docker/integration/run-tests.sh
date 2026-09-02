@@ -17,8 +17,11 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-API="http://localhost:15001"
-API_PORT_HOST=15001
+# The API is reached THROUGH the probe sidecar (compose network, by service name):
+# host-loopback port publishing is unavailable under some CI docker configurations
+# (userland-proxy/iptables variance) — this way the tests depend only on the
+# compose network itself.
+API="http://server:5001"
 CAPTURE=0
 [ "${1:-}" = "--capture" ] && CAPTURE=1
 PROFILES=""
@@ -27,6 +30,9 @@ COMPOSE="docker compose $PROFILES -f docker-compose.yml"
 
 say() { printf '\n=== %s ===\n' "$1"; }
 fail() { printf 'FAILED: %s\n' "$1" >&2; exit 1; }
+
+api_get() { $COMPOSE exec -T probe curl -sf --max-time 5 "$1"; }
+api_post() { $COMPOSE exec -T probe curl -s --max-time 10 -o - -w '\n%{http_code}' -X POST -H 'Content-Type: application/json' -d "$2" "$1"; }
 
 # --- bring the stand up -------------------------------------------------------
 say "build (linux/amd64)"
@@ -45,7 +51,6 @@ cleanup() {
 trap cleanup EXIT
 
 # --- helpers ------------------------------------------------------------------
-api_get() { curl -sf --max-time 5 "$API$1"; }
 TMP=$(mktemp -d)
 birdc() { $COMPOSE exec -T bird birdc "$@"; }
 
@@ -65,14 +70,14 @@ wait_for() {
 
 # --- 1. API plane --------------------------------------------------------------
 say "1. API reachable"
-wait_for 'api_get /api/server >/dev/null' 60
+wait_for 'api_get $API/api/server >/dev/null' 60
 
 # --- 2. register the IPv4 peer --------------------------------------------------
 say "2. register peer 172.30.100.20 (AS65002, custom prefix 192.0.2.0/24)"
 PEER_BODY='{"ip":"172.30.100.20","asn":65002,"description":"integration-bird","lists":["openai"],"customPrefixes":["192.0.2.0/24"]}'
-CREATE_STATUS=$(curl -s --max-time 10 -o "$TMP/create-peer.json" -w '%{http_code}' \
-  -X POST -H 'Content-Type: application/json' -d "$PEER_BODY" "$API/api/peers") \
-  || fail "POST /api/peers curl error"
+CREATE_RESP=$(api_post "$API/api/peers" "$PEER_BODY") || fail "POST /api/peers curl error"
+CREATE_STATUS=$(echo "$CREATE_RESP" | tail -1)
+echo "$CREATE_RESP" | sed '$d' > "$TMP/create-peer.json"
 [ "$CREATE_STATUS" = "200" ] || fail "POST /api/peers returned $CREATE_STATUS: $(cat "$TMP/create-peer.json")"
 grep -q '"error"' "$TMP/create-peer.json" && fail "POST /api/peers rejected: $(cat "$TMP/create-peer.json")"
 echo "created: $(cat "$TMP/create-peer.json")"
@@ -88,16 +93,17 @@ birdc "restart bgplite6" >/dev/null 2>&1
 wait_for 'birdc "show protocols all bgplite4" 2>/dev/null | grep -q "BGP state:.*Established"' 90
 wait_for 'birdc "show protocols all bgplite6" 2>/dev/null | grep -q "BGP state:.*Established"' 90
 
-ACTIVE=$(api_get /api/sessions | grep -o '"active":[0-9]*' | cut -d: -f2)
-[ -n "$ACTIVE" ] && [ "$ACTIVE" -ge 2 ] || fail "server reports active=$ACTIVE, want >=2 (both transports)"
-printf 'server reports %s active sessions\n' "$ACTIVE"
+# Poll instead of a one-shot pipe: under `set -o pipefail` a single curl/grep hiccup
+# here would silently kill the script (set -e) before any diagnostic is printed.
+wait_for 'api_get $API/api/sessions | grep -q "\"active\":[2-9]"' 60
+printf 'server reports both transports active\n'
 
 # --- 4. BIRD -> server route propagation ----------------------------------------
 say "4. BIRD announcements reach the server route table"
 # Seed prefixes carry community 65001:100; BIRD's are untagged -> the "default"
 # group must grow to exactly the 3 announced prefixes (2x IPv4 NLRI + 1x MP_REACH v6).
-wait_for 'api_get /api/routes | grep -q "\"default\":3"' 60
-ROUTES=$(api_get /api/routes)
+wait_for 'api_get $API/api/routes | grep -q "\"default\":3"' 60
+ROUTES=$(api_get $API/api/routes)
 echo "$ROUTES"
 echo "$ROUTES" | grep -q '"65001:100":2' || fail "seed source group (65001:100) should hold 2: $ROUTES"
 # The openai HTTP-source group must hold a healthy bulk (the live list has ~300;
