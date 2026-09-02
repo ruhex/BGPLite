@@ -34,7 +34,14 @@ $COMPOSE build --pull
 
 say "up"
 $COMPOSE up -d
-cleanup() { $COMPOSE down -v --remove-orphans; }
+cleanup() {
+  # Evidence before teardown: the first thing a CI failure needs is the server's
+  # own account of why the API/session assertions never succeeded.
+  say "server log (tail, pre-teardown)"
+  $COMPOSE logs --no-color --tail 120 server bird 2>&1 | tail -120 || true
+  $COMPOSE ps -a || true
+  $COMPOSE down -v --remove-orphans
+}
 trap cleanup EXIT
 
 # --- helpers ------------------------------------------------------------------
@@ -47,7 +54,10 @@ wait_for() {
   local what="$1" deadline="$2" i=0
   while ! eval "$what"; do
     i=$((i + 1))
-    [ "$i" -gt "$deadline" ] && fail "timeout after ${deadline}s waiting for: $what"
+    if [ "$i" -gt "$deadline" ]; then
+      $COMPOSE ps -a || true
+      fail "timeout after ${deadline}s waiting for: $what"
+    fi
     sleep 1
   done
   printf 'ok (%ss): %s\n' "$i" "$what"
