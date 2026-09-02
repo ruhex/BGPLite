@@ -1,0 +1,27 @@
+# Integration-test configuration: minimal, fully offline (no RIPEstat fetches).
+# The file source below is the "RU/default" set served to unconfigured peers —
+# so BGP exchange works without internet access.
+Bgp:
+  Asn: 65001
+  RouterId: 172.30.100.10
+  # Short timers: a dead session must be noticed in seconds, not minutes.
+  KeepAlive: 5
+  HoldTime: 15
+
+# Reachable from the test runner via the published port (compose: 15001 -> 5001).
+# Loopback (the production default, #90/#181) would be invisible outside the container.
+ApiListen: "0.0.0.0"
+ApiPort: 5001
+
+DefaultPrefixSource: test4
+
+PrefixSources:
+  - Kind: file
+    Name: test4
+    Description: "Integration-test seed prefixes (IPv4)"
+    Path: "/app/test-nets.txt"
+    Community: "65001:100"
+
+RipeStat:
+  TimeoutSeconds: 5
+  RetryAttempts: 0

@@ -1,0 +1,12 @@
+FROM debian:bookworm-slim
+
+# bird2 ships both the daemon and birdc (the control CLI the test runner uses).
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends bird2 \
+ && rm -rf /var/lib/apt/lists/* \
+ && mkdir -p /run/bird
+
+COPY bird.conf /etc/bird/bird.conf
+
+# Foreground: PID 1 must stay attached for `docker compose up`/health checks.
+CMD ["bird", "-f", "-c", "/etc/bird/bird.conf"]
