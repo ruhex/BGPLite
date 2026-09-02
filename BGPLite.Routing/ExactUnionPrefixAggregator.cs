@@ -1,12 +1,15 @@
 using System.Numerics;
+using BGPLite.Protocol;
 
 namespace BGPLite.Routing;
 
 /// <summary>
-/// Default <see cref="IPrefixAggregator"/>. Merges adjacent/overlapping IPv4 prefixes
-/// into the minimal equivalent set whose address range is EXACTLY the union of the
-/// inputs — never a single address more. Injectable as a strategy; inject
-/// <see cref="NoOpPrefixAggregator"/> to disable summarization.
+/// Default <see cref="IPrefixAggregator"/>. Merges adjacent/overlapping prefixes into the
+/// minimal equivalent set whose address range is EXACTLY the union of the inputs — never a
+/// single address more. Dual-stack (#14 phase 3): IPv4 (/0..32) and IPv6 (/0..128) are
+/// aggregated with the same exact-union semantics but never merged together — IPv4 and
+/// IPv6 routes stay in separate groups even with identical tags (ADR 0001 §6). Injectable
+/// as a strategy; inject <see cref="NoOpPrefixAggregator"/> to disable summarization.
 /// </summary>
 /// <remarks>
 /// Algorithm: (1) mask host bits and form inclusive <c>[start, end]</c> intervals,
@@ -61,11 +64,13 @@ public sealed class ExactUnionPrefixAggregator : IPrefixAggregator
         foreach (var (key, group) in groups)
         {
             var template = group[0];
-            foreach (var (prefix, length) in AggregatePrefixes(group))
+            var isIpv4 = key.IsIpv4;
+            foreach (var (prefix, length) in AggregatePrefixes(group, isIpv4))
             {
                 result.Add(new Route
                 {
                     Prefix = prefix,
+                    IsIpv4 = isIpv4,
                     PrefixLength = length,
                     NextHop = template.NextHop,
                     Communities = template.Communities,
@@ -77,32 +82,39 @@ public sealed class ExactUnionPrefixAggregator : IPrefixAggregator
         return result;
     }
 
-    /// <summary>Exact-union CIDR merge of the prefixes carried by a group of routes.</summary>
-    private static List<(uint Prefix, byte Length)> AggregatePrefixes(IReadOnlyList<Route> routes)
+    /// <summary>Exact-union CIDR merge of the prefixes carried by a family-homogeneous group of
+    /// routes (the group key includes <c>IsIpv4</c>, so every route here shares a family).</summary>
+    private static List<(UInt128 Prefix, byte Length)> AggregatePrefixes(IReadOnlyList<Route> routes, bool isIpv4)
     {
-        // 1. Mask host bits and build inclusive [start, end] intervals. ulong so a /0 fits.
-        var intervals = new List<(ulong Start, ulong End)>(routes.Count);
+        // 1. Mask host bits and build inclusive [start, end] intervals. UInt128 so an IPv6 /0 fits.
+        var intervals = new List<(UInt128 Start, UInt128 End)>(routes.Count);
         for (var i = 0; i < routes.Count; i++)
         {
             var prefix = routes[i].Prefix;
             var length = routes[i].PrefixLength;
-            if (length > 32) continue; // defensive: skip malformed prefixes
-            var mask = length == 0 ? 0u : (0xFFFFFFFFu << (32 - length));
-            var start = (ulong)(prefix & mask);
-            var size = length == 0 ? (1UL << 32) : (1UL << (32 - length));
-            intervals.Add((start, start + size - 1));
+            if (!IpPrefix.IsValidLength(length, isIpv4)) continue; // defensive: skip malformed prefixes
+            // /0 spans the whole address space: 2^128 itself overflows, so that end is stated
+            // directly rather than computed as start + size - 1.
+            var start = prefix & IpPrefix.Mask(length, isIpv4);
+            var end = length == 0
+                ? (isIpv4 ? (UInt128)0xFFFFFFFFu : UInt128.MaxValue)
+                : start + ((UInt128)1 << (isIpv4 ? 32 : 128) - length) - 1;
+            intervals.Add((start, end));
         }
         if (intervals.Count == 0)
             return [];
 
         // 2. Sort and merge overlapping/adjacent intervals into a disjoint union.
         intervals.Sort((a, b) => a.Start.CompareTo(b.Start));
-        var merged = new List<(ulong Start, ulong End)>(intervals.Count) { intervals[0] };
+        var merged = new List<(UInt128 Start, UInt128 End)>(intervals.Count) { intervals[0] };
         for (var i = 1; i < intervals.Count; i++)
         {
             var (start, end) = intervals[i];
             var last = merged[^1];
-            if (start <= last.End + 1) // overlap or directly adjacent
+            // Overlap, or directly adjacent — spelled without last.End + 1 because an interval
+            // ending at UInt128.MaxValue would wrap the increment to zero.
+            var adjacent = last.End != UInt128.MaxValue && start == last.End + 1;
+            if (start <= last.End || adjacent)
             {
                 if (end > last.End) merged[^1] = (last.Start, end);
             }
@@ -113,9 +125,9 @@ public sealed class ExactUnionPrefixAggregator : IPrefixAggregator
         }
 
         // 3. Emit the minimal exact CIDR cover for each merged interval.
-        var result = new List<(uint, byte)>();
+        var result = new List<(UInt128, byte)>();
         foreach (var (start, end) in merged)
-            EmitRange(start, end, result);
+            EmitRange(start, end, isIpv4, result);
         return result;
     }
 
@@ -125,39 +137,60 @@ public sealed class ExactUnionPrefixAggregator : IPrefixAggregator
     /// that is both aligned at <c>start</c> and fits inside the remaining range, so the
     /// emitted blocks tile the range with neither gaps nor overlaps.
     /// </summary>
-    private static void EmitRange(ulong start, ulong end, List<(uint, byte)> result)
+    private static void EmitRange(UInt128 start, UInt128 end, bool isIpv4, List<(UInt128, byte)> result)
     {
-        while (start <= end)
+        var maxLength = isIpv4 ? 32 : 128;
+        var maxAddress = isIpv4 ? (UInt128)0xFFFFFFFFu : UInt128.MaxValue;
+        while (true)
         {
-            var aligned = start == 0 ? (1UL << 32) : start & (~start + 1); // largest pow2 dividing start
-            var fits = HighestPowerOfTwo(end - start + 1);                 // largest pow2 ≤ remaining
-            var size = Math.Min(aligned, fits);
-            result.Add(((uint)start, (byte)(32 - BitOperations.Log2(size))));
+            // The whole address space is one /0 block; stating it directly keeps the span
+            // computation below free of the 2^128 overflow.
+            if (start == UInt128.Zero && end == maxAddress)
+            {
+                result.Add((UInt128.Zero, 0));
+                return;
+            }
+
+            var span = end - start + 1;                                   // < 2^128 here
+            // LeadingZeroCount/Log2 return UInt128 (IBinaryInteger); the values fit an int here
+            // (span < 2^128 ⇒ lzc ≤ 127, size < 2^128 ⇒ log2 ≤ 127).
+            var fits = UInt128.One << (127 - (int)UInt128.LeadingZeroCount(span)); // largest pow2 ≤ span
+            var size = start == UInt128.Zero
+                ? fits                                                    // 0 is aligned to anything
+                : UInt128.Min(start & (~start + 1), fits);                // largest pow2 dividing start
+            result.Add((start, (byte)(maxLength - (int)UInt128.Log2(size))));
+            if (size == span)
+                return;
             start += size;
         }
     }
 
-    private static ulong HighestPowerOfTwo(ulong value) =>
-        1UL << (63 - BitOperations.LeadingZeroCount(value));
-
-    /// <summary>Value-equality key over a route's communities (sorted, set semantics).</summary>
+    /// <summary>Value-equality key over a route's family and communities (communities sorted,
+    /// set semantics). The family participates in the key so IPv4 and IPv6 prefixes never merge
+    /// into one summary even with identical tags (ADR 0001 §6) — a 32-bit merge of an IPv6
+    /// prefix would summarize the wrong address space.</summary>
     private readonly struct AttributeKey : IEquatable<AttributeKey>
     {
         private readonly uint[] _communities;
         private readonly (uint Global, uint Local1, uint Local2)[] _largeCommunities;
 
-        private AttributeKey(uint[] communities, (uint Global, uint Local1, uint Local2)[] largeCommunities)
+        public bool IsIpv4 { get; }
+
+        private AttributeKey(uint[] communities,
+            (uint Global, uint Local1, uint Local2)[] largeCommunities, bool isIpv4)
         {
             _communities = communities;
             _largeCommunities = largeCommunities;
+            IsIpv4 = isIpv4;
         }
 
         // #238: Route collections are IReadOnlyList — the key holds privately-owned normalized
         // arrays so it never aliases a route's (shared) backing array. Building them is
         // KeyNormalizer's job.
         internal static AttributeKey Create(
-            uint[] communities, (uint Global, uint Local1, uint Local2)[] largeCommunities) =>
-            new(communities, largeCommunities);
+            uint[] communities, (uint Global, uint Local1, uint Local2)[] largeCommunities,
+            bool isIpv4) =>
+            new(communities, largeCommunities, isIpv4);
 
         internal static int LargeCommunityComparison(
             (uint Global, uint Local1, uint Local2) a, (uint Global, uint Local1, uint Local2) b)
@@ -171,6 +204,7 @@ public sealed class ExactUnionPrefixAggregator : IPrefixAggregator
 
         public bool Equals(AttributeKey other)
         {
+            if (IsIpv4 != other.IsIpv4) return false;
             if (_communities.Length != other._communities.Length) return false;
             for (var i = 0; i < _communities.Length; i++)
                 if (_communities[i] != other._communities[i]) return false;
@@ -185,6 +219,7 @@ public sealed class ExactUnionPrefixAggregator : IPrefixAggregator
         public override int GetHashCode()
         {
             var hc = new HashCode();
+            hc.Add(IsIpv4);
             foreach (var c in _communities) hc.Add(c);
             foreach (var l in _largeCommunities) hc.Add(l);
             return hc.ToHashCode();
@@ -216,7 +251,8 @@ public sealed class ExactUnionPrefixAggregator : IPrefixAggregator
         private Dictionary<object, (uint Global, uint Local1, uint Local2)[]>? _largeCommunities;
 
         public AttributeKey KeyFor(Route route) =>
-            AttributeKey.Create(Normalize(route.Communities), NormalizeLarge(route.LargeCommunities));
+            AttributeKey.Create(Normalize(route.Communities), NormalizeLarge(route.LargeCommunities),
+                route.IsIpv4);
 
         /// <summary>Communities are a set: dedup and sort so set-equivalent routes key together.</summary>
         private uint[] Normalize(IReadOnlyList<uint> communities)
