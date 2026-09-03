@@ -100,28 +100,39 @@ public static class TcpMd5
 
     /// <summary>Writes a sockaddr_storage-shaped sockaddr_in/inn6 for the peer, port 0 = "any port".
     /// <para>
-    /// The address family constants are the KERNEL's, not .NET's <see cref="AddressFamily"/> values
-    /// (which follow Winsock: InterNetworkV6 = 23). Linux wants AF_INET6 = 10, Darwin 28 — writing
-    /// 23 makes the kernel's md5 parse path reject the entry with EINVAL
-    /// (<c>sin6_family != AF_INET6</c>), which no v4 test could catch because AF_INET = 2 happens
-    /// to agree everywhere. The accepted-socket runtime checks are the OS guard: TCP-MD5 is only
-    /// ever applied on Linux/macOS.
+    /// Two per-OS differences live here:
+    /// <list type="bullet">
+    /// <item><b>Address family constants are the KERNEL's</b>, not .NET's <see cref="AddressFamily"/>
+    /// values (which follow Winsock: InterNetworkV6 = 23). Linux wants AF_INET6 = 10, Darwin 28 —
+    /// writing 23 makes Linux's md5 parse path reject the entry with EINVAL
+    /// (<c>sin6_family != AF_INET6</c>).</item>
+    /// <item><b>Darwin sockaddr_in/in6 carry a length byte first</b> (<c>sin_len</c>/<c>sin6_len</c>),
+    /// with the family in byte 1; Linux has no length byte and keeps the family in bytes 0-1.
+    /// Darwin's own tcpmd5sig path reads that length field, so omitting it (or writing the family
+    /// into byte 0) breaks key lookup there.</item>
+    /// </list>
     /// </para>
     /// </summary>
     internal static void WriteSockaddr(IPEndPoint peer, Span<byte> destination)
     {
         destination.Clear();
         var port = (ushort)peer.Port;
-        if (peer.Address.AddressFamily == AddressFamily.InterNetwork)
+        var isV4 = peer.Address.AddressFamily == AddressFamily.InterNetwork;
+        var darwin = OperatingSystem.IsMacOS();
+        if (isV4)
         {
-            destination[0] = AfInet;                                  // AF_INET: 2 on Linux and Darwin
+            var af = AfInet;
+            if (darwin) { destination[0] = 16; destination[1] = af; } // sin_len, sin_family
+            else { destination[0] = af; }                             // Linux: family, host order
             destination[2] = (byte)(port >> 8);                       // port, network byte order
             destination[3] = (byte)port;
             peer.Address.TryWriteBytes(destination.Slice(4, 4), out _);
         }
         else
         {
-            destination[0] = AfInet6;                                 // AF_INET6: 10 (Linux) / 28 (Darwin)
+            var af = AfInet6;
+            if (darwin) { destination[0] = 28; destination[1] = af; } // sin6_len, sin6_family
+            else { destination[0] = af; }
             destination[2] = (byte)(port >> 8);
             destination[3] = (byte)port;
             peer.Address.TryWriteBytes(destination.Slice(8, 16), out _);
