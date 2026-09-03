@@ -335,3 +335,19 @@ For section-by-section RFC conformance status, see `RFC_COMPLIANCE.md` (2026-07-
   conditional on the peer's offer (its receiving half has existed since #14).
 - **Tracker:** #466 (echo removed 2026-09-03, receive implemented same day after the
   `compose-integration` finding).
+
+### D25. A zero-length AS_PATH is rejected at the eBGP policy layer (Malformed AS_PATH)
+- **Decision:** an inbound UPDATE whose AS_PATH attribute has a zero-length value is rejected as
+  Malformed AS_PATH (subcode 11, treat-as-withdraw) in `UpdateCodec.ParseRouteAttributes`. The
+  codec (`AttributeHelper.ReadAsPath`/`WriteAsPath`) stays encoding-neutral — a zero-length
+  attribute is the on-wire form of an empty path, and the writer's empty-path roundtrip stands
+  (#248 review). AS4_PATH stays lenient: RFC 6793 leaves an empty one to the merge, which ignores it.
+- **Context:** RFC 4271 §5.1.2 defines a path segment as carrying "one or more AS numbers" and
+  permits an empty path only toward INTERNAL peers (iBGP); BGPLite serves eBGP exclusively, where
+  the sender's own ASN must be present — an empty path is malformed in practice (major
+  implementations reject it), though the RFC does not state it verbatim. #238 settled the
+  empty-SEGMENT case; #486 settled the empty-ATTRIBUTE case.
+- **Consequence:** an UPDATE a maximally lenient implementation might accept is
+  treated-as-withdraw; routes never install with an empty path (which the AS-loop exclusion,
+  RFC 4271 §9.1.2, could never match anyway — D23).
+- **Tracker:** #486.
