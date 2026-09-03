@@ -354,11 +354,61 @@ public class UserSourceCacheTests
         holder.TrySetResult();
         await holding.WaitAsync(TimeSpan.FromSeconds(5));
 
-        // The cancelled caller's pair-remove took the SHARED gate instance (the holder kept
-        // running on its own reference — the accepted duplicate-fetch tradeoff), and nothing
-        // re-adds a gate until the next call: zero gates, one cached entry, no orphan.
+        // The holder is the last participant out, so ExitInflight pair-removes the shared gate
+        // (the cancelled waiter no longer touches it — #468): zero gates, one cached entry,
+        // no orphan.
         Assert.Equal(0, cache.TrackedGateCount);
         Assert.Equal(1, cache.TrackedCount);
+    }
+
+    /// <summary>
+    /// #478: the #468 single-fetch invariant, end-to-end — across a waiter cancelled mid-queue AND
+    /// a caller arriving after it, exactly one loadAsync may run for the URL. Any gate split (the
+    /// cancelled waiter removing the shared gate, or a registration racing the first loader's
+    /// last-leaver exit) manifests as a second concurrent load, which the counting fetcher records
+    /// deterministically: every load blocks on the same release signal, so nobody finishes before
+    /// the assertion point. (The pre-#478 lock-free window between the decrement and the gate
+    /// pair-removal is nanosecond-narrow and cannot be forced from outside; this test pins the
+    /// invariant class, the lock closes the window by construction.)
+    /// </summary>
+    [Fact]
+    public async Task CancelledWaiterThenNewCaller_StillExactlyOneLoad()
+    {
+        var cache = new UserSourceCache();
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource<IReadOnlyList<IpPrefix>>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var loads = 0;
+
+        Task<IReadOnlyList<IpPrefix>> BlockingLoad(CancellationToken ct)
+        {
+            Interlocked.Increment(ref loads);
+            entered.TrySetResult();
+            return release.Task.WaitAsync(ct);
+        }
+
+        // Loader A holds the gate.
+        var a = cache.GetOrLoadAsync("https://example.com/l", "src", BlockingLoad, CancellationToken.None);
+        await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        // Waiter B queues behind A and is cancelled while queued (the #468 trigger).
+        var queuedCts = new CancellationTokenSource();
+        var queued = Task.Run(() => cache.GetOrLoadAsync("https://example.com/l", "src", BlockingLoad, queuedCts.Token));
+        await Task.Delay(50);            // let it queue behind the holder
+        queuedCts.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => queued);
+
+        // Caller C arrives while A is still inside — it must wait on A's gate (or hit the fresh
+        // cache entry after A completes), never start a second load.
+        var c = cache.GetOrLoadAsync("https://example.com/l", "src", BlockingLoad, CancellationToken.None);
+
+        release.TrySetResult(P((0x0A000000, 8, true)));
+        await a.WaitAsync(TimeSpan.FromSeconds(5));
+        var fromC = await c.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Equal(1, loads);
+        Assert.Single(fromC);
+        Assert.Equal(1, cache.TrackedCount);
+        Assert.Equal(0, cache.TrackedGateCount);   // last leaver reclaimed the gate
     }
 
     /// <summary>
