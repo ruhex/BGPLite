@@ -88,9 +88,12 @@ public sealed class BgpConfig
     /// <summary>#304: per-peer ceiling on prefixes installed from one session (distinct
     /// NLRI this session currently owns); exceeding it tears the session down with
     /// NOTIFICATION(Cease, MaxPrefixesExceeded) per RFC 4271 §6.7 / RFC 4486 §2.
-    /// 0 = unlimited (the convention of OpenTimeoutSeconds / MaxAcceptsPerIpPerMinute).</summary>
+    /// #481: the shipped default is bounded (1,000,000 — above any legitimate provisioning
+    /// peer, far below memory exhaustion) so the RFC 4486 defense is on out of the box;
+    /// 0 = unlimited remains available as an explicit opt-out (the convention of
+    /// OpenTimeoutSeconds / MaxAcceptsPerIpPerMinute).</summary>
     [YamlMember(Alias = "MaxPrefixesPerPeer")]
-    public int MaxPrefixesPerPeer { get; init; } = 0;
+    public int MaxPrefixesPerPeer { get; init; } = 1_000_000;
 
     public IPAddress GetRouterIdAddress() => IPAddress.Parse(RouterId);
 
