@@ -815,9 +815,19 @@ public sealed class BgpSession : IDisposable
                         _logger.LogWarning("RouteRefresh received from {Peer} without negotiated capability, ignoring", _peer);
                         break;
                     }
-                    if (refresh.Afi != BgpConstants.Afi.IPv4 || refresh.Safi != BgpConstants.Safi.Unicast)
+                    // RFC 2918 §2: the receiving speaker re-sends Adj-RIB-Out for the REQUESTED
+                    // AFI/SAFI. Both families BGPLite advertises are honored (#420): IPv4/Unicast
+                    // always, IPv6/Unicast for MP-IPv6-negotiated sessions (#14). The re-announcement
+                    // dump is family-unified (withdraw-all + re-send), so the same debounced refresh
+                    // serves either request.
+                    var isSupportedFamily = refresh.Safi == BgpConstants.Safi.Unicast &&
+                        (refresh.Afi == BgpConstants.Afi.IPv4 ||
+                         (refresh.Afi == BgpConstants.Afi.IPv6 && _peerMpIpv6Unicast));
+                    if (!isSupportedFamily)
                     {
-                        _logger.LogDebug("RouteRefresh ignored: unsupported AFI/SAFI from {Peer}", _peer);
+                        _logger.LogDebug(
+                            "RouteRefresh ignored: unsupported AFI/SAFI {Afi}/{Safi} from {Peer} (MP IPv6 negotiated: {MpV6})",
+                            refresh.Afi, refresh.Safi, _peer, _peerMpIpv6Unicast);
                         break;
                     }
                     // Debounce: ignore ROUTE_REFRESH floods. Atomic check-and-set so a burst of N
