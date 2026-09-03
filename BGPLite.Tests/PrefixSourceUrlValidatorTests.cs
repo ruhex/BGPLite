@@ -141,7 +141,7 @@ public class PrefixSourceUrlValidatorTests
     [InlineData("::192.168.1.1")]       // IPv4-compatible (deprecated ::a.b.c.d form)
     [InlineData("::ffff:10.0.0.1")]     // IPv4-mapped private (also caught by normalize, defense in depth)
     [InlineData("64:ff9b::0a00:0001")]  // NAT64 well-known embedding 10.0.0.1 (#321)
-    [InlineData("64:ff8:1::c0a8:0101")] // NAT64 local-scope embedding 192.168.1.1 (#321)
+    [InlineData("64:ff9b:1::a9fe:c9fe")] // NAT64 local-use 64:ff9b:1::/48 (RFC 8215) — cloud-metadata embedding (#419)
     public void IsBlockedAddress_Rejects_IPv4EmbeddingForms(string ip)
     {
         // Without the #158 ranges, an attacker controlling DNS returns one of these IPv6 addresses

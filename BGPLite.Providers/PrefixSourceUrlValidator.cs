@@ -38,7 +38,7 @@ public static class PrefixSourceUrlValidator
         IPNetwork.Parse("::ffff:0:0/96"),       // IPv4-mapped (also caught by IsIPv4MappedToIPv6, defense in depth)
         IPNetwork.Parse("::/96"),               // IPv4-compatible (deprecated ::a.b.c.d form)
         IPNetwork.Parse("64:ff9b::/96"),        // NAT64 well-known — a DNS64 name can embed any IPv4 here (#321)
-        IPNetwork.Parse("64:ff8:1::/96"),       // NAT64 well-known, local scope (RFC 6052 §2.1 alternate)
+        IPNetwork.Parse("64:ff9b:1::/48"),      // NAT64 local-use (RFC 8215) — same IPv4-embedding hazard as the well-known prefix (#419)
     ];
 
     /// <summary>Per-address connect budget so one blackholed candidate can't consume the whole
