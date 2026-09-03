@@ -12,6 +12,29 @@ public sealed class BgpConfig
     [YamlMember(Alias = "RouterId")]
     public string RouterId { get; init; } = "0.0.0.0";
 
+    /// <summary>
+    /// Optional global IPv6 next hop advertised to MP-BGP IPv6/Unicast peers (#14 phase 4,
+    /// RFC 2545 §3: the MP_REACH next hop is the speaker's GLOBAL address — the IPv4 router-id
+    /// cannot serve the IPv6 address family). Unset = IPv6 routes are never advertised to any
+    /// peer (suppressed with a warning per send); set = each MP-IPv6-negotiated session
+    /// announces its IPv6 routes with this next hop.
+    /// </summary>
+    [YamlMember(Alias = "NextHopIpv6")]
+    public string? NextHopIpv6 { get; init; }
+
+    /// <summary>
+    /// Whether <paramref name="value"/> parses as a GLOBAL IPv6 unicast address (2000::/3) —
+    /// the RFC 2545 §3 requirement for the MP_REACH next hop. Shared by <see cref="Validate"/>
+    /// and the session's send-time gate (a hand-built config record skips Validate, so the gate
+    /// must not trust the string blindly).
+    /// </summary>
+    public static bool IsGlobalUnicastV6([System.Diagnostics.CodeAnalysis.NotNullWhen(true)] string? value) =>
+        IPAddress.TryParse(value, out var v6)
+        && v6.AddressFamily == AddressFamily.InterNetworkV6
+        && !v6.IsIPv4MappedToIPv6
+        && v6.ScopeId == 0
+        && (v6.GetAddressBytes()[0] & 0xE0) == 0x20; // 2000::/3
+
     [YamlMember(Alias = "KeepAlive")]
     public int KeepAlive { get; init; } = 60;
 
@@ -129,5 +152,22 @@ public sealed class BgpConfig
         if (MaxPrefixesPerPeer < 0)
             throw new InvalidOperationException(
                 $"Invalid configuration: Bgp.MaxPrefixesPerPeer must be >= 0, 0 = unlimited (got {MaxPrefixesPerPeer}).");
+
+        // #14 phase 4: when an IPv6 next hop is configured it must be a GLOBAL IPv6 unicast
+        // address — RFC 2545 §3 requires the (first) MP_REACH next hop to be global, and the
+        // 16-byte form we advertise has no room for interface semantics (a link-local address
+        // is only meaningful on a shared link, which a route-server session is not required to
+        // be). Global unicast space is 2000::/3 — that single check also rejects the unspecified
+        // address, loopback (::1), link-local (fe80::/10), ULA (fc00::/7) and multicast (ff00::/8).
+        // Unset stays legal: it simply disables IPv6 advertisements (fail-visible at send time),
+        // never a startup failure for IPv4-only deployments.
+        if (!string.IsNullOrWhiteSpace(NextHopIpv6))
+        {
+            if (!IsGlobalUnicastV6(NextHopIpv6))
+                throw new InvalidOperationException(
+                    "Invalid configuration: Bgp.NextHopIpv6 must be a global unicast IPv6 address (2000::/3 — " +
+                    $"not link-local, multicast, ULA or mapped) when set (got '{NextHopIpv6}'). " +
+                    "Leave it unset to disable IPv6 advertisements.");
+        }
     }
 }

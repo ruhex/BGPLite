@@ -5,6 +5,7 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Time.Testing;
 using BGPLite.Contracts;
+using BGPLite.Protocol;
 
 namespace BGPLite.Tests;
 
@@ -36,10 +37,10 @@ public class PrefixAutoRefreshServiceTests
             => Conditional.TryGetValue(sourceName, out var v) ? v : true;
 
         // Unused by the auto-refresh service (it reads source names from AppConfig), but required by the interface.
-        public Task<IReadOnlyList<(PrefixSourceConfig Source, IReadOnlyList<(uint Prefix, byte Length)> Prefixes)>> LoadAllAsync(CancellationToken ct = default)
-            => Task.FromResult<IReadOnlyList<(PrefixSourceConfig, IReadOnlyList<(uint Prefix, byte Length)>)>>([]);
-        public Task<IReadOnlyList<(uint Prefix, byte Length)>> GetAsync(string name, CancellationToken ct = default) => Task.FromResult<IReadOnlyList<(uint Prefix, byte Length)>>([]);
-        public Task<IReadOnlyList<(uint Prefix, byte Length)>> GetDefaultAsync(CancellationToken ct = default) => Task.FromResult<IReadOnlyList<(uint Prefix, byte Length)>>([]);
+        public Task<IReadOnlyList<(PrefixSourceConfig Source, IReadOnlyList<IpPrefix> Prefixes)>> LoadAllAsync(CancellationToken ct = default)
+            => Task.FromResult<IReadOnlyList<(PrefixSourceConfig, IReadOnlyList<IpPrefix>)>>([]);
+        public Task<IReadOnlyList<IpPrefix>> GetAsync(string name, CancellationToken ct = default) => Task.FromResult<IReadOnlyList<IpPrefix>>([]);
+        public Task<IReadOnlyList<IpPrefix>> GetDefaultAsync(CancellationToken ct = default) => Task.FromResult<IReadOnlyList<IpPrefix>>([]);
         public Task WarmUpAsync(CancellationToken ct = default) => Task.CompletedTask;
     }
 

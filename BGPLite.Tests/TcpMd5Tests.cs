@@ -25,6 +25,58 @@ public class TcpMd5Tests
         Assert.False(TcpMd5.IsValidPassword(new string('é', 41)));  // 82 UTF-8 bytes
     }
 
+    /// <summary>
+    /// The sockaddr carries the KERNEL's address family, not .NET's (Winsock-derived) enum
+    /// value: Linux wants AF_INET6 = 10, but (byte)AddressFamily.InterNetworkV6 is 23 — the
+    /// kernel's md5 parse path rejects that with EINVAL (sin6_family != AF_INET6). The v4 path
+    /// could not catch this: AF_INET = 2 everywhere. Platform-dependent for the v6 value
+    /// (Darwin = 28), so asserted per-OS; the Linux branch is what CI proves.
+    /// </summary>
+    [Fact]
+    public void WriteSockaddr_V6Peer_CarriesKernelAddressFamily()
+    {
+        // TCP-MD5 is only ever applied on Linux/macOS; other platforms have no defined layout.
+        if (!OperatingSystem.IsLinux() && !OperatingSystem.IsMacOS()) return;
+
+        Span<byte> buffer = stackalloc byte[128];
+        TcpMd5.WriteSockaddr(new IPEndPoint(IPAddress.Parse("2001:db8::1"), 0), buffer);
+
+        var expectedFamily = OperatingSystem.IsLinux() ? 10 : 28;
+        Assert.Equal(expectedFamily, buffer[0]);
+        // Linux keeps byte 1 zero (family is 2 bytes little-endian); Darwin's byte 1 is the family.
+        Assert.Equal(OperatingSystem.IsLinux() ? 0 : 28, buffer[1]);
+
+        TcpMd5.WriteSockaddr(new IPEndPoint(IPAddress.Loopback, 0), buffer);
+        // v4 layout per OS: Linux = family in byte 0; Darwin = sin_len first, family in byte 1.
+        if (OperatingSystem.IsLinux())
+        {
+            Assert.Equal(2, buffer[0]);
+            Assert.Equal(0, buffer[1]);
+        }
+        else
+        {
+            Assert.Equal(16, buffer[0]); // sin_len
+            Assert.Equal(2, buffer[1]);  // sin_family
+        }
+    }
+
+    [Fact]
+    public void WriteSockaddr_Darwin_CarriesSinLenFirst()
+    {
+        // BSD sockaddr_in/in6 start with a LENGTH byte; the family follows in byte 1. Asserted
+        // only on Darwin, where the layout applies (the Linux expectations live above).
+        if (!OperatingSystem.IsMacOS()) return;
+
+        var buffer = new byte[128];
+        TcpMd5.WriteSockaddr(new IPEndPoint(IPAddress.Loopback, 0), buffer);
+        Assert.Equal(16, buffer[0]); // sin_len
+        Assert.Equal(2, buffer[1]);  // sin_family
+
+        TcpMd5.WriteSockaddr(new IPEndPoint(IPAddress.Parse("2001:db8::1"), 0), buffer);
+        Assert.Equal(28, buffer[0]); // sin6_len
+        Assert.Equal(28, buffer[1]); // sin6_family
+    }
+
     [Fact]
     public void InvalidKeyLength_Throws()
     {

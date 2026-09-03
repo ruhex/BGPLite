@@ -60,15 +60,32 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
 
     public Task StartAsync(CancellationToken cancellationToken)
     {
-        _listener = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
-        _listener.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
-        _listener.Bind(new IPEndPoint(IPAddress.Any, BgpConstants.BgpPort));
+        // #14 phase 4: prefer the dual-mode IPv6 listener — it accepts both IPv6 peers and IPv4
+        // peers (the kernel surfaces the latter as IPv4-mapped addresses, normalized in
+        // AcceptLoopAsync). DualMode must be set before Bind. On hosts with IPv6 disabled we fall
+        // back to the pre-phase-4 IPv4 listener instead of refusing to start: serving IPv4-only
+        // beats not serving at all, and the capability difference is announced loudly.
+        var useDualMode = Socket.OSSupportsIPv6;
+        if (useDualMode)
+        {
+            _listener = new Socket(AddressFamily.InterNetworkV6, SocketType.Stream, ProtocolType.Tcp);
+            _listener.DualMode = true;
+            _listener.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
+            _listener.Bind(new IPEndPoint(IPAddress.IPv6Any, BgpConstants.BgpPort));
+        }
+        else
+        {
+            _listener = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
+            _listener.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
+            _listener.Bind(new IPEndPoint(IPAddress.Any, BgpConstants.BgpPort));
+            _logger.LogWarning("IPv6 is not available on this host — serving IPv4 peers only");
+        }
         // #344: after a restart every peer reconnects at once; backlog 16 dropped SYNs and pushed
         // peers into their own retry backoff, stretching reconvergence for no benefit. A few
         // hundred pending accepts costs nothing on a route-server host.
         _listener.Listen(512);
 
-        _logger.LogInformation("BGP server listening on port {Port}", BgpConstants.BgpPort);
+        _logger.LogInformation("BGP server listening on {Address}:{Port}", useDualMode ? "[::]" : "0.0.0.0", BgpConstants.BgpPort);
         _logger.LogInformation("Local ASN={Asn}, RouterId={RouterId}", _config.Bgp.Asn, _config.Bgp.RouterId);
 
         _acceptTask = AcceptLoopAsync(_cts.Token);
@@ -184,12 +201,13 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
     {
         if (socket is null)
             return;
+        var wire = Md5WireAddress(socket.AddressFamily, peer);
         try
         {
             if (key is null)
-                TcpMd5.Clear(socket, peer);
+                TcpMd5.Clear(socket, wire);
             else
-                TcpMd5.Apply(socket, peer, key);
+                TcpMd5.Apply(socket, wire, key);
         }
         catch (Exception ex)
         {
@@ -199,6 +217,30 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
         }
     }
 
+    /// <summary>
+    /// Normalizes the remote address of an accepted connection for identity/lookup use — the
+    /// session key, the PeerStore string address, the accept throttle and the MD5 key table all
+    /// key on the plain form. A dual-mode listener surfaces IPv4 peers as IPv4-mapped IPv6
+    /// (<c>::ffff:a.b.c.d</c>); configured peers are plain IPv4, so the mapped form would break
+    /// every lookup. internal static for unit tests.
+    /// </summary>
+    internal static IPAddress NormalizeAcceptedAddress(IPAddress address) =>
+        address.IsIPv4MappedToIPv6 ? address.MapToIPv4() : address;
+
+    /// <summary>
+    /// The address form a TCP-MD5 key must be stored under on <paramref name="socketFamily"/>.
+    /// The kernel resolves the key through the socket's own parse path, which demands the
+    /// SOCKET's family in the sockaddr: on Linux an IPv6 socket's
+    /// <c>tcp_v6_parse_md5_keys</c> rejects an AF_INET entry (EINVAL) but accepts the
+    /// IPv4-mapped form (<c>ipv6_addr_v4mapped</c>, prefixlen 32) — so an IPv4 peer maps to
+    /// <c>::ffff:a.b.c.d</c> on a v6 (dual-mode) socket. A v4 socket and real v6 peers pass
+    /// through unchanged. Pure; internal static for unit tests.
+    /// </summary>
+    internal static IPAddress Md5WireAddress(AddressFamily socketFamily, IPAddress peer) =>
+        socketFamily == AddressFamily.InterNetworkV6 && peer.AddressFamily == AddressFamily.InterNetwork
+            ? peer.MapToIPv6()
+            : peer;
+
     private async Task AcceptLoopAsync(CancellationToken cancellationToken)
     {
         while (!cancellationToken.IsCancellationRequested)
@@ -207,12 +249,19 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
             {
                 var socket = await _listener!.AcceptAsync(cancellationToken);
                 var remoteEndpoint = (IPEndPoint)socket.RemoteEndPoint!;
+                // A dual-mode listener surfaces IPv4 peers as IPv4-mapped IPv6 addresses
+                // (::ffff:a.b.c.d). Normalize BEFORE anything keys on the address: the session
+                // key, the PeerStore string address, the accept throttle and the MD5 key table
+                // all key on the plain IPv4 form, so configured peer "10.0.0.1" matches the
+                // connection it configured. The RAW address stays the MD5 wire form — see
+                // Md5WireAddress for why it must NOT be normalized there (#14 phase 4).
+                var address = NormalizeAcceptedAddress(remoteEndpoint.Address);
                 // Session identity = the accepted TCP connection (remote IP + remote source port),
                 // so peers sharing a source IP but on different source ports get distinct slots and
                 // coexist (RFC 4271 §8.2.1; issue #18). peerAddress stays the IP-only form for the
                 // PeerStore, which is still keyed by IP.
-                var key = new SessionKey(remoteEndpoint.Address, remoteEndpoint.Port);
-                var peerAddress = remoteEndpoint.Address.ToString();
+                var key = new SessionKey(address, remoteEndpoint.Port);
+                var peerAddress = address.ToString();
 
                 // Per-source-IP accept throttle (#115): defend one-IP accept floods. If this IP has
                 // already exceeded MaxAcceptsPerIpPerMinute within the rolling 60s window, close the
@@ -236,7 +285,9 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
 
                 // #36: the accepted socket inherits the listener's TCP-MD5 key on Linux; re-apply
                 // for the known peer so enforcement does not depend on inheritance semantics.
-                if (_md5Keys.TryGetValue(remoteEndpoint.Address, out var md5Key))
+                // The lookup keys on the normalized address (the table is keyed by the configured
+                // form); ApplyMd5 re-maps to the socket's wire form itself.
+                if (_md5Keys.TryGetValue(address, out var md5Key))
                     ApplyMd5(socket, remoteEndpoint.Address, md5Key);
 
                 var session = _sessionFactory.Create(new SocketBgpConnection(socket), peerConfig);

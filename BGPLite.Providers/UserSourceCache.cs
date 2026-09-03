@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using BGPLite.Protocol;
 using Microsoft.Extensions.Logging;
 
 namespace BGPLite.Providers;
@@ -34,7 +35,7 @@ internal sealed class UserSourceCache
     private readonly int _maxEntries;
 
     // url → (list, cached at, is negative). Negative entries (failed loads) use _negativeTtl.
-    private readonly ConcurrentDictionary<string, (IReadOnlyList<(uint Prefix, byte Length)> List, DateTime CachedAt, bool Negative)> _cache = new();
+    private readonly ConcurrentDictionary<string, (IReadOnlyList<IpPrefix> List, DateTime CachedAt, bool Negative)> _cache = new();
     // url → gate serializing the cache-miss fetch path (prevents thundering herd on cold/expired keys).
     private readonly ConcurrentDictionary<string, SemaphoreSlim> _locks = new();
 
@@ -59,10 +60,10 @@ internal sealed class UserSourceCache
     /// <param name="logLabel">Safe identifier (the source <c>Name</c>) for log lines — the URL itself is
     /// never logged, since peer URLs may carry query-string tokens (#149).</param>
     /// <param name="loadAsync">The fetcher ( HttpPrefixProvider.LoadAsync closed over the source config).</param>
-    public async Task<IReadOnlyList<(uint Prefix, byte Length)>> GetOrLoadAsync(
+    public async Task<IReadOnlyList<IpPrefix>> GetOrLoadAsync(
         string url,
         string logLabel,
-        Func<CancellationToken, Task<IReadOnlyList<(uint Prefix, byte Length)>>> loadAsync,
+        Func<CancellationToken, Task<IReadOnlyList<IpPrefix>>> loadAsync,
         CancellationToken ct)
     {
         if (TryGetFresh(url, out var fresh))
@@ -91,7 +92,7 @@ internal sealed class UserSourceCache
             if (TryGetFresh(url, out var rechecked))
                 return rechecked;
 
-            IReadOnlyList<(uint Prefix, byte Length)> prefixes;
+            IReadOnlyList<IpPrefix> prefixes;
             try
             {
                 prefixes = await loadAsync(ct);
@@ -175,7 +176,7 @@ internal sealed class UserSourceCache
         }
     }
 
-    private bool TryGetFresh(string url, out IReadOnlyList<(uint Prefix, byte Length)> list)
+    private bool TryGetFresh(string url, out IReadOnlyList<IpPrefix> list)
     {
         list = null!;
         if (!_cache.TryGetValue(url, out var entry)) return false;

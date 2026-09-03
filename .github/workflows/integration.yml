@@ -1,0 +1,28 @@
+name: integration
+
+# End-to-end BGP tests: a real BGPLite server vs a real BIRD2 peer over
+# IPv4 and IPv6 transport (docker/integration). Complements the unit suite —
+# this is what catches kernel/transport-level issues (e.g. #406's TCP_MD5SIG
+# sockaddr family bug, which unit tests could not see).
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, dev]
+
+permissions:
+  contents: read
+
+jobs:
+  compose-integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run BGP integration tests (linux64)
+        run: docker/integration/run-tests.sh
+
+      - name: Server logs on failure
+        if: failure()
+        run: |
+          docker compose -f docker/integration/docker-compose.yml logs server bird || true

@@ -235,4 +235,127 @@ public class RouteTableTests
         Assert.InRange(actual, 0, keys);   // sanity: some subset of the key set survived
         Assert.Equal(actual, table.Count); // counter == dictionary truth (no drift, never negative)
     }
+
+    // ---- #14 phase 3: longest-prefix-match lookup ----
+
+    [Fact]
+    public void GetLongestPrefixMatch_MostSpecificPrefixWins()
+    {
+        var table = new RouteTable();
+        var lessSpecific = new Route { Prefix = 0x0A000000, PrefixLength = 8, NextHop = 1 };
+        var moreSpecific = new Route { Prefix = 0x0A010000, PrefixLength = 16, NextHop = 2 };
+        table.AddOrUpdate(lessSpecific);
+        table.AddOrUpdate(moreSpecific);
+
+        Assert.Same(moreSpecific, table.GetLongestPrefixMatch(0x0A010203)); // inside both → /16
+        Assert.Same(lessSpecific, table.GetLongestPrefixMatch(0x0A020304)); // inside /8 only
+    }
+
+    [Fact]
+    public void GetLongestPrefixMatch_NoMatch_ReturnsNull()
+    {
+        var table = new RouteTable();
+        table.AddOrUpdate(new Route { Prefix = 0x0A000000, PrefixLength = 8, NextHop = 1 });
+
+        Assert.Null(table.GetLongestPrefixMatch(0xC0A80001)); // 192.168.0.1 — outside 10/8
+    }
+
+    [Fact]
+    public void GetLongestPrefixMatch_EmptyTable_ReturnsNull()
+    {
+        Assert.Null(new RouteTable().GetLongestPrefixMatch(0x0A000001));
+    }
+
+    [Fact]
+    public void GetLongestPrefixMatch_DefaultRoute_CatchesEverything()
+    {
+        var table = new RouteTable();
+        var defaultRoute = new Route { Prefix = (UInt128)0, PrefixLength = 0, NextHop = 1 };
+        table.AddOrUpdate(defaultRoute);
+
+        Assert.Same(defaultRoute, table.GetLongestPrefixMatch(0xC0A80102));
+    }
+
+    [Fact]
+    public void GetLongestPrefixMatch_RemovedMoreSpecific_FallsBackToLessSpecific()
+    {
+        var table = new RouteTable();
+        var lessSpecific = new Route { Prefix = 0x0A000000, PrefixLength = 8, NextHop = 1 };
+        table.AddOrUpdate(lessSpecific);
+        table.AddOrUpdate(new Route { Prefix = 0x0A010000, PrefixLength = 16, NextHop = 2 });
+        table.Remove(0x0A010000, 16);
+
+        Assert.Same(lessSpecific, table.GetLongestPrefixMatch(0x0A010203));
+    }
+
+    [Fact]
+    public void GetLongestPrefixMatch_Ipv6_MostSpecificPrefixWins()
+    {
+        var table = new RouteTable();
+        var lessSpecific = new Route { Prefix = V6Net(0x2001, 0xDB8), IsIpv4 = false, PrefixLength = 32, NextHop = 1 };
+        var moreSpecific = new Route { Prefix = V6Net(0x2001, 0xDB8, 1), IsIpv4 = false, PrefixLength = 48, NextHop = 2 };
+        table.AddOrUpdate(lessSpecific);
+        table.AddOrUpdate(moreSpecific);
+
+        // Inside both → /48; inside the /32 but outside the /48 → /32; outside both → null.
+        var inBoth = V6Net(0x2001, 0xDB8, 1) + 1;
+        var inWide = V6Net(0x2001, 0xDB8, 2);
+        Assert.Same(moreSpecific, table.GetLongestPrefixMatch(inBoth, isIpv4: false));
+        Assert.Same(lessSpecific, table.GetLongestPrefixMatch(inWide, isIpv4: false));
+        Assert.Null(table.GetLongestPrefixMatch(V6Net(0x2001, 0xDB9), isIpv4: false));
+    }
+
+    [Fact]
+    public void GetLongestPrefixMatch_Ipv4_HostRouteBoundary()
+    {
+        // /32 is the family length maximum: the probe must hit the exact host route and
+        // nothing one address away.
+        var table = new RouteTable();
+        var host = new Route { Prefix = 0x0A000001, PrefixLength = 32, NextHop = 1 };
+        table.AddOrUpdate(host);
+
+        Assert.Same(host, table.GetLongestPrefixMatch(0x0A000001));
+        Assert.Null(table.GetLongestPrefixMatch(0x0A000002));
+    }
+
+    [Fact]
+    public void GetLongestPrefixMatch_Ipv6_HostAndDefaultBoundaries()
+    {
+        // Both IPv6 length extremes in one table: a /128 host route (probe starts at the
+        // family maximum) and ::/0 (probe ends at the minimum) — the address between them
+        // falls through 128..1 to the default.
+        var table = new RouteTable();
+        var hostRoute = new Route { Prefix = V6Net(0x2001, 0xDB8, 1) + 5, IsIpv4 = false, PrefixLength = 128, NextHop = 1 };
+        var defaultRoute = new Route { Prefix = (UInt128)0, IsIpv4 = false, PrefixLength = 0, NextHop = 2 };
+        table.AddOrUpdate(hostRoute);
+        table.AddOrUpdate(defaultRoute);
+
+        Assert.Same(hostRoute, table.GetLongestPrefixMatch(V6Net(0x2001, 0xDB8, 1) + 5, isIpv4: false));
+        Assert.Same(defaultRoute, table.GetLongestPrefixMatch(V6Net(0x2001, 0xDB9), isIpv4: false));
+    }
+
+    [Fact]
+    public void GetLongestPrefixMatch_Ipv6_NeverMatchesIpv4Entries()
+    {
+        // Family-scoped: the IPv4 key carries IsIpv4 = true, so an IPv6 address whose 128-bit
+        // value numerically contains the IPv4 network must not match it.
+        var table = new RouteTable();
+        table.AddOrUpdate(new Route { Prefix = 0x0A000000, PrefixLength = 8, NextHop = 1 });
+
+        Assert.Null(table.GetLongestPrefixMatch(0x0A000001, isIpv4: false));
+    }
+
+    [Fact]
+    public void GetLongestPrefixMatch_Ipv4_NeverMatchesIpv6Entries()
+    {
+        var table = new RouteTable();
+        table.AddOrUpdate(new Route { Prefix = V6Net(0x2001, 0xDB8), IsIpv4 = false, PrefixLength = 32, NextHop = 1 });
+
+        Assert.Null(table.GetLongestPrefixMatch(0x20010DB8, isIpv4: true));
+    }
+
+    /// <summary>Composes an IPv6 network address from its leading hextets (the rest are zero):
+    /// <c>V6Net(0x2001, 0xDB8, 1)</c> is 2001:db8:1::.</summary>
+    private static UInt128 V6Net(ushort g0, ushort g1, ushort g2 = 0) =>
+        ((UInt128)g0 << 112) | ((UInt128)g1 << 96) | ((UInt128)g2 << 80);
 }

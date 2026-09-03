@@ -245,29 +245,29 @@ public sealed class PeerDeleteTeardownTests
     /// <summary>Answers every prefix query with an empty set; the delete path never calls it.</summary>
     private sealed class InertPrefixService : IPrefixService
     {
-        public Task<IReadOnlyList<(uint Prefix, byte Length)>> GetPrefixesAsync(uint asn, CancellationToken ct = default)
-            => Task.FromResult<IReadOnlyList<(uint Prefix, byte Length)>>([]);
-        public Task<List<(uint Prefix, byte Length, uint Asn)>> GetPrefixesForAsns(IEnumerable<uint> asns, CancellationToken ct = default)
-            => Task.FromResult(new List<(uint Prefix, byte Length, uint Asn)>());
+        public Task<IReadOnlyList<(UInt128 Prefix, byte Length, bool IsIpv4)>> GetPrefixesAsync(uint asn, CancellationToken ct = default)
+            => Task.FromResult<IReadOnlyList<(UInt128 Prefix, byte Length, bool IsIpv4)>>([]);
+        public Task<List<(UInt128 Prefix, byte Length, bool IsIpv4, uint Asn)>> GetPrefixesForAsns(IEnumerable<uint> asns, CancellationToken ct = default)
+            => Task.FromResult(new List<(UInt128 Prefix, byte Length, bool IsIpv4, uint Asn)>());
         public Task<int> GetPrefixCountAsync(uint asn, CancellationToken ct = default) => Task.FromResult(0);
-        public Task<List<(uint Prefix, byte Length, uint Asn)>> GetRuPrefixesAsync(CancellationToken ct = default)
-            => Task.FromResult(new List<(uint Prefix, byte Length, uint Asn)>());
-        public Task<IReadOnlyList<(uint Prefix, byte Length)>> GetSourcePrefixesAsync(string name, CancellationToken ct = default)
-            => Task.FromResult<IReadOnlyList<(uint Prefix, byte Length)>>([]);
-        public Task<IReadOnlyList<(uint Prefix, byte Length)>> GetUserSourcePrefixesAsync(string name, string url, string? community, CancellationToken ct = default)
-            => Task.FromResult<IReadOnlyList<(uint Prefix, byte Length)>>([]);
+        public Task<List<(UInt128 Prefix, byte Length, bool IsIpv4, uint Asn)>> GetRuPrefixesAsync(CancellationToken ct = default)
+            => Task.FromResult(new List<(UInt128 Prefix, byte Length, bool IsIpv4, uint Asn)>());
+        public Task<IReadOnlyList<(UInt128 Prefix, byte Length, bool IsIpv4)>> GetSourcePrefixesAsync(string name, CancellationToken ct = default)
+            => Task.FromResult<IReadOnlyList<(UInt128 Prefix, byte Length, bool IsIpv4)>>([]);
+        public Task<IReadOnlyList<(UInt128 Prefix, byte Length, bool IsIpv4)>> GetUserSourcePrefixesAsync(string name, string url, string? community, CancellationToken ct = default)
+            => Task.FromResult<IReadOnlyList<(UInt128 Prefix, byte Length, bool IsIpv4)>>([]);
         public Task WarmUpAsync(CancellationToken ct = default) => Task.CompletedTask;
     }
 
     /// <summary>Reports no configured prefix sources; the delete path never calls it.</summary>
     private sealed class InertPrefixSourceService : IPrefixSourceService
     {
-        public Task<IReadOnlyList<(PrefixSourceConfig Source, IReadOnlyList<(uint Prefix, byte Length)> Prefixes)>> LoadAllAsync(CancellationToken ct = default)
-            => Task.FromResult<IReadOnlyList<(PrefixSourceConfig, IReadOnlyList<(uint Prefix, byte Length)>)>>([]);
-        public Task<IReadOnlyList<(uint Prefix, byte Length)>> GetAsync(string name, CancellationToken ct = default)
-            => Task.FromResult<IReadOnlyList<(uint Prefix, byte Length)>>([]);
-        public Task<IReadOnlyList<(uint Prefix, byte Length)>> GetDefaultAsync(CancellationToken ct = default)
-            => Task.FromResult<IReadOnlyList<(uint Prefix, byte Length)>>([]);
+        public Task<IReadOnlyList<(PrefixSourceConfig Source, IReadOnlyList<IpPrefix> Prefixes)>> LoadAllAsync(CancellationToken ct = default)
+            => Task.FromResult<IReadOnlyList<(PrefixSourceConfig, IReadOnlyList<IpPrefix>)>>([]);
+        public Task<IReadOnlyList<IpPrefix>> GetAsync(string name, CancellationToken ct = default)
+            => Task.FromResult<IReadOnlyList<IpPrefix>>([]);
+        public Task<IReadOnlyList<IpPrefix>> GetDefaultAsync(CancellationToken ct = default)
+            => Task.FromResult<IReadOnlyList<IpPrefix>>([]);
         public Task WarmUpAsync(CancellationToken ct = default) => Task.CompletedTask;
         public Task<bool> RefreshAsync(string sourceName, CancellationToken ct = default) => Task.FromResult(false);
         public bool SourceSupportsConditional(string sourceName) => false;

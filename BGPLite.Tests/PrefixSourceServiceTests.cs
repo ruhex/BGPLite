@@ -1,6 +1,7 @@
 using BGPLite.Configuration;
 using BGPLite.Providers;
 using Microsoft.Extensions.Logging.Abstractions;
+using BGPLite.Protocol;
 
 namespace BGPLite.Tests;
 
@@ -11,8 +12,8 @@ public class PrefixSourceServiceTests
         public string Kind => "stub";
         public bool SupportsConditionalRequests => true;
         public int Calls { get; private set; }
-        private readonly IReadOnlyList<(uint, byte)> _list;
-        public CountingProvider(IReadOnlyList<(uint, byte)> list) => _list = list;
+        private readonly IReadOnlyList<IpPrefix> _list;
+        public CountingProvider(IReadOnlyList<IpPrefix> list) => _list = list;
 
         public Task<SourceLoadResult> LoadAsync(PrefixSourceConfig source, string? etag = null, DateTimeOffset? lastModified = null, CancellationToken ct = default)
         {
@@ -40,7 +41,7 @@ public class PrefixSourceServiceTests
     [Fact]
     public async Task GetAsync_CachesWithinTtl()
     {
-        var provider = new CountingProvider([(1u, (byte)24)]);
+        var provider = new CountingProvider([new(1u, 24)]);
         var svc = new PrefixSourceService(
             ConfigWith("ru"),
             new PrefixSourceProviderFactory([provider]),
@@ -57,7 +58,7 @@ public class PrefixSourceServiceTests
     {
         var svc = new PrefixSourceService(
             ConfigWith("ru"),
-            new PrefixSourceProviderFactory([new CountingProvider([(1u, (byte)24)])]),
+            new PrefixSourceProviderFactory([new CountingProvider([new(1u, 24)])]),
             NullLogger<PrefixSourceService>.Instance);
 
         Assert.Empty(await svc.GetAsync("nope"));
@@ -66,7 +67,7 @@ public class PrefixSourceServiceTests
     [Fact]
     public async Task GetDefaultAsync_ResolvesByName()
     {
-        var provider = new CountingProvider([(1u, (byte)24), (2u, (byte)16)]);
+        var provider = new CountingProvider([new IpPrefix(1u, 24), new IpPrefix(2u, 16)]);
         var yaml = "Bgp:\n  Asn: 65444\n  RouterId: 10.0.0.1\n" +
                    "PrefixSources:\n  - Name: ru\n    Kind: stub\nDefaultPrefixSource: ru\n";
         var svc = new PrefixSourceService(
@@ -83,7 +84,7 @@ public class PrefixSourceServiceTests
     {
         var svc = new PrefixSourceService(
             ConfigWith("ru"),
-            new PrefixSourceProviderFactory([new CountingProvider([(1u, (byte)24)])]),
+            new PrefixSourceProviderFactory([new CountingProvider([new(1u, 24)])]),
             NullLogger<PrefixSourceService>.Instance);
 
         Assert.Empty(await svc.GetDefaultAsync());
@@ -106,7 +107,7 @@ public class PrefixSourceServiceTests
     [Fact]
     public async Task WarmUpAsync_PrimesAllSources()
     {
-        var provider = new CountingProvider([(1u, (byte)24)]);
+        var provider = new CountingProvider([new(1u, 24)]);
         var svc = new PrefixSourceService(
             ConfigWith("a", "b"),
             new PrefixSourceProviderFactory([provider]),
@@ -120,7 +121,7 @@ public class PrefixSourceServiceTests
     [Fact]
     public async Task GetAsync_RefetchesAfterTtlExpiry()
     {
-        var provider = new CountingProvider([(1u, (byte)24)]);
+        var provider = new CountingProvider([new(1u, 24)]);
         var svc = new PrefixSourceService(
             ConfigWith("ru"),
             new PrefixSourceProviderFactory([provider]),
@@ -139,8 +140,8 @@ public class PrefixSourceServiceTests
         public string Kind => "stub";
         public bool SupportsConditionalRequests => true;
         private int _calls;
-        private readonly IReadOnlyList<(uint, byte)> _first;
-        public ToggleProvider(IReadOnlyList<(uint, byte)> first) => _first = first;
+        private readonly IReadOnlyList<IpPrefix> _first;
+        public ToggleProvider(IReadOnlyList<IpPrefix> first) => _first = first;
 
         public Task<SourceLoadResult> LoadAsync(PrefixSourceConfig source, string? etag = null, DateTimeOffset? lastModified = null, CancellationToken ct = default)
         {
@@ -154,7 +155,7 @@ public class PrefixSourceServiceTests
     [Fact]
     public async Task GetAsync_ServesStaleOnFailure()
     {
-        var provider = new ToggleProvider([(1u, (byte)24), (2u, (byte)16)]);
+        var provider = new ToggleProvider([new(1u, 24), new(2u, 16)]);
         var svc = new PrefixSourceService(
             ConfigWith("ru"),
             new PrefixSourceProviderFactory([provider]),
@@ -189,7 +190,7 @@ public class PrefixSourceServiceTests
         var ex = Assert.Throws<InvalidOperationException>(() =>
             new PrefixSourceService(
                 ConfigLoader.LoadFromText(yaml),
-                new PrefixSourceProviderFactory([new CountingProvider([(1u, (byte)24)])]),
+                new PrefixSourceProviderFactory([new CountingProvider([new(1u, 24)])]),
                 NullLogger<PrefixSourceService>.Instance));
 
         Assert.Contains("ru", ex.Message);
@@ -207,8 +208,8 @@ public class PrefixSourceServiceTests
         public string Kind => "stub";
         public bool SupportsConditionalRequests => true;
         public int Calls { get; private set; }
-        private readonly IReadOnlyList<IReadOnlyList<(uint, byte)>> _lists;
-        public SequenceProvider(params IReadOnlyList<(uint, byte)>[] lists) => _lists = lists;
+        private readonly IReadOnlyList<IReadOnlyList<IpPrefix>> _lists;
+        public SequenceProvider(params IReadOnlyList<IpPrefix>[] lists) => _lists = lists;
 
         public async Task<SourceLoadResult> LoadAsync(PrefixSourceConfig source, string? etag = null, DateTimeOffset? lastModified = null, CancellationToken ct = default)
         {
@@ -225,8 +226,8 @@ public class PrefixSourceServiceTests
         public string Kind => "stub";
         public bool SupportsConditionalRequests => true;
         public int Calls { get; private set; }
-        private readonly IReadOnlyList<(uint, byte)> _list;
-        public ConditionalProvider(IReadOnlyList<(uint, byte)> list) => _list = list;
+        private readonly IReadOnlyList<IpPrefix> _list;
+        public ConditionalProvider(IReadOnlyList<IpPrefix> list) => _list = list;
 
         public Task<SourceLoadResult> LoadAsync(PrefixSourceConfig source, string? etag = null, DateTimeOffset? lastModified = null, CancellationToken ct = default)
         {
@@ -242,7 +243,7 @@ public class PrefixSourceServiceTests
     [Fact]
     public async Task RefreshAsync_ReportsChanged_WhenContentDiffers()
     {
-        var provider = new SequenceProvider([(1u, (byte)24)], [(1u, (byte)24), (2u, (byte)16)]);
+        var provider = new SequenceProvider([new(1u, 24)], [new(1u, 24), new(2u, 16)]);
         var svc = new PrefixSourceService(
             ConfigWith("ru"),
             new PrefixSourceProviderFactory([provider]),
@@ -261,7 +262,7 @@ public class PrefixSourceServiceTests
     [Fact]
     public async Task RefreshAsync_ReportsUnchanged_WhenContentIdentical()
     {
-        var provider = new SequenceProvider([(1u, (byte)24)], [(1u, (byte)24)]);
+        var provider = new SequenceProvider([new(1u, 24)], [new(1u, 24)]);
         var svc = new PrefixSourceService(
             ConfigWith("ru"),
             new PrefixSourceProviderFactory([provider]),
@@ -277,7 +278,7 @@ public class PrefixSourceServiceTests
     [Fact]
     public async Task RefreshAsync_ReportsUnchanged_OnNotModified304()
     {
-        var provider = new ConditionalProvider([(1u, (byte)24)]);
+        var provider = new ConditionalProvider([new(1u, 24)]);
         var svc = new PrefixSourceService(
             ConfigWith("ru"),
             new PrefixSourceProviderFactory([provider]),
@@ -302,7 +303,7 @@ public class PrefixSourceServiceTests
     [Fact]
     public async Task RefreshAsync_AfterConcurrentGetAsyncConsumedChange_ReportsFalse_PushFiresOnce()
     {
-        var provider = new SequenceProvider([(1u, (byte)24)], [(1u, (byte)24), (2u, (byte)16)]);
+        var provider = new SequenceProvider([new(1u, 24)], [new(1u, 24), new(2u, 16)]);
         var pushed = new List<string>();
         var gate = new object();
         var svc = new PrefixSourceService(
@@ -335,7 +336,7 @@ public class PrefixSourceServiceTests
     [Fact]
     public void SourceSupportsConditional_ReflectsProvider()
     {
-        var etagProvider = new CountingProvider([(1u, (byte)24)]);
+        var etagProvider = new CountingProvider([new(1u, 24)]);
         var noEtagProvider = new NoEtagStubProvider();
         var yaml = "Bgp:\n  Asn: 65444\n  RouterId: 10.0.0.1\n" +
                    "PrefixSources:\n  - Name: http-src\n    Kind: http\n  - Name: asn-src\n    Kind: asn\n";
@@ -354,7 +355,7 @@ public class PrefixSourceServiceTests
         public string Kind => "asn";
         public bool SupportsConditionalRequests => false;
         public Task<SourceLoadResult> LoadAsync(PrefixSourceConfig source, string? etag = null, DateTimeOffset? lastModified = null, CancellationToken ct = default)
-            => Task.FromResult(SourceLoadResult.Ok([(1u, (byte)24)]));
+            => Task.FromResult(SourceLoadResult.Ok([new IpPrefix(1u, 24)]));
     }
 
     /// <summary>
@@ -367,8 +368,8 @@ public class PrefixSourceServiceTests
     {
         // v1 and v2 contain the SAME prefixes in a DIFFERENT order → must report unchanged.
         var provider = new SequenceProvider(
-            [(1u, (byte)24), (2u, (byte)16)],   // call 1: [a, b]
-            [(2u, (byte)16), (1u, (byte)24)]);  // call 2: [b, a] — same set, reversed
+            [new IpPrefix(1u, 24), new IpPrefix(2u, 16)],   // call 1: [a, b]
+            [new IpPrefix(2u, 16), new IpPrefix(1u, 24)]);  // call 2: [b, a] — same set, reversed
         var svc = new PrefixSourceService(
             ConfigWith("ru"),
             new PrefixSourceProviderFactory([provider]),
@@ -385,9 +386,9 @@ public class PrefixSourceServiceTests
         // v1 (first load) → v2 (changed) → v2 again (no change). Models: source changes once, then
         // stays stable; a subsequent TTL-expired GetAsync must NOT re-fire the callback.
         var provider = new SequenceProvider(
-            [(1u, (byte)24)],                       // call 1: v1
-            [(1u, (byte)24), (2u, (byte)16)],        // call 2: v2 (changed)
-            [(1u, (byte)24), (2u, (byte)16)]);       // call 3: v2 (same — no change)
+            [new IpPrefix(1u, 24)],                       // call 1: v1
+            [new IpPrefix(1u, 24), new IpPrefix(2u, 16)],        // call 2: v2 (changed)
+            [new IpPrefix(1u, 24), new IpPrefix(2u, 16)]);       // call 3: v2 (same — no change)
         var changed = new List<string>();
         var svc = new PrefixSourceService(
             ConfigWith("ru"),

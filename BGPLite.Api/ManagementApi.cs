@@ -685,7 +685,12 @@ public sealed class ManagementApi : IHostedService, IDisposable
             keepalive = bgp.KeepAlive,
             setup = BuildCiscoSetup(bgp.Asn),
             bird = BuildBirdSetup(bgp.RouterId, bgp.Asn, bgp.HoldTime),
-            mikrotik = BuildMikrotikSetup(bgp.RouterId, bgp.Asn, bgp.HoldTime)
+            mikrotik = BuildMikrotikSetup(bgp.RouterId, bgp.Asn, bgp.HoldTime),
+            // IPv6 address-family variants (#14 phase 5): the peer side needs them to exchange
+            // IPv6 routes. <SERVER_V6> placeholders resolve to Bgp.NextHopIpv6 when configured.
+            setup6 = BuildCiscoSetupV6(bgp.Asn),
+            bird6 = BuildBirdSetupV6(bgp.NextHopIpv6, bgp.Asn, bgp.HoldTime),
+            mikrotik6 = BuildMikrotikSetupV6(bgp.NextHopIpv6, bgp.Asn, bgp.HoldTime)
         });
     }
 
@@ -749,6 +754,56 @@ public sealed class ManagementApi : IHostedService, IDisposable
         $"/routing/filter/rule/add chain=discard rule=\"reject;\"",
         $"/routing/filter/rule/add chain=bgplite-in rule=\"set gw <YOUR_GW>; accept;\"",
         $"/routing/bgp/connection/add name=bgplite instance=bgplite afi=ip remote.address={routerId}/32 remote.as={asn} local.role=ebgp multihop=yes hold-time={holdTime}s output.filter-chain=discard input.filter=bgplite-in"
+    ];
+
+    /// <summary>
+    /// Cisco IOS peering snippet for the IPv6 address family (#14 phase 5): mirrors
+    /// <see cref="BuildCiscoSetup"/> with <c>address-family ipv6 unicast</c>. Pure.
+    /// </summary>
+    internal static string[] BuildCiscoSetupV6(uint asn) =>
+    [
+        $"router bgp {asn}",
+        $" neighbor <YOUR_IPv6> remote-as {asn}",
+        $" neighbor <YOUR_IPv6> ebgp-multihop 2",
+        $" neighbor <YOUR_IPv6> update-source <YOUR_INTERFACE>",
+        $" neighbor <YOUR_IPv6> soft-reconfiguration inbound",
+        $"!",
+        $"address-family ipv6 unicast",
+        $" neighbor <YOUR_IPv6> activate",
+        $" neighbor <YOUR_IPv6> route-map BGPLite-V6-IN in",
+        $" neighbor <YOUR_IPv6> route-map BGPLite-V6-OUT out",
+        $"exit-address-family"
+    ];
+
+    /// <summary>
+    /// BIRD peering snippet for the IPv6 address family (#14 phase 5): an <c>ipv6</c> channel
+    /// BGPLite announces through when <c>Bgp.NextHopIpv6</c> is configured. Pure.
+    /// </summary>
+    internal static string[] BuildBirdSetupV6(string? serverV6, uint asn, int holdTime) =>
+    [
+        $"# ---------- eBGP IPv6 ----------",
+        $"protocol bgp bgplite6 {{",
+        $"  local as <YOUR_ASN>;",
+        $"  neighbor {serverV6 ?? "<SERVER_V6>"} as {asn};",
+        $"  source address <YOUR_IPv6>;",
+        $"  multihop;",
+        $"  hold time {holdTime};",
+        $"  ipv6 {{",
+        $"    import filter bgplite_in;",
+        $"    export none;",
+        $"    graceful restart on;",
+        $"  }};",
+        $"}}"
+    ];
+
+    /// <summary>
+    /// MikroTik RouterOS v7 peering snippet for the IPv6 address family (#14 phase 5): a second
+    /// connection with <c>afi=ip6</c>. Pure.
+    /// </summary>
+    internal static string[] BuildMikrotikSetupV6(string? serverV6, uint asn, int holdTime) =>
+    [
+        $"# IPv6 transport — apply after the instance/filter lines from the IPv4 snippet.",
+        $"/routing/bgp/connection/add name=bgplite6 instance=bgplite afi=ip6 remote.address={serverV6 ?? "<SERVER_V6>"}/128 remote.as={asn} local.role=ebgp multihop=yes hold-time={holdTime}s output.filter-chain=discard input.filter=bgplite-in"
     ];
 
     #endregion
@@ -1211,8 +1266,8 @@ public sealed class ManagementApi : IHostedService, IDisposable
             try
             {
                 var fetched = await _prefixService.GetPrefixesForAsns(asns, ct);
-                foreach (var (prefix, length, _) in fetched)
-                    prefixes.Add($"{BgpConstants.UintToIPAddress(prefix)}/{length}");
+                foreach (var p in fetched)
+                    prefixes.Add(new IpPrefix(p.Prefix, p.Length, p.IsIpv4).ToString());
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }  // #114/#337: only shutdown cancellation — a provider-timeout OCE (live token) is a fetch failure below
             catch (Exception ex) { _logger.LogWarning(ex, "CollectPeerPrefixes: ASN fetch failed"); }
@@ -1224,8 +1279,8 @@ public sealed class ManagementApi : IHostedService, IDisposable
             try
             {
                 var ruPrefixes = await _prefixService.GetRuPrefixesAsync(ct);
-                foreach (var (prefix, length, _) in ruPrefixes)
-                    prefixes.Add($"{BgpConstants.UintToIPAddress(prefix)}/{length}");
+                foreach (var p in ruPrefixes)
+                    prefixes.Add(new IpPrefix(p.Prefix, p.Length, p.IsIpv4).ToString());
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }  // #114/#337: only shutdown cancellation — a provider-timeout OCE (live token) is a fetch failure below
             catch (Exception ex) { _logger.LogWarning(ex, "CollectPeerPrefixes: RU prefix fetch failed"); }
@@ -1444,7 +1499,12 @@ public sealed class ManagementApi : IHostedService, IDisposable
     {
         if (string.IsNullOrWhiteSpace(ip)) return null;
         if (!IPAddress.TryParse(ip, out var address)) return null;
-        if (address.AddressFamily != AddressFamily.InterNetwork) return null;
+        // IPv4-mapped IPv6 (::ffff:a.b.c.d) names the IPv4 address space — normalize to the
+        // plain IPv4 form so the row matches the address form the dual-mode listener reports.
+        if (address.IsIPv4MappedToIPv6)
+            address = address.MapToIPv4();
+        // Both families are accepted (#14 phase 5): a peer may be an IPv6 host; the canonical
+        // ToString form matches what the accept loop stores.
         return address.ToString();
     }
 

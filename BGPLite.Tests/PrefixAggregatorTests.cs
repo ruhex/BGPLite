@@ -22,6 +22,52 @@ public class PrefixAggregatorTests
     private static List<(UInt128 Prefix, byte Length)> Pfx(IReadOnlyList<Route> routes) =>
         routes.Select(r => (r.Prefix, r.PrefixLength)).ToList();
 
+    /// <summary>IPv6 route builder. <paramref name="prefix"/> carries the network address in the
+    /// full 128 bits (<see cref="V6"/> composes one from leading hextets).</summary>
+    private static Route R6(UInt128 prefix, byte length, uint[]? communities = null) => new()
+    {
+        Prefix = prefix,
+        IsIpv4 = false,
+        PrefixLength = length,
+        NextHop = NextHop,
+        Communities = communities ?? []
+    };
+
+    /// <summary>Composes an IPv6 network address from its leading hextets (the rest are zero):
+    /// <c>V6(0x2001, 0x0DB8, 1)</c> is 2001:db8:1::.</summary>
+    private static UInt128 V6(ushort g0, ushort g1 = 0, ushort g2 = 0) =>
+        ((UInt128)g0 << 112) | ((UInt128)g1 << 96) | ((UInt128)g2 << 80);
+
+    /// <summary>Family-aware counterpart of <see cref="UnionRanges"/>: the sorted, merged
+    /// [start,end] intervals of an IPv6 prefix set (address space capped at 2^128-1).</summary>
+    private static List<(UInt128 Start, UInt128 End)> UnionRanges6(IEnumerable<(UInt128 Prefix, byte Length)> prefixes)
+    {
+        var intervals = new List<(UInt128 Start, UInt128 End)>();
+        foreach (var (prefix, length) in prefixes)
+        {
+            if (length > 128) continue;
+            var mask = length == 0 ? UInt128.Zero : UInt128.MaxValue << (128 - length);
+            var start = prefix & mask;
+            // /0 spans the whole space: 2^128 itself overflows, so the end is stated directly.
+            var end = length == 0 ? UInt128.MaxValue : start + ((UInt128)1 << (128 - length)) - 1;
+            intervals.Add((start, end));
+        }
+        intervals.Sort((a, b) => a.Start.CompareTo(b.Start));
+        var merged = new List<(UInt128 Start, UInt128 End)>();
+        foreach (var (s, e) in intervals)
+        {
+            if (merged.Count > 0 && (s <= merged[^1].End ||
+                                     (merged[^1].End != UInt128.MaxValue && s == merged[^1].End + 1)))
+            {
+                var newEnd = merged[^1].End > e ? merged[^1].End : e;
+                merged[^1] = (merged[^1].Start, newEnd);
+            }
+            else
+                merged.Add((s, e));
+        }
+        return merged;
+    }
+
     /// <summary>Independent reference implementation: the sorted, merged [start,end] intervals
     /// of a prefix set. Used to cross-check that aggregation adds no address and drops none.</summary>
     private static List<(UInt128 Start, UInt128 End)> UnionRanges(IEnumerable<(UInt128 Prefix, byte Length)> prefixes)
@@ -219,6 +265,125 @@ public class PrefixAggregatorTests
         ]);
         var route = Assert.Single(result);
         Assert.Equal(0xC0A80000u, route.Prefix);
+    }
+
+    // ---- #14 phase 3: IPv6 aggregation (family-aware, /0..128) ----
+
+    [Fact]
+    public void Ipv6_NestedPrefixes_CollapseToWidest()
+    {
+        // 2001:db8::/32 + nested 2001:db8:1::/48 → /32.
+        var result = _aggregator.Aggregate([
+            R6(V6(0x2001, 0xDB8), 32),
+            R6(V6(0x2001, 0xDB8, 1), 48),
+        ]);
+        Assert.Equal([(V6(0x2001, 0xDB8), (byte)32)], Pfx(result));
+        Assert.All(result, r => Assert.False(r.IsIpv4));
+    }
+
+    [Fact]
+    public void Ipv6_AdjacentPrefixes_MergeToSupernet()
+    {
+        // 2001:db8::/48 + 2001:db8:1::/48 → 2001:db8::/47. Regression: the 32-bit aggregator
+        // dropped every IPv6 prefix longer than /32, so the union lost BOTH routes entirely.
+        var result = _aggregator.Aggregate([
+            R6(V6(0x2001, 0xDB8), 48),
+            R6(V6(0x2001, 0xDB8, 1), 48),
+        ]);
+        var route = Assert.Single(result);
+        Assert.Equal((V6(0x2001, 0xDB8), (byte)47), (route.Prefix, route.PrefixLength));
+        Assert.False(route.IsIpv4);
+    }
+
+    [Fact]
+    public void Ipv6_HostBits_AreMasked()
+    {
+        var result = _aggregator.Aggregate([R6(V6(0x2001, 0xDB8) + 5, 32)]);
+        Assert.Equal([(V6(0x2001, 0xDB8), (byte)32)], Pfx(result));
+        Assert.False(result[0].IsIpv4);
+    }
+
+    [Fact]
+    public void Ipv6_Slash127Pair_MergesToSlash126()
+    {
+        var result = _aggregator.Aggregate([
+            R6(V6(0x2001, 0xDB8), 127),
+            R6(V6(0x2001, 0xDB8) + 2, 127),
+        ]);
+        var route = Assert.Single(result);
+        Assert.Equal((V6(0x2001, 0xDB8), (byte)126), (route.Prefix, route.PrefixLength));
+    }
+
+    [Fact]
+    public void Ipv6_Slash128_HostRoute_StaysUnchanged()
+    {
+        var result = _aggregator.Aggregate([R6(V6(0x2001, 0xDB8, 1) + 5, 128)]);
+        var route = Assert.Single(result);
+        Assert.Equal((V6(0x2001, 0xDB8, 1) + 5, (byte)128), (route.Prefix, route.PrefixLength));
+    }
+
+    [Fact]
+    public void Ipv6_DefaultRoute_Handled()
+    {
+        // ::/0 alone stays ::/0 with the IPv6 family (regression: it fell into the 32-bit
+        // interval math and came back out as 0.0.0.0/0 marked IPv4).
+        var single = Assert.Single(_aggregator.Aggregate([R6(0, 0)]));
+        Assert.Equal((UInt128.Zero, (byte)0), (single.Prefix, single.PrefixLength));
+        Assert.False(single.IsIpv4);
+
+        // The two /1 halves merge back into ::/0.
+        var merged = Assert.Single(_aggregator.Aggregate([
+            R6(0, 1),
+            R6((UInt128)1 << 127, 1),
+        ]));
+        Assert.Equal((UInt128.Zero, (byte)0), (merged.Prefix, merged.PrefixLength));
+        Assert.False(merged.IsIpv4);
+    }
+
+    [Fact]
+    public void Ipv6_UnionInvariant_NoExtraAndNoMissingIp()
+    {
+        // ::/0 swallows the whole set: the union must stay the full address space, emitted
+        // as exactly one route.
+        var input = new List<Route>
+        {
+            R6(V6(0x2001, 0xDB8), 48),
+            R6(V6(0x2001, 0xDB8, 1), 48),                      // adjacent /48s → /47
+            R6(V6(0x2001, 0xDB8, 2), 64),
+            R6(V6(0x2001, 0xDB8, 2) + ((UInt128)1 << 48), 64), // adjacent /64s → /63
+            R6(UInt128.Zero, 0),
+        };
+
+        var output = _aggregator.Aggregate(input);
+
+        Assert.Equal(UnionRanges6(input.Select(r => (r.Prefix, r.PrefixLength))),
+                     UnionRanges6(Pfx(output)));
+        Assert.True(output.Count <= input.Count);
+        Assert.All(output, r => Assert.False(r.IsIpv4));
+    }
+
+    [Fact]
+    public void Ipv4AndIpv6_SameCommunities_NeverMerge()
+    {
+        // Identical community sets, but IPv4 and IPv6 must never land in one summary
+        // (ADR 0001 §6). The two IPv6 /32s are the same network after host-bit masking and
+        // legitimately collapse to one; the point is the family split: pre-phase-3 the IPv6
+        // routes fell into the 32-bit interval space and the whole set collapsed into
+        // 0.0.0.0/0 marked IPv4.
+        var comm = new uint[] { 0x65 };
+        var result = _aggregator.Aggregate([
+            R(0xC0A80000, 24, comm),
+            R(0xC0A80100, 24, (uint[])comm.Clone()),
+            R6(V6(0x2001, 0xDB8), 32, (uint[])comm.Clone()),
+            R6(V6(0x2001, 0xDB8, 1), 32, (uint[])comm.Clone()),
+        ]);
+
+        Assert.Equal(2, result.Count);
+        var v4 = Assert.Single(result, r => r.IsIpv4);
+        Assert.Equal((0xC0A80000u, (byte)23), (v4.Prefix, v4.PrefixLength));
+        var v6 = Assert.Single(result, r => !r.IsIpv4);
+        Assert.Equal((V6(0x2001, 0xDB8), (byte)32), (v6.Prefix, v6.PrefixLength));
+        Assert.Equal([0x65u], v6.Communities);
     }
 
     // ---- #305: normalization is memoized per backing-array instance ----

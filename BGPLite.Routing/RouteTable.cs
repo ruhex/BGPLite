@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using BGPLite.Protocol;
 
 namespace BGPLite.Routing;
 
@@ -169,6 +170,27 @@ public sealed class RouteTable
 
     public Route? Get(UInt128 prefix, byte length, bool isIpv4 = true) =>
         _routes.TryGetValue((prefix, length, isIpv4), out var entry) ? entry.Route : null;
+
+    /// <summary>
+    /// Longest-prefix-match lookup (#14 phase 3): the stored route whose network most
+    /// specifically contains <paramref name="address"/>, or null. Probes candidate prefix
+    /// lengths from the family maximum down to /0 — at most 33 (IPv4) / 129 (IPv6) dictionary
+    /// lookups — and is family-scoped: an IPv6 address never matches an IPv4 entry and vice
+    /// versa (the family is part of the key). Read-only: it never installs or replaces anything,
+    /// unlike <see cref="AddOrUpdate"/>. There is no per-packet consumer today (a route server
+    /// does not forward); this is the lookup the epic's routing layer requires for /0..128
+    /// coverage checks and policy decisions.
+    /// </summary>
+    public Route? GetLongestPrefixMatch(UInt128 address, bool isIpv4 = true)
+    {
+        for (var length = isIpv4 ? 32 : 128; length >= 0; length--)
+        {
+            var network = address & IpPrefix.Mask((byte)length, isIpv4);
+            if (_routes.TryGetValue((network, (byte)length, isIpv4), out var entry))
+                return entry.Route;
+        }
+        return null;
+    }
 
     public IReadOnlyList<Route> GetAll()
     {

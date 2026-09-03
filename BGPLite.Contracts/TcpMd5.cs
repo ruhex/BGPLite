@@ -98,26 +98,50 @@ public static class TcpMd5
         return buffer;
     }
 
-    /// <summary>Writes a sockaddr_storage-shaped sockaddr_in/inn6 for the peer, port 0 = "any port".</summary>
-    private static void WriteSockaddr(IPEndPoint peer, Span<byte> destination)
+    /// <summary>Writes a sockaddr_storage-shaped sockaddr_in/inn6 for the peer, port 0 = "any port".
+    /// <para>
+    /// Two per-OS differences live here:
+    /// <list type="bullet">
+    /// <item><b>Address family constants are the KERNEL's</b>, not .NET's <see cref="AddressFamily"/>
+    /// values (which follow Winsock: InterNetworkV6 = 23). Linux wants AF_INET6 = 10, Darwin 28 —
+    /// writing 23 makes Linux's md5 parse path reject the entry with EINVAL
+    /// (<c>sin6_family != AF_INET6</c>).</item>
+    /// <item><b>Darwin sockaddr_in/in6 carry a length byte first</b> (<c>sin_len</c>/<c>sin6_len</c>),
+    /// with the family in byte 1; Linux has no length byte and keeps the family in bytes 0-1.
+    /// Darwin's own tcpmd5sig path reads that length field, so omitting it (or writing the family
+    /// into byte 0) breaks key lookup there.</item>
+    /// </list>
+    /// </para>
+    /// </summary>
+    internal static void WriteSockaddr(IPEndPoint peer, Span<byte> destination)
     {
         destination.Clear();
         var port = (ushort)peer.Port;
-        if (peer.Address.AddressFamily == AddressFamily.InterNetwork)
+        var isV4 = peer.Address.AddressFamily == AddressFamily.InterNetwork;
+        var darwin = OperatingSystem.IsMacOS();
+        if (isV4)
         {
-            destination[0] = (byte)AddressFamily.InterNetwork;        // AF_INET (little-endian host order)
+            var af = AfInet;
+            if (darwin) { destination[0] = 16; destination[1] = af; } // sin_len, sin_family
+            else { destination[0] = af; }                             // Linux: family, host order
             destination[2] = (byte)(port >> 8);                       // port, network byte order
             destination[3] = (byte)port;
             peer.Address.TryWriteBytes(destination.Slice(4, 4), out _);
         }
         else
         {
-            destination[0] = (byte)AddressFamily.InterNetworkV6;      // AF_INET6
+            var af = AfInet6;
+            if (darwin) { destination[0] = 28; destination[1] = af; } // sin6_len, sin6_family
+            else { destination[0] = af; }
             destination[2] = (byte)(port >> 8);
             destination[3] = (byte)port;
             peer.Address.TryWriteBytes(destination.Slice(8, 16), out _);
         }
     }
+
+    private static byte AfInet => 2;
+
+    private static byte AfInet6 => OperatingSystem.IsMacOS() ? (byte)28 : (byte)10;
 
     /// <summary>True when <paramref name="password"/> would be accepted as a TCP-MD5 key.</summary>
     public static bool IsValidPassword(string? password) =>

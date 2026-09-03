@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using BGPLite.Configuration;
+using BGPLite.Protocol;
 using Microsoft.Extensions.Logging;
 
 namespace BGPLite.Providers;
@@ -60,7 +61,7 @@ public sealed class PrefixSourceService : IPrefixSourceService
         _sourcesByName = config.PrefixSources.ToDictionary(s => s.Name);
     }
 
-    public async Task<IReadOnlyList<(uint Prefix, byte Length)>> GetAsync(string name, CancellationToken ct = default)
+    public async Task<IReadOnlyList<IpPrefix>> GetAsync(string name, CancellationToken ct = default)
     {
         if (!_sourcesByName.TryGetValue(name, out var source))
         {
@@ -77,7 +78,7 @@ public sealed class PrefixSourceService : IPrefixSourceService
         }
     }
 
-    public async Task<IReadOnlyList<(uint Prefix, byte Length)>> GetDefaultAsync(CancellationToken ct = default)
+    public async Task<IReadOnlyList<IpPrefix>> GetDefaultAsync(CancellationToken ct = default)
     {
         var defaultName = _config.DefaultPrefixSource;
         if (string.IsNullOrWhiteSpace(defaultName))
@@ -98,12 +99,12 @@ public sealed class PrefixSourceService : IPrefixSourceService
         }
     }
 
-    public async Task<IReadOnlyList<(PrefixSourceConfig Source, IReadOnlyList<(uint Prefix, byte Length)> Prefixes)>> LoadAllAsync(CancellationToken ct = default)
+    public async Task<IReadOnlyList<(PrefixSourceConfig Source, IReadOnlyList<IpPrefix> Prefixes)>> LoadAllAsync(CancellationToken ct = default)
     {
-        var result = new List<(PrefixSourceConfig Source, IReadOnlyList<(uint Prefix, byte Length)> Prefixes)>();
+        var result = new List<(PrefixSourceConfig Source, IReadOnlyList<IpPrefix> Prefixes)>();
         foreach (var source in _config.PrefixSources)
         {
-            IReadOnlyList<(uint Prefix, byte Length)> prefixes;
+            IReadOnlyList<IpPrefix> prefixes;
             try { prefixes = (await LoadCachedAsync(source, ct)).Prefixes; }
             catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }  // #324: only CALLER cancellation — the #324 default fetch budget fires as a foreign-token OCE (live ct) and must stay a per-source failure below
             catch (Exception ex)
@@ -173,7 +174,7 @@ public sealed class PrefixSourceService : IPrefixSourceService
     /// is detected (by any entry point), <c>_onSourceChanged</c> is invoked AFTER releasing the gate
     /// so the callback (peer refresh) can't deadlock on the per-source lock.
     /// </summary>
-    private async Task<(IReadOnlyList<(uint Prefix, byte Length)> Prefixes, bool Changed)> LoadCachedAsync(
+    private async Task<(IReadOnlyList<IpPrefix> Prefixes, bool Changed)> LoadCachedAsync(
         PrefixSourceConfig source, CancellationToken ct, bool forceRefresh = false, bool triggerCallback = true)
     {
         if (!forceRefresh && TryGetFresh(source.Name, out var fresh))
@@ -182,7 +183,7 @@ public sealed class PrefixSourceService : IPrefixSourceService
         var gate = _locks.GetOrAdd(source.Name, _ => new SemaphoreSlim(1, 1));
         await gate.WaitAsync(ct);
         bool changed;
-        IReadOnlyList<(uint Prefix, byte Length)> loaded;
+        IReadOnlyList<IpPrefix> loaded;
         try
         {
             if (!forceRefresh && TryGetFresh(source.Name, out var rechecked))
@@ -277,19 +278,21 @@ public sealed class PrefixSourceService : IPrefixSourceService
     /// the HashSet allocation path on the common unchanged case via the fast count/SequenceEqual
     /// shortcut when the source already returned a sorted list.
     /// </summary>
-    private static bool SamePrefixes(IReadOnlyList<(uint Prefix, byte Length)> a, IReadOnlyList<(uint Prefix, byte Length)> b)
+    private static bool SamePrefixes(IReadOnlyList<IpPrefix> a, IReadOnlyList<IpPrefix> b)
     {
         if (a.Count != b.Count) return false;
         // Fast path: if both happen to be in the same order (common — file sources, cached HTTP),
         // SequenceEqual is O(n) with no allocation.
         if (a.SequenceEqual(b)) return true;
-        // Slow path: order differs — compare as sorted sequences.
-        var sa = a.OrderBy(x => x.Prefix).ThenBy(x => x.Length).ToArray();
-        var sb = b.OrderBy(x => x.Prefix).ThenBy(x => x.Length).ToArray();
+        // Slow path: order differs — compare as sorted sequences. IpPrefix's own comparison is
+        // family-first (IsIpv4, then address, then length), so an IPv4 key can never equal an
+        // IPv6 one even when the numeric address and length agree.
+        var sa = a.OrderBy(x => x).ToArray();
+        var sb = b.OrderBy(x => x).ToArray();
         return sa.SequenceEqual(sb);
     }
 
-    private bool TryGetFresh(string name, out IReadOnlyList<(uint Prefix, byte Length)> list)
+    private bool TryGetFresh(string name, out IReadOnlyList<IpPrefix> list)
     {
         list = null!;
         if (!_cache.TryGetValue(name, out var entry)) return false;
@@ -305,7 +308,7 @@ public sealed class PrefixSourceService : IPrefixSourceService
 
     /// <summary>#214: Cache entry with ETag/Last-Modified for conditional re-fetches.</summary>
     private sealed record CacheEntry(
-        IReadOnlyList<(uint Prefix, byte Length)> List,
+        IReadOnlyList<IpPrefix> List,
         DateTime CachedAt,
         bool Negative,
         string? ETag = null,

@@ -102,3 +102,6 @@ logs/
 
 ## Claude Code local handoff notes
 .handoff/
+
+## Integration stand packet captures (docker/integration --capture)
+docker/integration/captures/

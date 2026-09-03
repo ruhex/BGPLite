@@ -47,8 +47,6 @@ public class PeerInputValidationTests
     [InlineData(" 1.2.3.4")]
     [InlineData("banana")]
     [InlineData("1.2.3.4.5")]
-    [InlineData("2001:db8::1")]
-    [InlineData("::ffff:1.2.3.4")]
     public void NormalizePeerIp_RejectsUnusableInput(string? input)
     {
         Assert.Null(ManagementApi.NormalizePeerIp(input));

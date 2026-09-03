@@ -62,7 +62,9 @@ For section-by-section RFC conformance status, see `RFC_COMPLIANCE.md` (2026-07-
   End-of-RIB) is not implemented, and advertising the `<AFI=1, SAFI=1, F>` tuple promised behavior
   the code does not have. The sending-side conveniences gated on the `GracefulRestart` config are
   unchanged: an End-of-RIB marker after the initial route dump, and the GR-aware silent close on
-  server shutdown (`StopAsync`).
+  server shutdown (`StopAsync`). #14 phase 5 made the factory/parser per-family (IPv4/Unicast AND
+  IPv6/Unicast tuples) and added the IPv6-family End-of-RIB (empty MP_UNREACH, RFC 4724 §2) for
+  MP-IPv6-negotiated peers; the advertisement itself remains off until retention exists.
 - **Context:** the capability was previously advertised by default while routes of a
   silently-disconnecting peer were flushed immediately (`RemoveAllOwnedBy`, #314) — a wire promise
   the code did not honor. RFC 4724 §4.2's MUST binds a speaker to the procedures it engages;
@@ -228,11 +230,30 @@ For section-by-section RFC conformance status, see `RFC_COMPLIANCE.md` (2026-07-
   routes flowing; such routes now stop at the filter (visible via the existing send logs).
 - **Tracker:** #389.
 
+### D22. IPv6 outbound advertisement is gated on negotiation AND a configured global next hop
+- **Decision:** IPv6 routes are advertised to a peer only when BOTH hold: the peer negotiated
+  MP IPv6/Unicast in OPEN, and `Bgp.NextHopIpv6` is configured (validated at startup as a global
+  unicast address, 2000::/3). Otherwise IPv6 routes are suppressed for that send with a warning —
+  never silently, and never encoded as classic IPv4 NLRI (which would corrupt the peer's table).
+  v6 UPDATEs carry no classic NEXT_HOP (RFC 4760 §5 — the next hop rides in MP_REACH_NLRI,
+  RFC 2545 §3 global form); IPv6 withdrawals ride MP_UNREACH_NLRI (RFC 4760 §7).
+- **Context:** after the phase-2 codec (#15) and #407 fix the session could RECEIVE IPv6 routes
+  but had no outbound path — sources were IPv4-only and the send path had no family split.
+  Advertising IPv6 with the IPv4 router-id as next hop (or without the peer's negotiation) would
+  be a route leak/blackhole, so the gate is deliberately double-sided and fail-visible.
+- **Consequence:** IPv4-only deployments need no config change (no `NextHopIpv6` = no IPv6
+  advertisements, one Warning per send that actually had v6 routes); MP-IPv6 deployments add one
+  config line. The MP_REACH attribute is appended per batch (it embeds the batch's NLRI bytes) and
+  goes last — attribute ordering is an implementation choice (D15).
+- **Tracker:** #14 (phase 4b), #407.
+
 ### D21. IPv6 dual-stack address model (ADR 0001)
 - **Decision:** `IpPrefix` is family-aware over `UInt128` — IPv4 in the low 32 bits with an
   explicit `IsIpv4` flag, IPv6 as the full 128 bits; the constructor masks host bits (canonical
   keys); `Route.Key`/`RouteTable` keys carry the family; the aggregator partitions by family.
-  Full ADR: `docs/adr/0001-ipv6-address-model.md` (#15 phase 1).
+  Full ADR: `docs/adr/0001-ipv6-address-model.md` (#15 phase 1). The family partition and
+  128-bit interval math in `ExactUnionPrefixAggregator`, plus the `RouteTable`
+  longest-prefix-match lookup, landed with #14 phase 3.
 - **Tracker:** #15, #14.
 
 ## Management API

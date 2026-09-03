@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using BGPLite.Configuration;
+using BGPLite.Protocol;
 using Microsoft.Extensions.Logging;
 using BGPLite.Contracts;
 
@@ -64,7 +65,7 @@ public sealed class PrefixService : IPrefixService
     /// refreshes do not re-pay the budget.
     /// </para>
     /// </summary>
-    public async Task<IReadOnlyList<(uint Prefix, byte Length)>> GetUserSourcePrefixesAsync(string name, string url, string? community, CancellationToken ct = default)
+    public async Task<IReadOnlyList<(UInt128 Prefix, byte Length, bool IsIpv4)>> GetUserSourcePrefixesAsync(string name, string url, string? community, CancellationToken ct = default)
     {
         var source = new PrefixSourceConfig
         {
@@ -74,24 +75,25 @@ public sealed class PrefixService : IPrefixService
             Community = community,
             Timeout = _userSourceTimeoutSeconds
         };
-        return await _userSourceCache.GetOrLoadAsync(url, name, async ct =>
+        var prefixes = await _userSourceCache.GetOrLoadAsync(url, name, async ct =>
         {
             var result = await _httpProvider.LoadAsync(source, ct: ct);
-            return result.Prefixes;
+            return result.Prefixes;   // provider-native IpPrefix list
         }, ct);
+        return ToContract(prefixes);
     }
 
-    public Task<IReadOnlyList<(uint Prefix, byte Length)>> GetPrefixesAsync(uint asn, CancellationToken ct = default)
+    public async Task<IReadOnlyList<(UInt128 Prefix, byte Length, bool IsIpv4)>> GetPrefixesAsync(uint asn, CancellationToken ct = default)
         // Per-ASN caching, stale-on-failure, negative TTL, fetch gates, and the #165 eviction
         // sweep all live in the shared cache (#267 item 5) — one wire fetch per ASN regardless
         // of which mechanism asked.
-        => _ripeStatCache.GetPrefixesAsync(asn, ct);
+        => ToContract(await _ripeStatCache.GetPrefixesAsync(asn, ct));
 
     /// <summary>Bounds how many ASNs are resolved against RIPEstat concurrently on a cold cache
     /// (warm traffic is cache-flat). Keeps cold-start fan-out from tripping RIPEstat rate limits.</summary>
     private const int MaxDegreeOfParallelism = 8;
 
-    public async Task<List<(uint Prefix, byte Length, uint Asn)>> GetPrefixesForAsns(IEnumerable<uint> asns, CancellationToken ct = default)
+    public async Task<List<(UInt128 Prefix, byte Length, bool IsIpv4, uint Asn)>> GetPrefixesForAsns(IEnumerable<uint> asns, CancellationToken ct = default)
     {
         // Materialize once: we enumerate for fan-out and again for ordered assembly.
         var asnList = asns as IList<uint> ?? asns.ToList();
@@ -102,7 +104,7 @@ public sealed class PrefixService : IPrefixService
         // per-ASN cache and double-fetch (CodeRabbit #130); output multiplicity is preserved below.
         // Each ASN keeps its own try/catch so one failure (incl. cancellation) can't drop the others.
         using var gate = new SemaphoreSlim(MaxDegreeOfParallelism, MaxDegreeOfParallelism);
-        var resolvedByAsn = new Dictionary<uint, Task<IReadOnlyList<(uint Prefix, byte Length)>>>();
+        var resolvedByAsn = new Dictionary<uint, Task<IReadOnlyList<(UInt128 Prefix, byte Length, bool IsIpv4)>>>();
         foreach (var asn in asnList.Distinct())
             resolvedByAsn[asn] = ResolveAsnAsync(asn, gate, ct);
 
@@ -112,14 +114,14 @@ public sealed class PrefixService : IPrefixService
         // prior sequential output, including for duplicate ASNs. Await each completed task (rather
         // than .Result) so a faulted task surfaces its real exception, not an AggregateException,
         // and never blocks the threadpool thread.
-        var result = new List<(uint Prefix, byte Length, uint Asn)>();
+        var result = new List<(UInt128 Prefix, byte Length, bool IsIpv4, uint Asn)>();
         foreach (var asn in asnList)
-            foreach (var (prefix, length) in await resolvedByAsn[asn])
-                result.Add((prefix, length, asn));
+            foreach (var p in await resolvedByAsn[asn])
+                result.Add((p.Prefix, p.Length, p.IsIpv4, asn));
         return result;
     }
 
-    private async Task<IReadOnlyList<(uint Prefix, byte Length)>> ResolveAsnAsync(uint asn, SemaphoreSlim gate, CancellationToken ct)
+    private async Task<IReadOnlyList<(UInt128 Prefix, byte Length, bool IsIpv4)>> ResolveAsnAsync(uint asn, SemaphoreSlim gate, CancellationToken ct)
     {
         try
         {
@@ -177,10 +179,10 @@ public sealed class PrefixService : IPrefixService
     /// stale-on-failure serves the last good copy on a transient fetch error (#163 parity).
     /// </para>
     /// </summary>
-    private sealed record RuCacheEntry(List<(uint Prefix, byte Length, uint Asn)> Projected, long CachedAtTicks);
+    private sealed record RuCacheEntry(List<(UInt128 Prefix, byte Length, bool IsIpv4, uint Asn)> Projected, long CachedAtTicks);
     private RuCacheEntry? _ruCache;
 
-    public async Task<List<(uint Prefix, byte Length, uint Asn)>> GetRuPrefixesAsync(CancellationToken ct = default)
+    public async Task<List<(UInt128 Prefix, byte Length, bool IsIpv4, uint Asn)>> GetRuPrefixesAsync(CancellationToken ct = default)
     {
         // Fast path: fresh entry. A single Volatile.Read of the immutable entry reference gives a
         // consistent (projection, ticks) snapshot — no two-field torn read.
@@ -198,11 +200,11 @@ public sealed class PrefixService : IPrefixService
             if (cached is not null && _timeProvider.GetUtcNow().UtcDateTime.Ticks - cached.CachedAtTicks < _ruCacheTtl.Ticks)
                 return cached.Projected;
 
-            List<(uint Prefix, byte Length, uint Asn)> projected;
+            List<(UInt128 Prefix, byte Length, bool IsIpv4, uint Asn)> projected;
             try
             {
                 var prefixes = await _prefixSources.GetDefaultAsync(ct);
-                projected = prefixes.Select(p => (p.Prefix, p.Length, 0u)).ToList();
+                projected = prefixes.Select(p => (p.Address, p.Length, p.IsIpv4, 0u)).ToList();
             }
             catch (OperationCanceledException) { throw; }
             catch (Exception ex)
@@ -233,8 +235,13 @@ public sealed class PrefixService : IPrefixService
     }
 
     /// <summary>Prefixes of a configured source by name (cache-through).</summary>
-    public Task<IReadOnlyList<(uint Prefix, byte Length)>> GetSourcePrefixesAsync(string name, CancellationToken ct = default) =>
-        _prefixSources.GetAsync(name, ct);
+    public async Task<IReadOnlyList<(UInt128 Prefix, byte Length, bool IsIpv4)>> GetSourcePrefixesAsync(string name, CancellationToken ct = default) =>
+        ToContract(await _prefixSources.GetAsync(name, ct));
+
+    /// <summary>Provider-native <see cref="IpPrefix"/> values mapped onto the Contracts tuple
+    /// layout (Contracts is a dependency-free leaf and cannot see the Protocol type).</summary>
+    private static IReadOnlyList<(UInt128 Prefix, byte Length, bool IsIpv4)> ToContract(IReadOnlyList<IpPrefix> prefixes) =>
+        prefixes.Select(p => (p.Address, p.Length, p.IsIpv4)).ToList();
 
     public async Task WarmUpAsync(CancellationToken ct = default)
     {

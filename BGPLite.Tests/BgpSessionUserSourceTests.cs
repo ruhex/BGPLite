@@ -31,11 +31,11 @@ public class BgpSessionUserSourceTests
     /// <summary>A minimal <see cref="IPrefixService"/> that only implements the user-source path.</summary>
     private sealed class StubPrefixService : IPrefixService
     {
-        public IReadOnlyList<(uint Prefix, byte Length)> Result { get; set; } = [];
+        public IReadOnlyList<(UInt128 Prefix, byte Length, bool IsIpv4)> Result { get; set; } = [];
         public Exception? Throw { get; set; }
         public (string Name, string Url, string? Community)? Last { get; private set; }
 
-        public Task<IReadOnlyList<(uint Prefix, byte Length)>> GetUserSourcePrefixesAsync(
+        public Task<IReadOnlyList<(UInt128 Prefix, byte Length, bool IsIpv4)>> GetUserSourcePrefixesAsync(
             string name, string url, string? community, CancellationToken ct = default)
         {
             Last = (name, url, community);
@@ -43,22 +43,22 @@ public class BgpSessionUserSourceTests
             return Task.FromResult(Result);
         }
 
-        public Task<IReadOnlyList<(uint Prefix, byte Length)>> GetPrefixesAsync(uint asn, CancellationToken ct = default)
-            => Task.FromResult<IReadOnlyList<(uint Prefix, byte Length)>>([]);
-        public Task<List<(uint Prefix, byte Length, uint Asn)>> GetPrefixesForAsns(IEnumerable<uint> asns, CancellationToken ct = default)
-            => Task.FromResult(new List<(uint Prefix, byte Length, uint Asn)>());
+        public Task<IReadOnlyList<(UInt128 Prefix, byte Length, bool IsIpv4)>> GetPrefixesAsync(uint asn, CancellationToken ct = default)
+            => Task.FromResult<IReadOnlyList<(UInt128 Prefix, byte Length, bool IsIpv4)>>([]);
+        public Task<List<(UInt128 Prefix, byte Length, bool IsIpv4, uint Asn)>> GetPrefixesForAsns(IEnumerable<uint> asns, CancellationToken ct = default)
+            => Task.FromResult(new List<(UInt128 Prefix, byte Length, bool IsIpv4, uint Asn)>());
         public Task<int> GetPrefixCountAsync(uint asn, CancellationToken ct = default) => Task.FromResult(0);
-        public Task<List<(uint Prefix, byte Length, uint Asn)>> GetRuPrefixesAsync(CancellationToken ct = default)
-            => Task.FromResult(new List<(uint Prefix, byte Length, uint Asn)>());
-        public Task<IReadOnlyList<(uint Prefix, byte Length)>> GetSourcePrefixesAsync(string name, CancellationToken ct = default)
-            => Task.FromResult<IReadOnlyList<(uint Prefix, byte Length)>>([]);
+        public Task<List<(UInt128 Prefix, byte Length, bool IsIpv4, uint Asn)>> GetRuPrefixesAsync(CancellationToken ct = default)
+            => Task.FromResult(new List<(UInt128 Prefix, byte Length, bool IsIpv4, uint Asn)>());
+        public Task<IReadOnlyList<(UInt128 Prefix, byte Length, bool IsIpv4)>> GetSourcePrefixesAsync(string name, CancellationToken ct = default)
+            => Task.FromResult<IReadOnlyList<(UInt128 Prefix, byte Length, bool IsIpv4)>>([]);
         public Task WarmUpAsync(CancellationToken ct = default) => Task.CompletedTask;
     }
 
     [Fact]
     public async Task Success_AddsRoutesWithResolvedCommunity()
     {
-        var svc = new StubPrefixService { Result = [(0xC0A80000u, (byte)24)] };
+        var svc = new StubPrefixService { Result = [((UInt128)0xC0A80000u, (byte)24, true)] };
         var resolver = new StubResolver();
         var routes = new List<Route>();
 
@@ -83,7 +83,7 @@ public class BgpSessionUserSourceTests
         // Per-source try/catch: one failing URL must not drop another source's prefixes.
         var routes = new List<Route>();
         var throwSvc = new StubPrefixService { Throw = new InvalidOperationException("boom") };
-        var okSvc = new StubPrefixService { Result = [(0x0A000000u, (byte)8)] };
+        var okSvc = new StubPrefixService { Result = [((UInt128)0x0A000000u, (byte)8, true)] };
 
         await RouteAssembler.AddUserSourceRoutesAsync(
             routes, new CustomSourceView("bad", "https://x/b", null), 1, throwSvc, new StubResolver(), NullLogger.Instance, "peer", CancellationToken.None);
@@ -118,7 +118,7 @@ public class BgpSessionUserSourceTests
         // RunAsync's OCE handler.
         var routes = new List<Route>();
         var slowSvc = new StubPrefixService { Throw = new OperationCanceledException() };
-        var okSvc = new StubPrefixService { Result = [(0x0A000000u, (byte)8)] };
+        var okSvc = new StubPrefixService { Result = [((UInt128)0x0A000000u, (byte)8, true)] };
 
         await RouteAssembler.AddUserSourceRoutesAsync(
             routes, new CustomSourceView("slow", "https://x/s", null), 1, slowSvc, new StubResolver(),

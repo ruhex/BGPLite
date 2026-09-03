@@ -152,4 +152,44 @@ public class PrefixCidrTests
         Assert.Equal(0u, prefix);
         Assert.Equal((byte)0, length);
     }
+    // ---- #14 phase 4: family-aware parse (IPv6) ----
+
+    [Fact]
+    public void TryParse_Ipv6_AcceptsAndMasks()
+    {
+        Assert.True(PrefixCidr.TryParse("2001:db8:ffff:ffff:1::/48", out var prefix));
+        Assert.False(prefix.IsIpv4);
+        Assert.Equal(48, prefix.Length);
+        var expected = ((UInt128)0x2001 << 112) | ((UInt128)0x0DB8 << 96) | ((UInt128)0xFFFF << 80);
+        Assert.Equal(expected, prefix.Address);
+    }
+
+    [Fact]
+    public void TryParse_Ipv6_HostRoute128()
+    {
+        Assert.True(PrefixCidr.TryParse("2001:db8::1/128", out var prefix));
+        Assert.False(prefix.IsIpv4);
+        Assert.Equal(128, prefix.Length);
+    }
+
+    [Theory]
+    [InlineData("2001:db8::/129")]   // out of range
+    [InlineData("::/0")]             // default route rejected like 0.0.0.0/0
+    [InlineData("2001:db8::")]       // no length
+    [InlineData("::ffff:10.0.0.1/96")] // v4-mapped — not a real IPv6 prefix
+    public void TryParse_Ipv6_Rejects(string bad)
+    {
+        Assert.False(PrefixCidr.TryParse(bad, out var prefix));
+        Assert.Equal(default, prefix);
+    }
+
+    [Fact]
+    public void TryParse_Ipv4OnlyOverload_StillRejectsIpv6()
+    {
+        // The API's custom-prefix path stays IPv4-scoped for now; the v4 overload must not
+        // silently widen with the family-aware parser arriving alongside it.
+        Assert.False(PrefixCidr.TryParse("2001:db8::/48", out var prefix, out var length));
+        Assert.Equal(0u, prefix);
+        Assert.Equal((byte)0, length);
+    }
 }

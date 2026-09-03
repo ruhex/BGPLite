@@ -1,0 +1,83 @@
+# Integration-test stand: BGPLite route server + BIRD2 peer over BOTH transport
+# families. Fixed addressing (no dynamic discovery) so BIRD's neighbor statements
+# and the server's peer registration agree.
+#
+#   net bgp4  172.30.100.0/24   server .10   bird .20
+#   net bgp6  2001:db8:cccc::/64 server ::10  bird ::20 (doc prefix, RFC 3849)
+#
+# Everything is forced to linux/amd64 ("linux64"): the server image publishes with
+# the linux-x64 RID and both services pin the platform, so the stand behaves the
+# same on an arm64 developer Mac (via Rosetta) and on the amd64 CI runner.
+name: bgplite-integration
+
+services:
+  server:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    platform: linux/amd64
+    container_name: bgplite-it-server
+    networks:
+      bgp4:
+        ipv4_address: 172.30.100.10
+      bgp6:
+        ipv6_address: 2001:db8:cccc::10
+    volumes:
+      - ./server-appsettings.yml:/app/appsettings.yml:ro
+      - ./test-nets.txt:/app/test-nets.txt:ro
+    environment:
+      # Debug logs for the session pipeline — this stand exists to diagnose it.
+      - Logging__LogLevel__BGPLite=Debug
+
+  bird:
+    build:
+      context: .
+      dockerfile: Dockerfile.bird
+    platform: linux/amd64
+    container_name: bgplite-it-bird
+    networks:
+      bgp4:
+        ipv4_address: 172.30.100.20
+      bgp6:
+        ipv6_address: 2001:db8:cccc::20
+
+  # Opt-in packet capture of the BGP traffic INSIDE the server's network namespace
+  # (both transports, one pcap). Start the stand with:
+  #   docker compose --profile capture up -d
+  # or run the tests with:  ./run-tests.sh --capture
+  # The pcap lands in ./captures/ for Wireshark/tshark analysis.
+  capture:
+    build:
+      context: .
+      dockerfile: Dockerfile.capture
+    platform: linux/amd64
+    container_name: bgplite-it-capture
+    profiles: ["capture"]
+    network_mode: "service:server"
+    volumes:
+      - ./captures:/captures
+    command: ["-i", "any", "-U", "-w", "/captures/bgp.pcap", "port 179"]
+
+  # In-network API probe: the runner talks to the server through this sidecar, so the
+  # tests never depend on host-loopback port publishing (unreachable under some CI
+  # docker configurations — userland-proxy/iptables variance).
+  probe:
+    image: curlimages/curl:8.11.0
+    platform: linux/amd64
+    container_name: bgplite-it-probe
+    networks:
+      bgp4:
+    entrypoint: ["sleep", "infinity"]
+
+networks:
+  bgp4:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.30.100.0/24
+  bgp6:
+    driver: bridge
+    enable_ipv6: true
+    ipam:
+      config:
+        - subnet: 2001:db8:cccc::/64

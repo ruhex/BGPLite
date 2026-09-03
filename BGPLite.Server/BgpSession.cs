@@ -231,16 +231,42 @@ public sealed class BgpSession : IDisposable
         const int maxPerUpdate = 100;
         // #85: reuse a single batch list instead of GetRange (which allocates a new List per batch).
         var batch = new List<IpPrefix>(Math.Min(maxPerUpdate, count));
+
+        // IPv4 withdrawals ride the classic WITHDRAWN ROUTES field (RFC 4271 §4.3).
         for (var i = 0; i < count; i += maxPerUpdate)
         {
             batch.Clear();
             var end = Math.Min(i + maxPerUpdate, count);
             for (var j = i; j < end; j++)
-                batch.Add(_advertisedPrefixes[j]);
+                if (_advertisedPrefixes[j].IsIpv4)
+                    batch.Add(_advertisedPrefixes[j]);
+            if (batch.Count == 0)
+                continue;
             var update = new BgpUpdateMessage
             {
                 WithdrawnRoutes = batch,
                 PathAttributes = [],
+                Nlri = []
+            };
+            await SendMessageAsync(update);
+            _metrics.UpdateSent();
+        }
+
+        // IPv6 withdrawals ride MP_UNREACH_NLRI (RFC 4760 §7 — #14 phase 4): an IPv6 prefix can
+        // never be named by the classic withdrawn field, and BIRD/FRR expect the MP form.
+        for (var i = 0; i < count; i += maxPerUpdate)
+        {
+            batch.Clear();
+            var end = Math.Min(i + maxPerUpdate, count);
+            for (var j = i; j < end; j++)
+                if (!_advertisedPrefixes[j].IsIpv4)
+                    batch.Add(_advertisedPrefixes[j]);
+            if (batch.Count == 0)
+                continue;
+            var update = new BgpUpdateMessage
+            {
+                WithdrawnRoutes = [],
+                PathAttributes = UpdateCodec.WithMpUnreachV6Attribute(batch),
                 Nlri = []
             };
             await SendMessageAsync(update);
@@ -917,8 +943,10 @@ public sealed class BgpSession : IDisposable
         foreach (var w in update.WithdrawnRoutes)
             WithdrawIfOwned(w, "Route withdrawn");
 
-        // Process announcements
-        if (update.Nlri.Count > 0)
+        // Process announcements. The gate must accept MP_REACH-only UPDATEs (#407): the normal
+        // wire shape for an IPv6 announcement (RFC 4760 §5) leaves the classic NLRI field EMPTY —
+        // gating on Nlri.Count alone silently dropped every such announcement.
+        if (update.Nlri.Count > 0 || update.MpReachV6 is not null)
         {
             // #270: the inbound attribute pipeline (per-attribute validation, mandatory set,
             // AS4_PATH reconstruction, aggregator consistency — subcodes 3/6/8/9/11) lives in the
@@ -1033,14 +1061,6 @@ public sealed class BgpSession : IDisposable
                 }
             }
 
-            // #15 phase 2 (RFC 4760 §7): MP_UNREACH_NLRI (AFI=2/SAFI=1) withdraws IPv6 routes
-            // this session installed — same ownership rule as the classic withdrawal path (#289).
-            if (update.MpUnreachV6 is { Count: > 0 } v6Withdrawn)
-            {
-                foreach (var prefix in v6Withdrawn)
-                    WithdrawIfOwned(prefix, "Route withdrawn (MP_UNREACH)");
-            }
-
             // MP_REACH_NLRI (AFI=2/SAFI=1) announcements: same install pipeline as the classic
             // IPv4 NLRI loop — AS-loop exclusion, filter, cap, ownership (#15 phase 2).
             if (update.MpReachV6 is { } mpReach)
@@ -1084,6 +1104,16 @@ public sealed class BgpSession : IDisposable
                     }
                 }
             }
+        }
+
+        // #15 phase 2 (RFC 4760 §7): MP_UNREACH_NLRI (AFI=2/SAFI=1) withdraws IPv6 routes this
+        // session installed — same ownership rule as the classic withdrawal path (#289). Runs
+        // OUTSIDE the announcement block (#407): an MP_UNREACH-only UPDATE (a peer withdrawing
+        // its IPv6 routes) has no classic NLRI and no MP_REACH, and must not depend on either.
+        if (update.MpUnreachV6 is { Count: > 0 } v6Withdrawn)
+        {
+            foreach (var prefix in v6Withdrawn)
+                WithdrawIfOwned(prefix, "Route withdrawn (MP_UNREACH)");
         }
 
         _metrics.SetRouteCount(_routeTable.Count);
@@ -1174,6 +1204,15 @@ public sealed class BgpSession : IDisposable
             await SendRoutesAsync(nextHop, routes);
     }
 
+    /// <summary>The local global IPv6 next hop (Bgp.NextHopIpv6) or null when unset/invalid —
+    /// null disables IPv6 advertisements (fail-visible at send time). Re-parsed per send from the
+    /// immutable config rather than cached in the constructor: tests construct sessions from raw
+    /// config records, and the parse is nanoseconds against a ~30s send.</summary>
+    private UInt128? NextHopIpv6 =>
+        BgpConfig.IsGlobalUnicastV6(_bgpConfig.NextHopIpv6) && IPAddress.TryParse(_bgpConfig.NextHopIpv6, out var v6)
+            ? BgpConstants.ToUInt128(v6)
+            : null;
+
     private async Task SendRoutesAsync(uint nextHop, List<Route> routes)
     {
         // Summarize before sending: merge adjacent/overlapping prefixes into the minimal
@@ -1193,6 +1232,35 @@ public sealed class BgpSession : IDisposable
                 routes.Count, aggregated.Count, deduped.Count, _peer);
         routes = deduped;
 
+        // #14 phase 4: family split. IPv4 rides the classic NLRI field; IPv6 rides MP_REACH
+        // (RFC 4760 §5) and ONLY when both halves agree: the peer negotiated MP IPv6/Unicast in
+        // OPEN, and Bgp.NextHopIpv6 is configured (RFC 2545 §3 — the MP_REACH next hop must be a
+        // global address; the IPv4 router-id cannot serve the IPv6 family). Otherwise IPv6
+        // routes are suppressed for this send — loudly, never silently.
+        var v4Routes = new List<Route>(routes.Count);
+        var v6Routes = new List<Route>();
+        foreach (var route in routes)
+        {
+            if (route.IsIpv4)
+                v4Routes.Add(route);
+            else
+                v6Routes.Add(route);
+        }
+        if (v6Routes.Count > 0 && !_peerMpIpv6Unicast)
+        {
+            _logger.LogWarning(
+                "Suppressing {Count} IPv6 routes to {Peer}: the peer did not negotiate MP IPv6/Unicast — advertising them as classic IPv4 NLRI would corrupt the peer's table",
+                v6Routes.Count, _peer);
+            v6Routes.Clear();
+        }
+        else if (v6Routes.Count > 0 && !NextHopIpv6.HasValue)
+        {
+            _logger.LogWarning(
+                "Suppressing {Count} IPv6 routes to {Peer}: Bgp.NextHopIpv6 is not configured — set it to a global IPv6 address to advertise IPv6 routes",
+                v6Routes.Count, _peer);
+            v6Routes.Clear();
+        }
+
         const int maxNlriPerUpdate = 100;
         _advertisedPrefixes.EnsureCapacity(_advertisedPrefixes.Count + routes.Count);
         var sent = 0;
@@ -1202,10 +1270,12 @@ public sealed class BgpSession : IDisposable
         // a single send (localAsn/localFourByteAsn/nextHop are constant for the whole send), so
         // build them once per community set and reuse instead of rebuilding on each batch (#87).
         // Scoped to this send only: the cache dies with the dictionary, so it can never serve a
-        // later send that carries a different nextHop or renegotiated ASN.
+        // later send that carries a different nextHop or renegotiated ASN. The v6 family gets its
+        // own cache — its cached lists carry no classic NEXT_HOP (#407's wire shape).
         var attrCache = UpdateCodec.CreateUpdateAttributeCache();
+        var v6AttrCache = UpdateCodec.CreateV6UpdateAttributeCache();
 
-        foreach (var route in routes)
+        foreach (var route in v4Routes)
         {
             batch.Add(route);
             _advertisedPrefixes.Add(new IpPrefix(route.Prefix, route.PrefixLength, route.IsIpv4));
@@ -1223,9 +1293,49 @@ public sealed class BgpSession : IDisposable
             sent += batch.Count;
         }
 
+        var v6NextHop = NextHopIpv6 ?? 0;
+        batch.Clear();
+        foreach (var route in v6Routes)
+        {
+            batch.Add(route);
+            _advertisedPrefixes.Add(new IpPrefix(route.Prefix, route.PrefixLength, route.IsIpv4));
+            if (batch.Count >= maxNlriPerUpdate)
+            {
+                await SendV6RouteBatchAsync(v6NextHop, batch, v6AttrCache);
+                sent += batch.Count;
+                batch.Clear();
+            }
+        }
+
+        if (batch.Count > 0)
+        {
+            await SendV6RouteBatchAsync(v6NextHop, batch, v6AttrCache);
+            sent += batch.Count;
+        }
+
         _logger.LogInformation("UpdateSent {Count} routes to {Peer}", sent, _peer);
         // #212: cache the actual wire count for the API/UI.
         Volatile.Write(ref _advertisedCount, sent);
+    }
+
+    /// <summary>
+    /// Sends one batch of IPv6 routes as MP_REACH_NLRI UPDATEs (#14 phase 4): the batch is
+    /// partitioned by community set (the MP_REACH attribute applies to every NLRI in its UPDATE,
+    /// same rule as COMMUNITY), base attributes come from the v6 cache (no classic NEXT_HOP),
+    /// and the MP_REACH attribute — global next hop + this group's NLRI — is appended per group.
+    /// </summary>
+    private async Task SendV6RouteBatchAsync(UInt128 nextHop6, List<Route> routes, Dictionary<IReadOnlyList<uint>, List<PathAttribute>> v6AttrCache)
+    {
+        foreach (var groupRoutes in GroupByCommunitySet(routes))
+        {
+            var attrs = UpdateCodec.GetCachedV6UpdateAttributes(
+                _bgpConfig.Asn, _localFourByteAsn, groupRoutes[0].Communities, v6AttrCache);
+            attrs = UpdateCodec.WithLargeCommunityAttribute(attrs, groupRoutes[0].LargeCommunities);
+
+            var nlri = groupRoutes.Select(r => new IpPrefix(r.Prefix, r.PrefixLength, r.IsIpv4)).ToList();
+            attrs = UpdateCodec.WithMpReachV6Attribute(attrs, nextHop6, nlri);
+            await SendUpdateBatchAsync(attrs, [], mpReach: new MpReachCodec.MpReachV6(nextHop6, nlri));
+        }
     }
 
     /// <summary>
@@ -1295,12 +1405,13 @@ public sealed class BgpSession : IDisposable
     private static List<List<Route>> GroupByCommunitySet(IReadOnlyList<Route> routes)
         => RouteAssembler.GroupByCommunitySet(routes);
 
-    private async Task SendUpdateBatchAsync(List<PathAttribute> attrs, List<IpPrefix> nlri)
+    private async Task SendUpdateBatchAsync(List<PathAttribute> attrs, List<IpPrefix> nlri, MpReachCodec.MpReachV6? mpReach = null)
     {
         var update = new BgpUpdateMessage
         {
             PathAttributes = attrs,
-            Nlri = nlri
+            Nlri = nlri,
+            MpReachV6 = mpReach
         };
 
         await SendMessageAsync(update);
@@ -1316,16 +1427,25 @@ public sealed class BgpSession : IDisposable
     };
 
     /// <summary>
-    /// End-of-RIB marker for IPv4 unicast (RFC 4724 §2): a minimum-length UPDATE (no withdrawn
-    /// routes, no path attributes, no NLRI). Signals completion of the initial routing update so
-    /// GR-capable peers finalize — replacing stale routes with what we re-advertised and purging
-    /// the rest. Lock is acquired inside SendMessageAsync.
+    /// End-of-RIB markers (RFC 4724 §2), one per advertised family: a minimum-length UPDATE for
+    /// IPv4 unicast, and — for MP-IPv6-negotiated peers — an UPDATE carrying an EMPTY
+    /// MP_UNREACH_NLRI (AFI=2/SAFI=1), which is the IPv6 family's EoR. Signals completion of the
+    /// initial routing update so GR-capable peers finalize — replacing stale routes with what we
+    /// re-advertised and purging the rest. Lock is acquired inside SendMessageAsync.
     /// </summary>
     private async Task SendEndOfRibAsync()
     {
         await SendMessageAsync(new BgpUpdateMessage());
         _metrics.UpdateSent();
         _logger.LogDebug("End-of-RIB sent to {Peer}", _peer);
+
+        if (_peerMpIpv6Unicast)
+        {
+            var eor = new BgpUpdateMessage { PathAttributes = UpdateCodec.WithMpUnreachV6Attribute([]) };
+            await SendMessageAsync(eor);
+            _metrics.UpdateSent();
+            _logger.LogDebug("End-of-RIB (IPv6/Unicast) sent to {Peer}", _peer);
+        }
     }
 
     #region Message I/O
@@ -1626,7 +1746,7 @@ public sealed class BgpSession : IDisposable
         _logger.LogInformation("Peer {Peer} Graceful Restart: {State}",
             _peer,
             peerGr.HasValue
-                ? $"supported (restartState={peerGr.Value.RestartState}, restartTime={peerGr.Value.RestartTime}s, IPv4/Unicast forwarding={peerGr.Value.Ipv4UnicastForwarding})"
+                ? $"supported (restartState={peerGr.Value.RestartState}, restartTime={peerGr.Value.RestartTime}s, IPv4/Unicast forwarding={peerGr.Value.Ipv4UnicastForwarding}, IPv6/Unicast forwarding={peerGr.Value.Ipv6UnicastForwarding})"
                 : "not supported");
     }
 
