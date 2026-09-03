@@ -33,13 +33,29 @@ internal sealed class UserSourceCache
     // each (the HTTP body cap) plus a SemaphoreSlim — so operator churn or an API client loop grows
     // the cache without limit. Exceeded → sweep expired entries first, then the oldest by CachedAt.
     private readonly int _maxEntries;
+    // #426: entry COUNT caps say nothing about memory — one entry can hold ~1M prefixes (a 10 MB
+    // response parsed). The budget bounds the TOTAL parsed prefixes across all entries; over
+    // budget → the sweep drops the OLDEST positive entries until under. 2M prefixes ≈ 50 MB worst
+    // case — generous for real peer sources, hostile to unbounded growth.
+    internal const long DefaultMaxTotalPrefixes = 2_000_000;
+    private readonly long _maxTotalPrefixes;
+    // #426: expired entries used to be PINNED until the entry cap was hit — steady-state memory
+    // was "everything fetched recently", not "live entries". The amortized sweep (every
+    // _sweepEvery calls) now removes expired entries and enforces the prefix budget regardless
+    // of the cap. internal-settable via ctor for tests.
+    private int _callsSinceSweep;
+    private readonly int _sweepEvery;
+    internal int SweepEvery => _sweepEvery;
+
+    /// <summary>Total parsed prefixes currently held in positive entries (test/observability).</summary>
+    internal long TrackedPrefixes => _cache.Where(kvp => !kvp.Value.Negative).Sum(kvp => (long)kvp.Value.List.Count);
 
     // url → (list, cached at, is negative). Negative entries (failed loads) use _negativeTtl.
     private readonly ConcurrentDictionary<string, (IReadOnlyList<IpPrefix> List, DateTime CachedAt, bool Negative)> _cache = new();
     // url → gate serializing the cache-miss fetch path (prevents thundering herd on cold/expired keys).
     private readonly ConcurrentDictionary<string, SemaphoreSlim> _locks = new();
 
-    public UserSourceCache(TimeSpan? positiveTtl = null, TimeSpan? negativeTtl = null, ILogger? logger = null, TimeProvider? timeProvider = null, int? maxCacheEntries = null)
+    public UserSourceCache(TimeSpan? positiveTtl = null, TimeSpan? negativeTtl = null, ILogger? logger = null, TimeProvider? timeProvider = null, int? maxCacheEntries = null, long? maxTotalPrefixes = null, int? sweepEvery = null)
     {
         _positiveTtl = positiveTtl ?? TimeSpan.FromHours(1);
         _negativeTtl = negativeTtl ?? TimeSpan.FromSeconds(30);
@@ -48,6 +64,8 @@ internal sealed class UserSourceCache
         // Generous vs. real deployments (peers × a few active sources each); the cap defends
         // against unbounded growth from churn/adversarial URL variety, not normal operation.
         _maxEntries = maxCacheEntries ?? 1024;
+        _maxTotalPrefixes = maxTotalPrefixes ?? DefaultMaxTotalPrefixes;
+        _sweepEvery = sweepEvery ?? 64;
     }
 
     /// <summary>Entries currently tracked (test/observability).</summary>
@@ -66,6 +84,10 @@ internal sealed class UserSourceCache
         Func<CancellationToken, Task<IReadOnlyList<IpPrefix>>> loadAsync,
         CancellationToken ct)
     {
+        // #426: amortized expired-entry + prefix-budget sweep — expired entries used to be pinned
+        // until the entry cap was hit. Cheap (every Nth call), idempotent under concurrency.
+        SweepIfNeeded();
+
         if (TryGetFresh(url, out var fresh))
             return fresh;
 
@@ -189,5 +211,49 @@ internal sealed class UserSourceCache
         }
 
         return false;
+    }
+
+    /// <summary>
+    /// #426: amortized housekeeping, run every <see cref="_sweepEvery"/> calls. (1) Removes EXPIRED
+    /// entries regardless of the entry cap — they used to be pinned until the cap was hit. (2)
+    /// Enforces the total-prefix budget: over budget, the OLDEST positive entries are dropped until
+    /// under (a later caller re-fetches them — a duplicate idempotent GET, never a correctness
+    /// loss, the same tradeoff <see cref="EvictIfAtCapacity"/> accepts).
+    /// </summary>
+    private void SweepIfNeeded()
+    {
+        if (Interlocked.Increment(ref _callsSinceSweep) < _sweepEvery)
+            return;
+        Volatile.Write(ref _callsSinceSweep, 0);
+
+        var now = _timeProvider.GetUtcNow().UtcDateTime;
+        var toEvict = new List<string>();
+        long total = 0;
+        foreach (var (key, entry) in _cache)
+        {
+            var ttl = entry.Negative ? _negativeTtl : _positiveTtl;
+            if (now - entry.CachedAt >= ttl)
+            {
+                toEvict.Add(key);
+                continue;
+            }
+            if (!entry.Negative)
+                total += entry.List.Count;
+        }
+
+        foreach (var kvp in _cache
+                     .Where(kvp => !kvp.Value.Negative && !toEvict.Contains(kvp.Key))
+                     .OrderBy(kvp => kvp.Value.CachedAt))
+        {
+            if (total <= _maxTotalPrefixes) break;
+            toEvict.Add(kvp.Key);
+            total -= kvp.Value.List.Count;
+        }
+
+        foreach (var key in toEvict)
+        {
+            if (_cache.TryRemove(key, out _))
+                _locks.TryRemove(key, out _);
+        }
     }
 }
