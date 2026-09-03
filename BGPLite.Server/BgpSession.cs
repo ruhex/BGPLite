@@ -1275,6 +1275,13 @@ public sealed class BgpSession : IDisposable
     {
         _peerMpV6Disabled = true;
         var flushed = _routeTable.RemoveAllOwnedBy(this, isIpv4: false);
+        // #472 review: RemoveAllOwnedBy does not raise EntryOwnershipLost — this session is not
+        // losing keys to a replacing owner, it is discarding its own — so the per-peer prefix
+        // set must drop the family's keys here, or its cap count keeps drifting for prefixes
+        // the peer no longer has with us.
+        foreach (var key in _installedPrefixes.Keys)
+            if (!key.IsIpv4)
+                _installedPrefixes.TryRemove(key, out _);
         if (flushed > 0)
         {
             _logger.LogInformation(

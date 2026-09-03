@@ -291,7 +291,13 @@ public static class BgpMessageReader
                 // their shape, so a flags conflict is a session-reset error (3/4), not a discard.
                 if (attr.TypeCode is MpReachCodec.MpReachNlriType or MpReachCodec.MpUnreachNlriType)
                 {
-                    if (!attr.Optional || attr.Transitive)
+                    // RFC 4760 §4/§5 make both attributes OPTIONAL NON-TRANSITIVE; the Partial bit
+                    // is equally invalid on them — a non-transitive attribute is never re-advertised
+                    // by a speaker lacking the family, so nothing can set it (#472 review). The
+                    // Extended Length bit stays legal. RFC 7606 leaves the MP attributes explicitly
+                    // unrevised — the RFC 4271 §6.3 baseline applies to their shape, so a flags
+                    // conflict is a session-reset error (3/4), not a discard.
+                    if (!attr.Optional || attr.Transitive || attr.Partial)
                         throw new BgpParseException(
                             $"MP_REACH/MP_UNREACH flags conflict with optional non-transitive (flags=0x{attr.Flags:X2}, RFC 4760 §4)",
                             BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.AttributeFlagsError,
@@ -307,14 +313,15 @@ public static class BgpMessageReader
                             throw new BgpParseException("Duplicate MP_REACH_NLRI attribute (RFC 7606 §3(g))",
                                 BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.MalformedAttributeList,
                                 sessionResetRequired: true);
+                        ScopeMpValueOrThrow(attr.Data);
                         try
                         {
                             mpReachV6 = MpReachCodec.DecodeMpReachV6(attr.Data);
                         }
                         catch (BgpParseException ex)
                         {
-                            // RFC 7606 §3(j): an unparseable MP value must get "session reset" OR
-                            // "AFI/SAFI disable" — marked for the session's disable policy (D17).
+                            // RFC 7606 §3(j): a SUPPORTED tuple whose value cannot be decoded takes
+                            // the "AFI/SAFI disable" choice, scoped to that family (D17).
                             throw new BgpMpParseException(ex.Message, ex.SubErrorCode, ex);
                         }
                         continue;
@@ -324,6 +331,7 @@ public static class BgpMessageReader
                         throw new BgpParseException("Duplicate MP_UNREACH_NLRI attribute (RFC 7606 §3(g))",
                             BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.MalformedAttributeList,
                             sessionResetRequired: true);
+                    ScopeMpValueOrThrow(attr.Data);
                     try
                     {
                         mpUnreachV6 = MpReachCodec.DecodeMpUnreachV6(attr.Data);
@@ -354,6 +362,31 @@ public static class BgpMessageReader
             MpReachV6 = mpReachV6,
             MpUnreachV6 = mpUnreachV6
         };
+    }
+
+    /// <summary>
+    /// #472 review: scope MP value failures to the offending AFI/SAFI tuple. A value too short
+    /// to name its tuple cannot be scoped to any family — the RFC 7606 §3(j) fallback is the
+    /// session reset. A tuple this speaker does not support was never negotiated (RFC 4760 §8):
+    /// its arrival is not a parse failure of the supported family, so it is answered with a
+    /// plain keep-alive body error — the whole UPDATE is discarded (D17) and the supported
+    /// family stays enabled. Only a supported tuple's decode failure reaches the decoder, whose
+    /// <see cref="BgpMpParseException"/> marks the AFI/SAFI disable.
+    /// </summary>
+    private static void ScopeMpValueOrThrow(ReadOnlySpan<byte> value)
+    {
+        if (value.Length < 3)
+            throw new BgpParseException(
+                $"Truncated MP attribute: {value.Length} byte(s) cannot contain an AFI/SAFI tuple",
+                BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.MalformedAttributeList,
+                sessionResetRequired: true);
+
+        var afi = BinaryPrimitives.ReadUInt16BigEndian(value);
+        var safi = value[2];
+        if (afi != MpReachCodec.AfiIpv6 || safi != MpReachCodec.SafiUnicast)
+            throw new BgpParseException(
+                $"MP_REACH/MP_UNREACH for an unsupported address family: AFI={afi}, SAFI={safi}",
+                BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.InvalidNetworkField);
     }
 
     private static (PathAttribute attr, int consumed) ParseAttribute(ReadOnlySpan<byte> data)

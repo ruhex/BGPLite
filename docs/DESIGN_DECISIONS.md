@@ -203,12 +203,18 @@ For section-by-section RFC conformance status, see `RFC_COMPLIANCE.md` (2026-07-
   policy instead of the paragraph above. A DUPLICATE MP attribute is answered with exactly one
   NOTIFICATION 3/1 (Malformed Attribute List) and a session reset — RFC 7606 §3(g) MUST. An MP
   flags conflict (RFC 4760 §4: both attributes are optional NON-transitive) is a session reset
-  with 3/4 per the RFC 4271 §6.3 baseline. An UNPARSEABLE MP VALUE takes the RFC 7606 §3(j)
-  "AFI/SAFI disable" choice: every IPv6 route the session accepted from the peer is withdrawn,
+  with 3/4 per the RFC 4271 §6.3 baseline (the Partial bit joins the Transitive bit in the
+  conflict mask). An UNPARSEABLE MP VALUE is scoped to the offending AFI/SAFI tuple: a tuple
+  this speaker does not support was never negotiated (RFC 4760 §8), so it only discards its
+  UPDATE through the keep-alive path above — the session and the supported family stay
+  untouched; a supported tuple whose value cannot be decoded takes the RFC 7606 §3(j)
+  "AFI/SAFI disable" choice — every IPv6 route the session accepted from the peer is withdrawn,
   the family is ignored for the rest of the session, and the session itself stays up — the
-  route-server rationale above, family-scoped. Additionally, an MP_REACH next hop that is not
-  a global IPv6 address (::, ::1, ff00::/8, fe80::/10 — RFC 2545 §3) excludes that attribute's
-  routes only: route-level exclusion, like the AS-loop rule, not a session error.
+  route-server rationale above, family-scoped; a value too short to even name its AFI/SAFI
+  cannot be scoped to any family, so the §3(j) fallback is the session reset. Additionally, an
+  MP_REACH next hop that is not a global IPv6 address (::, ::1, ff00::/8, fe80::/10 — RFC 2545
+  §3) excludes that attribute's routes only: route-level exclusion, like the AS-loop rule, not
+  a session error.
 - **Consequence:** a peer sending structurally valid but semantically rejected UPDATEs gets them
   silently dropped (log Warning + `UpdatesRejected` metric) instead of a session reset; operators
   comparing against RFC-strict speakers will see BGPLite retain sessions others would close.
