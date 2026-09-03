@@ -368,9 +368,31 @@ public sealed class BgpSession : IDisposable
                 openMessage = await ReceiveMessageAsync(linkedCts.Token);
             }
 
+            if (openMessage is BgpNotificationMessage earlyNotification)
+            {
+                // #483 (RFC 4271 §6.3/§4.5, D8): on receiving a NOTIFICATION, release resources and
+                // close — NEVER reply. Previously this fell into the not-OPEN branch below and
+                // answered 2/0, violating the no-reply rule the OpenConfirm and Established arms
+                // follow. Latch RemoteNotification so the finally-block stays silent too.
+                _logger.LogWarning("NotificationReceived from {Peer} before OPEN: {Error}/{SubError}",
+                    _peer, earlyNotification.ErrorCode, earlyNotification.SubErrorCode);
+                Interlocked.CompareExchange(ref _teardownReason, (int)TeardownReason.RemoteNotification, (int)TeardownReason.None);
+                return;
+            }
+
             if (openMessage is not BgpOpenMessage remoteOpen)
             {
-                await SendNotificationAsync(BgpConstants.Error.OpenMessageError, BgpConstants.SubError.Unspecific);
+                // #483 (RFC 4271 §8.2.2, the #427/#453 class): the handshake phase accepts only
+                // OPEN and NOTIFICATION — any other first message is an FSM error, not an OPEN-body
+                // problem (the previous 2/0 misreported "your OPEN body was malformed"). CAS-latch
+                // the teardown before sending, like every other pre-close NOTIFICATION send.
+                _logger.LogWarning("Unexpected message {Type} from {Peer} before OPEN — FSM error (RFC 4271 §8.2.2)",
+                    openMessage.Type, _peer);
+                if (Interlocked.CompareExchange(ref _teardownReason, (int)TeardownReason.LocalCease, (int)TeardownReason.None) == (int)TeardownReason.None)
+                {
+                    try { await SendNotificationAsync(BgpConstants.Error.FiniteStateMachineError, BgpConstants.SubError.Unspecific); }
+                    catch { /* best-effort — partial write counts, see RFC 4271 §8.1 */ }
+                }
                 return;
             }
 
@@ -464,8 +486,15 @@ public sealed class BgpSession : IDisposable
                         _peer, notif.ErrorCode, notif.SubErrorCode, dataHex);
                     return;
                 default:
-                    _logger.LogError("Unexpected message {Type} from {Peer} in OpenConfirm", response.Type, _peer);
-                    await SendNotificationAsync(BgpConstants.Error.FiniteStateMachineError, BgpConstants.SubError.Unspecific);
+                    // #483: CAS-latch before sending (the #453/#427 shape) — the un-latched send
+                    // let a concurrent replacement's SilentClose be answered with a 5/0.
+                    _logger.LogWarning("Unexpected message {Type} from {Peer} in OpenConfirm — FSM error (RFC 4271 §8.2.2)",
+                        response.Type, _peer);
+                    if (Interlocked.CompareExchange(ref _teardownReason, (int)TeardownReason.LocalCease, (int)TeardownReason.None) == (int)TeardownReason.None)
+                    {
+                        try { await SendNotificationAsync(BgpConstants.Error.FiniteStateMachineError, BgpConstants.SubError.Unspecific); }
+                        catch { /* best-effort — partial write counts, see RFC 4271 §8.1 */ }
+                    }
                     return;
             }
 
