@@ -1135,6 +1135,9 @@ public sealed class BgpSession : IDisposable
                 // the parse; this closes the asymmetry on the NLRI side.
                 // Same ownership rule as an explicit withdrawal (#289): treat-as-withdraw removes
                 // what this peer installed, not whatever is at that prefix.
+                // #484 (RFC 7606 §2): the MP_UNREACH_NLRI half of the SAME message is applied too —
+                // the classic WITHDRAWN field is honored even when the parse fails (it ran before
+                // the parse), so the MP withdrawal must not be lost to the same failure.
                 foreach (var nlri in update.Nlri)
                     WithdrawIfOwned(nlri, "Route withdrawn (treat-as-withdraw)");
                 if (mpReach is { } failedReach)
@@ -1143,6 +1146,12 @@ public sealed class BgpSession : IDisposable
                 if (mpReachV4 is { } failedReach4)
                     foreach (var p in failedReach4.Prefixes)
                         WithdrawIfOwned(p, "Route withdrawn (treat-as-withdraw, MP_REACH IPv4)");
+                if (update.MpUnreachV6 is { Count: > 0 } failedUnreach)
+                    foreach (var p in failedUnreach)
+                        WithdrawIfOwned(p, "Route withdrawn (treat-as-withdraw, MP_UNREACH)");
+                if (update.MpUnreachV4 is { Count: > 0 } failedUnreach4)
+                    foreach (var p in failedUnreach4)
+                        WithdrawIfOwned(p, "Route withdrawn (treat-as-withdraw, MP_UNREACH IPv4)");
                 _metrics.SetRouteCount(_routeTable.Count);
                 throw;
             }
