@@ -992,7 +992,12 @@ public sealed class ManagementApi : IHostedService, IDisposable
             normalizedIp, data.Asn, data.Description, asnLists, customPrefixes, data.CustomAsns ?? [], data.MaxPrefix,
             md5Password: string.IsNullOrEmpty(data.Md5Password) ? null : data.Md5Password);
         if (!string.IsNullOrEmpty(data.Md5Password))
-            _sessionManager.SetPeerMd5Key(normalizedIp, data.Md5Password);
+        {
+            // #455: resolve through the SAME shared-IP re-arm the delete/PATCH/bootstrap paths use —
+            // TCP keys by address (#36), so arming the new row's key directly silently overrode a
+            // sibling's key on the same IP (last-writer-wins, no disagreement warning).
+            await RearmPeerIpMd5KeyAsync(normalizedIp);
+        }
 
         _logger.LogInformation("Created peer {Ip} AS{Asn} ({Id}): {Subs} lists, {Prefixes} custom prefixes, {Asns} custom AS",
             normalizedIp, data.Asn, saved.Id, asnLists.Count, customPrefixes.Count, data.CustomAsns?.Count ?? 0);
