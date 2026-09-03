@@ -1445,20 +1445,31 @@ public sealed class ManagementApi : IHostedService, IDisposable
 
         // Append configured PrefixSources (file/http) alongside the legacy RipeStat ASN-lists,
         // reusing the same response shape. "Kind" is intentionally not exposed.
+        // #480: the budget token firing mid-LoadAllAsync surfaces as a foreign-token OCE (live
+        // shutdown token) — without this catch it escaped the handler and closed the connection
+        // without a body, discarding the partial result assembled above. Degrade like the
+        // per-source loops above; the tail warning below reports the budget expiry (both paths).
         var seen = lists.Select(l => l.Name).ToHashSet();
-        foreach (var (source, prefixes) in await _prefixSources.LoadAllAsync(ct))
+        try
         {
-            if (!seen.Add(source.Name)) continue; // skip names already present (e.g. shared "ru")
-            result.Add(new
+            foreach (var (source, prefixes) in await _prefixSources.LoadAllAsync(ct))
             {
-                id = source.Name,
-                Name = source.Name,
-                Description = source.Description,
-                Country = (string?)null,
-                Community = source.Community,
-                prefixCount = prefixes.Count,
-                type = source.Kind == "asn" ? "asn" : "list"
-            });
+                if (!seen.Add(source.Name)) continue; // skip names already present (e.g. shared "ru")
+                result.Add(new
+                {
+                    id = source.Name,
+                    Name = source.Name,
+                    Description = source.Description,
+                    Country = (string?)null,
+                    Community = source.Community,
+                    prefixCount = prefixes.Count,
+                    type = source.Kind == "asn" ? "asn" : "list"
+                });
+            }
+        }
+        catch (OperationCanceledException) when (!_shutdownCts.IsCancellationRequested)
+        {
+            // Budget expiry, not shutdown — serve the partial result (see above).
         }
 
         if (ct.IsCancellationRequested && !_shutdownCts.IsCancellationRequested)
