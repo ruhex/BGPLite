@@ -729,6 +729,22 @@ public sealed class BgpSession : IDisposable
                 LogPeerClosedEstablished(ex);
                 return;
             }
+            catch (BgpParseException ex) when (ex.ErrorCode == BgpConstants.Error.OpenMessageError)
+            {
+                // #427 (RFC 4271 §8.2.2): an OPEN received in Established is an FSM error
+                // regardless of body validity — Established accepts only UPDATE, KEEPALIVE,
+                // NOTIFICATION and ROUTE_REFRESH, and a conformant speaker never parses the body.
+                // The body-error filter below must NOT keep the session up for this message class
+                // (that treatment is UPDATE-specific, D17). Same teardown as the FSM-error default
+                // case: exactly one NOTIFICATION 5/0 (CAS-latched), then Idle.
+                _logger.LogWarning("OPEN received from {Peer} in Established — FSM error (RFC 4271 §8.2.2)", _peer);
+                if (Interlocked.CompareExchange(ref _teardownReason, (int)TeardownReason.LocalCease, (int)TeardownReason.None) == (int)TeardownReason.None)
+                {
+                    try { await SendNotificationAsync(BgpConstants.Error.FiniteStateMachineError, BgpConstants.SubError.Unspecific); }
+                    catch { /* best-effort — partial write counts, see RFC 4271 §8.1 */ }
+                }
+                return;
+            }
             catch (BgpParseException ex) when (ex.ErrorCode is not null)
             {
                 // #222: a malformed message BODY (truncated path attribute, out-of-range NLRI length,
