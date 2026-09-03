@@ -21,6 +21,8 @@ public class HttpPrefixProviderTests
             _body = body;
         }
 
+        public StubHandler() : this(HttpStatusCode.OK, "10.0.0.0/8\n") { }
+
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
         {
             LastRequestUri = request.RequestUri;
@@ -33,6 +35,7 @@ public class HttpPrefixProviderTests
         private readonly HttpMessageHandler _handler;
         private readonly string? _defaultUserAgent;
         public HttpClient? LastClient { get; private set; }
+        public string LastName { get; private set; } = "";
         public StubFactory(HttpMessageHandler handler, string? defaultUserAgent = null)
         {
             _handler = handler;
@@ -40,6 +43,7 @@ public class HttpPrefixProviderTests
         }
         public HttpClient CreateClient(string name)
         {
+            LastName = name;
             LastClient = new HttpClient(_handler, disposeHandler: false);
             if (_defaultUserAgent is not null)
                 LastClient.DefaultRequestHeaders.UserAgent.ParseAdd(_defaultUserAgent);
@@ -78,6 +82,31 @@ public class HttpPrefixProviderTests
         var provider = Provider(new StubHandler(HttpStatusCode.OK, "1.2.3.0/24\n5.6.0.0/16\n"));
         var result = await provider.LoadAsync(HttpSource("https://raw.githubusercontent.com/o/r/main/x.txt"));
         Assert.Equal(2, result.Prefixes.Count);
+    }
+
+    [Fact]
+    public async Task LoadAsync_UsesTheClientNameFromTheCtor()
+    {
+        // #425: the user-source instance must draw its HttpClient from the retry-only named
+        // pipeline, never from the shared breaker pipeline the operator sources use.
+        var factory = new StubFactory(new StubHandler());
+        var provider = new HttpPrefixProvider(
+            factory, NullLogger<HttpPrefixProvider>.Instance, clientName: HttpPrefixProvider.UserSourceClientName);
+
+        await provider.LoadAsync(HttpSource("https://example.com/u.txt"));
+
+        Assert.Equal(HttpPrefixProvider.UserSourceClientName, factory.LastName);
+    }
+
+    [Fact]
+    public async Task LoadAsync_DefaultsToTheOperatorClientName()
+    {
+        var factory = new StubFactory(new StubHandler());
+        var provider = new HttpPrefixProvider(factory, NullLogger<HttpPrefixProvider>.Instance);
+
+        await provider.LoadAsync(HttpSource("https://example.com/o.txt"));
+
+        Assert.Equal(HttpPrefixProvider.ClientName, factory.LastName);
     }
 
     [Fact]
