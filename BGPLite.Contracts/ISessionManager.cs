@@ -26,6 +26,15 @@ public interface ISessionManager
     Task TerminatePeerAsync(string peerIp, uint asn, CancellationToken ct = default);
 
     /// <summary>
+    /// Terminates all live BGP sessions arriving from ONE source IP, regardless of their ASN
+    /// (#422). The IP-only counterpart of <see cref="TerminatePeerAsync"/>: a deleted peer row
+    /// with a NULL Asn (legacy Ip-only era rows) cannot be matched by (Ip, Asn) — no live session
+    /// ever has RemoteAsn 0 — so without this the teardown was a silent no-op and the session kept
+    /// advertising a deleted peer. Same Cease + dispose semantics as <see cref="TerminatePeerAsync"/>.
+    /// </summary>
+    Task TerminatePeerByIpAsync(string peerIp, CancellationToken ct = default);
+
+    /// <summary>
     /// Sets or clears the TCP-MD5 (RFC 2385) shared key for a peer's source IP (#36). A password
     /// enables enforcement on the listening socket (unsigned segments from that peer are dropped
     /// by the kernel); null/empty disables it. Passwords are never logged.

@@ -53,6 +53,42 @@ public sealed class PeerDeleteTeardownTests
         Assert.Empty(manager.Terminated);
     }
 
+    [Fact]
+    public async Task DeletePeer_NullAsn_TerminatesByIp_NotSilentNoOp()
+    {
+        // #422: a legacy NULL-Asn row cannot match a live session by (Ip, Asn) — no session ever
+        // has RemoteAsn 0 (AS 0 OPENs are rejected, #300) — so the pre-#422 `asn ?? 0` teardown
+        // was a SILENT no-op: the row was deleted while its session kept advertising. The delete
+        // must terminate by IP instead.
+        using var connection = NewOpenConnection();
+        var store = NewStore(connection);
+        InsertLegacyNullAsnRow(connection, "203.0.113.9");
+        var row = (await store.GetPeersByIpAsync("203.0.113.9")).Single();
+        var manager = new RecordingSessionManager();
+        using var api = NewApi(store, manager);
+
+        var response = await api.HandleDeletePeer(row.Id);
+
+        Assert.Equal(200, response.StatusCode);
+        Assert.Empty(manager.Terminated); // the (Ip, Asn=0) match is gone — it never matched anything
+        Assert.Equal("203.0.113.9", Assert.Single(manager.TerminatedByIp));
+        Assert.Null(await store.GetDbPeerByIdAsync(row.Id));
+    }
+
+    /// <summary>A row from the Ip-only era: no Asn column value (#19 pre-#422 legacy shape).</summary>
+    private static void InsertLegacyNullAsnRow(SqliteConnection connection, string ip)
+    {
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText =
+            "INSERT INTO Peers (Id, Ip, Asn, Description, Status, CreatedAt, LastSessionAt) " +
+            "VALUES ('legacy-row', @ip, NULL, NULL, 'inactive', '2026-01-01T00:00:00.0000000Z', NULL)";
+        var p = cmd.CreateParameter();
+        p.ParameterName = "@ip";
+        p.Value = ip;
+        cmd.Parameters.Add(p);
+        cmd.ExecuteNonQuery();
+    }
+
     // ---- management API: TCP-MD5 key re-arm on delete (#418) ----
 
     [Fact]
@@ -283,6 +319,7 @@ public sealed class PeerDeleteTeardownTests
     private sealed class RecordingSessionManager(Func<string, uint, Task>? onTerminate = null) : ISessionManager
     {
         public List<(string Ip, uint Asn)> Terminated { get; } = [];
+        public List<string> TerminatedByIp { get; } = [];
         public List<(string Ip, string? Password)> Md5Keys { get; } = [];
 
         public Task RefreshPeerAsync(string peerIp, uint asn) => Task.CompletedTask;
@@ -294,6 +331,11 @@ public sealed class PeerDeleteTeardownTests
         {
             Terminated.Add((peerIp, asn));
             if (onTerminate is not null) await onTerminate(peerIp, asn);
+        }
+        public Task TerminatePeerByIpAsync(string peerIp, CancellationToken ct = default)
+        {
+            TerminatedByIp.Add(peerIp);
+            return Task.CompletedTask;
         }
         public void SetPeerMd5Key(string peerIp, string? password) => Md5Keys.Add((peerIp, password));
     }
