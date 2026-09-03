@@ -104,6 +104,111 @@ public sealed class ManagementApiShutdownTests : IDisposable
     }
 
     [Fact]
+    public async Task AsnListsGet_ExternalFetchBudget_BoundsColdRequests()
+    {
+        // #424: a cold /api/asn-lists fetches RIPEstat per ASN (minutes-scale per ASN); N such GETs
+        // used to monopolize the global in-flight cap and starve every other route. The handler's
+        // wall-clock budget (default 30s, shrunk here) bounds the request: the parked provider is
+        // cancelled, the partial counts are served, status stays 200 — never a hang.
+        var provider = new BlockingRuPrefixService();
+        for (var attempt = 0; ; attempt++)
+        {
+            var port = FreeTcpPort();
+            var config = new AppConfig
+            {
+                ApiListen = "127.0.0.1",
+                ApiPort = port,
+                Bgp = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1" },
+                RipeStat = new RipeStatConfig { AsnLists = [new AsnList { Name = "ru", Country = "RU" }] }
+            };
+            _api = new ManagementApi(
+                new PeerStore(new StaticOptionsFactory(new DbContextOptionsBuilder<BgpDbContext>().UseSqlite(_connection).Options)),
+                new RouteTable(),
+                config,
+                new BgpMetrics(),
+                NullLogger<ManagementApi>.Instance,
+                provider,
+                new InertPrefixSourceService(),
+                new InertSessionManager());
+            _api.ExternalFetchBudget = TimeSpan.FromMilliseconds(250);
+            try
+            {
+                await _api.StartAsync(CancellationToken.None);
+                _port = port;
+                break;
+            }
+            catch (HttpListenerException) when (attempt < 2)
+            {
+                _api.Dispose();
+                _api = null;
+            }
+        }
+        _client = new HttpClient();
+
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+        var response = await _client.GetAsync($"http://127.0.0.1:{_port}/api/asn-lists");
+        watch.Stop();
+
+        await provider.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5)); // the fetch really started
+        Assert.True(watch.Elapsed < TimeSpan.FromSeconds(5),
+            $"the fetch budget must bound the request, took {watch.Elapsed}");
+        Assert.True(response.IsSuccessStatusCode, "budget expiry must degrade to a partial 200, not an error");
+    }
+
+    [Fact]
+    public async Task ExportPrefixesGet_ExternalFetchBudget_BoundsColdRequests()
+    {
+        // #424: /api/peers/{id}/prefixes has the same cold-fetch shape (subscription ASN/RU pulls).
+        var store = new PeerStore(new StaticOptionsFactory(new DbContextOptionsBuilder<BgpDbContext>().UseSqlite(_connection).Options));
+        var peerId = await store.CreatePeerAsync("203.0.113.42", 65002, null);
+        await store.SetSubscriptionsAsync(peerId, ["ru"]);
+
+        var provider = new BlockingRuPrefixService();
+        for (var attempt = 0; ; attempt++)
+        {
+            var port = FreeTcpPort();
+            var config = new AppConfig
+            {
+                ApiListen = "127.0.0.1",
+                ApiPort = port,
+                Bgp = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1" },
+                RipeStat = new RipeStatConfig { AsnLists = [new AsnList { Name = "ru", Country = "RU" }] }
+            };
+            _api = new ManagementApi(
+                store,
+                new RouteTable(),
+                config,
+                new BgpMetrics(),
+                NullLogger<ManagementApi>.Instance,
+                provider,
+                new InertPrefixSourceService(),
+                new InertSessionManager());
+            _api.ExternalFetchBudget = TimeSpan.FromMilliseconds(250);
+            try
+            {
+                await _api.StartAsync(CancellationToken.None);
+                _port = port;
+                break;
+            }
+            catch (HttpListenerException) when (attempt < 2)
+            {
+                _api.Dispose();
+                _api = null;
+            }
+        }
+        _client = new HttpClient();
+
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+        var response = await _client.GetAsync($"http://127.0.0.1:{_port}/api/peers/{peerId}/prefixes");
+        watch.Stop();
+
+        await provider.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.True(watch.Elapsed < TimeSpan.FromSeconds(5),
+            $"the fetch budget must bound the request, took {watch.Elapsed}");
+        Assert.True(response.IsSuccessStatusCode, "budget expiry must degrade to a partial 200, not an error");
+    }
+
+    [Fact]
     public async Task StartAsync_Retries_WhenThePortIsTaken()
     {
         // FreeTcpPort has an inherent TOCTOU window — a concurrent bind between the probe and
