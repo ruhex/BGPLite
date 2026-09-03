@@ -216,7 +216,9 @@ internal sealed class UserSourceCache
         if (_cache.ContainsKey(insertingUrl)) return; // already present, no insert coming
 
         var now = _timeProvider.GetUtcNow().UtcDateTime;
-        var toEvict = new List<string>();
+        // #487: HashSet — the Contains in the oldest-selection loop below made eviction O(n²) at
+        // the 1024-entry cap.
+        var toEvict = new HashSet<string>();
         foreach (var (key, entry) in _cache)
         {
             var ttl = entry.Negative ? _negativeTtl : _positiveTtl;
@@ -280,7 +282,7 @@ internal sealed class UserSourceCache
         Volatile.Write(ref _callsSinceSweep, 0);
 
         var now = _timeProvider.GetUtcNow().UtcDateTime;
-        var toEvict = new List<string>();
+        var toEvict = new HashSet<string>();   // #487: O(1) Contains for the budget loop below
         long total = 0;
         foreach (var (key, entry) in _cache)
         {

@@ -382,6 +382,34 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
     }
 
     [Fact]
+    public async Task AddSource_FieldLimits_And_PerPeerCap_AreEnforced()
+    {
+        // #487: repeated POSTs bounded — name/URL length ceilings and a per-peer source-count cap
+        // (the 1 MiB body cap bounds ONE request; the DB rows outlive it).
+        var store = new PeerStore(new StaticOptionsFactory(new DbContextOptionsBuilder<BgpDbContext>().UseSqlite(_connection).Options));
+        var id = (await store.SavePeerConfigurationAsync("198.51.100.8", 65091, null, [], [], [])).Id;
+        _port = await StartAsync(new AppConfig { Bgp = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1" } });
+        _client = new HttpClient();
+
+        var longName = new string('n', ManagementApi.MaxSourceNameLength + 1);
+        using var badName = await _client.PostAsync($"http://127.0.0.1:{_port}/api/peers/{id}/sources",
+            new StringContent(JsonSerializer.Serialize(new { name = longName, url = "https://example.com/l" }), Encoding.UTF8, "application/json"));
+        Assert.Equal(HttpStatusCode.BadRequest, badName.StatusCode);
+
+        var longUrl = "https://example.com/" + new string('u', ManagementApi.MaxSourceUrlLength);
+        using var badUrl = await _client.PostAsync($"http://127.0.0.1:{_port}/api/peers/{id}/sources",
+            new StringContent(JsonSerializer.Serialize(new { name = "ok", url = longUrl }), Encoding.UTF8, "application/json"));
+        Assert.Equal(HttpStatusCode.BadRequest, badUrl.StatusCode);
+
+        // Seed the per-peer cap directly through the store, then POST one more → 400.
+        for (var i = 0; i < ManagementApi.MaxSourcesPerPeer; i++)
+            await store.AddCustomSourceAsync(id, $"s{i}", $"https://example.com/{i}", null);
+        using var capped = await _client.PostAsync($"http://127.0.0.1:{_port}/api/peers/{id}/sources",
+            new StringContent(JsonSerializer.Serialize(new { name = "one-too-many", url = "https://example.com/x" }), Encoding.UTF8, "application/json"));
+        Assert.Equal(HttpStatusCode.BadRequest, capped.StatusCode);
+    }
+
+    [Fact]
     public async Task AsnLists_BudgetExpiryMidSources_ServesPartialJson()
     {
         // #480: the budget token firing during LoadAllAsync must degrade to the partial response

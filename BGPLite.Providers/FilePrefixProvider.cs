@@ -41,6 +41,13 @@ public sealed class FilePrefixProvider(ILogger<FilePrefixProvider> logger) : IPr
         // #321 item 5: async read with the caller's token — the sync ReadAllText held a threadpool
         // thread under the per-source gate for the whole file. The metadata probes above stay
         // sync: they are single stat calls, not reads.
+        // #487: cap parity with the HTTP paths (HttpPrefixProvider.MaxResponseBytes) — the file is
+        // operator-controlled, but a multi-GB "prefix list" is never legitimate and the uncapped
+        // read was an asymmetric memory-amplification footgun.
+        var length = new FileInfo(fullPath).Length;
+        if (length > HttpPrefixProvider.MaxResponseBytes)
+            throw new InvalidOperationException(
+                $"Prefix file for source '{source.Name}' is {length} bytes — over the {HttpPrefixProvider.MaxResponseBytes}-byte cap.");
         var text = await File.ReadAllTextAsync(fullPath, ct);
         var prefixes = PrefixListParser.Parse(text);
         logger.LogInformation("Source '{Name}' (file): loaded {Count} prefixes from {Path}", source.Name, prefixes.Count, fullPath);

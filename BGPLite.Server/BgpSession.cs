@@ -31,8 +31,9 @@ public sealed class BgpSession : IDisposable
     private readonly ILogger<BgpSession> _logger;
     private readonly CancellationTokenSource _cts = new();
     private readonly Func<string, uint, CancellationToken, Task>? _onPeerIdentified;
-    // #15 phase 2: the peer advertised MP-BGP IPv6/Unicast.
-    private bool _peerMpIpv6Unicast;
+    // #15 phase 2: the peer advertised MP-BGP IPv6/Unicast. Written once on the session thread
+    // (ValidateOpenAsync); read cross-thread on the API-refresh/send paths — volatile (#487).
+    private volatile bool _peerMpIpv6Unicast;
     // #467 (RFC 7606 §3(j) "AFI/SAFI disable"): set when an unparseable MP attribute withdraws
     // the family — subsequent MP_REACH/MP_UNREACH payloads from this peer are ignored and its
     // accepted IPv6 routes are gone. Volatile: written on the read loop, read on send paths.
@@ -72,7 +73,10 @@ public sealed class BgpSession : IDisposable
     // StopAsync/replace path), read by the RunAsync finally-block on a different thread.
     private int _teardownReason = (int)TeardownReason.None;
     private int _disposed;
-    private uint _remoteAsn;
+    // Negotiated from the peer's OPEN (OpenNegotiator). Written on the session thread before
+    // Established; read cross-thread by BgpServer's (Ip, Asn) filters and the refresh/send paths
+    // — volatile for guaranteed visibility (#487, matching _peerMpV6Disabled).
+    private volatile uint _remoteAsn;
     private bool _remoteFourByteAsn;
     private bool _remoteRouteRefresh;
     private bool _localFourByteAsn; // derived from negotiated OPEN capability (RFC 6793)

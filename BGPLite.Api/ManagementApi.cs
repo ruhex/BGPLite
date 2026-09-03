@@ -68,6 +68,12 @@ public sealed class ManagementApi : IHostedService, IDisposable
     /// their PARTIAL result with a warning; shutdown still propagates. internal settable for tests.
     /// </summary>
     internal TimeSpan ExternalFetchBudget { get; set; } = TimeSpan.FromSeconds(30);
+
+    // #487: bounds for peer-supplied custom sources — generous ceilings that only reject abuse
+    // (repeated POSTs growing the DB without limit; megabyte-scale names/URLs in logs and rows).
+    internal const int MaxSourceNameLength = 200;
+    internal const int MaxSourceUrlLength = 2048;
+    internal const int MaxSourcesPerPeer = 64;
     // #258: in-flight tracking is a COUNT plus an idle Task (completed whenever the count is 0),
     // not a List<Task> — the #248 design appended every handler and never removed it, so each
     // completed request leaked its Task (and its exception, if faulted) for the process lifetime
@@ -721,7 +727,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
         {
             asn = bgp.Asn,
             routerId = bgp.RouterId,
-            bgpPort = 179,
+            bgpPort = BgpConstants.BgpPort,
             apiPort = _port,
             holdTime = bgp.HoldTime,
             keepalive = bgp.KeepAlive,
@@ -1115,13 +1121,18 @@ public sealed class ManagementApi : IHostedService, IDisposable
 
         await _store.UpdatePeerConfigurationAsync(peerId, data.Description, data.Lists, parsedPrefixes, data.CustomAsns, data.MaxPrefix,
             md5Password: data.Md5Password);
+        // #487: a concurrent DELETE between the top-of-handler GET and this UPDATE left the
+        // ExecuteUpdates touching 0 rows while the handler still logged "Updated peer", answered
+        // 200 and fired a refresh — the follow-up GET then 404ed. Re-check the row and answer 404
+        // directly (the write itself is harmless: transaction-scoped, 0 rows affected).
+        var surviving = await _store.GetDbPeerByIdAsync(peerId);
+        if (surviving is null)
+            return ApiResponse.Error("Peer not found", 404);
         if (data.Md5Password is not null)
         {
             // #418: re-arm from ALL surviving rows for this IP — clearing this peer's key must
             // fall back to a sibling's, not silently disarm the address for every peer on it.
-            var md5Peer = await _store.GetDbPeerByIdAsync(peerId);
-            if (md5Peer is not null)
-                await RearmPeerIpMd5KeyAsync(md5Peer.Ip);
+            await RearmPeerIpMd5KeyAsync(surviving.Ip);
         }
 
         _logger.LogInformation("Updated peer {Id}", SanitizeForLog(peerId));
@@ -1216,6 +1227,16 @@ public sealed class ManagementApi : IHostedService, IDisposable
 
         if (data is null || string.IsNullOrWhiteSpace(data.Name) || string.IsNullOrWhiteSpace(data.Url))
             return ApiResponse.Error("Name and Url are required", 400);
+
+        // #487: bound the peer-supplied fields and the per-peer source count. The 1 MiB body cap
+        // bounds ONE request; nothing bounded repeated posts, and the DB rows outlive the request.
+        // Generous limits: a longer name/URL is never legitimate, and a peer needs far fewer
+        // sources than the user-source cache's 1024-URL entry cap.
+        if (data.Name.Length > MaxSourceNameLength || data.Url.Length > MaxSourceUrlLength)
+            return ApiResponse.Error(
+                $"Name must be at most {MaxSourceNameLength} characters and Url at most {MaxSourceUrlLength}.", 400);
+        if ((await _store.GetCustomSourcesAsync(peerId)).Count >= MaxSourcesPerPeer)
+            return ApiResponse.Error($"Peer already has the maximum of {MaxSourcesPerPeer} custom sources.", 400);
 
         // #266 item 3: the community is peer-supplied and reaches the wire through
         // CommunityCodec at send time — validate the SAME contract at the API boundary (#255
