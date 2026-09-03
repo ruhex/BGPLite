@@ -273,10 +273,22 @@ public sealed class PrefixService : IPrefixService
     public async Task<IReadOnlyList<(UInt128 Prefix, byte Length, bool IsIpv4)>> GetSourcePrefixesAsync(string name, CancellationToken ct = default) =>
         ToContract(await _prefixSources.GetAsync(name, ct));
 
-    /// <summary>Provider-native <see cref="IpPrefix"/> values mapped onto the Contracts tuple
-    /// layout (Contracts is a dependency-free leaf and cannot see the Protocol type).</summary>
+    /// <summary>
+    /// Provider-native <see cref="IpPrefix"/> values mapped onto the Contracts tuple layout
+    /// (Contracts is a dependency-free leaf and cannot see the Protocol type).
+    /// <para>
+    /// #429: the projection is memoized by the NATIVE list instance (ConditionalWeakTable — freed
+    /// with it, no eviction needed). All three cache layers return the SAME list instance until
+    /// their next reload, so every warm call was re-projecting an 11k-entry list per peer per
+    /// refresh; now the tuple list is built once per load and shared read-only.
+    /// </para>
+    /// </summary>
+    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable
+        <IReadOnlyList<IpPrefix>, IReadOnlyList<(UInt128 Prefix, byte Length, bool IsIpv4)>> ContractMemo = new();
+
     private static IReadOnlyList<(UInt128 Prefix, byte Length, bool IsIpv4)> ToContract(IReadOnlyList<IpPrefix> prefixes) =>
-        prefixes.Select(p => (p.Address, p.Length, p.IsIpv4)).ToList();
+        ContractMemo.GetValue(prefixes, p =>
+            (IReadOnlyList<(UInt128, byte, bool)>)p.Select(x => (x.Address, x.Length, x.IsIpv4)).ToList());
 
     public async Task WarmUpAsync(CancellationToken ct = default)
     {
