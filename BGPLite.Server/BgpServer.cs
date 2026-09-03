@@ -573,6 +573,7 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
         _listener?.Close();
         _cts.Cancel();
         _cts.Dispose();  // #105: dispose the CTS (StopAsync's graceful path doesn't reach here)
+        _statusTimer?.Dispose();  // #487: the abort path never runs StopAsync — don't leak the timer to GC
         foreach (var session in _sessions.Values)
             session.Dispose();
     }

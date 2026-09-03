@@ -71,6 +71,11 @@ public sealed class ConfigReloader : IHostedService, IDisposable
         _watcher.Changed += OnFileChanged;
         _watcher.Created += OnFileChanged;
         _watcher.Renamed += OnFileChanged;
+        // #487: an internal-buffer overflow (busy save storms) drops events SILENTLY — hot reload
+        // would quietly stop working until the next successful save. Surface it; the operator can
+        // then touch the file or restart.
+        _watcher.Error += (_, e) => _logger.LogWarning(e.GetException(),
+            "Config hot-reload watcher error (buffer overflow?) — change events may have been LOST; touch the config file to force a reload.");
         _watcher.EnableRaisingEvents = true;
 
         // One debounce timer, rearmed (never auto-recurring): fires exactly once, DebounceMs after
