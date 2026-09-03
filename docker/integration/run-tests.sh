@@ -138,7 +138,9 @@ ROUTES4=$(birdc "show route protocol bgplite4 count" 2>/dev/null | tail -n +2 | 
   || fail "expected >=100 routes from the openai HTTP source on bgplite4, got: $ROUTES4"
 printf 'bgplite4 carries %s routes (custom + HTTP-source subscription)\n' "$ROUTES4"
 
-# The UNREGISTERED IPv6-transport peer gets the RU defaults (= the file seed source).
+# The IPv6-transport peer is REGISTERED but configures no lists/custom prefixes, so the
+# assembler's zero-resolved-prefixes branch falls back to the RU defaults (= the file seed
+# source) for it — same source the unconfigured case would get.
 # The IPv4 seeds ride as classic IPv4 NLRI over the IPv6 transport, imported by
 # bgplite6's IPv4 channel — and the IPv6 seed rides MP_REACH_NLRI (#14 phase 4b):
 # BIRD's IPv6 channel must import 2001:db8:cccc::/64 from the server.
