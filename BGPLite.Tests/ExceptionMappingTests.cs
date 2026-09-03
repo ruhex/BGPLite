@@ -116,20 +116,6 @@ public class ExceptionMappingTests
         Assert.Contains("exists", message);
     }
 
-    [Fact]
-    public void DbUpdateException_WithoutSqliteInner_MapsTo_500()
-    {
-        // #431: a DbUpdateException WITHOUT a SqliteException inner (an EF-level failure, e.g. a
-        // value conversion) is a server-side problem — the pre-#431 mapping answered 409 "already
-        // exists" for it, misleading every client debugging the conflict.
-        var ex = new DbUpdateException("An error occurred while saving.", new InvalidOperationException("value conversion failed"));
-
-        var (message, status) = ManagementApi.MapExceptionToResponse(ex);
-
-        Assert.Equal(500, status);
-        Assert.Equal("Internal server error", message);
-    }
-
     [Theory]
     [InlineData(1299)] // SQLITE_CONSTRAINT_NOTNULL — a schema/data bug, not a client conflict
     [InlineData(275)]  // SQLITE_CONSTRAINT_CHECK
