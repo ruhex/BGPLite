@@ -27,7 +27,7 @@ public sealed class PrefixService : IPrefixService
     // when the TTL elapses. Mirrors the per-ASN gate pattern in GetPrefixesAsync.
     private readonly SemaphoreSlim _ruGate = new(1, 1);
 
-    public PrefixService(AppConfig config, RipeStatPrefixCache ripeStatCache, IPrefixSourceService prefixSources, HttpPrefixProvider httpProvider, TimeSpan? ruCacheTtl = null, ILogger<PrefixService>? logger = null, TimeProvider? timeProvider = null, int? userSourceTimeoutSeconds = null)
+    public PrefixService(AppConfig config, RipeStatPrefixCache ripeStatCache, IPrefixSourceService prefixSources, HttpPrefixProvider httpProvider, TimeSpan? ruCacheTtl = null, ILogger<PrefixService>? logger = null, TimeProvider? timeProvider = null, int? userSourceTimeoutSeconds = null, Func<string, Task>? onSourceChanged = null)
     {
         _config = config;
         _ripeStatCache = ripeStatCache;
@@ -41,6 +41,9 @@ public sealed class PrefixService : IPrefixService
         // stall the route dump behind the per-URL gate.
         _userSourceTimeoutSeconds = userSourceTimeoutSeconds ?? DefaultUserSourceTimeoutSeconds;
         _userSourceCache = new UserSourceCache(logger: logger, timeProvider: _timeProvider);
+        // #416: convergence push for default-source changes detected on the RU path. Fired AFTER
+        // _ruGate.Release() in GetRuPrefixesAsync — never while the gate is held.
+        _onSourceChanged = onSourceChanged;
     }
 
     /// <summary>Default per-fetch budget for peer-supplied URL sources (#320).</summary>
@@ -178,9 +181,18 @@ public sealed class PrefixService : IPrefixService
     /// fetch so concurrent callers share one default-source load (thundering-herd defense), and
     /// stale-on-failure serves the last good copy on a transient fetch error (#163 parity).
     /// </para>
+    /// <para>
+    /// #416: the convergence push for a detected content change fires AFTER <c>_ruGate.Release()</c>
+    /// — the load itself runs callback-free (<see cref="IPrefixSourceService.LoadDefaultAsync"/>).
+    /// Firing it while the gate was held deadlocked the fleet refresh: the push re-enters this
+    /// method from other sessions' builds, which blocked on the gate the triggering frame still
+    /// held, while that frame awaited the push (Task.WhenAll over every session) — a permanent
+    /// circular wait with sessions staying Established and nothing in the logs.
+    /// </para>
     /// </summary>
     private sealed record RuCacheEntry(List<(UInt128 Prefix, byte Length, bool IsIpv4, uint Asn)> Projected, long CachedAtTicks);
     private RuCacheEntry? _ruCache;
+    private readonly Func<string, Task>? _onSourceChanged;
 
     public async Task<List<(UInt128 Prefix, byte Length, bool IsIpv4, uint Asn)>> GetRuPrefixesAsync(CancellationToken ct = default)
     {
@@ -192,6 +204,8 @@ public sealed class PrefixService : IPrefixService
 
         // Serialize the cache-miss fetch so concurrent callers share one default-source fetch
         // (thundering-herd defense — #229). Mirrors the per-ASN gate in GetPrefixesAsync.
+        List<(UInt128 Prefix, byte Length, bool IsIpv4, uint Asn)> projected;
+        var changed = false;
         await _ruGate.WaitAsync(ct);
         try
         {
@@ -200,11 +214,14 @@ public sealed class PrefixService : IPrefixService
             if (cached is not null && _timeProvider.GetUtcNow().UtcDateTime.Ticks - cached.CachedAtTicks < _ruCacheTtl.Ticks)
                 return cached.Projected;
 
-            List<(UInt128 Prefix, byte Length, bool IsIpv4, uint Asn)> projected;
             try
             {
-                var prefixes = await _prefixSources.GetDefaultAsync(ct);
+                // Callback-free load (#416): no onSourceChanged can fire while this frame holds
+                // the gate. Failures propagate so the stale-on-failure branch below stays live —
+                // a failed cold load must not be cached as a positive empty set.
+                var (prefixes, loadChanged) = await _prefixSources.LoadDefaultAsync(ct);
                 projected = prefixes.Select(p => (p.Address, p.Length, p.IsIpv4, 0u)).ToList();
+                changed = loadChanged;
             }
             catch (OperationCanceledException) { throw; }
             catch (Exception ex)
@@ -226,12 +243,25 @@ public sealed class PrefixService : IPrefixService
             // Swap the whole entry atomically — projection and timestamp move together, so a reader
             // can never observe a mismatched (new projection, old timestamp) pair.
             Interlocked.Exchange(ref _ruCache, new RuCacheEntry(projected, _timeProvider.GetUtcNow().UtcDateTime.Ticks));
-            return projected;
         }
         finally
         {
             _ruGate.Release();
         }
+
+        // #416: the push runs AFTER the gate is released — a re-entrant GetRuPrefixesAsync (another
+        // session's build) takes the fast path against the just-written cache instead of blocking
+        // on this frame. A failure is logged, never propagated into the caller's route dump.
+        if (changed && _onSourceChanged is not null)
+        {
+            try { await _onSourceChanged(_config.DefaultPrefixSource ?? string.Empty); }
+            catch (Exception ex)
+            {
+                _logger?.LogWarning(ex, "OnSourceChanged callback failed for the default prefix source.");
+            }
+        }
+
+        return projected;
     }
 
     /// <summary>Prefixes of a configured source by name (cache-through).</summary>

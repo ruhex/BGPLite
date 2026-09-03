@@ -80,23 +80,40 @@ public sealed class PrefixSourceService : IPrefixSourceService
 
     public async Task<IReadOnlyList<IpPrefix>> GetDefaultAsync(CancellationToken ct = default)
     {
+        // Deliberately swallowing: GetDefaultAsync is the "best-effort" shape (empty on unset
+        // source, missing source, or fetch failure). #416 split the callback-free, propagating
+        // variant into LoadDefaultAsync for the RU path, whose caller has stale-on-failure
+        // handling a swallowed exception would defeat.
+        try { return (await LoadDefaultAsync(ct)).Prefixes; }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }  // #324: only CALLER cancellation — the #324 default fetch budget fires as a foreign-token OCE (live ct) and must stay a per-source failure below
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to load default prefix source '{Name}'.", _config.DefaultPrefixSource);
+            return [];
+        }
+    }
+
+    /// <inheritdoc cref="IPrefixSourceService.LoadDefaultAsync" />
+    /// <remarks>
+    /// Same load as <see cref="GetDefaultAsync"/> minus two things, both deliberate (#416):
+    /// the <c>onSourceChanged</c> callback is NOT fired (the caller owns the push, off its own
+    /// locks), and failures PROPAGATE instead of collapsing to <c>[]</c> — the RU caller
+    /// (<c>PrefixService.GetRuPrefixesAsync</c>) has stale-on-failure handling that a swallowed
+    /// exception would defeat (a failed cold load must not be cached as a positive empty set).
+    /// </remarks>
+    public async Task<(IReadOnlyList<IpPrefix> Prefixes, bool Changed)> LoadDefaultAsync(CancellationToken ct = default)
+    {
         var defaultName = _config.DefaultPrefixSource;
         if (string.IsNullOrWhiteSpace(defaultName))
-            return [];
+            return ([], false);
 
         if (!_sourcesByName.TryGetValue(defaultName, out var source))
         {
             _logger.LogWarning("DefaultPrefixSource '{Name}' does not match any configured source.", defaultName);
-            return [];
+            return ([], false);
         }
 
-        try { return (await LoadCachedAsync(source, ct)).Prefixes; }
-        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }  // #324: only CALLER cancellation — the #324 default fetch budget fires as a foreign-token OCE (live ct) and must stay a per-source failure below
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Failed to load default prefix source '{Name}'.", defaultName);
-            return [];
-        }
+        return await LoadCachedAsync(source, ct, triggerCallback: false);
     }
 
     public async Task<IReadOnlyList<(PrefixSourceConfig Source, IReadOnlyList<IpPrefix> Prefixes)>> LoadAllAsync(CancellationToken ct = default)
