@@ -68,8 +68,9 @@ public sealed class BgpSessionPhantomWithdrawalTests
         // Healthy refresh #1: the /8 is advertised normally.
         await session.RefreshRoutesAsync();
 
-        // Inject the poison route and refresh: the composed UPDATE exceeds MaxMessageSize, the
-        // writer throws mid-send, and RefreshCycleAsync contains the failure (session stays up).
+        // Inject the poison route and refresh: the composed UPDATE exceeds MaxMessageSize and is
+        // dropped before the wire (#457 pre-validation; pre-#457 the writer threw mid-send and
+        // RefreshCycleAsync contained the failure — same observable outcome, session stays up).
         routeTable.AddOrUpdate(PoisonRoute());
         await session.RefreshRoutesAsync();
 
@@ -112,6 +113,42 @@ public sealed class BgpSessionPhantomWithdrawalTests
         Assert.Contains(updates, u => u.Nlri.Any(p => p.Address == 0x0A000000 && p.Length == 8));
         var withdrawal = updates.LastOrDefault(u => u.WithdrawnRoutes.Any(p => p.Address == 0x0A000000));
         Assert.NotNull(withdrawal);
+
+        session.Dispose();
+        try { await run.WaitAsync(TimeSpan.FromSeconds(2)); } catch (TimeoutException) { }
+    }
+
+    [Fact]
+    public async Task OversizeGroupAtInitialSend_SessionStaysUp_HealthyRoutesAdvertised()
+    {
+        // #457: the poison route present BEFORE establishment exercises the INITIAL-send path.
+        // Pre-fix the composed overflow threw ArgumentOutOfRangeException out of the initial dump
+        // into RunAsync's generic catch: best-effort Cease + teardown — the peer reconnected into
+        // the same state with zero routes, every time. Post-fix the unsplittable group (attributes
+        // are constant per community set; NLRI cannot overflow at the 100-per-UPDATE cap) is
+        // dropped loudly: the session establishes, the healthy seed reaches the wire, no
+        // NOTIFICATION is emitted, and the poison prefix never enters the mirror.
+        var routeTable = new RouteTable();
+        routeTable.AddOrUpdate(new Route { Prefix = 0x0A000000, PrefixLength = 8, NextHop = 1 }); // healthy seed
+        routeTable.AddOrUpdate(PoisonRoute());
+        var (session, run, conn) = await EstablishAsync(routeTable);
+        await Task.Delay(TimeSpan.FromMilliseconds(100)); // let the initial dump finish
+
+        Assert.True(session.IsEstablished, "the oversize group must not tear down the initial send");
+        var frames = conn.Sent.Select(f => BgpMessageReader.ReadMessage(f)).ToList();
+        Assert.DoesNotContain(frames, m => m is BgpNotificationMessage);
+        var updates = frames.OfType<BgpUpdateMessage>().ToList();
+        Assert.Contains(updates, u => u.Nlri.Any(p => p.Address == 0x0A000000 && p.Length == 8));
+        Assert.DoesNotContain(updates, u => u.Nlri.Any(p => p.Address == 0x0A010000 && p.Length == 16));
+        Assert.DoesNotContain(updates, u => u.WithdrawnRoutes.Count > 0);
+
+        // Mirror consistency on top of the dropped group: a later refresh withdraws ONLY the
+        // healthy /8 (the poison prefix was never advertised, so it must never be withdrawn).
+        routeTable.Remove(0x0A000000, 8);
+        await session.RefreshRoutesAsync();
+        await Task.Delay(TimeSpan.FromMilliseconds(100));
+        Assert.DoesNotContain(conn.Sent.Select(f => BgpMessageReader.ReadMessage(f)).OfType<BgpUpdateMessage>(),
+            u => u.WithdrawnRoutes.Any(p => p.Address == 0x0A010000 && p.Length == 16));
 
         session.Dispose();
         try { await run.WaitAsync(TimeSpan.FromSeconds(2)); } catch (TimeoutException) { }

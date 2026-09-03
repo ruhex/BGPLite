@@ -1456,6 +1456,24 @@ public sealed class BgpSession : IDisposable
             MpReachV6 = mpReach
         };
 
+        // #457: pre-validate the composed frame against the RFC 4271 §4.1 4096-byte maximum
+        // BEFORE it reaches the writer. An oversized frame threw ArgumentOutOfRangeException out
+        // of WriteHeader; on the initial-send path that unwound RunAsync's generic catch —
+        // best-effort Cease + teardown — so a peer whose route set contained one unsplittable
+        // group was reset on every reconnect with zero routes. The batch itself cannot overflow
+        // on NLRI (the 100-per-UPDATE cap bounds it well under the maximum), only the attributes
+        // can — and those are constant per community group, so there is nothing to split the
+        // batch into: the group is dropped loudly instead. Everything else is advertised, the
+        // mirror stays consistent (the dropped prefixes never enter it), the session stays up.
+        var bufferSize = BgpMessageWriter.GetBufferSize(update);
+        if (bufferSize > BgpConstants.MaxMessageSize)
+        {
+            _logger.LogError(
+                "Composed UPDATE to {Peer} is {Size} bytes — over the {Max}-byte BGP maximum and unsplittable (attributes are constant per community group); dropping this group of {Count} prefix(es)",
+                _peer, bufferSize, BgpConstants.MaxMessageSize, mpReach?.Prefixes.Count ?? nlri.Count);
+            return;
+        }
+
         await SendMessageAsync(update);
         // #430 + #450 review: per-UPDATE mirror commit — SendRouteBatchAsync/SendV6RouteBatchAsync
         // emit one UPDATE per community group, so a group that throws after an earlier group
