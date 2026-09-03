@@ -1427,16 +1427,25 @@ public sealed class BgpSession : IDisposable
     };
 
     /// <summary>
-    /// End-of-RIB marker for IPv4 unicast (RFC 4724 §2): a minimum-length UPDATE (no withdrawn
-    /// routes, no path attributes, no NLRI). Signals completion of the initial routing update so
-    /// GR-capable peers finalize — replacing stale routes with what we re-advertised and purging
-    /// the rest. Lock is acquired inside SendMessageAsync.
+    /// End-of-RIB markers (RFC 4724 §2), one per advertised family: a minimum-length UPDATE for
+    /// IPv4 unicast, and — for MP-IPv6-negotiated peers — an UPDATE carrying an EMPTY
+    /// MP_UNREACH_NLRI (AFI=2/SAFI=1), which is the IPv6 family's EoR. Signals completion of the
+    /// initial routing update so GR-capable peers finalize — replacing stale routes with what we
+    /// re-advertised and purging the rest. Lock is acquired inside SendMessageAsync.
     /// </summary>
     private async Task SendEndOfRibAsync()
     {
         await SendMessageAsync(new BgpUpdateMessage());
         _metrics.UpdateSent();
         _logger.LogDebug("End-of-RIB sent to {Peer}", _peer);
+
+        if (_peerMpIpv6Unicast)
+        {
+            var eor = new BgpUpdateMessage { PathAttributes = UpdateCodec.WithMpUnreachV6Attribute([]) };
+            await SendMessageAsync(eor);
+            _metrics.UpdateSent();
+            _logger.LogDebug("End-of-RIB (IPv6/Unicast) sent to {Peer}", _peer);
+        }
     }
 
     #region Message I/O
@@ -1737,7 +1746,7 @@ public sealed class BgpSession : IDisposable
         _logger.LogInformation("Peer {Peer} Graceful Restart: {State}",
             _peer,
             peerGr.HasValue
-                ? $"supported (restartState={peerGr.Value.RestartState}, restartTime={peerGr.Value.RestartTime}s, IPv4/Unicast forwarding={peerGr.Value.Ipv4UnicastForwarding})"
+                ? $"supported (restartState={peerGr.Value.RestartState}, restartTime={peerGr.Value.RestartTime}s, IPv4/Unicast forwarding={peerGr.Value.Ipv4UnicastForwarding}, IPv6/Unicast forwarding={peerGr.Value.Ipv6UnicastForwarding})"
                 : "not supported");
     }
 

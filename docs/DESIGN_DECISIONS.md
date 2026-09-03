@@ -62,7 +62,9 @@ For section-by-section RFC conformance status, see `RFC_COMPLIANCE.md` (2026-07-
   End-of-RIB) is not implemented, and advertising the `<AFI=1, SAFI=1, F>` tuple promised behavior
   the code does not have. The sending-side conveniences gated on the `GracefulRestart` config are
   unchanged: an End-of-RIB marker after the initial route dump, and the GR-aware silent close on
-  server shutdown (`StopAsync`).
+  server shutdown (`StopAsync`). #14 phase 5 made the factory/parser per-family (IPv4/Unicast AND
+  IPv6/Unicast tuples) and added the IPv6-family End-of-RIB (empty MP_UNREACH, RFC 4724 §2) for
+  MP-IPv6-negotiated peers; the advertisement itself remains off until retention exists.
 - **Context:** the capability was previously advertised by default while routes of a
   silently-disconnecting peer were flushed immediately (`RemoveAllOwnedBy`, #314) — a wire promise
   the code did not honor. RFC 4724 §4.2's MUST binds a speaker to the procedures it engages;

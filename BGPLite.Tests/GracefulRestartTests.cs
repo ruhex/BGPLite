@@ -12,22 +12,30 @@ public class GracefulRestartTests
         //   byte0 = 0x80 (R) | 0x01 (high nibble of 0x1FF) = 0x81
         //   byte1 = 0xFF (low byte of 0x1FF)
         //   IPv4(0x00,0x01) + Unicast(0x01) + AF flags 0x80 (F)
-        var cap = BgpCapabilityInfo.GracefulRestart(restartState: true, restartTime: 0x1FF, forwardingState: true);
+        //   IPv6(0x00,0x02) + Unicast(0x01) + AF flags 0x80 (F)
+        var cap = BgpCapabilityInfo.GracefulRestart(restartState: true, restartTime: 0x1FF, ipv4Forwarding: true, ipv6Forwarding: true);
 
         Assert.Equal(BgpConstants.Capability.GracefulRestart, cap.Code);
-        Assert.Equal(new byte[] { 0x81, 0xFF, 0x00, 0x01, 0x01, 0x80 }, cap.Data);
+        Assert.Equal(new byte[] { 0x81, 0xFF, 0x00, 0x01, 0x01, 0x80, 0x00, 0x02, 0x01, 0x80 }, cap.Data);
+
+        // A legacy v4-only payload (one tuple, no IPv6) still parses — v6 forwarding = false.
+        var legacy = BgpCapabilityInfo.TryParseGracefulRestart(new byte[] { 0x81, 0xFF, 0x00, 0x01, 0x01, 0x80 });
+        Assert.NotNull(legacy);
+        Assert.True(legacy!.Value.Ipv4UnicastForwarding);
+        Assert.False(legacy.Value.Ipv6UnicastForwarding);
     }
 
     [Fact]
     public void Capability_RoundTrips_Through_Parser()
     {
-        var cap = BgpCapabilityInfo.GracefulRestart(true, 120, true);
+        var cap = BgpCapabilityInfo.GracefulRestart(true, 120, true, ipv6Forwarding: true);
         var parsed = BgpCapabilityInfo.TryParseGracefulRestart(cap.Data);
 
         Assert.NotNull(parsed);
         Assert.True(parsed!.Value.RestartState);
         Assert.Equal((ushort)120, parsed.Value.RestartTime);
         Assert.True(parsed.Value.Ipv4UnicastForwarding);
+        Assert.True(parsed.Value.Ipv6UnicastForwarding);
     }
 
     [Fact]
@@ -41,7 +49,8 @@ public class GracefulRestartTests
         Assert.Equal((ushort)60, parsed.Value.RestartTime);
         Assert.False(parsed.Value.Ipv4UnicastForwarding);
         Assert.Equal(0x00, cap.Data[0]);   // no R, no high time bits
-        Assert.Equal(0x00, cap.Data[5]);   // no F
+        Assert.Equal(0x00, cap.Data[5]);   // no IPv4 F
+        Assert.Equal(0x00, cap.Data[9]);   // no IPv6 F
     }
 
     [Fact]
@@ -100,7 +109,7 @@ public class GracefulRestartTests
             Capabilities =
             [
                 BgpCapabilityInfo.FourOctetAsn(65001),
-                BgpCapabilityInfo.GracefulRestart(true, 120, true)
+                BgpCapabilityInfo.GracefulRestart(true, 120, true, ipv6Forwarding: false)
             ]
         };
 
