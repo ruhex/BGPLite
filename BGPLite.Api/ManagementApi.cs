@@ -992,7 +992,12 @@ public sealed class ManagementApi : IHostedService, IDisposable
             normalizedIp, data.Asn, data.Description, asnLists, customPrefixes, data.CustomAsns ?? [], data.MaxPrefix,
             md5Password: string.IsNullOrEmpty(data.Md5Password) ? null : data.Md5Password);
         if (!string.IsNullOrEmpty(data.Md5Password))
-            _sessionManager.SetPeerMd5Key(normalizedIp, data.Md5Password);
+        {
+            // #455: resolve through the SAME shared-IP re-arm the delete/PATCH/bootstrap paths use —
+            // TCP keys by address (#36), so arming the new row's key directly silently overrode a
+            // sibling's key on the same IP (last-writer-wins, no disagreement warning).
+            await RearmPeerIpMd5KeyAsync(normalizedIp);
+        }
 
         _logger.LogInformation("Created peer {Ip} AS{Asn} ({Id}): {Subs} lists, {Prefixes} custom prefixes, {Asns} custom AS",
             normalizedIp, data.Asn, saved.Id, asnLists.Count, customPrefixes.Count, data.CustomAsns?.Count ?? 0);
@@ -1522,10 +1527,24 @@ public sealed class ManagementApi : IHostedService, IDisposable
 
         if (countOnly)
         {
+            // #454: same wall-clock budget as /api/asn-lists (#424) — a cold RIPEstat fetch is
+            // minutes-scale and must not pin the request (and its in-flight slot) for the full
+            // timeout×retries chain. Unlike the two endpoints #424 covered, a count cannot
+            // degrade to a partial list, so budget expiry answers a stable 503; shutdown still
+            // propagates.
+            using var budget = CancellationTokenSource.CreateLinkedTokenSource(_shutdownCts.Token);
+            budget.CancelAfter(ExternalFetchBudget);
             try
             {
-                var count = await _prefixService.GetPrefixCountAsync(asn, _shutdownCts.Token);
+                var count = await _prefixService.GetPrefixCountAsync(asn, budget.Token);
                 return ApiResponse.Ok(new { asn, prefixCount = count });
+            }
+            catch (OperationCanceledException) when (!_shutdownCts.IsCancellationRequested)
+            {
+                _logger.LogWarning(
+                    "GET /api/as/{Asn}/prefixes exceeded the {Seconds:0}s external-fetch budget",
+                    asn, ExternalFetchBudget.TotalSeconds);
+                return ApiResponse.Error("The upstream prefix source did not respond in time", 503);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {

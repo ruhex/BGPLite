@@ -333,6 +333,8 @@ public sealed class ManagementApiShutdownTests : IDisposable
     /// <summary>Reports no configured prefix sources; the shutdown path never calls it.</summary>
     private sealed class InertPrefixSourceService : IPrefixSourceService
     {
+
+        public event Action<string>? ContentCommitted;
         public Task<IReadOnlyList<(PrefixSourceConfig Source, IReadOnlyList<IpPrefix> Prefixes)>> LoadAllAsync(CancellationToken ct = default)
             => Task.FromResult<IReadOnlyList<(PrefixSourceConfig, IReadOnlyList<IpPrefix>)>>([]);
         public Task<IReadOnlyList<IpPrefix>> GetAsync(string name, CancellationToken ct = default)

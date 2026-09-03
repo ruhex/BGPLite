@@ -426,6 +426,23 @@ public sealed class BgpSession : IDisposable
                     }
                     return;
                 }
+                catch (BgpParseException ex) when (ex.ErrorCode == BgpConstants.Error.OpenMessageError)
+                {
+                    // #453 (RFC 4271 §8.2.2): an OPEN received in OpenConfirm is an FSM error
+                    // regardless of body validity — the handshake phase accepts only KEEPALIVE and
+                    // NOTIFICATION. Without this the parse failure escaped to RunAsync's
+                    // catch(BgpParseException) and answered Open Message Error (2/x), misreporting
+                    // "your OPEN body was malformed" when the real fault is sending a second OPEN.
+                    // Mirrors the #427 Established branch in ReadLoopAsync: CAS-latch the teardown,
+                    // exactly one NOTIFICATION 5/0, then Idle.
+                    _logger.LogWarning("OPEN received from {Peer} in OpenConfirm — FSM error (RFC 4271 §8.2.2)", _peer);
+                    if (Interlocked.CompareExchange(ref _teardownReason, (int)TeardownReason.LocalCease, (int)TeardownReason.None) == (int)TeardownReason.None)
+                    {
+                        try { await SendNotificationAsync(BgpConstants.Error.FiniteStateMachineError, BgpConstants.SubError.Unspecific); }
+                        catch { /* best-effort — partial write counts, see RFC 4271 §8.1 */ }
+                    }
+                    return;
+                }
             }
 
             _logger.LogInformation("Received {Type} from {Peer} in OpenConfirm", response.Type, _peer);
@@ -1310,15 +1327,15 @@ public sealed class BgpSession : IDisposable
         {
             batch.Add(route);
             if (batch.Count < maxNlriPerUpdate) continue;
-            await SendRouteBatchAsync(nextHop, batch, attrCache);
-            sent += batch.Count;
+            // #457 review: count what actually reached the wire — a community group dropped by
+            // the oversize pre-validation must not inflate _advertisedCount (#212 contract).
+            sent += await SendRouteBatchAsync(nextHop, batch, attrCache);
             batch.Clear();
         }
 
         if (batch.Count > 0)
         {
-            await SendRouteBatchAsync(nextHop, batch, attrCache);
-            sent += batch.Count;
+            sent += await SendRouteBatchAsync(nextHop, batch, attrCache);
         }
 
         var v6NextHop = NextHopIpv6 ?? 0;
@@ -1327,15 +1344,13 @@ public sealed class BgpSession : IDisposable
         {
             batch.Add(route);
             if (batch.Count < maxNlriPerUpdate) continue;
-            await SendV6RouteBatchAsync(v6NextHop, batch, v6AttrCache);
-            sent += batch.Count;
+            sent += await SendV6RouteBatchAsync(v6NextHop, batch, v6AttrCache);
             batch.Clear();
         }
 
         if (batch.Count > 0)
         {
-            await SendV6RouteBatchAsync(v6NextHop, batch, v6AttrCache);
-            sent += batch.Count;
+            sent += await SendV6RouteBatchAsync(v6NextHop, batch, v6AttrCache);
         }
 
         _logger.LogInformation("UpdateSent {Count} routes to {Peer}", sent, _peer);
@@ -1348,9 +1363,12 @@ public sealed class BgpSession : IDisposable
     /// partitioned by community set (the MP_REACH attribute applies to every NLRI in its UPDATE,
     /// same rule as COMMUNITY), base attributes come from the v6 cache (no classic NEXT_HOP),
     /// and the MP_REACH attribute — global next hop + this group's NLRI — is appended per group.
+    /// Returns the number of prefixes that actually reached the wire (#457: dropped groups are
+    /// not counted, keeping <c>_advertisedCount</c> equal to the wire truth, #212).
     /// </summary>
-    private async Task SendV6RouteBatchAsync(UInt128 nextHop6, List<Route> routes, Dictionary<IReadOnlyList<uint>, List<PathAttribute>> v6AttrCache)
+    private async Task<int> SendV6RouteBatchAsync(UInt128 nextHop6, List<Route> routes, Dictionary<IReadOnlyList<uint>, List<PathAttribute>> v6AttrCache)
     {
+        var sent = 0;
         foreach (var groupRoutes in GroupByCommunitySet(routes))
         {
             var attrs = UpdateCodec.GetCachedV6UpdateAttributes(
@@ -1359,8 +1377,10 @@ public sealed class BgpSession : IDisposable
 
             var nlri = groupRoutes.Select(r => new IpPrefix(r.Prefix, r.PrefixLength, r.IsIpv4)).ToList();
             attrs = UpdateCodec.WithMpReachV6Attribute(attrs, nextHop6, nlri);
-            await SendUpdateBatchAsync(attrs, [], mpReach: new MpReachCodec.MpReachV6(nextHop6, nlri));
+            if (await SendUpdateBatchAsync(attrs, [], mpReach: new MpReachCodec.MpReachV6(nextHop6, nlri)))
+                sent += nlri.Count;
         }
+        return sent;
     }
 
     /// <summary>
@@ -1402,12 +1422,19 @@ public sealed class BgpSession : IDisposable
         return [.. merged.Values];
     }
 
-    private async Task SendRouteBatchAsync(uint nextHop, List<Route> routes, Dictionary<IReadOnlyList<uint>, List<PathAttribute>> attrCache)
+    /// <summary>
+    /// Sends one batch of IPv4 routes as classic-NLRI UPDATEs, partitioned by community set.
+    /// Returns the number of prefixes that actually reached the wire — a group dropped by the
+    /// #457 oversize pre-validation is not counted, keeping <c>_advertisedCount</c> equal to the
+    /// wire truth (#212).
+    /// </summary>
+    private async Task<int> SendRouteBatchAsync(uint nextHop, List<Route> routes, Dictionary<IReadOnlyList<uint>, List<PathAttribute>> attrCache)
     {
         // The COMMUNITY/LARGE_COMMUNITY path attributes apply to EVERY NLRI in an UPDATE, so
         // partition the batch by (community set, large-community set) and emit one UPDATE per
         // set. Otherwise prefixes belonging to one group would be tagged with another group's
         // communities on the wire.
+        var sent = 0;
         foreach (var groupRoutes in GroupByCommunitySet(routes))
         {
             var attrs = UpdateCodec.GetCachedUpdateAttributes(_bgpConfig.Asn, _localFourByteAsn, nextHop, groupRoutes[0].Communities, attrCache);
@@ -1418,8 +1445,10 @@ public sealed class BgpSession : IDisposable
             attrs = UpdateCodec.WithLargeCommunityAttribute(attrs, groupRoutes[0].LargeCommunities);
 
             var nlri = groupRoutes.Select(r => new IpPrefix(r.Prefix, r.PrefixLength, r.IsIpv4)).ToList();
-            await SendUpdateBatchAsync(attrs, nlri);
+            if (await SendUpdateBatchAsync(attrs, nlri))
+                sent += nlri.Count;
         }
+        return sent;
     }
 
     /// <summary>
@@ -1430,7 +1459,11 @@ public sealed class BgpSession : IDisposable
     private static List<List<Route>> GroupByCommunitySet(IReadOnlyList<Route> routes)
         => RouteAssembler.GroupByCommunitySet(routes);
 
-    private async Task SendUpdateBatchAsync(List<PathAttribute> attrs, List<IpPrefix> nlri, MpReachCodec.MpReachV6? mpReach = null)
+    /// <summary>Serializes and sends one community-group UPDATE. Returns <c>false</c> when the
+    /// composed frame was dropped by the #457 oversize pre-validation (nothing sent, nothing
+    /// mirrored, nothing counted) so the caller can keep <c>_advertisedCount</c> at wire truth
+    /// (#212); <c>true</c> when the frame reached the wire.</summary>
+    private async Task<bool> SendUpdateBatchAsync(List<PathAttribute> attrs, List<IpPrefix> nlri, MpReachCodec.MpReachV6? mpReach = null)
     {
         var update = new BgpUpdateMessage
         {
@@ -1438,6 +1471,24 @@ public sealed class BgpSession : IDisposable
             Nlri = nlri,
             MpReachV6 = mpReach
         };
+
+        // #457: pre-validate the composed frame against the RFC 4271 §4.1 4096-byte maximum
+        // BEFORE it reaches the writer. An oversized frame threw ArgumentOutOfRangeException out
+        // of WriteHeader; on the initial-send path that unwound RunAsync's generic catch —
+        // best-effort Cease + teardown — so a peer whose route set contained one unsplittable
+        // group was reset on every reconnect with zero routes. The batch itself cannot overflow
+        // on NLRI (the 100-per-UPDATE cap bounds it well under the maximum), only the attributes
+        // can — and those are constant per community group, so there is nothing to split the
+        // batch into: the group is dropped loudly instead. Everything else is advertised, the
+        // mirror stays consistent (the dropped prefixes never enter it), the session stays up.
+        var bufferSize = BgpMessageWriter.GetBufferSize(update);
+        if (bufferSize > BgpConstants.MaxMessageSize)
+        {
+            _logger.LogError(
+                "Composed UPDATE to {Peer} is {Size} bytes — over the {Max}-byte BGP maximum and unsplittable (attributes are constant per community group); dropping this group of {Count} prefix(es)",
+                _peer, bufferSize, BgpConstants.MaxMessageSize, mpReach?.Prefixes.Count ?? nlri.Count);
+            return false;
+        }
 
         await SendMessageAsync(update);
         // #430 + #450 review: per-UPDATE mirror commit — SendRouteBatchAsync/SendV6RouteBatchAsync
@@ -1455,6 +1506,7 @@ public sealed class BgpSession : IDisposable
                 _advertisedPrefixes.Add(p);
         }
         _metrics.UpdateSent();
+        return true;
     }
 
     private PeerConfig GetFilterPeerConfig() => new()

@@ -43,7 +43,7 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
         _connection.Dispose();
     }
 
-    private async Task<int> StartAsync(AppConfig template)
+    private async Task<int> StartAsync(AppConfig template, ISessionManager? sessions = null)
     {
         for (var attempt = 0; ; attempt++)
         {
@@ -64,7 +64,7 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
                 NullLogger<ManagementApi>.Instance,
                 new InertPrefixService(),
                 new InertPrefixSources(),
-                new InertSessions());
+                sessions ?? new InertSessions());
             try
             {
                 await _api.StartAsync(CancellationToken.None);
@@ -250,6 +250,32 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
         }
     }
 
+    [Fact]
+    public async Task CreatePeer_SecondKeyOnSharedIp_ArmsTheDeterministicResolverKey()
+    {
+        // #455: pre-fix the create path armed the NEW row's key directly (last-writer-wins across
+        // the shared source IP, no disagreement warning) while delete/PATCH/bootstrap resolved
+        // through RearmPeerIpMd5KeyAsync/ResolveSharedIpKey. Create goes through the same resolver:
+        // with "key-a" already keyed on the IP, creating a sibling with "key-b" must arm the
+        // deterministic ordinal pick ("key-a"), not the new row's key.
+        var sessions = new RecordingSessions();
+        _port = await StartAsync(
+            new AppConfig { Bgp = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1" } },
+            sessions);
+        _client = new HttpClient();
+
+        using (var first = await _client.PostAsync($"http://127.0.0.1:{_port}/api/peers",
+            new StringContent("""{"ip":"203.0.113.11","asn":65001,"md5Password":"key-a"}""", Encoding.UTF8, "application/json")))
+            Assert.True(first.IsSuccessStatusCode, await first.Content.ReadAsStringAsync());
+        using (var second = await _client.PostAsync($"http://127.0.0.1:{_port}/api/peers",
+            new StringContent("""{"ip":"203.0.113.11","asn":65002,"md5Password":"key-b"}""", Encoding.UTF8, "application/json")))
+            Assert.True(second.IsSuccessStatusCode, await second.Content.ReadAsStringAsync());
+
+        var armed = sessions.Md5Keys.Last(k => k.Password is not null);
+        Assert.Equal("203.0.113.11", armed.Ip);
+        Assert.Equal("key-a", armed.Password);
+    }
+
     private static int FreeTcpPort()
     {
         using var socket = new System.Net.Sockets.Socket(System.Net.Sockets.AddressFamily.InterNetwork, System.Net.Sockets.SocketType.Stream, System.Net.Sockets.ProtocolType.Tcp);
@@ -275,6 +301,8 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
 
     private sealed class InertPrefixSources : IPrefixSourceService
     {
+
+        public event Action<string>? ContentCommitted;
         public Task<IReadOnlyList<(PrefixSourceConfig Source, IReadOnlyList<IpPrefix> Prefixes)>> LoadAllAsync(CancellationToken ct = default) => Task.FromResult<IReadOnlyList<(PrefixSourceConfig, IReadOnlyList<IpPrefix>)>>([]);
         public Task<IReadOnlyList<IpPrefix>> GetAsync(string name, CancellationToken ct = default) => Task.FromResult<IReadOnlyList<IpPrefix>>([]);
         public Task<(IReadOnlyList<IpPrefix> Prefixes, bool Changed)> LoadDefaultAsync(CancellationToken ct = default) => Task.FromResult<(IReadOnlyList<IpPrefix>, bool)>(([], false));
@@ -290,6 +318,19 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
         public Task TerminatePeerAsync(string peerIp, uint asn, CancellationToken ct = default) => Task.CompletedTask;
         public Task TerminatePeerByIpAsync(string peerIp, CancellationToken ct = default) => Task.CompletedTask;
         public void SetPeerMd5Key(string peerIp, string? password) { }
+        public int GetAdvertisedPrefixCount(string peerIp, uint asn) => 0;
+        public Task RefreshAllEstablishedAsync() => Task.CompletedTask;
+    }
+
+    /// <summary>Records SetPeerMd5Key calls so a test can assert WHAT was armed (#455).</summary>
+    private sealed class RecordingSessions : ISessionManager
+    {
+        public List<(string Ip, string? Password)> Md5Keys { get; } = [];
+        public Task RefreshPeerAsync(string peerIp, uint asn) => Task.CompletedTask;
+        public List<string> GetActivePeerIps() => [];
+        public Task TerminatePeerAsync(string peerIp, uint asn, CancellationToken ct = default) => Task.CompletedTask;
+        public Task TerminatePeerByIpAsync(string peerIp, CancellationToken ct = default) => Task.CompletedTask;
+        public void SetPeerMd5Key(string peerIp, string? password) => Md5Keys.Add((peerIp, password));
         public int GetAdvertisedPrefixCount(string peerIp, uint asn) => 0;
         public Task RefreshAllEstablishedAsync() => Task.CompletedTask;
     }
