@@ -21,13 +21,14 @@ public sealed class PrefixService : IPrefixService
     private readonly ILogger<PrefixService>? _logger;
     private readonly TimeProvider _timeProvider;
     private readonly UserSourceCache _userSourceCache;
+    private readonly IPrefixSourceProvider _userSourceHttpProvider;
     // #229: gate serializing the RU/default-prefix cache-miss fetch path. The RU set is a single
     // shared cache (unlike the per-ASN _cache), so a single SemaphoreSlim is enough — it prevents a
     // thundering herd of N concurrent sessions from all re-fetching the ~11k-prefix default list
     // when the TTL elapses. Mirrors the per-ASN gate pattern in GetPrefixesAsync.
     private readonly SemaphoreSlim _ruGate = new(1, 1);
 
-    public PrefixService(AppConfig config, RipeStatPrefixCache ripeStatCache, IPrefixSourceService prefixSources, HttpPrefixProvider httpProvider, TimeSpan? ruCacheTtl = null, ILogger<PrefixService>? logger = null, TimeProvider? timeProvider = null, int? userSourceTimeoutSeconds = null, Func<string, Task>? onSourceChanged = null)
+    public PrefixService(AppConfig config, RipeStatPrefixCache ripeStatCache, IPrefixSourceService prefixSources, HttpPrefixProvider httpProvider, TimeSpan? ruCacheTtl = null, ILogger<PrefixService>? logger = null, TimeProvider? timeProvider = null, int? userSourceTimeoutSeconds = null, Func<string, Task>? onSourceChanged = null, IPrefixSourceProvider? userSourceHttpProvider = null)
     {
         _config = config;
         _ripeStatCache = ripeStatCache;
@@ -44,6 +45,10 @@ public sealed class PrefixService : IPrefixService
         // #416: convergence push for default-source changes detected on the RU path. Fired AFTER
         // _ruGate.Release() in GetRuPrefixesAsync — never while the gate is held.
         _onSourceChanged = onSourceChanged;
+        // #425: the peer-supplied user-source path uses its OWN http provider (the retry-only
+        // pipeline) so peer-controlled failures cannot open the breaker gating operator sources;
+        // falls back to the operator provider when not wired (tests).
+        _userSourceHttpProvider = userSourceHttpProvider ?? httpProvider;
     }
 
     /// <summary>Default per-fetch budget for peer-supplied URL sources (#320).</summary>
@@ -80,7 +85,7 @@ public sealed class PrefixService : IPrefixService
         };
         var prefixes = await _userSourceCache.GetOrLoadAsync(url, name, async ct =>
         {
-            var result = await _httpProvider.LoadAsync(source, ct: ct);
+            var result = await _userSourceHttpProvider.LoadAsync(source, ct: ct);
             return result.Prefixes;   // provider-native IpPrefix list
         }, ct);
         return ToContract(prefixes);

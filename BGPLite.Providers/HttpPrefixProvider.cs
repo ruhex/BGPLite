@@ -22,10 +22,19 @@ namespace BGPLite.Providers;
 public sealed class HttpPrefixProvider(
     IHttpClientFactory httpFactory,
     ILogger<HttpPrefixProvider> logger,
-    int defaultFetchTimeoutSeconds = 30) // mirrors DefaultFetchTimeoutSeconds (a ctor default cannot reference the member const)
+    int defaultFetchTimeoutSeconds = 30, // mirrors DefaultFetchTimeoutSeconds (a ctor default cannot reference the member const)
+    string? clientName = null) // #425: selects the resilience pipeline — see UserSourceClientName
     : IPrefixSourceProvider
 {
     public const string ClientName = "http";
+
+    /// <summary>
+    /// #425: the peer-supplied user-source path uses this named client — a retry WITHOUT a circuit
+    /// breaker. The shared breaker coupled peer-controlled failure rates to operator sources: a few
+    /// blackholed user URLs opened the shared breaker and suppressed every operator source fetch
+    /// for 30s windows. SSRF handler and body cap are identical for both pipelines.
+    /// </summary>
+    public const string UserSourceClientName = "http-user-source";
 
     /// <summary>Maximum response body size (10 MB) — defends against OOM from huge/malicious files (#144).</summary>
     internal const int MaxResponseBytes = 10 * 1024 * 1024;
@@ -53,7 +62,7 @@ public sealed class HttpPrefixProvider(
         if (string.IsNullOrWhiteSpace(source.Url))
             throw new InvalidOperationException($"Prefix source '{source.Name}': Kind=http requires a Url.");
 
-        var http = httpFactory.CreateClient(ClientName);
+        var http = httpFactory.CreateClient(clientName ?? ClientName);
 
         // Per-source timeout: link the caller's token with a CancelAfter so a slow source can't pin
         // the fetch past its budget — now ALWAYS armed (#324): a configured Timeout wins, otherwise
