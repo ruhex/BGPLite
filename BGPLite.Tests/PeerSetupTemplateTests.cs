@@ -56,7 +56,9 @@ public class PeerSetupTemplateTests
     public void NormalizePeerIp_Ipv6_AcceptedAndCanonical()
     {
         Assert.Equal("2001:db8:cccc::20", ManagementApi.NormalizePeerIp("2001:db8:cccc:0:0:0:0:20"));
-        Assert.Equal("::1", ManagementApi.NormalizePeerIp("::1"));
+        // #421: ::1 (loopback) is no longer accepted as a peer address — the compressed-form
+        // canonicalization this test pins is covered by a non-special address instead.
+        Assert.Equal("2001:db8:cccc::21", ManagementApi.NormalizePeerIp("2001:0db8:cccc:0000:0000:0000:0000:0021"));
     }
 
     [Fact]
