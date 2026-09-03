@@ -78,8 +78,11 @@ public class UserSourceCacheTests
             (0x0A000000u, (byte)8, true), (0x0A000100u, (byte)8, true),
             (0x0A000200u, (byte)8, true), (0x0A000300u, (byte)8, true))
         };
-        var small = new Fetcher { OnSuccess = () => P(
-            (0xC0A80000u, (byte)24, true), (0xC0A80001u, (byte)24, true)) };
+        var small = new Fetcher
+        {
+            OnSuccess = () => P(
+            (0xC0A80000u, (byte)24, true), (0xC0A80001u, (byte)24, true))
+        };
         var third = new Fetcher { OnSuccess = () => P((0x0A0B0000u, (byte)16, true)) };
 
         await cache.GetOrLoadAsync("https://example.com/big", "big", big.Invoke, CancellationToken.None);
