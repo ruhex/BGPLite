@@ -26,17 +26,18 @@ public class ExceptionMappingTests
     }
 
     [Fact]
-    public void DbUpdateException_MapsTo_409_Conflict()
+    public void DbUpdateException_WithoutSqliteInner_MapsTo_500()
     {
-        // A unique-constraint violation (concurrent duplicate CreatePeer/UpsertPeer) is a 409, not
-        // a 500. EF Core wraps SQLite's "UNIQUE constraint failed" in DbUpdateException.
+        // #431: a DbUpdateException WITHOUT a SqliteException inner (an EF-level failure, e.g. a
+        // value conversion) is a server-side problem — the pre-#431 mapping answered 409 "already
+        // exists" for it, misleading every client debugging the conflict.
         var inner = new InvalidOperationException("UNIQUE constraint failed: Peers.Ip, Peers.Asn");
         var ex = new DbUpdateException("An error occurred while saving the entity changes.", inner);
 
         var (message, status) = ManagementApi.MapExceptionToResponse(ex);
 
-        Assert.Equal(409, status);
-        Assert.Equal("The resource already exists or conflicts with the current state", message);
+        Assert.Equal(500, status);
+        Assert.Equal("Internal server error", message);
         // The raw constraint text must NOT appear in the client-facing message.
         Assert.DoesNotContain("UNIQUE constraint", message);
         Assert.DoesNotContain("Peers.Ip", message);
@@ -113,5 +114,34 @@ public class ExceptionMappingTests
 
         Assert.Equal(409, status);
         Assert.Contains("exists", message);
+    }
+
+    [Fact]
+    public void DbUpdateException_WithoutSqliteInner_MapsTo_500()
+    {
+        // #431: a DbUpdateException WITHOUT a SqliteException inner (an EF-level failure, e.g. a
+        // value conversion) is a server-side problem — the pre-#431 mapping answered 409 "already
+        // exists" for it, misleading every client debugging the conflict.
+        var ex = new DbUpdateException("An error occurred while saving.", new InvalidOperationException("value conversion failed"));
+
+        var (message, status) = ManagementApi.MapExceptionToResponse(ex);
+
+        Assert.Equal(500, status);
+        Assert.Equal("Internal server error", message);
+    }
+
+    [Theory]
+    [InlineData(1299)] // SQLITE_CONSTRAINT_NOTNULL — a schema/data bug, not a client conflict
+    [InlineData(275)]  // SQLITE_CONSTRAINT_CHECK
+    public void DbUpdateException_NonConflictConstraint_MapsTo_500(int extendedCode)
+    {
+        // #431: the pre-#431 catch-all labeled every non-FK constraint 409 "already exists" —
+        // including NOT NULL / CHECK violations, which are server-side bugs. Only UNIQUE (2067)
+        // is a conflict.
+        var ex = new DbUpdateException("constraint failed", new SqliteException("constraint failed", 19, extendedCode));
+        var (message, status) = ManagementApi.MapExceptionToResponse(ex);
+
+        Assert.Equal(500, status);
+        Assert.Equal("Internal server error", message);
     }
 }
