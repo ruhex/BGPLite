@@ -518,18 +518,24 @@ public sealed class ManagementApi : IHostedService, IDisposable
         if (ex is JsonException)
             return ("Malformed JSON body", 400);
 
-        // EF Core constraint violation. #266 item 8: distinguish the two SQLite constraint codes —
-        // 2067 (SQLITE_CONSTRAINT_UNIQUE, a concurrent duplicate insert) is a genuine 409, while
-        // 19 (SQLITE_CONSTRAINT, in practice an FK violation after a concurrent DELETE removed the
-        // parent peer row) must not answer "already exists" for a resource that is GONE.
+        // EF Core constraint violation. #266 item 8 + #377 review + #431: classify by the SQLite
+        // EXTENDED code — 787 (SQLITE_CONSTRAINT_FOREIGNKEY) is the concurrent-DELETE case (the
+        // resource is GONE, not duplicated), 2067 (SQLITE_CONSTRAINT_UNIQUE) is a genuine conflict,
+        // and everything else — NOT NULL (1299), CHECK (275), other constraint classes, or a
+        // non-SQLite DbUpdateException — is a server-side data/schema problem that must not be
+        // mislabeled "already exists" to the client (pre-#431 the whole remaining bucket was 409).
         if (ex is Microsoft.EntityFrameworkCore.DbUpdateException)
         {
-            // #377 review: BOTH constraint classes report primary code 19 in SqliteErrorCode;
-            // the discriminator is the EXTENDED code — 787 (SQLITE_CONSTRAINT_FOREIGNKEY) is the
-            // concurrent-DELETE case, anything else (2067 unique, 19 bare) is a genuine conflict.
-            if (ex.InnerException is Microsoft.Data.Sqlite.SqliteException sqlite && sqlite.SqliteExtendedErrorCode == 787)
-                return ("The peer was removed while the change was being applied", 404);
-            return ("The resource already exists or conflicts with the current state", 409);
+            if (ex.InnerException is Microsoft.Data.Sqlite.SqliteException sqlite)
+            {
+                return sqlite.SqliteExtendedErrorCode switch
+                {
+                    787 => ("The peer was removed while the change was being applied", 404),
+                    2067 => ("The resource already exists or conflicts with the current state", 409),
+                    _ => ("Internal server error", 500),
+                };
+            }
+            return ("Internal server error", 500);
         }
 
         // Anything else: generic message, full detail logged server-side.
