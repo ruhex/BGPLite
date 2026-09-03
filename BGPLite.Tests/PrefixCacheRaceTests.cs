@@ -207,6 +207,8 @@ public class PrefixCacheRaceTests
     /// </summary>
     private sealed class CountingPrefixSource : IPrefixSourceService
     {
+
+        public event Action<string>? ContentCommitted;
         private int _loadCalls;
         public int LoadCalls => Volatile.Read(ref _loadCalls);
         public bool FailNext { get; set; }

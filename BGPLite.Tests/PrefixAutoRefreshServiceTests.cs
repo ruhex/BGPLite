@@ -23,6 +23,8 @@ public class PrefixAutoRefreshServiceTests
     /// </summary>
     private class CountingPrefixSourceService : IPrefixSourceService
     {
+
+        public event Action<string>? ContentCommitted;
         public Dictionary<string, int> RefreshCalls { get; } = new();
         public Dictionary<string, bool> Conditional { get; } = new();
         public bool ReportChanged { get; set; }
