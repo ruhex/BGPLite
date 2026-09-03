@@ -310,23 +310,44 @@ public sealed class RouteAssembler : IRouteAssembler
     internal static List<Route> SuppressCoveredByCustomPrefixes(
         List<Route> routes, List<(uint Network, byte Length)> customRanges)
     {
-        // A route is covered when its length is strictly greater than the custom prefix's and its
-        // network, masked to the custom length, equals the (already host-bit-normalized) custom
-        // network — the repo's masking idiom (PrefixCidr, ExactUnionPrefixAggregator).
-        // #15 phase 1: Route.Prefix is 128-bit now. Custom prefixes are IPv4-only (PrefixCidr),
-        // so suppression applies to IPv4 routes by their low-32-bit network; an IPv6 route can
-        // never be covered by an IPv4 custom prefix and always passes.
-        // Mask is in the v4 low-32 layout; Mask(0) must be 0, not 0xFFFFFFFF << 32 (a shift-by-32
-        // is a no-op on uint, not a wipe).
+        if (customRanges.Count == 0)
+            return routes; // nothing to suppress — skip the pass entirely
+
         static UInt128 Mask(byte length) => length == 0 ? 0u : (UInt128)(0xFFFFFFFFu << (32 - length));
+
+        // #429: precompute the coverage index ONCE (exact-match set + length → custom networks)
+        // instead of scanning the custom list per route — O(routes + customs) instead of the
+        // O(routes × customs) mask+compare the per-route Where paid (11k routes × 1k customs ≈
+        // 11M compares per peer per refresh, multiplied by fleet size on a RefreshAllEstablished).
+        var exact = new HashSet<(uint Network, byte Length)>(customRanges);
+        var networksByLength = new Dictionary<byte, List<(uint Network, UInt128 Mask)>>(customRanges.Count);
+        foreach (var cr in customRanges)
+        {
+            if (!networksByLength.TryGetValue(cr.Length, out var networks))
+                networksByLength[cr.Length] = networks = [];
+            networks.Add((cr.Network, Mask(cr.Length)));
+        }
+
+        bool IsCovered(Route r)
+        {
+            foreach (var (length, networks) in networksByLength)
+            {
+                if (length >= r.PrefixLength) continue; // only a STRICTLY broader custom covers
+                var mask = Mask(length);
+                foreach (var (network, _) in networks)
+                    if (((uint)r.Prefix & mask) == network)
+                        return true;
+            }
+            return false;
+        }
+
         return routes
             .Where(r =>
                 // A configured custom prefix is never suppressed — including by a broader
                 // custom prefix of the same peer. Exact (network, length) == custom match.
-                (r.IsIpv4 && customRanges.Contains(((uint)r.Prefix, r.PrefixLength)))
+                (r.IsIpv4 && exact.Contains(((uint)r.Prefix, r.PrefixLength)))
                 || !r.IsIpv4
-                || !customRanges.Any(cr => r.PrefixLength > cr.Length
-                                           && ((uint)r.Prefix & Mask(cr.Length)) == cr.Network))
+                || !IsCovered(r))
             .ToList();
     }
 
