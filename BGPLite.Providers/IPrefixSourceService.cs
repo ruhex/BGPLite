@@ -16,8 +16,23 @@ public interface IPrefixSourceService
     /// <summary>One source by name (cache-through). Empty list if missing or failed.</summary>
     Task<IReadOnlyList<IpPrefix>> GetAsync(string name, CancellationToken ct = default);
 
-    /// <summary>The source named by <c>AppConfig.DefaultPrefixSource</c>. Empty list if unset/missing.</summary>
-    Task<IReadOnlyList<IpPrefix>> GetDefaultAsync(CancellationToken ct = default);
+    /// <summary>
+    /// #416: lock-free convergence load of the source named by <c>AppConfig.DefaultPrefixSource</c> —
+    /// returns the prefix list plus whether the content actually changed, and NEVER fires the
+    /// <c>onSourceChanged</c> convergence callback. Callers that invoke it while holding a lock
+    /// (the RU gate in <c>PrefixService.GetRuPrefixesAsync</c>) must own the push themselves and
+    /// fire it only AFTER releasing the lock: an inline callback that re-enters the RU path from
+    /// another session's build deadlocked on the caller-held gate (the gate holder awaited the
+    /// push, the push awaited the gate).
+    /// <para>
+    /// #417: failures PROPAGATE rather than collapsing to <c>[]</c> — including a fresh negative
+    /// (failure-backoff) cache entry, which throws instead of returning an empty list. The RU
+    /// caller's stale-on-failure handling needs the real failure; a swallowed one would cache an
+    /// empty set positively for the full RU TTL, dropping every unconfigured peer's routes off a
+    /// single transient outage.
+    /// </para>
+    /// </summary>
+    Task<(IReadOnlyList<IpPrefix> Prefixes, bool Changed)> LoadDefaultAsync(CancellationToken ct = default);
 
     /// <summary>Prime the in-memory cache for all sources.</summary>
     Task WarmUpAsync(CancellationToken ct = default);

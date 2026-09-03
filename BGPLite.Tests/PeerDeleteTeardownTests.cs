@@ -53,6 +53,102 @@ public sealed class PeerDeleteTeardownTests
         Assert.Empty(manager.Terminated);
     }
 
+    [Fact]
+    public async Task DeletePeer_NullAsn_TerminatesByIp_NotSilentNoOp()
+    {
+        // #422: a legacy NULL-Asn row cannot match a live session by (Ip, Asn) — no session ever
+        // has RemoteAsn 0 (AS 0 OPENs are rejected, #300) — so the pre-#422 `asn ?? 0` teardown
+        // was a SILENT no-op: the row was deleted while its session kept advertising. The delete
+        // must terminate by IP instead.
+        using var connection = NewOpenConnection();
+        var store = NewStore(connection);
+        InsertLegacyNullAsnRow(connection, "203.0.113.9");
+        var row = (await store.GetPeersByIpAsync("203.0.113.9")).Single();
+        var manager = new RecordingSessionManager();
+        using var api = NewApi(store, manager);
+
+        var response = await api.HandleDeletePeer(row.Id);
+
+        Assert.Equal(200, response.StatusCode);
+        Assert.Empty(manager.Terminated); // the (Ip, Asn=0) match is gone — it never matched anything
+        Assert.Equal("203.0.113.9", Assert.Single(manager.TerminatedByIp));
+        Assert.Null(await store.GetDbPeerByIdAsync(row.Id));
+    }
+
+    /// <summary>A row from the Ip-only era: no Asn column value (#19 pre-#422 legacy shape).</summary>
+    private static void InsertLegacyNullAsnRow(SqliteConnection connection, string ip)
+    {
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText =
+            "INSERT INTO Peers (Id, Ip, Asn, Description, Status, CreatedAt, LastSessionAt) " +
+            "VALUES ('legacy-row', @ip, NULL, NULL, 'inactive', '2026-01-01T00:00:00.0000000Z', NULL)";
+        var p = cmd.CreateParameter();
+        p.ParameterName = "@ip";
+        p.Value = ip;
+        cmd.Parameters.Add(p);
+        cmd.ExecuteNonQuery();
+    }
+
+    // ---- management API: TCP-MD5 key re-arm on delete (#418) ----
+
+    [Fact]
+    public async Task DeletePeer_RearmsIpKey_FromSurvivingSibling()
+    {
+        using var connection = NewOpenConnection();
+        var store = NewStore(connection);
+        var idA = await store.CreatePeerAsync("203.0.113.7", 65001, null);
+        var idB = await store.CreatePeerAsync("203.0.113.7", 65002, null);
+        await store.UpdatePeerConfigurationAsync(idA, null, asnListNames: null, customPrefixes: null, customAsns: null, maxPrefix: null, md5Password: "key-a");
+        await store.UpdatePeerConfigurationAsync(idB, null, asnListNames: null, customPrefixes: null, customAsns: null, maxPrefix: null, md5Password: "key-b");
+        var manager = new RecordingSessionManager();
+        using var api = NewApi(store, manager);
+
+        var response = await api.HandleDeletePeer(idB);
+
+        Assert.Equal(200, response.StatusCode);
+        // Pre-#418 the delete armed null — silently disarming TCP-MD5 for the surviving sibling.
+        var armed = Assert.Single(manager.Md5Keys);
+        Assert.Equal("203.0.113.7", armed.Ip);
+        Assert.Equal("key-a", armed.Password);
+    }
+
+    [Fact]
+    public async Task DeletePeer_LastKeyedPeerOnIp_ClearsIpKey()
+    {
+        using var connection = NewOpenConnection();
+        var store = NewStore(connection);
+        var id = await store.CreatePeerAsync("203.0.113.8", 65001, null);
+        await store.UpdatePeerConfigurationAsync(id, null, asnListNames: null, customPrefixes: null, customAsns: null, maxPrefix: null, md5Password: "solo-key");
+        var manager = new RecordingSessionManager();
+        using var api = NewApi(store, manager);
+
+        await api.HandleDeletePeer(id);
+
+        var armed = Assert.Single(manager.Md5Keys);
+        Assert.Equal("203.0.113.8", armed.Ip);
+        Assert.Null(armed.Password); // nothing survives on the IP — a genuine disarm
+    }
+
+    [Fact]
+    public async Task RearmPeerIpMd5Key_ClearingSiblingPassword_FallsBackToSurvivingKey()
+    {
+        using var connection = NewOpenConnection();
+        var store = NewStore(connection);
+        var idA = await store.CreatePeerAsync("203.0.113.7", 65001, null);
+        var idB = await store.CreatePeerAsync("203.0.113.7", 65002, null);
+        await store.UpdatePeerConfigurationAsync(idA, null, asnListNames: null, customPrefixes: null, customAsns: null, maxPrefix: null, md5Password: "key-a");
+        await store.UpdatePeerConfigurationAsync(idB, null, asnListNames: null, customPrefixes: null, customAsns: null, maxPrefix: null, md5Password: "key-b");
+        var manager = new RecordingSessionManager();
+        using var api = NewApi(store, manager);
+
+        // The PATCH path clears idB's password (store already updated), then re-arms the IP.
+        await store.UpdatePeerConfigurationAsync(idB, null, asnListNames: null, customPrefixes: null, customAsns: null, maxPrefix: null, md5Password: "");
+        await api.RearmPeerIpMd5KeyAsync("203.0.113.7");
+
+        var armed = Assert.Single(manager.Md5Keys);
+        Assert.Equal("key-a", armed.Password); // the sibling's enforcement survives the clear
+    }
+
     // ---- server: the teardown core over real scripted sessions ----
 
     [Fact]
@@ -219,10 +315,12 @@ public sealed class PeerDeleteTeardownTests
             NullLogger<RouteAssembler>.Instance);
     }
 
-    /// <summary>Records TerminatePeerAsync calls; the optional hook runs at call time (row-state assertions).</summary>
+    /// <summary>Records TerminatePeerAsync and SetPeerMd5Key calls; the optional hook runs at terminate time (row-state assertions).</summary>
     private sealed class RecordingSessionManager(Func<string, uint, Task>? onTerminate = null) : ISessionManager
     {
         public List<(string Ip, uint Asn)> Terminated { get; } = [];
+        public List<string> TerminatedByIp { get; } = [];
+        public List<(string Ip, string? Password)> Md5Keys { get; } = [];
 
         public Task RefreshPeerAsync(string peerIp, uint asn) => Task.CompletedTask;
         public List<string> GetActivePeerIps() => [];
@@ -234,7 +332,12 @@ public sealed class PeerDeleteTeardownTests
             Terminated.Add((peerIp, asn));
             if (onTerminate is not null) await onTerminate(peerIp, asn);
         }
-        public void SetPeerMd5Key(string peerIp, string? password) { }
+        public Task TerminatePeerByIpAsync(string peerIp, CancellationToken ct = default)
+        {
+            TerminatedByIp.Add(peerIp);
+            return Task.CompletedTask;
+        }
+        public void SetPeerMd5Key(string peerIp, string? password) => Md5Keys.Add((peerIp, password));
     }
 
     private sealed class StaticOptionsFactory(DbContextOptions<BgpDbContext> options) : IDbContextFactory<BgpDbContext>
@@ -266,8 +369,8 @@ public sealed class PeerDeleteTeardownTests
             => Task.FromResult<IReadOnlyList<(PrefixSourceConfig, IReadOnlyList<IpPrefix>)>>([]);
         public Task<IReadOnlyList<IpPrefix>> GetAsync(string name, CancellationToken ct = default)
             => Task.FromResult<IReadOnlyList<IpPrefix>>([]);
-        public Task<IReadOnlyList<IpPrefix>> GetDefaultAsync(CancellationToken ct = default)
-            => Task.FromResult<IReadOnlyList<IpPrefix>>([]);
+        public Task<(IReadOnlyList<IpPrefix> Prefixes, bool Changed)> LoadDefaultAsync(CancellationToken ct = default)
+            => Task.FromResult<(IReadOnlyList<IpPrefix>, bool)>(([], false));
         public Task WarmUpAsync(CancellationToken ct = default) => Task.CompletedTask;
         public Task<bool> RefreshAsync(string sourceName, CancellationToken ct = default) => Task.FromResult(false);
         public bool SourceSupportsConditional(string sourceName) => false;

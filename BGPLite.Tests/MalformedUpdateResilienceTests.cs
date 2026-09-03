@@ -161,6 +161,86 @@ public class MalformedUpdateResilienceTests
     }
 
     [Fact]
+    public async Task MalformedOpen_InEstablished_IsFsmError_SessionResets()
+    {
+        // #427 (RFC 4271 §8.2.2): an OPEN received in Established is an FSM error REGARDLESS of
+        // body validity — Established accepts only UPDATE/KEEPALIVE/NOTIFICATION/ROUTE_REFRESH
+        // and a conformant speaker never parses the body. Pre-fix the body-error filter applied
+        // the UPDATE treatment (D17): the session stayed up with a warning and no NOTIFICATION.
+        var (server, client) = ConnectedPair();
+        using var clientSock = client;
+        var bgpConfig = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1", HoldTime = 0, KeepAlive = 0 };
+        var metrics = new BgpMetrics();
+        using var session = new BgpSession(
+            new SocketBgpConnection(server),
+            new PeerConfig { Address = "127.0.0.1" },
+            bgpConfig,
+            new RouteTable(),
+            AllowAllFilter.Instance,
+            metrics,
+            new NopLogger<BgpSession>());
+
+        var runTask = await EstablishSessionAsync(session, client, bgpConfig);
+
+        // Well-framed OPEN, body-invalid: the 10-byte minimum payload declares optParamsLen=5,
+        // which cannot fit — ParseOpen throws Open Message Error before the FSM switch saw the type.
+        var payload = new byte[10];
+        payload[0] = 4;                       // version
+        payload[1] = 0xFD; payload[2] = 0xE8; // My AS 65002
+        payload[9] = 5;                       // optional-parameters length: mismatches the 0 present
+        var open = BuildMessage(BgpMessageType.Open, payload);
+        client.Send(open, 0, open.Length, SocketFlags.None);
+
+        var sent = await DrainAsync(client, TimeSpan.FromSeconds(2));
+        var notification = Assert.Single(sent.OfType<BgpNotificationMessage>());
+        Assert.Equal(BgpConstants.Error.FiniteStateMachineError, notification.ErrorCode);
+        Assert.Equal(BgpConstants.SubError.Unspecific, notification.SubErrorCode);
+        Assert.False(session.IsEstablished, "an OPEN in Established must reset the session (RFC 4271 §8.2.2)");
+
+        await runTask.WaitAsync(TimeSpan.FromSeconds(5));
+    }
+
+    [Fact]
+    public async Task WellFormedOpen_InEstablished_IsFsmError_Too()
+    {
+        // Control for #427: both OPEN classes in Established — well-formed and malformed — take
+        // the same FSM-error teardown; only the parse-failure path changed.
+        var (server, client) = ConnectedPair();
+        using var clientSock = client;
+        var bgpConfig = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1", HoldTime = 0, KeepAlive = 0 };
+        var metrics = new BgpMetrics();
+        using var session = new BgpSession(
+            new SocketBgpConnection(server),
+            new PeerConfig { Address = "127.0.0.1" },
+            bgpConfig,
+            new RouteTable(),
+            AllowAllFilter.Instance,
+            metrics,
+            new NopLogger<BgpSession>());
+
+        var runTask = await EstablishSessionAsync(session, client, bgpConfig);
+
+        var open = new BgpOpenMessage
+        {
+            Version = BgpConstants.BgpVersion,
+            Asn = 65002,
+            HoldTime = 0,
+            RouterId = 0x0A000002,
+            Capabilities = [BgpCapabilityInfo.FourOctetAsn(65002)]
+        };
+        var buffer = new byte[BgpMessageWriter.GetBufferSize(open)];
+        var written = BgpMessageWriter.WriteMessage(open, buffer);
+        client.Send(buffer, 0, written, SocketFlags.None);
+
+        var sent = await DrainAsync(client, TimeSpan.FromSeconds(2));
+        Assert.Equal(BgpConstants.Error.FiniteStateMachineError,
+            Assert.Single(sent.OfType<BgpNotificationMessage>()).ErrorCode);
+        Assert.False(session.IsEstablished);
+
+        await runTask.WaitAsync(TimeSpan.FromSeconds(5));
+    }
+
+    [Fact]
     public async Task DuplicateNextHop_OnWire_InstallsTheFirstOccurrence()
     {
         // #287 / RFC 7606 §3: a duplicated attribute is not an error — all occurrences after the

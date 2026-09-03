@@ -46,6 +46,56 @@ public class UserSourceCacheTests
     }
 
     [Fact]
+    public async Task ExpiredEntries_Swept_EvenBelowTheCap()
+    {
+        // #426: expired entries used to be PINNED until the entry cap was hit — steady-state
+        // memory was "everything fetched recently", not "live entries". The amortized sweep
+        // drops them regardless of the cap.
+        var time = new Microsoft.Extensions.Time.Testing.FakeTimeProvider();
+        var cache = new UserSourceCache(
+            positiveTtl: TimeSpan.FromMilliseconds(100), timeProvider: time, sweepEvery: 1);
+        var f = new Fetcher { OnSuccess = () => P((0xC0A80000u, (byte)24, true)) };
+
+        await cache.GetOrLoadAsync("https://example.com/a", "src", f.Invoke, CancellationToken.None);
+        time.Advance(TimeSpan.FromMilliseconds(150)); // A expires
+
+        await cache.GetOrLoadAsync("https://example.com/b", "src", f.Invoke, CancellationToken.None); // sweep drops A, loads B
+
+        Assert.Equal(1, cache.TrackedCount);
+    }
+
+    [Fact]
+    public async Task PrefixBudget_EvictsOldestPositives_EvenBelowTheCap()
+    {
+        // #426: the entry-count cap says nothing about MEMORY — a handful of huge entries could
+        // hold millions of parsed prefixes. Over the total-prefix budget the sweep drops the
+        // OLDEST positive entries even though the entry cap is nowhere near reached. Budget = 5:
+        // big(4) + small(2) = 6 over budget; the next sweep evicts big (oldest) → 2 ≤ 5.
+        var cache = new UserSourceCache(maxTotalPrefixes: 5, sweepEvery: 1);
+        var big = new Fetcher
+        {
+            OnSuccess = () => P(
+            (0x0A000000u, (byte)8, true), (0x0A000100u, (byte)8, true),
+            (0x0A000200u, (byte)8, true), (0x0A000300u, (byte)8, true))
+        };
+        var small = new Fetcher
+        {
+            OnSuccess = () => P(
+            (0xC0A80000u, (byte)24, true), (0xC0A80001u, (byte)24, true))
+        };
+        var third = new Fetcher { OnSuccess = () => P((0x0A0B0000u, (byte)16, true)) };
+
+        await cache.GetOrLoadAsync("https://example.com/big", "big", big.Invoke, CancellationToken.None);
+        await cache.GetOrLoadAsync("https://example.com/small", "small", small.Invoke, CancellationToken.None);
+        Assert.Equal(6, cache.TrackedPrefixes); // over the budget — enforced at the next sweep
+
+        await cache.GetOrLoadAsync("https://example.com/third", "third", third.Invoke, CancellationToken.None);
+
+        Assert.Equal(2, cache.TrackedCount);    // small + third
+        Assert.Equal(3, cache.TrackedPrefixes); // small(2) + third(1); big(4) swept
+    }
+
+    [Fact]
     public async Task Concurrent_Same_Url_Fetched_Once_Gate_Serializes()
     {
         // Exercises the per-URL SemaphoreSlim (the actual thundering-herd defense): many concurrent

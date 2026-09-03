@@ -635,6 +635,46 @@ public class PrefixServiceTests
         Assert.Equal(1, handler.Calls);
     }
 
+    [Fact]
+    public async Task GetUserSourcePrefixesAsync_FetchesThroughTheUserSourceProvider()
+    {
+        // #425: the peer-supplied URL path must fetch through the user-source provider (the
+        // retry-only pipeline), never through the operator provider whose breaker it could open.
+        var operatorProvider = new StubHttpSourceProvider();
+        var userSource = new StubHttpSourceProvider();
+        var service = new PrefixService(
+            new AppConfig(),
+            null!, // RipeStatPrefixCache is not on the user-source path
+            null!, // IPrefixSourceService is not on the user-source path
+            new HttpPrefixProvider(new ThrowingOperatorFactory(), NullLogger<HttpPrefixProvider>.Instance),
+            userSourceHttpProvider: userSource);
+
+        var prefixes = await service.GetUserSourcePrefixesAsync("u", "https://example.com/u.txt", null);
+
+        Assert.NotEmpty(prefixes);
+        Assert.Equal(1, userSource.Calls);
+    }
+
+    private sealed class StubHttpSourceProvider : IPrefixSourceProvider
+    {
+        public string Kind => "http";
+        public bool SupportsConditionalRequests => false;
+        public int Calls { get; private set; }
+
+        public Task<SourceLoadResult> LoadAsync(PrefixSourceConfig source, string? etag = null, DateTimeOffset? lastModified = null, CancellationToken ct = default)
+        {
+            Calls++;
+            return Task.FromResult(SourceLoadResult.Ok(new List<IpPrefix> { new(0x0A000000u, 8) }));
+        }
+    }
+
+    /// <summary>Any touch of the operator pipeline fails the test loudly (#425).</summary>
+    private sealed class ThrowingOperatorFactory : IHttpClientFactory
+    {
+        public HttpClient CreateClient(string name) => throw new NotSupportedException(
+            "the user-source path must not touch the operator client pipeline");
+    }
+
     /// <summary>
     /// #324: a config source that hangs must not wedge sequential seeding — LoadAllAsync awaits
     /// sources one by one, so before the default budget one dripping source stalled every later

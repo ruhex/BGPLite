@@ -36,7 +36,7 @@ public class BgpSessionV6AdvertiseTests
     };
 
     private static async Task<(BgpSession Session, Task Run, ScriptedConnection Conn)> EstablishAsync(
-        RouteTable routeTable, BgpConfig? config = null, bool negotiateMpV6 = true)
+        RouteTable routeTable, BgpConfig? config = null, bool negotiateMpV6 = true, bool routeRefresh = false)
     {
         var conn = new ScriptedConnection();
         var session = new BgpSession(
@@ -52,6 +52,8 @@ public class BgpSessionV6AdvertiseTests
         var capabilities = new List<BgpCapabilityInfo> { BgpCapabilityInfo.FourOctetAsn(65002) };
         if (negotiateMpV6)
             capabilities.Add(BgpCapabilityInfo.MultiprotocolIpv6Unicast());
+        if (routeRefresh)
+            capabilities.Add(BgpCapabilityInfo.RouteRefresh());
         conn.EnqueueMessage(new BgpOpenMessage
         {
             Version = BgpConstants.BgpVersion,
@@ -67,6 +69,78 @@ public class BgpSessionV6AdvertiseTests
         Assert.True(session.IsEstablished, "session must reach Established");
         return (session, run, conn);
     }
+
+    [Fact]
+    public async Task RouteRefresh_Afi2_RereadvertisesV6Routes()
+    {
+        // #420 (RFC 2918 §2): a refresh request names the AFI/SAFI to re-send. An MP-IPv6-
+        // negotiated peer's AFI=2/SAFI=1 request was silently ignored — the only way to get the
+        // routes re-advertised was bouncing the session. It must trigger the same debounced
+        // re-announcement dump the AFI=1 request does.
+        var routeTable = new RouteTable();
+        routeTable.AddOrUpdate(V6Route());
+        var (session, run, conn) = await EstablishAsync(routeTable, routeRefresh: true);
+
+        // Wait for the initial dump's single MP_REACH frame before asking for a refresh.
+        var initial = 0;
+        for (var i = 0; i < 300 && (initial = CountMpReach(conn)) == 0; i++)
+            await Task.Delay(TimeSpan.FromMilliseconds(10));
+        Assert.Equal(1, initial);
+
+        conn.EnqueueMessage(new BgpRouteRefreshMessage { Afi = BgpConstants.Afi.IPv6, Reserved = 0, Safi = BgpConstants.Safi.Unicast });
+        for (var i = 0; i < 300 && CountMpReach(conn) <= initial; i++)
+            await Task.Delay(TimeSpan.FromMilliseconds(10));
+
+        Assert.True(CountMpReach(conn) > initial, "AFI=2 ROUTE_REFRESH must re-advertise the v6 routes");
+
+        await TeardownAsync(session, run);
+    }
+
+    [Fact]
+    public async Task RouteRefresh_Afi2_WithoutNegotiation_Ignored()
+    {
+        var routeTable = new RouteTable();
+        routeTable.AddOrUpdate(V6Route());
+        var (session, run, conn) = await EstablishAsync(routeTable, negotiateMpV6: false, routeRefresh: true);
+
+        conn.EnqueueMessage(new BgpRouteRefreshMessage { Afi = BgpConstants.Afi.IPv6, Reserved = 0, Safi = BgpConstants.Safi.Unicast });
+        await Task.Delay(TimeSpan.FromMilliseconds(300));
+
+        // Without MP-IPv6 negotiation no v6 advertisement exists to refresh — the request is a no-op.
+        Assert.Equal(0, CountMpReach(conn));
+
+        await TeardownAsync(session, run);
+    }
+
+    [Fact]
+    public async Task RouteRefresh_Afi1_StillRereadvertises()
+    {
+        // Control for the #420 gate refactor: the IPv4/Unicast refresh path is unchanged.
+        var routeTable = new RouteTable();
+        routeTable.AddOrUpdate(new Route { Prefix = 0x0A000000, PrefixLength = 8, NextHop = 1 });
+        var (session, run, conn) = await EstablishAsync(routeTable, routeRefresh: true);
+
+        // Wait for the initial dump before snapshotting (Established ≠ dump-complete,
+        // CodeRabbit on #450).
+        var initial = 0;
+        for (var i = 0; i < 300 && (initial = CountUpdates(conn)) == 0; i++)
+            await Task.Delay(TimeSpan.FromMilliseconds(10));
+        Assert.True(initial > 0);
+
+        conn.EnqueueMessage(new BgpRouteRefreshMessage { Afi = BgpConstants.Afi.IPv4, Reserved = 0, Safi = BgpConstants.Safi.Unicast });
+        for (var i = 0; i < 300 && CountUpdates(conn) <= initial; i++)
+            await Task.Delay(TimeSpan.FromMilliseconds(10));
+
+        Assert.True(CountUpdates(conn) > initial, "AFI=1 ROUTE_REFRESH must re-advertise");
+
+        await TeardownAsync(session, run);
+    }
+
+    private static int CountUpdates(ScriptedConnection conn) =>
+        conn.Sent.Select(f => BgpMessageReader.ReadMessage(f)).OfType<BgpUpdateMessage>().Count();
+
+    private static int CountMpReach(ScriptedConnection conn) =>
+        conn.Sent.Select(f => BgpMessageReader.ReadMessage(f)).OfType<BgpUpdateMessage>().Count(u => u.MpReachV6 is not null);
 
     private static async Task TeardownAsync(BgpSession session, Task run)
     {

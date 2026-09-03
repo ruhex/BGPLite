@@ -36,8 +36,9 @@ public class PeerInputValidationTests
 
     /// <summary>
     /// Rejected outright: unparseable input, absent input (which reached the store as null and
-    /// surfaced as a 500 from a NOT NULL violation), and IPv6 — BGPLite is IPv4-unicast only, so an
-    /// IPv6 peer row could never match a session either.
+    /// surfaced as a 500 from a NOT NULL violation), and — #421 — addresses no BGP session can
+    /// ever originate from (unspecified / loopback / multicast / broadcast; parity with the YAML
+    /// path's #390 validation, which already rejects 0.0.0.0).
     /// </summary>
     [Theory]
     [InlineData(null)]
@@ -47,6 +48,15 @@ public class PeerInputValidationTests
     [InlineData(" 1.2.3.4")]
     [InlineData("banana")]
     [InlineData("1.2.3.4.5")]
+    [InlineData("0.0.0.0")]              // #421: unspecified (the YAML path rejects it too, #390)
+    [InlineData("0.1.2.3")]              // #421: 0.0.0.0/8
+    [InlineData("127.0.0.1")]            // #421: loopback
+    [InlineData("224.0.0.1")]            // #421: multicast
+    [InlineData("255.255.255.255")]      // #421: broadcast
+    [InlineData("::")]                   // #421: IPv6 unspecified
+    [InlineData("::1")]                  // #421: IPv6 loopback
+    [InlineData("ff02::1")]              // #421: IPv6 multicast
+    [InlineData("::ffff:224.0.0.1")]     // #421: multicast hidden behind the mapped form
     public void NormalizePeerIp_RejectsUnusableInput(string? input)
     {
         Assert.Null(ManagementApi.NormalizePeerIp(input));

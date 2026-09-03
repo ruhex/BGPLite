@@ -95,14 +95,7 @@ builder.Services.AddSingleton(new BgpMetrics());
 // Prefix sources (file / HTTP / ...) resolved by Kind via a provider factory,
 // with an in-memory TTL cache. Add a new loader by implementing IPrefixSourceProvider
 // and registering it here.
-builder.Services.AddHttpClient(HttpPrefixProvider.ClientName, c =>
-{
-    // HttpClient.Timeout MUST be InfiniteTimeSpan when a Polly resilience pipeline is attached —
-    // otherwise the client's own timeout fires prematurely across retries and cancels the whole
-    // pipeline (CodeRabbit #177). The per-attempt timeout is enforced by the pipeline's AddTimeout.
-    c.Timeout = Timeout.InfiniteTimeSpan;
-    c.DefaultRequestHeaders.UserAgent.ParseAdd("BGPLite/1.0");
-})
+builder.Services.AddHttpClient(HttpPrefixProvider.ClientName, ConfigureHttpSourceClient)
 .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
 {
     // SSRF defense (#144): validate DNS resolution at the socket level — no TOCTOU race (every
@@ -118,6 +111,41 @@ builder.Services.AddHttpClient(HttpPrefixProvider.ClientName, c =>
 // with exponential backoff + jitter, plus a circuit breaker. A transient blip on a prefix-source
 // fetch previously returned 0 prefixes for that source until the next refresh; now it is retried.
 .AddResilienceHandler("http-prefix-source", ConfigureDefaultHttpResilience);
+
+// #425: peer-supplied user-source URLs get their OWN named client — retry WITHOUT a circuit
+// breaker. The shared breaker coupled peer-controlled failure rates to operator sources: a few
+// blackholed user URLs opened the shared breaker and suppressed every operator source fetch for
+// 30s windows. Handler, SSRF gate and body cap are identical to the operator client.
+builder.Services.AddHttpClient(HttpPrefixProvider.UserSourceClientName, ConfigureHttpSourceClient)
+.ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
+{
+    ConnectCallback = PrefixSourceUrlValidator.CreateValidatedConnectionAsync,
+    AllowAutoRedirect = false
+})
+.AddResilienceHandler("http-user-source", pipelineBuilder => pipelineBuilder.AddRetry(new HttpRetryStrategyOptions
+{
+    MaxRetryAttempts = 2,
+    Delay = TimeSpan.FromMilliseconds(500),
+    MaxDelay = TimeSpan.FromSeconds(2),
+}));
+
+// #425: the user-source provider instance wired with the retry-only client, keyed so the
+// operator registrations above are untouched.
+builder.Services.AddKeyedSingleton<IPrefixSourceProvider>(HttpPrefixProvider.UserSourceClientName,
+    (sp, _) => new HttpPrefixProvider(
+        sp.GetRequiredService<IHttpClientFactory>(),
+        sp.GetRequiredService<ILogger<HttpPrefixProvider>>(),
+        clientName: HttpPrefixProvider.UserSourceClientName));
+
+static void ConfigureHttpSourceClient(HttpClient c)
+{
+    // HttpClient.Timeout MUST be InfiniteTimeSpan when a Polly resilience pipeline is attached —
+    // otherwise the client's own timeout fires prematurely across retries and cancels the whole
+    // pipeline (CodeRabbit #177). Per-attempt/per-source budgets are enforced downstream (#324).
+    c.Timeout = Timeout.InfiniteTimeSpan;
+    c.DefaultRequestHeaders.UserAgent.ParseAdd("BGPLite/1.0");
+}
+
 builder.Services.AddSingleton<HttpPrefixProvider>();
 builder.Services.AddSingleton<FilePrefixProvider>();
 builder.Services.AddSingleton<IPrefixSourceProvider>(sp => sp.GetRequiredService<HttpPrefixProvider>());
@@ -184,7 +212,17 @@ builder.Services.AddSingleton<IPrefixService>(sp =>
         sp.GetRequiredService<RipeStatPrefixCache>(),
         sources,
         sp.GetRequiredService<HttpPrefixProvider>(),
-        logger: sp.GetRequiredService<ILogger<PrefixService>>());
+        logger: sp.GetRequiredService<ILogger<PrefixService>>(),
+        // #416: the RU path now owns its convergence push — GetRuPrefixesAsync fires it AFTER
+        // releasing _ruGate (the load itself is callback-free via LoadDefaultAsync), so a changed
+        // default source can no longer deadlock the fleet refresh it triggers.
+        onSourceChanged: async name =>
+        {
+            await sp.GetRequiredService<ISessionManager>().RefreshAllEstablishedAsync();
+        },
+        // #425: the peer-supplied user-source path uses the retry-only client so its failures
+        // cannot open the circuit breaker gating operator sources.
+        userSourceHttpProvider: sp.GetRequiredKeyedService<IPrefixSourceProvider>(HttpPrefixProvider.UserSourceClientName));
 });
 
 // #263: the BGP send path's dependencies are registered explicitly and resolved with

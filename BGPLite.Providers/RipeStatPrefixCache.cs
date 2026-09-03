@@ -52,6 +52,9 @@ public sealed class RipeStatPrefixCache
     // integration review): a plain presence marker would be removed by the first caller's exit
     // while a second caller is still inside/queued on the same gate.
     private readonly ConcurrentDictionary<uint, int> _inflight = new();
+    // #426: amortized expired-entry sweep state (see GetPrefixesAsync). injectable for tests.
+    private int _callsSinceSweep;
+    private readonly int _sweepEvery;
 
     public RipeStatPrefixCache(
         RipeStatProvider ripe,
@@ -59,7 +62,8 @@ public sealed class RipeStatPrefixCache
         TimeSpan? cacheTtl = null,
         TimeSpan? negativeTtl = null,
         int? maxCacheEntries = null,
-        TimeProvider? timeProvider = null)
+        TimeProvider? timeProvider = null,
+        int? sweepEvery = null)
     {
         _ripe = ripe;
         _logger = logger;
@@ -70,10 +74,22 @@ public sealed class RipeStatPrefixCache
         // churn traffic, not normal operation.
         _maxCacheEntries = maxCacheEntries ?? 4096;
         _timeProvider = timeProvider ?? TimeProvider.System;
+        _sweepEvery = sweepEvery ?? 64;
     }
+
+    /// <summary>Entries currently tracked (test/observability — #426 sweep coverage).</summary>
+    internal int TrackedCount => _cache.Count;
 
     public async Task<IReadOnlyList<IpPrefix>> GetPrefixesAsync(uint asn, CancellationToken ct = default, bool serveNegativeEntries = true)
     {
+        // #426: amortized expired-entry sweep — expired entries used to be pinned until the entry
+        // cap was hit. Cheap (every Nth call), idempotent, in-flight ASNs are never touched.
+        if (Interlocked.Increment(ref _callsSinceSweep) >= _sweepEvery)
+        {
+            Volatile.Write(ref _callsSinceSweep, 0);
+            SweepExpired();
+        }
+
         // Fast path: fresh entry (positive, or negative within its TTL when the caller accepts
         // the []-on-recent-failure semantic — the RouteAssembler fan-out does; a source provider
         // must NOT, see the class doc).
@@ -173,6 +189,24 @@ public sealed class RipeStatPrefixCache
     /// for an in-flight ASN (#267 item 3). Under the lock of the caller's per-ASN gate, so the
     /// sweep is serialized against itself; ConcurrentDictionary enumeration is a snapshot and safe
     /// against concurrent writers.</summary>
+    /// <summary>
+    /// #426: removes EXPIRED entries regardless of the entry cap — they used to be pinned until
+    /// the cap was hit, so steady-state memory was "every ASN fetched recently", not "live ASNs".
+    /// In-flight ASNs are never touched (#267 item 3); concurrent sweeps are idempotent.
+    /// </summary>
+    private void SweepExpired()
+    {
+        var now = _timeProvider.GetUtcNow().UtcDateTime;
+        foreach (var (key, entry) in _cache)
+        {
+            var ttl = entry.Negative ? _negativeTtl : _cacheTtl;
+            if (now - entry.CachedAt < ttl) continue;
+            if (_inflight.TryGetValue(key, out var active) && active > 0) continue;
+            if (_cache.TryRemove(key, out _))
+                _locks.TryRemove(key, out _);
+        }
+    }
+
     private void EvictIfAtCapacity(uint insertingKey)
     {
         if (_cache.Count < _maxCacheEntries) return;

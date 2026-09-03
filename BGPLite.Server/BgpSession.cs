@@ -729,6 +729,22 @@ public sealed class BgpSession : IDisposable
                 LogPeerClosedEstablished(ex);
                 return;
             }
+            catch (BgpParseException ex) when (ex.ErrorCode == BgpConstants.Error.OpenMessageError)
+            {
+                // #427 (RFC 4271 §8.2.2): an OPEN received in Established is an FSM error
+                // regardless of body validity — Established accepts only UPDATE, KEEPALIVE,
+                // NOTIFICATION and ROUTE_REFRESH, and a conformant speaker never parses the body.
+                // The body-error filter below must NOT keep the session up for this message class
+                // (that treatment is UPDATE-specific, D17). Same teardown as the FSM-error default
+                // case: exactly one NOTIFICATION 5/0 (CAS-latched), then Idle.
+                _logger.LogWarning("OPEN received from {Peer} in Established — FSM error (RFC 4271 §8.2.2)", _peer);
+                if (Interlocked.CompareExchange(ref _teardownReason, (int)TeardownReason.LocalCease, (int)TeardownReason.None) == (int)TeardownReason.None)
+                {
+                    try { await SendNotificationAsync(BgpConstants.Error.FiniteStateMachineError, BgpConstants.SubError.Unspecific); }
+                    catch { /* best-effort — partial write counts, see RFC 4271 §8.1 */ }
+                }
+                return;
+            }
             catch (BgpParseException ex) when (ex.ErrorCode is not null)
             {
                 // #222: a malformed message BODY (truncated path attribute, out-of-range NLRI length,
@@ -815,9 +831,19 @@ public sealed class BgpSession : IDisposable
                         _logger.LogWarning("RouteRefresh received from {Peer} without negotiated capability, ignoring", _peer);
                         break;
                     }
-                    if (refresh.Afi != BgpConstants.Afi.IPv4 || refresh.Safi != BgpConstants.Safi.Unicast)
+                    // RFC 2918 §2: the receiving speaker re-sends Adj-RIB-Out for the REQUESTED
+                    // AFI/SAFI. Both families BGPLite advertises are honored (#420): IPv4/Unicast
+                    // always, IPv6/Unicast for MP-IPv6-negotiated sessions (#14). The re-announcement
+                    // dump is family-unified (withdraw-all + re-send), so the same debounced refresh
+                    // serves either request.
+                    var isSupportedFamily = refresh.Safi == BgpConstants.Safi.Unicast &&
+                        (refresh.Afi == BgpConstants.Afi.IPv4 ||
+                         (refresh.Afi == BgpConstants.Afi.IPv6 && _peerMpIpv6Unicast));
+                    if (!isSupportedFamily)
                     {
-                        _logger.LogDebug("RouteRefresh ignored: unsupported AFI/SAFI from {Peer}", _peer);
+                        _logger.LogDebug(
+                            "RouteRefresh ignored: unsupported AFI/SAFI {Afi}/{Safi} from {Peer} (MP IPv6 negotiated: {MpV6})",
+                            refresh.Afi, refresh.Safi, _peer, _peerMpIpv6Unicast);
                         break;
                     }
                     // Debounce: ignore ROUTE_REFRESH floods. Atomic check-and-set so a burst of N
@@ -1275,16 +1301,18 @@ public sealed class BgpSession : IDisposable
         var attrCache = UpdateCodec.CreateUpdateAttributeCache();
         var v6AttrCache = UpdateCodec.CreateV6UpdateAttributeCache();
 
+        // #430 + #450 review: build-then-commit at UPDATE granularity — each emitted UPDATE's
+        // prefixes join the mirror only after THAT frame is on the wire (a batch may emit several
+        // UPDATEs, one per community group; a group that throws — e.g. a composed UPDATE over the
+        // 4096-byte maximum — must not take earlier groups' mirror entries down with it, nor may
+        // it record its own). The healthy /8 withdraw+re-announce contract is pinned by tests.
         foreach (var route in v4Routes)
         {
             batch.Add(route);
-            _advertisedPrefixes.Add(new IpPrefix(route.Prefix, route.PrefixLength, route.IsIpv4));
-            if (batch.Count >= maxNlriPerUpdate)
-            {
-                await SendRouteBatchAsync(nextHop, batch, attrCache);
-                sent += batch.Count;
-                batch.Clear();
-            }
+            if (batch.Count < maxNlriPerUpdate) continue;
+            await SendRouteBatchAsync(nextHop, batch, attrCache);
+            sent += batch.Count;
+            batch.Clear();
         }
 
         if (batch.Count > 0)
@@ -1298,13 +1326,10 @@ public sealed class BgpSession : IDisposable
         foreach (var route in v6Routes)
         {
             batch.Add(route);
-            _advertisedPrefixes.Add(new IpPrefix(route.Prefix, route.PrefixLength, route.IsIpv4));
-            if (batch.Count >= maxNlriPerUpdate)
-            {
-                await SendV6RouteBatchAsync(v6NextHop, batch, v6AttrCache);
-                sent += batch.Count;
-                batch.Clear();
-            }
+            if (batch.Count < maxNlriPerUpdate) continue;
+            await SendV6RouteBatchAsync(v6NextHop, batch, v6AttrCache);
+            sent += batch.Count;
+            batch.Clear();
         }
 
         if (batch.Count > 0)
@@ -1415,6 +1440,20 @@ public sealed class BgpSession : IDisposable
         };
 
         await SendMessageAsync(update);
+        // #430 + #450 review: per-UPDATE mirror commit — SendRouteBatchAsync/SendV6RouteBatchAsync
+        // emit one UPDATE per community group, so a group that throws after an earlier group
+        // succeeded must not drag the earlier group's mirror entries down (they ARE on the wire)
+        // nor record its own (they are NOT).
+        if (mpReach is { } reach)
+        {
+            foreach (var p in reach.Prefixes)
+                _advertisedPrefixes.Add(p);
+        }
+        else
+        {
+            foreach (var p in nlri)
+                _advertisedPrefixes.Add(p);
+        }
         _metrics.UpdateSent();
     }
 

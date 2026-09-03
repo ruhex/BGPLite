@@ -78,25 +78,41 @@ public sealed class PrefixSourceService : IPrefixSourceService
         }
     }
 
-    public async Task<IReadOnlyList<IpPrefix>> GetDefaultAsync(CancellationToken ct = default)
+    /// <inheritdoc cref="IPrefixSourceService.LoadDefaultAsync" />
+    /// <remarks>
+    /// Deliberately different from <see cref="GetAsync"/> in two ways (#416/#417): the
+    /// <c>onSourceChanged</c> callback is NOT fired (the caller owns the push, off its own locks),
+    /// and failures PROPAGATE instead of collapsing to <c>[]</c> — the RU caller
+    /// (<c>PrefixService.GetRuPrefixesAsync</c>) has stale-on-failure handling that a swallowed
+    /// exception would defeat (a failed cold load must not be cached as a positive empty set).
+    /// </remarks>
+    public async Task<(IReadOnlyList<IpPrefix> Prefixes, bool Changed)> LoadDefaultAsync(CancellationToken ct = default)
     {
         var defaultName = _config.DefaultPrefixSource;
         if (string.IsNullOrWhiteSpace(defaultName))
-            return [];
+            return ([], false);
 
         if (!_sourcesByName.TryGetValue(defaultName, out var source))
         {
             _logger.LogWarning("DefaultPrefixSource '{Name}' does not match any configured source.", defaultName);
-            return [];
+            return ([], false);
         }
 
-        try { return (await LoadCachedAsync(source, ct)).Prefixes; }
-        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }  // #324: only CALLER cancellation — the #324 default fetch budget fires as a foreign-token OCE (live ct) and must stay a per-source failure below
-        catch (Exception ex)
+        var (prefixes, changed) = await LoadCachedAsync(source, ct, triggerCallback: false);
+
+        // #417: an empty result served from a fresh NEGATIVE entry is failure backoff, not
+        // content. The negative entry is only ever written by the failure path above, so a
+        // negative hit means "the last real load failed" — surface it as a failure so the RU
+        // caller stale-serves (or throws) instead of positively caching an empty set for the full
+        // RU TTL. A legitimately empty source writes a NON-negative entry and passes through.
+        if (prefixes.Count == 0 && _cache.TryGetValue(source.Name, out var entry) &&
+            entry.Negative && _timeProvider.GetUtcNow().UtcDateTime - entry.CachedAt < _negativeTtl)
         {
-            _logger.LogWarning(ex, "Failed to load default prefix source '{Name}'.", defaultName);
-            return [];
+            throw new InvalidOperationException(
+                $"Default prefix source '{defaultName}' is in failure backoff — the last load failed within the last {_negativeTtl.TotalSeconds:0}s.");
         }
+
+        return (prefixes, changed);
     }
 
     public async Task<IReadOnlyList<(PrefixSourceConfig Source, IReadOnlyList<IpPrefix> Prefixes)>> LoadAllAsync(CancellationToken ct = default)

@@ -194,7 +194,10 @@ For section-by-section RFC conformance status, see `RFC_COMPLIANCE.md` (2026-07-
   adversarial UPDATE (#94, #222, #284 lineage). No NOTIFICATION is sent because RFC 4271 §6.3
   requires its receiver to tear down, defeating the purpose. Withdrawal semantics: class (b)
   withdraws the peer's own NLRI (RFC 7606's "treat" half, #288); class (a) cannot — the NLRI is
-  unrecoverable — and discards only (D2).
+  unrecoverable — and discards only (D2). Scope: **UPDATE only**. A malformed OPEN received in
+  Established is an FSM error (NOTIFICATION 5/0, #427) — RFC 4271 §8.2.2 makes ANY OPEN in
+  Established an FSM input regardless of body validity, so there is nothing to "keep alive" for
+  that message class.
 - **Consequence:** a peer sending structurally valid but semantically rejected UPDATEs gets them
   silently dropped (log Warning + `UpdatesRejected` metric) instead of a session reset; operators
   comparing against RFC-strict speakers will see BGPLite retain sessions others would close.

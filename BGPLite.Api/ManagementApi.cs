@@ -24,7 +24,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
     // them into locals (Volatile.Read) so a reload mid-request cannot observe a half-swapped set.
     private AppConfig _config;
     private IReadOnlyList<IPNetwork> _trustedProxyNetworks;
-    private PartitionedRateLimiter<string>? _rateLimiter;
+    private ClientIpRateLimiter? _rateLimiter;
     private ConcurrencyLimiter? _concurrencyLimiter;
     // #330: limiters swapped out by ApplyConfig, disposed in StopAsync/Dispose after in-flight
     // requests have drained — a retired TokenBucketRateLimiter with AutoReplenishment roots a
@@ -60,6 +60,14 @@ public sealed class ManagementApi : IHostedService, IDisposable
     /// </summary>
     private const int DefaultInflightCap = 64;
     private readonly SemaphoreSlim _inflightCap = new(DefaultInflightCap);
+    /// <summary>
+    /// #424: wall-clock budget for the GET endpoints that can trigger external fetches
+    /// (<c>/api/asn-lists</c>, <c>/api/peers/&#123;id&#125;/prefixes</c>). A cold RIPEstat fetch is
+    /// minutes-scale per ASN (180s timeout × retries), so N such GETs used to monopolize the
+    /// global in-flight cap and starve every other route for minutes. On expiry the handlers serve
+    /// their PARTIAL result with a warning; shutdown still propagates. internal settable for tests.
+    /// </summary>
+    internal TimeSpan ExternalFetchBudget { get; set; } = TimeSpan.FromSeconds(30);
     // #258: in-flight tracking is a COUNT plus an idle Task (completed whenever the count is 0),
     // not a List<Task> — the #248 design appended every handler and never removed it, so each
     // completed request leaked its Task (and its exception, if faulted) for the process lifetime
@@ -241,20 +249,48 @@ public sealed class ManagementApi : IHostedService, IDisposable
         // before this runs is the only unprotected moment (documented in #36).
         var md5Bootstrapped = 0;
         // TCP keys by source IP: if two peer rows share an IP with DIFFERENT keys, the last one
-        // would win non-deterministically — sort for determinism and warn (values never logged).
+        // would win non-deterministically — the shared resolver sorts for determinism and warns
+        // (values never logged). #418: the same resolver re-arms the key on delete/PATCH so the
+        // runtime behavior cannot drift from this bootstrap.
         foreach (var group in (await _store.GetPeerMd5CredentialsAsync(cancellationToken))
                      .GroupBy(c => c.Ip).OrderBy(g => g.Key, StringComparer.Ordinal))
         {
-            var creds = group.OrderBy(c => c.Md5Password, StringComparer.Ordinal).ToList();
-            if (creds.Select(c => c.Md5Password).Distinct().Count() > 1)
-                _logger.LogWarning(
-                    "TCP-MD5: {Count} peer rows on source IP {Ip} configure DIFFERENT keys — TCP-MD5 keys by IP, so one key applies to all of them (peers: {Peers})",
-                    creds.Count, group.Key, string.Join(", ", creds.Select(c => c.Ip)));
-            _sessionManager.SetPeerMd5Key(group.Key, creds[0].Md5Password);
+            var key = ResolveSharedIpKey(group.Key, [.. group]);
+            if (key is null) continue;
+            _sessionManager.SetPeerMd5Key(group.Key, key);
             md5Bootstrapped++;
         }
         if (md5Bootstrapped > 0)
             _logger.LogInformation("TCP-MD5 armed for {Count} peer(s)", md5Bootstrapped);
+    }
+
+    /// <summary>
+    /// Resolves the ONE TCP-MD5 key a source IP's surviving peer rows must share (#36 — TCP keys
+    /// by address, not by (IP, ASN)). Deterministic ordinal pick among the rows, with the same
+    /// warning the startup bootstrap emits when siblings declare DIFFERENT keys; null when no
+    /// surviving row carries a key (#418).
+    /// </summary>
+    private string? ResolveSharedIpKey(string ip, IReadOnlyList<(string Ip, string Md5Password)> rows)
+    {
+        if (rows.Count == 0) return null;
+        var creds = rows.OrderBy(c => c.Md5Password, StringComparer.Ordinal).ToList();
+        if (creds.Select(c => c.Md5Password).Distinct().Count() > 1)
+            _logger.LogWarning(
+                "TCP-MD5: {Count} peer rows on source IP {Ip} configure DIFFERENT keys — TCP-MD5 keys by IP, so one key applies to all of them (peers: {Peers})",
+                creds.Count, ip, string.Join(", ", creds.Select(c => c.Ip)));
+        return creds[0].Md5Password;
+    }
+
+    /// <summary>
+    /// Re-arms the per-IP TCP-MD5 key from the SURVIVING peer rows (#418): deleting a peer or
+    /// clearing its password must fall back to a sibling's key on the same source IP, and setting
+    /// a new one must leave the whole-IP state consistent with the store. The pre-#418 behavior
+    /// armed/unarmed from the single edited row, silently disarming (or overriding) siblings.
+    /// </summary>
+    internal async Task RearmPeerIpMd5KeyAsync(string ip)
+    {
+        var remaining = await _store.GetPeerMd5CredentialsForIpAsync(ip);
+        _sessionManager.SetPeerMd5Key(ip, ResolveSharedIpKey(ip, remaining));
     }
 
     public async Task StopAsync(CancellationToken cancellationToken)
@@ -490,18 +526,24 @@ public sealed class ManagementApi : IHostedService, IDisposable
         if (ex is JsonException)
             return ("Malformed JSON body", 400);
 
-        // EF Core constraint violation. #266 item 8: distinguish the two SQLite constraint codes —
-        // 2067 (SQLITE_CONSTRAINT_UNIQUE, a concurrent duplicate insert) is a genuine 409, while
-        // 19 (SQLITE_CONSTRAINT, in practice an FK violation after a concurrent DELETE removed the
-        // parent peer row) must not answer "already exists" for a resource that is GONE.
+        // EF Core constraint violation. #266 item 8 + #377 review + #431: classify by the SQLite
+        // EXTENDED code — 787 (SQLITE_CONSTRAINT_FOREIGNKEY) is the concurrent-DELETE case (the
+        // resource is GONE, not duplicated), 2067 (SQLITE_CONSTRAINT_UNIQUE) is a genuine conflict,
+        // and everything else — NOT NULL (1299), CHECK (275), other constraint classes, or a
+        // non-SQLite DbUpdateException — is a server-side data/schema problem that must not be
+        // mislabeled "already exists" to the client (pre-#431 the whole remaining bucket was 409).
         if (ex is Microsoft.EntityFrameworkCore.DbUpdateException)
         {
-            // #377 review: BOTH constraint classes report primary code 19 in SqliteErrorCode;
-            // the discriminator is the EXTENDED code — 787 (SQLITE_CONSTRAINT_FOREIGNKEY) is the
-            // concurrent-DELETE case, anything else (2067 unique, 19 bare) is a genuine conflict.
-            if (ex.InnerException is Microsoft.Data.Sqlite.SqliteException sqlite && sqlite.SqliteExtendedErrorCode == 787)
-                return ("The peer was removed while the change was being applied", 404);
-            return ("The resource already exists or conflicts with the current state", 409);
+            if (ex.InnerException is Microsoft.Data.Sqlite.SqliteException sqlite)
+            {
+                return sqlite.SqliteExtendedErrorCode switch
+                {
+                    787 => ("The peer was removed while the change was being applied", 404),
+                    2067 => ("The resource already exists or conflicts with the current state", 409),
+                    _ => ("Internal server error", 500),
+                };
+            }
+            return ("Internal server error", 500);
         }
 
         // Anything else: generic message, full detail logged server-side.
@@ -1070,17 +1112,38 @@ public sealed class ManagementApi : IHostedService, IDisposable
             md5Password: data.Md5Password);
         if (data.Md5Password is not null)
         {
-            // The peer row carries the source IP the key is attached to.
+            // #418: re-arm from ALL surviving rows for this IP — clearing this peer's key must
+            // fall back to a sibling's, not silently disarm the address for every peer on it.
             var md5Peer = await _store.GetDbPeerByIdAsync(peerId);
             if (md5Peer is not null)
-                _sessionManager.SetPeerMd5Key(md5Peer.Ip, md5Peer.Md5Password);
+                await RearmPeerIpMd5KeyAsync(md5Peer.Ip);
         }
 
         _logger.LogInformation("Updated peer {Id}", SanitizeForLog(peerId));
 
-        _ = _sessionManager.RefreshPeerAsync(peer.Ip, peer.Asn ?? 0);
+        RequestPeerRefresh(peerId, peer);
 
         return await HandleGetPeer(peerId);
+    }
+
+    /// <summary>
+    /// Fire-and-forget per-peer refresh after a config change. A NULL-Asn row (legacy Ip-only era)
+    /// cannot match any live session by (Ip, Asn) — no session ever has RemoteAsn 0 (#300) — so
+    /// the refresh is skipped with a warning instead of the confusing "no session for {Ip} AS0"
+    /// the old <c>asn ?? 0</c> produced (#422).
+    /// </summary>
+    private void RequestPeerRefresh(string peerId, Peer peer)
+    {
+        if (peer.Asn.HasValue)
+        {
+            _ = _sessionManager.RefreshPeerAsync(peer.Ip, peer.Asn.Value);
+        }
+        else
+        {
+            _logger.LogWarning(
+                "Peer row {Id} at {Ip} has NULL Asn — refresh skipped (no (Ip, Asn) session match is possible)",
+                SanitizeForLog(peerId), peer.Ip);
+        }
     }
 
     internal async Task<ApiResponse> HandleDeletePeer(string peerId)
@@ -1097,13 +1160,28 @@ public sealed class ManagementApi : IHostedService, IDisposable
         // send-timeout backstop) from pinning the DELETE request; the session is disposed even
         // when the Cease send is cancelled.
         using var bound = new CancellationTokenSource(TimeSpan.FromSeconds(10));
-        await _sessionManager.TerminatePeerAsync(peer.Ip, peer.Asn ?? 0, bound.Token);
+        if (peer.Asn.HasValue)
+        {
+            await _sessionManager.TerminatePeerAsync(peer.Ip, peer.Asn.Value, bound.Token);
+        }
+        else
+        {
+            // #422: a NULL-Asn row (legacy Ip-only era) cannot be matched by (Ip, Asn) — no live
+            // session ever has RemoteAsn 0 (AS 0 OPENs are rejected, #300) — so the pre-#422
+            // `asn ?? 0` teardown was a SILENT no-op and the session kept advertising a deleted
+            // peer. Terminate by IP instead, and say so in the log.
+            _logger.LogWarning(
+                "Deleting peer row {Id} at {Ip} with NULL Asn — terminating ALL its sessions by IP",
+                SanitizeForLog(peerId), peer.Ip);
+            await _sessionManager.TerminatePeerByIpAsync(peer.Ip, bound.Token);
+        }
 
         await _store.DeletePeerAsync(peerId);
 
-        // #36: disarm the deleted peer's TCP-MD5 key. Uses the row loaded BEFORE the delete —
-        // a post-delete re-read always returned null (CodeRabbit on #398).
-        _sessionManager.SetPeerMd5Key(peer.Ip, null);
+        // #36 + #418: re-arm the IP's TCP-MD5 key from the SURVIVING rows — deleting one sibling
+        // must not disarm TCP-MD5 for the other peers sharing the source IP (pre-#418 this was an
+        // unconditional SetPeerMd5Key(ip, null)). No key left on the IP resolves to null (disarm).
+        await RearmPeerIpMd5KeyAsync(peer.Ip);
         _logger.LogInformation("Deleted peer {Id} ({Ip})", SanitizeForLog(peerId), peer.Ip);
         return ApiResponse.Ok(new { id = peerId, deleted = true });
     }
@@ -1181,7 +1259,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
 
         // Trigger refresh so the peer receives the new source's prefixes immediately —
         // same pattern as CreatePeer/UpdatePeer. Pass ASN so shared-IP peers aren't refreshed (#200).
-        _ = _sessionManager.RefreshPeerAsync(peer.Ip, peer.Asn ?? 0);
+        RequestPeerRefresh(peerId, peer);
 
         _logger.LogInformation("Added source '{Name}' ({Url}) to peer {PeerId}",
             SanitizeForLog(data.Name), SanitizeForLog(data.Url), SanitizeForLog(peerId));
@@ -1198,7 +1276,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
             return ApiResponse.Error($"Source '{sourceId}' not found", 404);
 
         // Trigger refresh so the source's prefixes are withdrawn immediately (#200: ASN-scoped).
-        _ = _sessionManager.RefreshPeerAsync(peer.Ip, peer.Asn ?? 0);
+        RequestPeerRefresh(peerId, peer);
 
         _logger.LogInformation("Deleted source {SourceId} from peer {PeerId}", SanitizeForLog(sourceId), SanitizeForLog(peerId));
         return ApiResponse.Ok(new { id = sourceId, deleted = true });
@@ -1221,7 +1299,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
             return ApiResponse.Error($"Source '{sourceId}' not found", 404);
 
         // Trigger refresh so toggling active/inactive takes effect immediately (#200: ASN-scoped).
-        _ = _sessionManager.RefreshPeerAsync(peer.Ip, peer.Asn ?? 0);
+        RequestPeerRefresh(peerId, peer);
 
         _logger.LogInformation("Source {SourceId} active={Active}", SanitizeForLog(sourceId), data.Active.Value);
         return ApiResponse.Ok(new { id = sourceId, active = data.Active.Value });
@@ -1237,7 +1315,22 @@ public sealed class ManagementApi : IHostedService, IDisposable
         if (peer is null)
             return ApiResponse.Error("Peer not found", 404);
 
-        var prefixes = await CollectPeerPrefixes(peerId, _shutdownCts.Token);
+        // #424: same wall-clock budget as /api/asn-lists — cold subscription fetches are
+        // minutes-scale and must not pin the request (and its in-flight slot) indefinitely.
+        using var budget = CancellationTokenSource.CreateLinkedTokenSource(_shutdownCts.Token);
+        budget.CancelAfter(ExternalFetchBudget);
+        List<string> prefixes;
+        try
+        {
+            prefixes = await CollectPeerPrefixes(peerId, budget.Token);
+        }
+        catch (OperationCanceledException) when (!_shutdownCts.IsCancellationRequested)
+        {
+            _logger.LogWarning(
+                "GET /api/peers/{Id}/prefixes exceeded the {Seconds:0}s external-fetch budget — serving a partial list",
+                SanitizeForLog(peerId), ExternalFetchBudget.TotalSeconds);
+            prefixes = [];
+        }
 
         var format = ctx.Request.QueryString["format"] ?? "txt";
         if (format == "json")
@@ -1269,7 +1362,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
                 foreach (var p in fetched)
                     prefixes.Add(new IpPrefix(p.Prefix, p.Length, p.IsIpv4).ToString());
             }
-            catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }  // #114/#337: only shutdown cancellation — a provider-timeout OCE (live token) is a fetch failure below
+            catch (OperationCanceledException) when (_shutdownCts.IsCancellationRequested) { throw; }  // #114/#337/#424: only SHUTDOWN propagates — budget expiry degrades to the partial list
             catch (Exception ex) { _logger.LogWarning(ex, "CollectPeerPrefixes: ASN fetch failed"); }
         }
 
@@ -1282,7 +1375,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
                 foreach (var p in ruPrefixes)
                     prefixes.Add(new IpPrefix(p.Prefix, p.Length, p.IsIpv4).ToString());
             }
-            catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }  // #114/#337: only shutdown cancellation — a provider-timeout OCE (live token) is a fetch failure below
+            catch (OperationCanceledException) when (_shutdownCts.IsCancellationRequested) { throw; }  // #114/#337/#424: see above
             catch (Exception ex) { _logger.LogWarning(ex, "CollectPeerPrefixes: RU prefix fetch failed"); }
         }
 
@@ -1299,7 +1392,12 @@ public sealed class ManagementApi : IHostedService, IDisposable
 
     private async Task<ApiResponse> HandleGetAsnListsAsync()
     {
-        var ct = _shutdownCts.Token;
+        // #424: bound the whole handler — see ExternalFetchBudget. Shutdown still propagates;
+        // budget expiry degrades to the partial counts collected so far (each later fetch fails
+        // fast against the cancelled token) instead of pinning the request for minutes.
+        using var budget = CancellationTokenSource.CreateLinkedTokenSource(_shutdownCts.Token);
+        budget.CancelAfter(ExternalFetchBudget);
+        var ct = budget.Token;
         var lists = _config.RipeStat?.AsnLists ?? [];
         var result = new List<object>();
 
@@ -1311,14 +1409,14 @@ public sealed class ManagementApi : IHostedService, IDisposable
                 foreach (var asn in l.Asns)
                 {
                     try { prefixCount += await _prefixService.GetPrefixCountAsync(asn, ct); }
-                    catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }  // #114/#337: only shutdown cancellation — a provider-timeout OCE (live token) is a fetch failure below
+                    catch (OperationCanceledException) when (_shutdownCts.IsCancellationRequested) { throw; }  // #114/#337/#424: only SHUTDOWN propagates — the #424 fetch budget fires as OCE on a live shutdown token and degrades below
                     catch (Exception ex) { _logger.LogWarning(ex, "Failed to get prefix count for AS{Asn}", asn); }
                 }
             }
             else if (l.Country is not null)
             {
                 try { prefixCount = (await _prefixService.GetRuPrefixesAsync(ct)).Count; }
-                catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }  // #114/#337: only shutdown cancellation — a provider-timeout OCE (live token) is a fetch failure below
+                catch (OperationCanceledException) when (_shutdownCts.IsCancellationRequested) { throw; }  // #114/#337/#424: see above
                 catch (Exception ex) { _logger.LogWarning(ex, "Failed to get RU prefix count"); }
             }
 
@@ -1351,6 +1449,11 @@ public sealed class ManagementApi : IHostedService, IDisposable
                 type = source.Kind == "asn" ? "asn" : "list"
             });
         }
+
+        if (ct.IsCancellationRequested && !_shutdownCts.IsCancellationRequested)
+            _logger.LogWarning(
+                "GET /api/asn-lists exceeded the {Seconds:0}s external-fetch budget — serving partial prefix counts",
+                ExternalFetchBudget.TotalSeconds);
 
         return ApiResponse.Ok(result);
     }
@@ -1491,8 +1594,11 @@ public sealed class ManagementApi : IHostedService, IDisposable
     /// <c>ToString()</c> collapses all of them onto the form the BGP path will look for.
     /// </para>
     /// <para>
-    /// IPv6 is rejected rather than mapped: BGPLite is IPv4-unicast only (#14 tracks the rest), so
-    /// <c>::ffff:1.2.3.4</c> would produce a peer no session can match.
+    /// Both families are accepted (#14 phase 5): a peer may be an IPv6 host. Addresses no BGP
+    /// session can ever originate from — unspecified, loopback, multicast, and the IPv4 broadcast
+    /// address — are rejected (#421), the API-side parity of the YAML path's fail-loud validation
+    /// (#390): such rows can never match a session, and a multicast row would even arm a kernel
+    /// TCP-MD5 entry.
     /// </para>
     /// </summary>
     internal static string? NormalizePeerIp(string? ip)
@@ -1503,9 +1609,29 @@ public sealed class ManagementApi : IHostedService, IDisposable
         // plain IPv4 form so the row matches the address form the dual-mode listener reports.
         if (address.IsIPv4MappedToIPv6)
             address = address.MapToIPv4();
-        // Both families are accepted (#14 phase 5): a peer may be an IPv6 host; the canonical
-        // ToString form matches what the accept loop stores.
+        if (IsNonPeerAddress(address))
+            return null;
+        // The canonical ToString form matches what the accept loop stores.
         return address.ToString();
+    }
+
+    /// <summary>
+    /// The unspecified, loopback, multicast and (IPv4) broadcast addresses — unusable as a peer
+    /// identity. internal static for unit tests.
+    /// </summary>
+    internal static bool IsNonPeerAddress(IPAddress address)
+    {
+        if (address.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork)
+        {
+            var b = address.GetAddressBytes();
+            return b[0] == 0                                                 // 0.0.0.0/8 — unspecified / current-network
+                || b[0] == 127                                               // 127/8 — loopback
+                || (b[0] & 0xF0) == 0xE0                                     // 224/4 — multicast
+                || (b[0] == 255 && b[1] == 255 && b[2] == 255 && b[3] == 255); // broadcast
+        }
+        return IPAddress.IPv6Any.Equals(address)
+            || IPAddress.IPv6Loopback.Equals(address)
+            || address.IsIPv6Multicast;
     }
 
     /// <summary>
@@ -1622,22 +1748,15 @@ public sealed class ManagementApi : IHostedService, IDisposable
     /// <summary>
     /// Builds the per-client-IP token-bucket rate limiter for the management API (#116). Each distinct
     /// resolved client IP (see <see cref="GetClientIp"/>) gets its own token bucket; a request is
-    /// rejected with 429 once its bucket is exhausted. Tunable via <see cref="ApiRateLimitConfig"/>; the
+    /// rejected with 429 once the resolved client's token bucket is drained. Tunable via <see cref="ApiRateLimitConfig"/>; the
     /// limiter is only created when the operator opts in (ApiRateLimit section present + Enabled).
-    /// Extracted as a pure factory for unit tests.
+    /// Extracted as a pure factory for unit tests. #423: the registry evicts idle IP partitions —
+    /// <see cref="PartitionedRateLimiter"/> kept every IP ever seen (and its replenishment timer)
+    /// for the process lifetime.
     /// </summary>
-    internal static PartitionedRateLimiter<string> CreateRateLimiter(ApiRateLimitConfig cfg)
+    internal static ClientIpRateLimiter CreateRateLimiter(ApiRateLimitConfig cfg)
     {
-        var options = new TokenBucketRateLimiterOptions
-        {
-            TokenLimit = Math.Max(1, cfg.TokenLimit),
-            TokensPerPeriod = Math.Max(1, cfg.TokensPerPeriod),
-            ReplenishmentPeriod = TimeSpan.FromSeconds(Math.Max(1, cfg.PeriodSeconds)),
-            QueueLimit = 0,         // deny immediately (429) when no tokens — never queue
-            AutoReplenishment = true
-        };
-        return PartitionedRateLimiter.Create<string, string>(
-            ip => RateLimitPartition.GetTokenBucketLimiter(ip, _ => options));
+        return new ClientIpRateLimiter(cfg);
     }
 
     /// <summary>
