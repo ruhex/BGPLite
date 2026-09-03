@@ -8,6 +8,7 @@ using BGPLite.Providers;
 using BGPLite.Routing;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Data.Sqlite;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Xunit;
 using BGPLite.Protocol;
@@ -43,7 +44,7 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
         _connection.Dispose();
     }
 
-    private async Task<int> StartAsync(AppConfig template, ISessionManager? sessions = null)
+    private async Task<int> StartAsync(AppConfig template, ISessionManager? sessions = null, ILogger<ManagementApi>? logger = null)
     {
         for (var attempt = 0; ; attempt++)
         {
@@ -61,7 +62,7 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
                 new RouteTable(),
                 config,
                 new BgpMetrics(),
-                NullLogger<ManagementApi>.Instance,
+                logger ?? NullLogger<ManagementApi>.Instance,
                 new InertPrefixService(),
                 new InertPrefixSources(),
                 sessions ?? new InertSessions());
@@ -333,5 +334,35 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
         public void SetPeerMd5Key(string peerIp, string? password) => Md5Keys.Add((peerIp, password));
         public int GetAdvertisedPrefixCount(string peerIp, uint asn) => 0;
         public Task RefreshAllEstablishedAsync() => Task.CompletedTask;
+    }
+
+    /// <summary>Captures formatted log messages so a test can assert what must NEVER be logged (#479).</summary>
+    private sealed class RecordingLogger : ILogger<ManagementApi>
+    {
+        public List<string> Messages { get; } = [];
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+        public bool IsEnabled(LogLevel logLevel) => true;
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
+            => Messages.Add(formatter(state, exception));
+    }
+
+    [Fact]
+    public async Task AddSource_RejectedUrl_IsNeverLogged()
+    {
+        // #479 (#149): peer-source URLs may carry query-string tokens — the log events around
+        // save-time validation must name the source, never the URL. The loopback host is blocked
+        // by the SSRF validator without any network access, so the rejected path fires offline.
+        var store = new PeerStore(new StaticOptionsFactory(new DbContextOptionsBuilder<BgpDbContext>().UseSqlite(_connection).Options));
+        var id = (await store.SavePeerConfigurationAsync("198.51.100.7", 65090, null, [], [], [])).Id;
+        var logger = new RecordingLogger();
+        _port = await StartAsync(new AppConfig { Bgp = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1" } }, logger: logger);
+        _client = new HttpClient();
+
+        var body = JsonSerializer.Serialize(new { name = "leaky", url = "http://127.0.0.1:9/list?token=SECRET123" });
+        using var response = await _client.PostAsync($"http://127.0.0.1:{_port}/api/peers/{id}/sources",
+            new StringContent(body, Encoding.UTF8, "application/json"));
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);   // the loopback host is rejected
+        Assert.DoesNotContain(logger.Messages, m => m.Contains("SECRET123") || m.Contains("token="));
     }
 }

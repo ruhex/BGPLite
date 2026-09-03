@@ -1250,14 +1250,19 @@ public sealed class ManagementApi : IHostedService, IDisposable
         }
         catch (OperationCanceledException) when (validationCts.IsCancellationRequested)
         {
-            // DNS-resolution timeout (5s).
-            _logger.LogWarning("Save-time URL validation timed out for '{Url}'", SanitizeForLog(data.Url));
+            // DNS-resolution timeout (5s). #479 (#149): source URLs may carry query-string tokens —
+            // the log names the source, never the URL.
+            _logger.LogWarning("Save-time URL validation timed out for source '{Name}'", SanitizeForLog(data.Name));
             return ApiResponse.Error("URL validation timed out (DNS resolution took too long)", 400);
         }
         if (!isValid)
         {
-            _logger.LogWarning("Save-time URL validation rejected '{Url}': {Error}", SanitizeForLog(data.Url), validationError);
-            return ApiResponse.Error($"Invalid URL: the host could not be reached or is not allowed", 400);
+            // #479 (#149): neither the URL nor the validator's message (which embeds it) belongs in
+            // the log. The reason goes to the RESPONSE instead — the operator just submitted this
+            // URL, so echoing it there leaks nothing.
+            _logger.LogWarning("Save-time URL validation rejected source '{Name}' for peer {PeerId}",
+                SanitizeForLog(data.Name), SanitizeForLog(peerId));
+            return ApiResponse.Error($"Invalid URL: {validationError ?? "the host could not be reached or is not allowed"}", 400);
         }
 
         var source = await _store.AddCustomSourceAsync(peerId, data.Name, data.Url, data.Community);
@@ -1266,8 +1271,9 @@ public sealed class ManagementApi : IHostedService, IDisposable
         // same pattern as CreatePeer/UpdatePeer. Pass ASN so shared-IP peers aren't refreshed (#200).
         RequestPeerRefresh(peerId, peer);
 
-        _logger.LogInformation("Added source '{Name}' ({Url}) to peer {PeerId}",
-            SanitizeForLog(data.Name), SanitizeForLog(data.Url), SanitizeForLog(peerId));
+        // #479 (#149): log the source Name, not the URL (query-string tokens are secrets).
+        _logger.LogInformation("Added source '{Name}' to peer {PeerId}",
+            SanitizeForLog(data.Name), SanitizeForLog(peerId));
         return ApiResponse.Ok(new { id = source.Id, name = source.Name, url = source.Url, community = source.Community, active = source.Active });
     }
 
