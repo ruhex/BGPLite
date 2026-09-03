@@ -24,7 +24,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
     // them into locals (Volatile.Read) so a reload mid-request cannot observe a half-swapped set.
     private AppConfig _config;
     private IReadOnlyList<IPNetwork> _trustedProxyNetworks;
-    private PartitionedRateLimiter<string>? _rateLimiter;
+    private ClientIpRateLimiter? _rateLimiter;
     private ConcurrencyLimiter? _concurrencyLimiter;
     // #330: limiters swapped out by ApplyConfig, disposed in StopAsync/Dispose after in-flight
     // requests have drained — a retired TokenBucketRateLimiter with AutoReplenishment roots a
@@ -1748,22 +1748,15 @@ public sealed class ManagementApi : IHostedService, IDisposable
     /// <summary>
     /// Builds the per-client-IP token-bucket rate limiter for the management API (#116). Each distinct
     /// resolved client IP (see <see cref="GetClientIp"/>) gets its own token bucket; a request is
-    /// rejected with 429 once its bucket is exhausted. Tunable via <see cref="ApiRateLimitConfig"/>; the
+    /// rejected with 429 once the resolved client's token bucket is drained. Tunable via <see cref="ApiRateLimitConfig"/>; the
     /// limiter is only created when the operator opts in (ApiRateLimit section present + Enabled).
-    /// Extracted as a pure factory for unit tests.
+    /// Extracted as a pure factory for unit tests. #423: the registry evicts idle IP partitions —
+    /// <see cref="PartitionedRateLimiter"/> kept every IP ever seen (and its replenishment timer)
+    /// for the process lifetime.
     /// </summary>
-    internal static PartitionedRateLimiter<string> CreateRateLimiter(ApiRateLimitConfig cfg)
+    internal static ClientIpRateLimiter CreateRateLimiter(ApiRateLimitConfig cfg)
     {
-        var options = new TokenBucketRateLimiterOptions
-        {
-            TokenLimit = Math.Max(1, cfg.TokenLimit),
-            TokensPerPeriod = Math.Max(1, cfg.TokensPerPeriod),
-            ReplenishmentPeriod = TimeSpan.FromSeconds(Math.Max(1, cfg.PeriodSeconds)),
-            QueueLimit = 0,         // deny immediately (429) when no tokens — never queue
-            AutoReplenishment = true
-        };
-        return PartitionedRateLimiter.Create<string, string>(
-            ip => RateLimitPartition.GetTokenBucketLimiter(ip, _ => options));
+        return new ClientIpRateLimiter(cfg);
     }
 
     /// <summary>
