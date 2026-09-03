@@ -358,6 +358,16 @@ public static class UpdateCodec
                         originSeen = true;
                         break;
                     case BgpConstants.Attribute.AsPath:
+                        // #486 (D25): a zero-length AS_PATH is a legal ENCODING (RFC 4271 §5.1.2
+                        // lets an originator send an empty path toward INTERNAL peers) but never a
+                        // valid eBGP path — BGPLite serves eBGP only, where the sender's own ASN
+                        // must be present. Rejected at the policy layer as Malformed AS_PATH
+                        // (treat-as-withdraw); the codec stays encoding-neutral so the writer's
+                        // empty-path roundtrip (#248 review) stands.
+                        if (attr.Data.Length == 0)
+                            throw new BgpNotificationException(
+                                BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.MalformedAsPath,
+                                "Invalid AS_PATH: an empty path is only valid toward internal peers (RFC 4271 §5.1.2)");
                         asPath = AttributeHelper.ReadAsPath(attr, fourByteAsnSession);
                         asPathSeen = true;
                         break;
