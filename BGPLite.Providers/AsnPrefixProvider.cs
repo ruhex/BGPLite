@@ -50,6 +50,6 @@ public sealed class AsnPrefixProvider : IPrefixSourceProvider
         _logger.LogInformation(
             "Source '{Name}' (asn AS{Asn}): loaded {Count} prefixes via RIPEstat",
             source.Name, source.Asn.Value, prefixes.Count);
-        return SourceLoadResult.Ok(prefixes.Select(p => (Prefix: p.Prefix, Length: p.Length)).ToList());
+        return SourceLoadResult.Ok(prefixes.ToList());
     }
 }

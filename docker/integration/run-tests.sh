@@ -5,7 +5,7 @@
 #   1. API plane is reachable (/api/server).
 #   2. A configured peer (registered via POST /api/peers) establishes over IPv4 transport.
 #   3. An UNconfigured peer establishes over IPv6 transport — proves the dual-mode
-#      listener (#14 phase 4a): fd00:b00b::20 -> fd00:b00b::10 port 179.
+#      listener (#14 phase 4a): 2001:db8:cccc::20 -> 2001:db8:cccc::10 port 179.
 #   4. Route exchange, server <- BIRD: BIRD's static prefixes (203.0.113.0/24,
 #      198.51.100.0/24 via IPv4 session, 2001:db8:ffff::/48 via MP_REACH over the
 #      IPv6 session) land in the server's route table (the "default" community group
@@ -38,13 +38,16 @@ api_post() { $COMPOSE exec -T probe curl -s --max-time 10 -o - -w '\n%{http_code
 say "build (linux/amd64)"
 $COMPOSE build --pull
 
-say "up"
-$COMPOSE up -d
+say "up (server first — BIRD joins only after the peer is registered, see step 2)"
+$COMPOSE up -d server probe
 cleanup() {
   # Evidence before teardown: the first thing a CI failure needs is the server's
-  # own account of why the API/session assertions never succeeded.
-  say "server log (tail, pre-teardown)"
-  $COMPOSE logs --no-color --tail 120 server bird 2>&1 | tail -120 || true
+  # own account of why the API/session assertions never succeeded. Filtered to the
+  # route-pipeline lines — raw keepalive/debug noise would push them out of a tail.
+  say "server pipeline log (pre-teardown)"
+  $COMPOSE logs --no-color server 2>&1 \
+    | grep -E "Unconfigured|Sending |UpdateSent|Suppress|SessionEstablished|Route refresh|Withdrawn|registering" \
+    | tail -60 || true
   $COMPOSE ps -a || true
   $COMPOSE down -v --remove-orphans
 }
@@ -72,7 +75,7 @@ wait_for() {
 say "1. API reachable"
 wait_for 'api_get $API/api/server >/dev/null' 60
 
-# --- 2. register the IPv4 peer --------------------------------------------------
+# --- 2. register the IPv4 peer, THEN connect BIRD --------------------------------
 say "2. register peer 172.30.100.20 (AS65002, custom prefix 192.0.2.0/24)"
 PEER_BODY='{"ip":"172.30.100.20","asn":65002,"description":"integration-bird","lists":["openai"],"customPrefixes":["192.0.2.0/24"]}'
 CREATE_RESP=$(api_post "$API/api/peers" "$PEER_BODY") || fail "POST /api/peers curl error"
@@ -82,14 +85,12 @@ echo "$CREATE_RESP" | sed '$d' > "$TMP/create-peer.json"
 grep -q '"error"' "$TMP/create-peer.json" && fail "POST /api/peers rejected: $(cat "$TMP/create-peer.json")"
 echo "created: $(cat "$TMP/create-peer.json")"
 
+$COMPOSE up -d bird
+
 # --- 3. both sessions Established ----------------------------------------------
-# BIRD connects the moment the stand is up, which races the peer registration in
-# step 2 (the session's initial dump would run against a not-yet-created peer row
-# and take the unconfigured path). Restarting the protocols forces a fresh dump
-# that sees the registered peer — deterministic, no sleep-based hope.
-say "3. restart BIRD sessions, then Established (IPv4 + IPv6 transport)"
-birdc "restart bgplite4" >/dev/null 2>&1
-birdc "restart bgplite6" >/dev/null 2>&1
+# BIRD is started AFTER the registration, so its very first dump already sees the
+# configured peer — no restart race, no sleep-based hope.
+say "3. BGP sessions Established (IPv4 + IPv6 transport)"
 wait_for 'birdc "show protocols all bgplite4" 2>/dev/null | grep -q "BGP state:.*Established"' 90
 wait_for 'birdc "show protocols all bgplite6" 2>/dev/null | grep -q "BGP state:.*Established"' 90
 
@@ -105,7 +106,7 @@ say "4. BIRD announcements reach the server route table"
 wait_for 'api_get $API/api/routes | grep -q "\"default\":3"' 60
 ROUTES=$(api_get $API/api/routes)
 echo "$ROUTES"
-echo "$ROUTES" | grep -q '"65001:100":2' || fail "seed source group (65001:100) should hold 2: $ROUTES"
+echo "$ROUTES" | grep -q '"65001:100":3' || fail "seed source group (65001:100) should hold 3 (2 IPv4 + 1 IPv6 seed): $ROUTES"
 # The openai HTTP-source group must hold a healthy bulk (the live list has ~300;
 # aggregation may merge some, lists may evolve — assert a conservative floor).
 HTTP_ROUTES=$(echo "$ROUTES" | grep -oE '"65001:110":[0-9]+' | grep -oE '[0-9]+$')
@@ -115,8 +116,9 @@ HTTP_ROUTES=$(echo "$ROUTES" | grep -oE '"65001:110":[0-9]+' | grep -oE '[0-9]+$
 # --- 5. server -> BIRD route propagation ----------------------------------------
 say "5. server advertisements reach BIRD"
 # The REGISTERED IPv4 peer gets its custom prefix (the configured-peer pipeline:
-# custom prefixes + subscriptions, no RU defaults).
-wait_for 'birdc "show route protocol bgplite4" 2>/dev/null | grep -q "192.0.2.0/24"' 60
+# custom prefixes + subscriptions, no RU defaults). Point lookup — stable regardless
+# of how the full table listing renders.
+wait_for 'birdc "show route 192.0.2.0/24" 2>/dev/null | grep -q "bgplite4"' 90
 birdc "show route protocol bgplite4" || true
 
 # The peer also subscribes to the "openai" HTTP source (ruhex/prefix-lists): the full
@@ -129,10 +131,12 @@ ROUTES4=$(birdc "show route protocol bgplite4 count" 2>/dev/null | tail -n +2 | 
 printf 'bgplite4 carries %s routes (custom + HTTP-source subscription)\n' "$ROUTES4"
 
 # The UNREGISTERED IPv6-transport peer gets the RU defaults (= the file seed source).
-# They ride as classic IPv4 NLRI over the IPv6 transport, imported by bgplite6's
-# IPv4 channel.
-wait_for 'birdc "show route protocol bgplite6" 2>/dev/null | grep -q "10.100.0.0/16"' 60
-wait_for 'birdc "show route protocol bgplite6" 2>/dev/null | grep -q "10.200.0.0/16"' 60
+# The IPv4 seeds ride as classic IPv4 NLRI over the IPv6 transport, imported by
+# bgplite6's IPv4 channel — and the IPv6 seed rides MP_REACH_NLRI (#14 phase 4b):
+# BIRD's IPv6 channel must import 2001:db8:cccc::/64 from the server.
+wait_for 'birdc "show route protocol bgplite6" 2>/dev/null | grep -q "10.100.0.0/16"' 90
+wait_for 'birdc "show route protocol bgplite6" 2>/dev/null | grep -q "10.200.0.0/16"' 90
+wait_for 'birdc "show route protocol bgplite6" 2>/dev/null | grep -q "2001:db8:cccc::/64"' 90
 birdc "show route protocol bgplite6" || true
 
 # --- 6. traffic capture (opt-in: --capture) --------------------------------------

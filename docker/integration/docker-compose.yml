@@ -3,7 +3,7 @@
 # and the server's peer registration agree.
 #
 #   net bgp4  172.30.100.0/24   server .10   bird .20
-#   net bgp6  fd00:b00b::/64    server ::10  bird ::20
+#   net bgp6  2001:db8:cccc::/64 server ::10  bird ::20 (doc prefix, RFC 3849)
 #
 # Everything is forced to linux/amd64 ("linux64"): the server image publishes with
 # the linux-x64 RID and both services pin the platform, so the stand behaves the
@@ -21,7 +21,7 @@ services:
       bgp4:
         ipv4_address: 172.30.100.10
       bgp6:
-        ipv6_address: fd00:b00b::10
+        ipv6_address: 2001:db8:cccc::10
     volumes:
       - ./server-appsettings.yml:/app/appsettings.yml:ro
       - ./test-nets.txt:/app/test-nets.txt:ro
@@ -41,7 +41,7 @@ services:
       bgp4:
         ipv4_address: 172.30.100.20
       bgp6:
-        ipv6_address: fd00:b00b::20
+        ipv6_address: 2001:db8:cccc::20
 
   # Opt-in packet capture of the BGP traffic INSIDE the server's network namespace
   # (both transports, one pcap). Start the stand with:
@@ -82,4 +82,4 @@ networks:
     enable_ipv6: true
     ipam:
       config:
-        - subnet: fd00:b00b::/64
+        - subnet: 2001:db8:cccc::/64

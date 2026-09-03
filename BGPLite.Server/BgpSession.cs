@@ -231,16 +231,42 @@ public sealed class BgpSession : IDisposable
         const int maxPerUpdate = 100;
         // #85: reuse a single batch list instead of GetRange (which allocates a new List per batch).
         var batch = new List<IpPrefix>(Math.Min(maxPerUpdate, count));
+
+        // IPv4 withdrawals ride the classic WITHDRAWN ROUTES field (RFC 4271 §4.3).
         for (var i = 0; i < count; i += maxPerUpdate)
         {
             batch.Clear();
             var end = Math.Min(i + maxPerUpdate, count);
             for (var j = i; j < end; j++)
-                batch.Add(_advertisedPrefixes[j]);
+                if (_advertisedPrefixes[j].IsIpv4)
+                    batch.Add(_advertisedPrefixes[j]);
+            if (batch.Count == 0)
+                continue;
             var update = new BgpUpdateMessage
             {
                 WithdrawnRoutes = batch,
                 PathAttributes = [],
+                Nlri = []
+            };
+            await SendMessageAsync(update);
+            _metrics.UpdateSent();
+        }
+
+        // IPv6 withdrawals ride MP_UNREACH_NLRI (RFC 4760 §7 — #14 phase 4): an IPv6 prefix can
+        // never be named by the classic withdrawn field, and BIRD/FRR expect the MP form.
+        for (var i = 0; i < count; i += maxPerUpdate)
+        {
+            batch.Clear();
+            var end = Math.Min(i + maxPerUpdate, count);
+            for (var j = i; j < end; j++)
+                if (!_advertisedPrefixes[j].IsIpv4)
+                    batch.Add(_advertisedPrefixes[j]);
+            if (batch.Count == 0)
+                continue;
+            var update = new BgpUpdateMessage
+            {
+                WithdrawnRoutes = [],
+                PathAttributes = UpdateCodec.WithMpUnreachV6Attribute(batch),
                 Nlri = []
             };
             await SendMessageAsync(update);
@@ -1178,6 +1204,15 @@ public sealed class BgpSession : IDisposable
             await SendRoutesAsync(nextHop, routes);
     }
 
+    /// <summary>The local global IPv6 next hop (Bgp.NextHopIpv6) or null when unset/invalid —
+    /// null disables IPv6 advertisements (fail-visible at send time). Re-parsed per send from the
+    /// immutable config rather than cached in the constructor: tests construct sessions from raw
+    /// config records, and the parse is nanoseconds against a ~30s send.</summary>
+    private UInt128? NextHopIpv6 =>
+        BgpConfig.IsGlobalUnicastV6(_bgpConfig.NextHopIpv6) && IPAddress.TryParse(_bgpConfig.NextHopIpv6, out var v6)
+            ? BgpConstants.ToUInt128(v6)
+            : null;
+
     private async Task SendRoutesAsync(uint nextHop, List<Route> routes)
     {
         // Summarize before sending: merge adjacent/overlapping prefixes into the minimal
@@ -1197,6 +1232,35 @@ public sealed class BgpSession : IDisposable
                 routes.Count, aggregated.Count, deduped.Count, _peer);
         routes = deduped;
 
+        // #14 phase 4: family split. IPv4 rides the classic NLRI field; IPv6 rides MP_REACH
+        // (RFC 4760 §5) and ONLY when both halves agree: the peer negotiated MP IPv6/Unicast in
+        // OPEN, and Bgp.NextHopIpv6 is configured (RFC 2545 §3 — the MP_REACH next hop must be a
+        // global address; the IPv4 router-id cannot serve the IPv6 family). Otherwise IPv6
+        // routes are suppressed for this send — loudly, never silently.
+        var v4Routes = new List<Route>(routes.Count);
+        var v6Routes = new List<Route>();
+        foreach (var route in routes)
+        {
+            if (route.IsIpv4)
+                v4Routes.Add(route);
+            else
+                v6Routes.Add(route);
+        }
+        if (v6Routes.Count > 0 && !_peerMpIpv6Unicast)
+        {
+            _logger.LogWarning(
+                "Suppressing {Count} IPv6 routes to {Peer}: the peer did not negotiate MP IPv6/Unicast — advertising them as classic IPv4 NLRI would corrupt the peer's table",
+                v6Routes.Count, _peer);
+            v6Routes.Clear();
+        }
+        else if (v6Routes.Count > 0 && !NextHopIpv6.HasValue)
+        {
+            _logger.LogWarning(
+                "Suppressing {Count} IPv6 routes to {Peer}: Bgp.NextHopIpv6 is not configured — set it to a global IPv6 address to advertise IPv6 routes",
+                v6Routes.Count, _peer);
+            v6Routes.Clear();
+        }
+
         const int maxNlriPerUpdate = 100;
         _advertisedPrefixes.EnsureCapacity(_advertisedPrefixes.Count + routes.Count);
         var sent = 0;
@@ -1206,10 +1270,12 @@ public sealed class BgpSession : IDisposable
         // a single send (localAsn/localFourByteAsn/nextHop are constant for the whole send), so
         // build them once per community set and reuse instead of rebuilding on each batch (#87).
         // Scoped to this send only: the cache dies with the dictionary, so it can never serve a
-        // later send that carries a different nextHop or renegotiated ASN.
+        // later send that carries a different nextHop or renegotiated ASN. The v6 family gets its
+        // own cache — its cached lists carry no classic NEXT_HOP (#407's wire shape).
         var attrCache = UpdateCodec.CreateUpdateAttributeCache();
+        var v6AttrCache = UpdateCodec.CreateV6UpdateAttributeCache();
 
-        foreach (var route in routes)
+        foreach (var route in v4Routes)
         {
             batch.Add(route);
             _advertisedPrefixes.Add(new IpPrefix(route.Prefix, route.PrefixLength, route.IsIpv4));
@@ -1227,9 +1293,49 @@ public sealed class BgpSession : IDisposable
             sent += batch.Count;
         }
 
+        var v6NextHop = NextHopIpv6 ?? 0;
+        batch.Clear();
+        foreach (var route in v6Routes)
+        {
+            batch.Add(route);
+            _advertisedPrefixes.Add(new IpPrefix(route.Prefix, route.PrefixLength, route.IsIpv4));
+            if (batch.Count >= maxNlriPerUpdate)
+            {
+                await SendV6RouteBatchAsync(v6NextHop, batch, v6AttrCache);
+                sent += batch.Count;
+                batch.Clear();
+            }
+        }
+
+        if (batch.Count > 0)
+        {
+            await SendV6RouteBatchAsync(v6NextHop, batch, v6AttrCache);
+            sent += batch.Count;
+        }
+
         _logger.LogInformation("UpdateSent {Count} routes to {Peer}", sent, _peer);
         // #212: cache the actual wire count for the API/UI.
         Volatile.Write(ref _advertisedCount, sent);
+    }
+
+    /// <summary>
+    /// Sends one batch of IPv6 routes as MP_REACH_NLRI UPDATEs (#14 phase 4): the batch is
+    /// partitioned by community set (the MP_REACH attribute applies to every NLRI in its UPDATE,
+    /// same rule as COMMUNITY), base attributes come from the v6 cache (no classic NEXT_HOP),
+    /// and the MP_REACH attribute — global next hop + this group's NLRI — is appended per group.
+    /// </summary>
+    private async Task SendV6RouteBatchAsync(UInt128 nextHop6, List<Route> routes, Dictionary<IReadOnlyList<uint>, List<PathAttribute>> v6AttrCache)
+    {
+        foreach (var groupRoutes in GroupByCommunitySet(routes))
+        {
+            var attrs = UpdateCodec.GetCachedV6UpdateAttributes(
+                _bgpConfig.Asn, _localFourByteAsn, groupRoutes[0].Communities, v6AttrCache);
+            attrs = UpdateCodec.WithLargeCommunityAttribute(attrs, groupRoutes[0].LargeCommunities);
+
+            var nlri = groupRoutes.Select(r => new IpPrefix(r.Prefix, r.PrefixLength, r.IsIpv4)).ToList();
+            attrs = UpdateCodec.WithMpReachV6Attribute(attrs, nextHop6, nlri);
+            await SendUpdateBatchAsync(attrs, [], mpReach: new MpReachCodec.MpReachV6(nextHop6, nlri));
+        }
     }
 
     /// <summary>
@@ -1299,12 +1405,13 @@ public sealed class BgpSession : IDisposable
     private static List<List<Route>> GroupByCommunitySet(IReadOnlyList<Route> routes)
         => RouteAssembler.GroupByCommunitySet(routes);
 
-    private async Task SendUpdateBatchAsync(List<PathAttribute> attrs, List<IpPrefix> nlri)
+    private async Task SendUpdateBatchAsync(List<PathAttribute> attrs, List<IpPrefix> nlri, MpReachCodec.MpReachV6? mpReach = null)
     {
         var update = new BgpUpdateMessage
         {
             PathAttributes = attrs,
-            Nlri = nlri
+            Nlri = nlri,
+            MpReachV6 = mpReach
         };
 
         await SendMessageAsync(update);

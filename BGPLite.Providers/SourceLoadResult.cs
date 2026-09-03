@@ -1,3 +1,5 @@
+using BGPLite.Protocol;
+
 namespace BGPLite.Providers;
 
 /// <summary>
@@ -7,13 +9,13 @@ namespace BGPLite.Providers;
 /// should keep the existing cached data (just refresh the timestamp).
 /// </summary>
 public sealed record SourceLoadResult(
-    IReadOnlyList<(uint Prefix, byte Length)> Prefixes,
+    IReadOnlyList<IpPrefix> Prefixes,
     string? ETag = null,
     DateTimeOffset? LastModified = null,
     bool NotModified = false)
 {
     /// <summary>Convenience for a normal (200 OK) load — prefixes + validators from the response.</summary>
-    public static SourceLoadResult Ok(IReadOnlyList<(uint Prefix, byte Length)> prefixes, string? etag = null, DateTimeOffset? lastModified = null) =>
+    public static SourceLoadResult Ok(IReadOnlyList<IpPrefix> prefixes, string? etag = null, DateTimeOffset? lastModified = null) =>
         new(prefixes, etag, lastModified, NotModified: false);
 
     /// <summary>Convenience for a 304 Not Modified response — no prefixes, caller keeps cached data.</summary>

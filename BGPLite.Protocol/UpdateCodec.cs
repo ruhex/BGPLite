@@ -70,6 +70,32 @@ public static class UpdateCodec
     }
 
     /// <summary>
+    /// Builds outbound UPDATE path attributes for the IPv6 address family (RFC 4760 §5):
+    /// ORIGIN, AS_PATH (+AS4_PATH tunneling), optional COMMUNITY — and NO classic NEXT_HOP.
+    /// For MP_REACH-carried routes the next hop rides inside the MP_REACH_NLRI attribute
+    /// (attached per batch by <see cref="WithMpReachV6Attribute"/>, since it embeds that
+    /// batch's NLRI); the classic NEXT_HOP is defined only for the IPv4 NLRI field.
+    /// </summary>
+    public static List<PathAttribute> BuildV6UpdateAttributes(uint localAsn, bool localFourByteAsn, IReadOnlyList<uint> communities)
+    {
+        var attrs = new List<PathAttribute>(4)
+        {
+            AttributeHelper.WriteOrigin(BgpOrigin.Igp),
+        };
+
+        var asPathAttrs = BuildAsPathAttributes(localAsn, localFourByteAsn);
+        attrs.Add(asPathAttrs[0]);
+
+        if (communities.Count > 0)
+            attrs.Add(AttributeHelper.WriteCommunities(communities));
+
+        if (asPathAttrs.Count > 1)
+            attrs.Add(asPathAttrs[1]);
+
+        return attrs;
+    }
+
+    /// <summary>
     /// Creates a per-send cache of built UPDATE path attributes, keyed by community set. The
     /// cache is scoped to a single send invocation: the ASN/nextHop inputs are constant for that
     /// whole send, so identical community sets yield byte-identical <see cref="PathAttribute"/>
@@ -96,6 +122,31 @@ public static class UpdateCodec
         return attrs;
     }
 
+    /// <summary>The IPv6-family counterpart of <see cref="GetCachedUpdateAttributes"/>: cached
+    /// per-community attributes WITHOUT a classic NEXT_HOP (the MP_REACH attribute supplies it,
+    /// per batch, via <see cref="WithMpReachV6Attribute"/>). Uses its own cache instance — the
+    /// cached lists differ from the IPv4 ones by the absent NEXT_HOP, so sharing the IPv4 cache
+    /// would leak a stale next hop into v6 UPDATEs.</summary>
+    public static List<PathAttribute> GetCachedV6UpdateAttributes(
+        uint localAsn, bool localFourByteAsn, IReadOnlyList<uint> communities,
+        Dictionary<IReadOnlyList<uint>, List<PathAttribute>> cache)
+    {
+        if (cache.TryGetValue(communities, out var cached))
+            return cached;
+
+        var attrs = BuildV6UpdateAttributes(localAsn, localFourByteAsn, communities);
+        cache[communities] = attrs;
+        return attrs;
+    }
+
+    /// <summary>
+    /// Creates a per-send attribute cache for the IPv6 family (see
+    /// <see cref="GetCachedV6UpdateAttributes"/>). Scoped to a single send invocation like the
+    /// IPv4 counterpart (#87).
+    /// </summary>
+    public static Dictionary<IReadOnlyList<uint>, List<PathAttribute>> CreateV6UpdateAttributeCache() =>
+        new(CommunitySetComparer.Instance);
+
     /// <summary>
     /// Returns the path attributes for an UPDATE carrying the given Large Community set: the
     /// cached base attributes (ORIGIN/AS_PATH/NEXT_HOP/COMMUNITY/AS4_PATH) untouched when
@@ -116,6 +167,30 @@ public static class UpdateCodec
         withLarge.Add(AttributeHelper.WriteLargeCommunities(largeCommunities));
         return withLarge;
     }
+
+    /// <summary>
+    /// Appends the MP_REACH_NLRI attribute (global IPv6 next hop + this batch's NLRI) to the
+    /// cached base attributes. It must be attached PER BATCH — unlike the community-keyed base
+    /// attributes, the attribute value embeds the batch's NLRI bytes — and goes last, matching
+    /// the repo's append-per-batch idiom of <see cref="WithLargeCommunityAttribute"/>. Attribute
+    /// ordering is an implementation choice, not an RFC requirement (D15); MP_REACH is optional
+    /// non-transitive (RFC 4760 §4).
+    /// </summary>
+    public static List<PathAttribute> WithMpReachV6Attribute(
+        List<PathAttribute> baseAttrs, UInt128 nextHop, IReadOnlyList<IpPrefix> prefixes)
+    {
+        var with = new List<PathAttribute>(baseAttrs.Count + 1);
+        with.AddRange(baseAttrs);
+        with.Add(AttributeHelper.WriteMpReachNlriV6(nextHop, prefixes));
+        return with;
+    }
+
+    /// <summary>
+    /// Appends the MP_UNREACH_NLRI attribute withdrawing the given IPv6 prefixes to an otherwise
+    /// empty attribute list (RFC 4760 §7 — the IPv6 counterpart of the WITHDRAWN ROUTES field).
+    /// </summary>
+    public static List<PathAttribute> WithMpUnreachV6Attribute(IReadOnlyList<IpPrefix> prefixes) =>
+        [AttributeHelper.WriteMpUnreachNlriV6(prefixes)];
 
     /// <summary>
     /// Validates that a route announcement carried the mandatory well-known attributes

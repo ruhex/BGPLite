@@ -1,4 +1,5 @@
 using System.Buffers.Binary;
+using System.Collections.Generic;
 
 namespace BGPLite.Protocol;
 
@@ -134,6 +135,35 @@ public static class AttributeHelper
                 BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.OptionalAttributeError);
 
         return asn;
+    }
+
+    /// <summary>
+    /// Builds the MP_REACH_NLRI (type 14) attribute for IPv6/Unicast announcements — optional
+    /// non-transitive per RFC 4760 §4; the value carries the global next hop (RFC 2545 §3,
+    /// 16-byte form) plus the NLRI list. The IPv6 analogue of <see cref="WriteNextHop"/>: it is
+    /// where the outbound next hop lives for the IPv6 address family.
+    /// </summary>
+    public static PathAttribute WriteMpReachNlriV6(UInt128 nextHop, IReadOnlyList<IpPrefix> prefixes)
+    {
+        return new PathAttribute
+        {
+            Flags = BgpConstants.Attribute.FlagOptional,
+            TypeCode = MpReachCodec.MpReachNlriType,
+            Data = MpReachCodec.EncodeMpReachV6(nextHop, prefixes)
+        };
+    }
+
+    /// <summary>Builds the MP_UNREACH_NLRI (type 15) attribute for IPv6/Unicast withdrawals —
+    /// optional non-transitive per RFC 4760 §4 (the IPv6 counterpart of the withdrawn-routes
+    /// field).</summary>
+    public static PathAttribute WriteMpUnreachNlriV6(IReadOnlyList<IpPrefix> prefixes)
+    {
+        return new PathAttribute
+        {
+            Flags = BgpConstants.Attribute.FlagOptional,
+            TypeCode = MpReachCodec.MpUnreachNlriType,
+            Data = MpReachCodec.EncodeMpUnreachV6(prefixes)
+        };
     }
 
     public static PathAttribute WriteNextHop(uint nextHop)

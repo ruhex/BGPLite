@@ -79,8 +79,8 @@ public sealed class RouteAssembler : IRouteAssembler
                 try
                 {
                     var ruPrefixes = await _prefixService.GetRuPrefixesAsync(ct);
-                    foreach (var (prefix, length, _) in ruPrefixes)
-                        routes.Add(MakeRoute(prefix, length, nextHop, null, defaultComms));
+                    foreach (var p in ruPrefixes)
+                        routes.Add(MakeRoute(p.Prefix, p.Length, p.IsIpv4, nextHop, null, defaultComms));
                     _logger.LogInformation("Sent {Count} RU prefixes to unconfigured peer {Peer}",
                         ruPrefixes.Count, peerLabel);
                 }
@@ -115,11 +115,11 @@ public sealed class RouteAssembler : IRouteAssembler
                         var comms = _communityResolver.Resolve(
                             new CommunitySource(CommunitySourceKind.AsnList, list.Name));
                         var prefixes = await _prefixService.GetPrefixesForAsns(list.Asns, ct);
-                        foreach (var (prefix, length, _) in prefixes)
+                        foreach (var p in prefixes)
                             // #85: AsPath is overwritten by the local ASN in the outbound codec
                             // (BuildUpdateAttributes), so the per-prefix asn value is never used
                             // on the wire — pass null instead of allocating [asn] per prefix.
-                            routes.Add(MakeRoute(prefix, length, nextHop, null, comms));
+                            routes.Add(MakeRoute(p.Prefix, p.Length, p.IsIpv4, nextHop, null, comms));
                     }
                     catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }  // #114/#330
                     catch (Exception ex)
@@ -140,8 +140,8 @@ public sealed class RouteAssembler : IRouteAssembler
                     var comms = _communityResolver.Resolve(
                         new CommunitySource(CommunitySourceKind.Country, countryLists[0].Name));
                     var ruPrefixes = await _prefixService.GetRuPrefixesAsync(ct);
-                    foreach (var (prefix, length, _) in ruPrefixes)
-                        routes.Add(MakeRoute(prefix, length, nextHop, null, comms));
+                    foreach (var p in ruPrefixes)
+                        routes.Add(MakeRoute(p.Prefix, p.Length, p.IsIpv4, nextHop, null, comms));
                     _logger.LogInformation("Fetched {Count} RU prefixes for {Peer}", ruPrefixes.Count, peerLabel);
                 }
                 catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }  // #114/#330
@@ -163,8 +163,8 @@ public sealed class RouteAssembler : IRouteAssembler
                 {
                     var comms = _communityResolver.Resolve(new CommunitySource(CommunitySourceKind.PrefixSource, name));
                     var srcPrefixes = await _prefixService.GetSourcePrefixesAsync(name, ct);
-                    foreach (var (prefix, length) in srcPrefixes)
-                        routes.Add(MakeRoute(prefix, length, nextHop, null, comms));
+                    foreach (var p in srcPrefixes)
+                        routes.Add(MakeRoute(p.Prefix, p.Length, p.IsIpv4, nextHop, null, comms));
                     _logger.LogInformation("Fetched {Count} prefixes from source '{Source}' for {Peer}",
                         srcPrefixes.Count, name, peerLabel);
                 }
@@ -193,7 +193,7 @@ public sealed class RouteAssembler : IRouteAssembler
                     continue;
                 }
                 customRanges.Add((prefix, length));
-                routes.Add(MakeRoute(prefix, length, nextHop, null, customPrefixComms));
+                routes.Add(MakeRoute(prefix, length, isIpv4: true, nextHop, null, customPrefixComms));
             }
 
             // Add custom AS prefixes. Custom-AS routes carry the static "custom AS" community.
@@ -203,8 +203,8 @@ public sealed class RouteAssembler : IRouteAssembler
                 {
                     var customAsnComms = _communityResolver.Resolve(new CommunitySource(CommunitySourceKind.CustomAsn));
                     var asnPrefixes = await _prefixService.GetPrefixesForAsns(customAsns, ct);
-                    foreach (var (prefix, length, _) in asnPrefixes)
-                        routes.Add(MakeRoute(prefix, length, nextHop, null, customAsnComms));
+                    foreach (var p in asnPrefixes)
+                        routes.Add(MakeRoute(p.Prefix, p.Length, p.IsIpv4, nextHop, null, customAsnComms));
                     _logger.LogInformation("Peer {Peer} custom AS: {Asns} -> {Count} prefixes",
                         peerLabel, string.Join(",", customAsns), asnPrefixes.Count);
                 }
@@ -244,8 +244,8 @@ public sealed class RouteAssembler : IRouteAssembler
                 try
                 {
                     var ruPrefixes = await _prefixService.GetRuPrefixesAsync(ct);
-                    foreach (var (prefix, length, _) in ruPrefixes)
-                        routes.Add(MakeRoute(prefix, length, nextHop, null, defaultComms));
+                    foreach (var p in ruPrefixes)
+                        routes.Add(MakeRoute(p.Prefix, p.Length, p.IsIpv4, nextHop, null, defaultComms));
                 }
                 catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }  // #114/#330
                 catch (Exception ex)
@@ -275,8 +275,8 @@ public sealed class RouteAssembler : IRouteAssembler
             try
             {
                 var ruPrefixes = await _prefixService.GetRuPrefixesAsync(ct);
-                foreach (var (prefix, length, _) in ruPrefixes)
-                    routes.Add(MakeRoute(prefix, length, nextHop, null, defaultComms));
+                foreach (var p in ruPrefixes)
+                    routes.Add(MakeRoute(p.Prefix, p.Length, p.IsIpv4, nextHop, null, defaultComms));
                 _logger.LogInformation("Fetched {Count} RU prefixes for unknown peer {Peer}",
                     ruPrefixes.Count, peerLabel);
             }
@@ -332,13 +332,16 @@ public sealed class RouteAssembler : IRouteAssembler
 
     /// <summary>
     /// Builds a <see cref="Route"/> from its components. Static so it can be called from
-    /// <see cref="AddUserSourceRoutesAsync"/> and unit-tested directly.
+    /// <see cref="AddUserSourceRoutesAsync"/> and unit-tested directly. IPv4 addresses occupy
+    /// the low 32 bits of <paramref name="prefix"/> (the implicit uint→UInt128 widening);
+    /// <paramref name="isIpv4"/> carries the family (#14 phase 4).
     /// </summary>
     internal static Route MakeRoute(
-        uint prefix, byte length, uint nextHop, uint[]? asPath, uint[] communities,
+        UInt128 prefix, byte length, bool isIpv4, uint nextHop, uint[]? asPath, uint[] communities,
         (uint Global, uint Local1, uint Local2)[]? largeCommunities = null) => new()
         {
             Prefix = prefix,
+            IsIpv4 = isIpv4,
             PrefixLength = length,
             NextHop = nextHop,
             AsPath = asPath ?? [],
@@ -364,8 +367,8 @@ public sealed class RouteAssembler : IRouteAssembler
             var comms = communityResolver.Resolve(
                 new CommunitySource(CommunitySourceKind.UserSource, source.Name, source.Community));
             var prefixes = await prefixService.GetUserSourcePrefixesAsync(source.Name, source.Url, source.Community, ct);
-            foreach (var (prefix, length) in prefixes)
-                routes.Add(MakeRoute(prefix, length, nextHop, null, comms));
+            foreach (var p in prefixes)
+                routes.Add(MakeRoute(p.Prefix, p.Length, p.IsIpv4, nextHop, null, comms));
             logger.LogInformation("User-source '{Name}': {Count} prefixes for {Peer}", source.Name, prefixes.Count, peerLabel);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }  // #114/#342: only CALLER cancellation — a per-source timeout OCE (#320's linked CTS, live ct) must stay a fetch failure below

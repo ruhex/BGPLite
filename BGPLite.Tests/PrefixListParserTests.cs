@@ -6,14 +6,14 @@ namespace BGPLite.Tests;
 
 public class PrefixListParserTests
 {
-    private static uint Ip(string s) => BgpConstants.IPAddressToUint(IPAddress.Parse(s));
+    private static IpPrefix Pfx(string s) => new(BgpConstants.IPAddressToUint(IPAddress.Parse(s[..s.IndexOf("/")])), byte.Parse(s[(s.IndexOf("/") + 1)..]));
 
     [Fact]
     public void ParsesSingleCidr()
     {
         var result = PrefixListParser.Parse("1.2.3.0/24");
         var single = Assert.Single(result);
-        Assert.Equal((Ip("1.2.3.0"), (byte)24), single);
+        Assert.Equal(Pfx("1.2.3.0/24"), single);
     }
 
     [Fact]
@@ -31,12 +31,32 @@ public class PrefixListParserTests
     }
 
     [Fact]
-    public void SkipsIpv6()
+    public void AcceptsIpv6()
     {
-        var result = PrefixListParser.Parse("::1/128\n1.2.3.0/24");
-        var single = Assert.Single(result);
-        Assert.Equal((Ip("1.2.3.0"), (byte)24), single);
+        // #14 phase 4 flipped the old "SkipsIpv6" behavior: IPv6 entries are family-tagged
+        // prefixes now, parsed by the same canonical policy (masking, /0 rejection, 1..128).
+        var result = PrefixListParser.Parse("2001:DB8:0:0:0:0:0:1/48\n1.2.3.0/24");
+        Assert.Equal(2, result.Count);
+        // host bits masked: 2001:DB8:0:0:0:0:0:1/48 → 2001:db8::/48
+        var expected = ((UInt128)0x2001 << 112) | ((UInt128)0x0DB8 << 96);
+        Assert.Equal(new IpPrefix(expected, 48, isIpv4: false), result[0]);
+        Assert.True(result[1].IsIpv4);
     }
+
+    [Fact]
+    public void RejectsIpv6DefaultRoute()
+    {
+        Assert.Empty(PrefixListParser.Parse("::/0"));
+    }
+
+    [Fact]
+    public void AcceptsIpv6BoundaryLengths()
+    {
+        Assert.Single(PrefixListParser.Parse("2001:db8::/128")); // host route
+        Assert.Single(PrefixListParser.Parse("2001:db8::/1"));   // /1 — same policy space as v4's /1
+        Assert.Empty(PrefixListParser.Parse("2001:db8::/129"));  // out of range
+    }
+
 
     [Fact]
     public void SkipsBadLength()
@@ -80,7 +100,7 @@ public class PrefixListParserTests
     {
         var result = PrefixListParser.Parse("0.0.0.0/0\n1.2.3.0/24");
         var single = Assert.Single(result);
-        Assert.Equal((Ip("1.2.3.0"), (byte)24), single);
+        Assert.Equal(Pfx("1.2.3.0/24"), single);
     }
 
     [Fact]
@@ -90,7 +110,7 @@ public class PrefixListParserTests
         // so downstream dedup keys them as one route instead of two distinct rows.
         var result = PrefixListParser.Parse("10.0.0.5/24\n10.0.0.99/24");
         Assert.Equal(2, result.Count);
-        Assert.All(result, r => Assert.Equal((Ip("10.0.0.0"), (byte)24), r));
+        Assert.All(result, r => Assert.Equal(Pfx("10.0.0.0/24"), r));
     }
 
     [Fact]
@@ -98,7 +118,7 @@ public class PrefixListParserTests
     {
         var result = PrefixListParser.Parse("10.0.0.0/24");
         var single = Assert.Single(result);
-        Assert.Equal((Ip("10.0.0.0"), (byte)24), single);
+        Assert.Equal(Pfx("10.0.0.0/24"), single);
     }
 
     [Fact]
@@ -106,10 +126,10 @@ public class PrefixListParserTests
     {
         // /1 masks all but the top bit; /32 (host route) masks nothing.
         var r1 = Assert.Single(PrefixListParser.Parse("255.255.255.255/1"));
-        Assert.Equal((Ip("128.0.0.0"), (byte)1), r1);
+        Assert.Equal(Pfx("128.0.0.0/1"), r1);
 
         var r32 = Assert.Single(PrefixListParser.Parse("10.0.0.5/32"));
-        Assert.Equal((Ip("10.0.0.5"), (byte)32), r32);
+        Assert.Equal(Pfx("10.0.0.5/32"), r32);
     }
 
     [Fact]
@@ -120,6 +140,6 @@ public class PrefixListParserTests
         var bom = "\uFEFF1.2.3.0/24";
         var result = PrefixListParser.Parse(bom);
         var single = Assert.Single(result);
-        Assert.Equal((Ip("1.2.3.0"), (byte)24), single);
+        Assert.Equal(Pfx("1.2.3.0/24"), single);
     }
 }

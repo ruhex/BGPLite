@@ -1,5 +1,6 @@
 using System.Net;
 using BGPLite.Configuration;
+using BGPLite.Protocol;
 using BGPLite.Providers;
 using Microsoft.Extensions.Http;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -64,8 +65,9 @@ public class RipeStatProviderTests
         var result = await Provider(handler).GetPrefixesAsync(65001);
 
         var row = Assert.Single(result);
-        Assert.Equal(0x0A000000u, row.Prefix);
-        Assert.Equal(24, row.PrefixLength);
+        Assert.True(row.IsIpv4);
+        Assert.Equal(0x0A000000u, (uint)row.Address);
+        Assert.Equal(24, row.Length);
     }
 
     [Fact]
@@ -154,11 +156,13 @@ public class RipeStatProviderTests
         var handler = new StubHandler(HttpStatusCode.OK, body);
         var result = await Provider(handler).GetPrefixesAsync(65001);
 
-        Assert.Contains((0x0A000000u, (byte)8), result);      // 10.0.0.1/8 masked to the network
-        Assert.DoesNotContain((0x0A000001u, (byte)8), result); // unmasked key never stored
-        Assert.Contains((0xC0A80000u, (byte)16), result);      // canonical row unaffected
-        Assert.DoesNotContain(result, p => p.PrefixLength is 0 or > 32); // /0 and /33 rejected
+        Assert.Contains(new IpPrefix(0x0A000000u, 8), result);      // 10.0.0.1/8 masked to the network
+        Assert.Contains(new IpPrefix(0xC0A80000u, 16), result);      // canonical row unaffected
+        Assert.All(result, p => Assert.True(p.Length is not 0 and <= 32)); // /0 and /33 rejected
         Assert.Equal(2, result.Count);                          // garbage skipped, not thrown
+        // An IpPrefix is canonical by construction, so "10.0.0.1/8" cannot survive as an
+        // unmasked key — the Contains above proves the masking happened (was a real hazard
+        // when rows were raw (uint, byte) tuples).
     }
 
     /// <summary>A handler that honors the CancellationToken like HttpClient's real handler does.</summary>

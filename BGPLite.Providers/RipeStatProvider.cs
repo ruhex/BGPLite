@@ -27,13 +27,14 @@ public sealed class RipeStatProvider
     }
 
     /// <summary>
-    /// Fetches the IPv4 prefixes originated by <paramref name="asn"/> from RIPEstat. The named
-    /// client's resilience handler (Program.cs, #104) retries transient HTTP failures (429/5xx/
-    /// timeouts/network errors) with exponential backoff + circuit breaker, so this method performs
-    /// a single attempt — a transient failure propagates only after the resilience pipeline is
-    /// exhausted. The ris-prefixes endpoint can take minutes for large origin ASes (e.g. AS3356).
+    /// Fetches the IPv4 AND IPv6 prefixes originated by <paramref name="asn"/> from RIPEstat
+    /// (#14 phase 4: the <c>v6.originating</c> section is parsed alongside <c>v4.originating</c>).
+    /// The named client's resilience handler (Program.cs, #104) retries transient HTTP failures
+    /// (429/5xx/timeouts/network errors) with exponential backoff + circuit breaker, so this method
+    /// performs a single attempt — a transient failure propagates only after the resilience pipeline
+    /// is exhausted. The ris-prefixes endpoint can take minutes for large origin ASes (e.g. AS3356).
     /// </summary>
-    public async Task<IReadOnlyList<(uint Prefix, byte PrefixLength)>> GetPrefixesAsync(uint asn, CancellationToken ct = default)
+    public async Task<IReadOnlyList<IpPrefix>> GetPrefixesAsync(uint asn, CancellationToken ct = default)
     {
         var url = $"https://stat.ripe.net/data/ris-prefixes/data.json?resource=AS{asn}&list_prefixes=true";
         var http = _httpFactory.CreateClient(ClientName);
@@ -66,35 +67,50 @@ public sealed class RipeStatProvider
         }
         using var doc = JsonDocument.Parse(new ReadOnlyMemory<byte>(buffered.GetBuffer(), 0, (int)buffered.Length));
 
-        var prefixes = doc.RootElement
-            .GetProperty("data")
-            .GetProperty("prefixes")
-            .GetProperty("v4")
-            .GetProperty("originating");
+        var data = doc.RootElement.GetProperty("data").GetProperty("prefixes");
+        var result = new List<IpPrefix>();
 
-        var result = new List<(uint Prefix, byte PrefixLength)>(prefixes.GetArrayLength());
+        // Both family sections are OPTIONAL in the response (an ASN may originate only v4 or only
+        // v6) — a missing section contributes nothing rather than throwing.
+        result.AddRange(ParseFamily(asn, data, "v4"));
+        result.AddRange(ParseFamily(asn, data, "v6"));
 
+        _logger.LogInformation("AS{Asn}: fetched {Count} prefixes ({V4} IPv4 + {V6} IPv6)",
+            asn, result.Count, result.Count(p => p.IsIpv4), result.Count(p => !p.IsIpv4));
+        return result;
+    }
+
+    /// <summary>Parses one family's <c>originating</c> array through the canonical parser.
+    /// Returns an empty list when the section is absent. Each entry is validated independently —
+    /// a single non-canonical prefix skips without taking the whole ASN fetch down.</summary>
+    private List<IpPrefix> ParseFamily(uint asn, JsonElement data, string family)
+    {
+        if (!data.TryGetProperty(family, out var familySection) ||
+            !familySection.TryGetProperty("originating", out var prefixes) ||
+            prefixes.ValueKind != JsonValueKind.Array)
+            return [];
+
+        var result = new List<IpPrefix>(prefixes.GetArrayLength());
         foreach (var element in prefixes.EnumerateArray())
         {
             // #319/#358-review: the canonical parser every other prefix input path uses (#236):
-            // host-bit masking, /0 rejection, length 1..32, IPv4-only. RIS collectors return what
+            // host-bit masking, /0 rejection, per-family length range. RIS collectors return what
             // third parties ANNOUNCED — non-canonical NLRI ("10.0.0.1/8") must not reach the route
-            // table under a corrupt key, and "0.0.0.0/0" must not become a default-route leak
-            // (#162 closed the same hole for URL sources). Skip + warn, like stored custom
+            // table under a corrupt key, and "0.0.0.0/0"/"::/0" must not become a default-route
+            // leak (#162 closed the same hole for URL sources). Skip + warn, like stored custom
             // prefixes; a null element, garbage string, or NON-STRING JSON element (GetString
             // throws InvalidOperationException on numbers/objects) is skipped without taking the
             // whole ASN fetch down with it.
             var cidr = element.ValueKind == JsonValueKind.String ? element.GetString() : null;
-            if (!PrefixCidr.TryParse(cidr, out var prefix, out var length))
+            if (!PrefixCidr.TryParse(cidr, out var prefix))
             {
                 _logger.LogWarning("AS{Asn}: RIPEstat returned a non-canonical prefix '{Cidr}'; skipped", asn, cidr);
                 continue;
             }
 
-            result.Add((prefix, length));
+            result.Add(prefix);
         }
 
-        _logger.LogInformation("AS{Asn}: fetched {Count} prefixes", asn, result.Count);
         return result;
     }
 }

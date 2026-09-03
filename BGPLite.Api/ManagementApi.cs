@@ -1211,8 +1211,8 @@ public sealed class ManagementApi : IHostedService, IDisposable
             try
             {
                 var fetched = await _prefixService.GetPrefixesForAsns(asns, ct);
-                foreach (var (prefix, length, _) in fetched)
-                    prefixes.Add($"{BgpConstants.UintToIPAddress(prefix)}/{length}");
+                foreach (var p in fetched)
+                    prefixes.Add(new IpPrefix(p.Prefix, p.Length, p.IsIpv4).ToString());
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }  // #114/#337: only shutdown cancellation — a provider-timeout OCE (live token) is a fetch failure below
             catch (Exception ex) { _logger.LogWarning(ex, "CollectPeerPrefixes: ASN fetch failed"); }
@@ -1224,8 +1224,8 @@ public sealed class ManagementApi : IHostedService, IDisposable
             try
             {
                 var ruPrefixes = await _prefixService.GetRuPrefixesAsync(ct);
-                foreach (var (prefix, length, _) in ruPrefixes)
-                    prefixes.Add($"{BgpConstants.UintToIPAddress(prefix)}/{length}");
+                foreach (var p in ruPrefixes)
+                    prefixes.Add(new IpPrefix(p.Prefix, p.Length, p.IsIpv4).ToString());
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }  // #114/#337: only shutdown cancellation — a provider-timeout OCE (live token) is a fetch failure below
             catch (Exception ex) { _logger.LogWarning(ex, "CollectPeerPrefixes: RU prefix fetch failed"); }

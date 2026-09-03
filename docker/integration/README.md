@@ -12,9 +12,9 @@ its `birdc` CLI gives precise per-protocol assertions.
 ## Topology
 
 ```
-           net bgp4  172.30.100.0/24        net bgp6  fd00:b00b::/64
-  server   172.30.100.10                    fd00:b00b::10        (BGPLite :179, API 5001)
-  bird     172.30.100.20                    fd00:b00b::20        (BIRD2, AS65002)
+           net bgp4  172.30.100.0/24        net bgp6  2001:db8:cccc::/64
+  server   172.30.100.10                    2001:db8:cccc::10    (BGPLite :179, API 5001)
+  bird     172.30.100.20                    2001:db8:cccc::20    (BIRD2, AS65002)
 ```
 
 Server AS65001. Two BGP sessions: `bgplite4` (IPv4 transport) and `bgplite6`
