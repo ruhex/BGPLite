@@ -26,6 +26,10 @@ public sealed class PrefixSourceService : IPrefixSourceService
     // RefreshAsync (which would see already-new data and report unchanged) — leaving established peers
     // on stale routes. The callback is wired in Program.cs to ISessionManager.RefreshAllEstablishedAsync.
     private readonly Func<string, Task>? _onSourceChanged;
+    // #452: fired on EVERY committed content change (including RefreshAsync, which never fires
+    // _onSourceChanged). The RU projection's cache-layer consumer (PrefixService) subscribes to
+    // invalidate its projection so the next rebuild re-projects from the committed content.
+    public event Action<string>? ContentCommitted;
     // #85: pre-built name→source lookup (replaces per-call FirstOrDefault linear scan).
     private readonly Dictionary<string, PrefixSourceConfig> _sourcesByName;
 
@@ -276,10 +280,20 @@ public sealed class PrefixSourceService : IPrefixSourceService
         // path. Without this, established peers stay on stale routes until the source changes AGAIN.
         // Skipped from RefreshAsync (triggerCallback=false): the auto-refresh timer aggregates all
         // changed sources into ONE peer push in LoopAsync, so firing the callback here would double-push.
-        if (changed && triggerCallback && _onSourceChanged is not null)
+        // #452: the ContentCommitted event fires on BOTH paths (it is the cache-invalidation signal,
+        // not the push) — otherwise a RefreshAsync-committed change left the RU projection stale for
+        // its full TTL. Fired before _onSourceChanged so the projection is already invalidated when
+        // the push-triggered rebuilds start reading it.
+        if (changed)
         {
-            try { await _onSourceChanged(source.Name); }
-            catch (Exception ex) { _logger.LogWarning(ex, "OnSourceChanged callback failed for '{Name}'.", source.Name); }
+            try { ContentCommitted?.Invoke(source.Name); }
+            catch (Exception ex) { _logger.LogWarning(ex, "ContentCommitted handler failed for '{Name}'.", source.Name); }
+
+            if (triggerCallback && _onSourceChanged is not null)
+            {
+                try { await _onSourceChanged(source.Name); }
+                catch (Exception ex) { _logger.LogWarning(ex, "OnSourceChanged callback failed for '{Name}'.", source.Name); }
+            }
         }
 
         return (loaded, changed);

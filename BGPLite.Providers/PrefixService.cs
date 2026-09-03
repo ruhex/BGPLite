@@ -49,6 +49,28 @@ public sealed class PrefixService : IPrefixService
         // pipeline) so peer-controlled failures cannot open the breaker gating operator sources;
         // falls back to the operator provider when not wired (tests).
         _userSourceHttpProvider = userSourceHttpProvider ?? httpProvider;
+        // #452: a committed content change to the DEFAULT source must invalidate the RU projection
+        // immediately — the auto-refresh path (RefreshAsync) never fires the push callback, so
+        // without this the fleet rebuild triggered afterwards re-reads the stale fast path for up
+        // to the RU TTL. The handler is a Volatile.Write: cheap, non-blocking, safe off the
+        // per-source gate (LoadCachedAsync fires the event only after releasing it).
+        // Guarded: tests compose PrefixService WITHOUT a source service (the interface sits only
+        // on the RU paths), passing null — those compositions simply get no invalidation signal.
+        if (prefixSources is not null)
+            _prefixSources.ContentCommitted += OnSourceContentCommitted;
+    }
+
+    /// <summary>
+    /// #452 handler for <see cref="IPrefixSourceService.ContentCommitted"/>: drops the cached RU
+    /// projection when the changed source is the one it is projected from. The next
+    /// <see cref="GetRuPrefixesAsync"/> takes the gate path, re-projects from the already-new
+    /// source-level cache, and reports no change — so the fleet push is not duplicated.
+    /// </summary>
+    private void OnSourceContentCommitted(string sourceName)
+    {
+        if (!string.Equals(sourceName, _config.DefaultPrefixSource, StringComparison.Ordinal))
+            return;
+        Volatile.Write(ref _ruCache, null);
     }
 
     /// <summary>Default per-fetch budget for peer-supplied URL sources (#320).</summary>

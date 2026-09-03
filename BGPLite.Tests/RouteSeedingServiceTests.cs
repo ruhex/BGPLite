@@ -38,6 +38,8 @@ public class RouteSeedingServiceTests
 
     private sealed class FakeSourceService : IPrefixSourceService
     {
+
+        public event Action<string>? ContentCommitted;
         private readonly IReadOnlyList<(PrefixSourceConfig Source, IReadOnlyList<IpPrefix> Prefixes)> _sources;
 
         public FakeSourceService(IReadOnlyList<(PrefixSourceConfig, IReadOnlyList<IpPrefix>)>? sources = null) =>

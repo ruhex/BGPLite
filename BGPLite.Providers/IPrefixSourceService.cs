@@ -48,4 +48,15 @@ public interface IPrefixSourceService
     /// interval selection in the auto-refresh timer.
     /// </summary>
     bool SourceSupportsConditional(string sourceName);
+
+    /// <summary>
+    /// #452: fired AFTER a source's freshly loaded content is committed to the cache and the load
+    /// detected an actual change — on EVERY change-detecting entry point, including
+    /// <see cref="RefreshAsync"/> (which deliberately never fires the <c>onSourceChanged</c>
+    /// BGP-push callback). Cache-layer consumers that project a source's list into their own
+    /// longer-TTL cache (the RU projection in <c>PrefixService</c>) subscribe to invalidate
+    /// their projection, so a fleet rebuild always re-projects from the committed content.
+    /// Fired off the per-source gate; handlers must be cheap and non-blocking.
+    /// </summary>
+    event Action<string>? ContentCommitted;
 }
