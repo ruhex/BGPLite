@@ -14,4 +14,12 @@ public sealed class BgpUpdateMessage : BgpMessage
     /// <summary>Decoded MP_UNREACH_NLRI (RFC 4760, AFI=2/SAFI=1) IPv6 withdrawals. Null/empty when
     /// the UPDATE carries none.</summary>
     public IReadOnlyList<IpPrefix>? MpUnreachV6 { get; init; }
+
+    /// <summary>Decoded MP_REACH_NLRI (RFC 4760, AFI=1/SAFI=1) IPv4 announcements (#466). Null when
+    /// the UPDATE carries none. Routes ride the same install pipeline as the classic NLRI field.</summary>
+    public MpReachCodec.MpReachV4? MpReachV4 { get; init; }
+
+    /// <summary>Decoded MP_UNREACH_NLRI (RFC 4760, AFI=1/SAFI=1) IPv4 withdrawals (#466). Null/empty
+    /// when the UPDATE carries none.</summary>
+    public IReadOnlyList<IpPrefix>? MpUnreachV4 { get; init; }
 }

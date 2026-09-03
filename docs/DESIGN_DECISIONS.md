@@ -198,6 +198,25 @@ For section-by-section RFC conformance status, see `RFC_COMPLIANCE.md` (2026-07-
   Established is an FSM error (NOTIFICATION 5/0, #427) — RFC 4271 §8.2.2 makes ANY OPEN in
   Established an FSM input regardless of body validity, so there is nothing to "keep alive" for
   that message class.
+- **MP carve-out (#467, recorded 2026-09-03):** RFC 7606 explicitly leaves MP_REACH_NLRI and
+  MP_UNREACH_NLRI outside the keep-alive revision, so their failure classes follow their own
+  policy instead of the paragraph above. A DUPLICATE MP attribute is answered with exactly one
+  NOTIFICATION 3/1 (Malformed Attribute List) and a session reset — RFC 7606 §3(g) MUST. An MP
+  flags conflict (RFC 4760 §4: both attributes are optional NON-transitive) is a session reset
+  with 3/4 per the RFC 4271 §6.3 baseline (the Partial bit joins the Transitive bit in the
+  conflict mask). An UNPARSEABLE MP VALUE is scoped to the offending AFI/SAFI tuple: a tuple
+  this speaker does not support was never negotiated (RFC 4760 §8), so it only discards its
+  UPDATE through the keep-alive path above — the session and the supported family stay
+  untouched; a supported tuple whose value cannot be decoded takes the RFC 7606 §3(j)
+  "AFI/SAFI disable" choice for IPv6/Unicast — every IPv6 route the session accepted from the
+  peer is withdrawn, the family is ignored for the rest of the session, and the session itself
+  stays up — the route-server rationale above, family-scoped. For IPv4/Unicast (#466 receive)
+  the §3(j) fallback is the session reset: the family rides BOTH the classic and the MP
+  carriage, so disabling only the MP carriage would be incoherent; a value too short to even
+  name its AFI/SAFI cannot be scoped to any family, so it resets too. Additionally, an
+  MP_REACH next hop that is not a global IPv6 address (::, ::1, ff00::/8, fe80::/10 — RFC 2545
+  §3) excludes that attribute's routes only: route-level exclusion, like the AS-loop rule, not
+  a session error.
 - **Consequence:** a peer sending structurally valid but semantically rejected UPDATEs gets them
   silently dropped (log Warning + `UpdatesRejected` metric) instead of a session reset; operators
   comparing against RFC-strict speakers will see BGPLite retain sessions others would close.
@@ -297,3 +316,22 @@ For section-by-section RFC conformance status, see `RFC_COMPLIANCE.md` (2026-07-
   policy. Operators comparing against RFC-strict speakers should know the advertised paths are
   always exactly one ASN long.
 - **Tracker:** #456 (documentation of long-standing behavior, flagged by the 2026-09-03 audit).
+
+### D24. MP IPv4/Unicast is advertised AND received
+- **Decision:** the OPEN carries the Multiprotocol Extensions capability for AFI=1/SAFI=1
+  unconditionally, and inbound MP_REACH_NLRI / MP_UNREACH_NLRI AFI=1/SAFI=1 decode into the
+  classic IPv4 pipeline: announcements install like classic NLRI (NEXT_HOP semantics applied
+  to the MP-carried next hop), withdrawals remove the peer's routes.
+- **Context:** `SendOpenAsync` used to ECHO the peer's MP IPv4/Unicast offer while the inbound
+  path had no AFI=1 handling — a negotiated IPv4 MP UPDATE was discarded whole
+  (treat-as-withdraw) with the session looking healthy: silent route loss (#466). The interim
+  removal of the advertisement closed the route loss but broke capability-strict peers in
+  return: BIRD 2 with default `capabilities` requires the peer's MP_IPV4 tuple for the ipv4
+  channel ("Required capability missing") and refuses the session — caught by the
+  `compose-integration` stand. The honest fix is both halves: receive AFI=1 AND advertise it.
+- **Consequence:** a conformant peer may carry IPv4 NLRI in MP_REACH on any session; BGPLite
+  installs it through the same ownership/filter/cap pipeline as classic NLRI. Outbound
+  IPv4/Unicast still rides the classic NLRI field. IPv6/Unicast advertisement stays
+  conditional on the peer's offer (its receiving half has existed since #14).
+- **Tracker:** #466 (echo removed 2026-09-03, receive implemented same day after the
+  `compose-integration` finding).

@@ -267,6 +267,10 @@ public static class BgpMessageReader
         var attributes = new List<PathAttribute>();
         MpReachCodec.MpReachV6? mpReachV6 = null;
         IReadOnlyList<IpPrefix>? mpUnreachV6 = null;
+        MpReachCodec.MpReachV4? mpReachV4 = null;
+        IReadOnlyList<IpPrefix>? mpUnreachV4 = null;
+        var mpReachSeen = false;
+        var mpUnreachSeen = false;
         if (attrsLen > 0)
         {
             var attrsEnd = offset + attrsLen;
@@ -284,21 +288,74 @@ public static class BgpMessageReader
                 // Malformed AFI=2 payloads throw BgpParseException (Update Message Error) — the
                 // whole UPDATE is discarded with the session kept (D17), matching RFC 7606 §2
                 // (the attribute carries NLRI ⇒ treat-as-withdraw).
-                if (attr.TypeCode == MpReachCodec.MpReachNlriType)
+                // #467: the MP attributes are extracted here and never reach ParseRouteAttributes'
+                // flag/duplicate pipeline, so their RFC-prescribed error policy is applied at this
+                // extraction point. RFC 4760 §4/§5 make both attributes OPTIONAL NON-TRANSITIVE and
+                // RFC 7606 leaves them explicitly unrevised — the RFC 4271 §6.3 baseline applies to
+                // their shape, so a flags conflict is a session-reset error (3/4), not a discard.
+                if (attr.TypeCode is MpReachCodec.MpReachNlriType or MpReachCodec.MpUnreachNlriType)
                 {
-                    // RFC 4760: only one MP_REACH per UPDATE. A duplicate is a protocol error.
-                    if (mpReachV6 is not null)
-                        throw new BgpParseException("Duplicate MP_REACH_NLRI attribute",
-                            BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.MalformedAttributeList);
-                    mpReachV6 = MpReachCodec.DecodeMpReachV6(attr.Data);
-                    continue;
-                }
-                if (attr.TypeCode == MpReachCodec.MpUnreachNlriType)
-                {
-                    if (mpUnreachV6 is not null)
-                        throw new BgpParseException("Duplicate MP_UNREACH_NLRI attribute",
-                            BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.MalformedAttributeList);
-                    mpUnreachV6 = MpReachCodec.DecodeMpUnreachV6(attr.Data);
+                    // RFC 4760 §4/§5 make both attributes OPTIONAL NON-TRANSITIVE; the Partial bit
+                    // is equally invalid on them — a non-transitive attribute is never re-advertised
+                    // by a speaker lacking the family, so nothing can set it (#472 review). The
+                    // Extended Length bit stays legal. RFC 7606 leaves the MP attributes explicitly
+                    // unrevised — the RFC 4271 §6.3 baseline applies to their shape, so a flags
+                    // conflict is a session-reset error (3/4), not a discard.
+                    if (!attr.Optional || attr.Transitive || attr.Partial)
+                        throw new BgpParseException(
+                            $"MP_REACH/MP_UNREACH flags conflict with optional non-transitive (flags=0x{attr.Flags:X2}, RFC 4760 §4)",
+                            BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.AttributeFlagsError,
+                            sessionResetRequired: true);
+
+                    // #466: BOTH supported families decode here — IPv4/Unicast (AFI=1/SAFI=1) into
+                    // the classic NLRI pipeline and IPv6/Unicast (AFI=2/SAFI=1) into MP_REACH_NLRI.
+                    // §3(g) duplicate detection is per ATTRIBUTE TYPE: a second instance of the
+                    // type is a session reset regardless of which family it names.
+                    if (attr.TypeCode == MpReachCodec.MpReachNlriType)
+                    {
+                        // RFC 7606 §3(g): "If the MP_REACH_NLRI attribute or the MP_UNREACH_NLRI
+                        // [RFC4760] attribute appears more than once in the UPDATE message then a
+                        // NOTIFICATION message MUST be sent with the Error Subcode 'Malformed
+                        // Attribute List'." — a session reset, NOT the D17 keep-alive discard.
+                        if (mpReachSeen)
+                            throw new BgpParseException("Duplicate MP_REACH_NLRI attribute (RFC 7606 §3(g))",
+                                BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.MalformedAttributeList,
+                                sessionResetRequired: true);
+                        mpReachSeen = true;
+                        var reachIsV4 = ScopeMpValueOrThrow(attr.Data);
+                        try
+                        {
+                            if (reachIsV4)
+                                mpReachV4 = MpReachCodec.DecodeMpReachV4(attr.Data);
+                            else
+                                mpReachV6 = MpReachCodec.DecodeMpReachV6(attr.Data);
+                        }
+                        catch (BgpParseException ex)
+                        {
+                            // RFC 7606 §3(j): a SUPPORTED tuple whose value cannot be decoded takes
+                            // the "AFI/SAFI disable" choice, scoped to that family (D17).
+                            throw new BgpMpParseException(ex.Message, reachIsV4, ex.SubErrorCode, ex);
+                        }
+                        continue;
+                    }
+
+                    if (mpUnreachSeen)
+                        throw new BgpParseException("Duplicate MP_UNREACH_NLRI attribute (RFC 7606 §3(g))",
+                            BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.MalformedAttributeList,
+                            sessionResetRequired: true);
+                    mpUnreachSeen = true;
+                    var unreachIsV4 = ScopeMpValueOrThrow(attr.Data);
+                    try
+                    {
+                        if (unreachIsV4)
+                            mpUnreachV4 = MpReachCodec.DecodeMpUnreachV4(attr.Data);
+                        else
+                            mpUnreachV6 = MpReachCodec.DecodeMpUnreachV6(attr.Data);
+                    }
+                    catch (BgpParseException ex)
+                    {
+                        throw new BgpMpParseException(ex.Message, unreachIsV4, ex.SubErrorCode, ex);
+                    }
                     continue;
                 }
                 attributes.Add(attr);
@@ -319,8 +376,39 @@ public static class BgpMessageReader
             PathAttributes = attributes,
             Nlri = nlri,
             MpReachV6 = mpReachV6,
-            MpUnreachV6 = mpUnreachV6
+            MpUnreachV6 = mpUnreachV6,
+            MpReachV4 = mpReachV4,
+            MpUnreachV4 = mpUnreachV4
         };
+    }
+
+    /// <summary>
+    /// #472 review: scope MP value failures to the offending AFI/SAFI tuple. A value too short
+    /// to name its tuple cannot be scoped to any family — the RFC 7606 §3(j) fallback is the
+    /// session reset. A tuple this speaker does not support was never negotiated (RFC 4760 §8):
+    /// its arrival is not a parse failure of a supported family, so it is answered with a plain
+    /// keep-alive body error — the whole UPDATE is discarded (D17) and the supported families
+    /// stay enabled. Supported tuples (#466): AFI=1/SAFI=1 and AFI=2/SAFI=1.
+    /// </summary>
+    /// <returns>true for the IPv4/Unicast tuple, false for IPv6/Unicast.</returns>
+    private static bool ScopeMpValueOrThrow(ReadOnlySpan<byte> value)
+    {
+        if (value.Length < 3)
+            throw new BgpParseException(
+                $"Truncated MP attribute: {value.Length} byte(s) cannot contain an AFI/SAFI tuple",
+                BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.MalformedAttributeList,
+                sessionResetRequired: true);
+
+        var afi = BinaryPrimitives.ReadUInt16BigEndian(value);
+        var safi = value[2];
+        if (afi == MpReachCodec.AfiIpv4 && safi == MpReachCodec.SafiUnicast)
+            return true;
+        if (afi == MpReachCodec.AfiIpv6 && safi == MpReachCodec.SafiUnicast)
+            return false;
+
+        throw new BgpParseException(
+            $"MP_REACH/MP_UNREACH for an unsupported address family: AFI={afi}, SAFI={safi}",
+            BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.InvalidNetworkField);
     }
 
     private static (PathAttribute attr, int consumed) ParseAttribute(ReadOnlySpan<byte> data)
@@ -434,15 +522,17 @@ public static class BgpMessageReader
 /// set Update Message Error (§6.3). A <c>null</c> sub-error code maps to Unspecific (0).
 /// </para>
 /// </summary>
-public sealed class BgpParseException : Exception
+public class BgpParseException : Exception
 {
     private readonly byte[]? _notificationData;
 
-    public BgpParseException(string message, byte? errorCode = null, byte? subErrorCode = null, byte[]? notificationData = null) : base(message)
+    public BgpParseException(string message, byte? errorCode = null, byte? subErrorCode = null, byte[]? notificationData = null, Exception? innerException = null, bool sessionResetRequired = false)
+        : base(message, innerException)
     {
         ErrorCode = errorCode;
         SubErrorCode = subErrorCode;
         _notificationData = notificationData is null ? null : (byte[])notificationData.Clone();
+        SessionResetRequired = sessionResetRequired;
     }
 
     public BgpParseException(string message, Exception inner) : base(message, inner) { }
@@ -460,4 +550,35 @@ public sealed class BgpParseException : Exception
     /// <see cref="BgpNotificationException.NotificationData"/>.
     /// </summary>
     public byte[]? NotificationData => _notificationData is null ? null : (byte[])_notificationData.Clone();
+
+    /// <summary>
+    /// #467: true when the RFC error policy for this failure class mandates a session reset
+    /// rather than the D17 keep-alive treatment — RFC 7606 §3(g) for a duplicated
+    /// MP_REACH_NLRI/MP_UNREACH_NLRI attribute (NOTIFICATION "Malformed Attribute List" MUST)
+    /// and the RFC 4271 §6.3 baseline for their flags conflicts (RFC 7606 leaves the MP
+    /// attributes explicitly unrevised). The read loop answers with exactly one NOTIFICATION
+    /// and tears the session down instead of discarding the message.
+    /// </summary>
+    public bool SessionResetRequired { get; }
+}
+
+/// <summary>
+/// #467: thrown by <see cref="BgpMessageReader.ReadMessage"/> when an MP_REACH_NLRI /
+/// MP_UNREACH_NLRI VALUE cannot be decoded (unsupported AFI/SAFI, truncated value, invalid
+/// next-hop length). RFC 7606 §3(j) places these attributes outside the keep-alive revision:
+/// an unparseable MP attribute MUST be answered with the "session reset" OR the "AFI/SAFI
+/// disable" approach. BGPLite records the disable choice in D17 — the session stays up, the
+/// IPv6/Unicast family is withdrawn from the peer and no longer accepted.
+/// </summary>
+public sealed class BgpMpParseException : BgpParseException
+{
+    /// <summary>True when the failing tuple was AFI=1/SAFI=1 (IPv4/Unicast), false for
+    /// AFI=2/SAFI=1 — the recovery must be scoped to the offending family (#472 review).</summary>
+    public bool IsIpv4 { get; }
+
+    public BgpMpParseException(string message, bool isIpv4, byte? subErrorCode = null, Exception? innerException = null)
+        : base(message, BgpConstants.Error.UpdateMessageError, subErrorCode, innerException: innerException)
+    {
+        IsIpv4 = isIpv4;
+    }
 }
