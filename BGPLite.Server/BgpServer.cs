@@ -472,6 +472,28 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
         await TerminateSessionsAsync(sessions, ct);
     }
 
+    /// <inheritdoc cref="ISessionManager.TerminatePeerByIpAsync" />
+    public async Task TerminatePeerByIpAsync(string peerIp, CancellationToken ct = default)
+    {
+        if (!IPAddress.TryParse(peerIp, out var ip))
+        {
+            _logger.LogWarning("TerminatePeerByIp: invalid IP {Ip}", peerIp);
+            return;
+        }
+
+        var sessions = _sessions
+            .Where(kvp => kvp.Key.Address.Equals(ip))
+            .Select(kvp => kvp.Value)
+            .ToList();
+
+        if (sessions.Count == 0)
+            return;
+
+        _logger.LogInformation("Terminating {Count} session(s) from {Ip} (IP-only match — the deleted peer row carries no ASN)",
+            sessions.Count, peerIp);
+        await TerminateSessionsAsync(sessions, ct);
+    }
+
     /// <summary>
     /// The #323 teardown core, split out so tests can drive real sessions without a live BgpServer
     /// (sessions enter <see cref="_sessions"/> only through the accept loop, which binds port 179).

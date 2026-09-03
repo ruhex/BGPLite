@@ -1107,9 +1107,29 @@ public sealed class ManagementApi : IHostedService, IDisposable
 
         _logger.LogInformation("Updated peer {Id}", SanitizeForLog(peerId));
 
-        _ = _sessionManager.RefreshPeerAsync(peer.Ip, peer.Asn ?? 0);
+        RequestPeerRefresh(peerId, peer);
 
         return await HandleGetPeer(peerId);
+    }
+
+    /// <summary>
+    /// Fire-and-forget per-peer refresh after a config change. A NULL-Asn row (legacy Ip-only era)
+    /// cannot match any live session by (Ip, Asn) — no session ever has RemoteAsn 0 (#300) — so
+    /// the refresh is skipped with a warning instead of the confusing "no session for {Ip} AS0"
+    /// the old <c>asn ?? 0</c> produced (#422).
+    /// </summary>
+    private void RequestPeerRefresh(string peerId, Peer peer)
+    {
+        if (peer.Asn.HasValue)
+        {
+            _ = _sessionManager.RefreshPeerAsync(peer.Ip, peer.Asn.Value);
+        }
+        else
+        {
+            _logger.LogWarning(
+                "Peer row {Id} at {Ip} has NULL Asn — refresh skipped (no (Ip, Asn) session match is possible)",
+                SanitizeForLog(peerId), peer.Ip);
+        }
     }
 
     internal async Task<ApiResponse> HandleDeletePeer(string peerId)
@@ -1126,7 +1146,21 @@ public sealed class ManagementApi : IHostedService, IDisposable
         // send-timeout backstop) from pinning the DELETE request; the session is disposed even
         // when the Cease send is cancelled.
         using var bound = new CancellationTokenSource(TimeSpan.FromSeconds(10));
-        await _sessionManager.TerminatePeerAsync(peer.Ip, peer.Asn ?? 0, bound.Token);
+        if (peer.Asn.HasValue)
+        {
+            await _sessionManager.TerminatePeerAsync(peer.Ip, peer.Asn.Value, bound.Token);
+        }
+        else
+        {
+            // #422: a NULL-Asn row (legacy Ip-only era) cannot be matched by (Ip, Asn) — no live
+            // session ever has RemoteAsn 0 (AS 0 OPENs are rejected, #300) — so the pre-#422
+            // `asn ?? 0` teardown was a SILENT no-op and the session kept advertising a deleted
+            // peer. Terminate by IP instead, and say so in the log.
+            _logger.LogWarning(
+                "Deleting peer row {Id} at {Ip} with NULL Asn — terminating ALL its sessions by IP",
+                SanitizeForLog(peerId), peer.Ip);
+            await _sessionManager.TerminatePeerByIpAsync(peer.Ip, bound.Token);
+        }
 
         await _store.DeletePeerAsync(peerId);
 
@@ -1211,7 +1245,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
 
         // Trigger refresh so the peer receives the new source's prefixes immediately —
         // same pattern as CreatePeer/UpdatePeer. Pass ASN so shared-IP peers aren't refreshed (#200).
-        _ = _sessionManager.RefreshPeerAsync(peer.Ip, peer.Asn ?? 0);
+        RequestPeerRefresh(peerId, peer);
 
         _logger.LogInformation("Added source '{Name}' ({Url}) to peer {PeerId}",
             SanitizeForLog(data.Name), SanitizeForLog(data.Url), SanitizeForLog(peerId));
@@ -1228,7 +1262,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
             return ApiResponse.Error($"Source '{sourceId}' not found", 404);
 
         // Trigger refresh so the source's prefixes are withdrawn immediately (#200: ASN-scoped).
-        _ = _sessionManager.RefreshPeerAsync(peer.Ip, peer.Asn ?? 0);
+        RequestPeerRefresh(peerId, peer);
 
         _logger.LogInformation("Deleted source {SourceId} from peer {PeerId}", SanitizeForLog(sourceId), SanitizeForLog(peerId));
         return ApiResponse.Ok(new { id = sourceId, deleted = true });
@@ -1251,7 +1285,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
             return ApiResponse.Error($"Source '{sourceId}' not found", 404);
 
         // Trigger refresh so toggling active/inactive takes effect immediately (#200: ASN-scoped).
-        _ = _sessionManager.RefreshPeerAsync(peer.Ip, peer.Asn ?? 0);
+        RequestPeerRefresh(peerId, peer);
 
         _logger.LogInformation("Source {SourceId} active={Active}", SanitizeForLog(sourceId), data.Active.Value);
         return ApiResponse.Ok(new { id = sourceId, active = data.Active.Value });
