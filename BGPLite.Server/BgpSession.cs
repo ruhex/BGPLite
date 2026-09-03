@@ -1301,21 +1301,26 @@ public sealed class BgpSession : IDisposable
         var attrCache = UpdateCodec.CreateUpdateAttributeCache();
         var v6AttrCache = UpdateCodec.CreateV6UpdateAttributeCache();
 
+        // #430: build-then-commit — a batch's prefixes are recorded in _advertisedPrefixes only
+        // AFTER its UPDATE serialized and hit the wire. A send that throws (e.g. a composed
+        // UPDATE over the 4096-byte maximum) leaves the mirror exactly matching reality: a later
+        // WithdrawAllAsync no longer sends withdrawals for prefixes that were never announced.
         foreach (var route in v4Routes)
         {
             batch.Add(route);
-            _advertisedPrefixes.Add(new IpPrefix(route.Prefix, route.PrefixLength, route.IsIpv4));
-            if (batch.Count >= maxNlriPerUpdate)
-            {
-                await SendRouteBatchAsync(nextHop, batch, attrCache);
-                sent += batch.Count;
-                batch.Clear();
-            }
+            if (batch.Count < maxNlriPerUpdate) continue;
+            await SendRouteBatchAsync(nextHop, batch, attrCache);
+            foreach (var sent_route in batch)
+                _advertisedPrefixes.Add(new IpPrefix(sent_route.Prefix, sent_route.PrefixLength, sent_route.IsIpv4));
+            sent += batch.Count;
+            batch.Clear();
         }
 
         if (batch.Count > 0)
         {
             await SendRouteBatchAsync(nextHop, batch, attrCache);
+            foreach (var sent_route in batch)
+                _advertisedPrefixes.Add(new IpPrefix(sent_route.Prefix, sent_route.PrefixLength, sent_route.IsIpv4));
             sent += batch.Count;
         }
 
@@ -1324,18 +1329,19 @@ public sealed class BgpSession : IDisposable
         foreach (var route in v6Routes)
         {
             batch.Add(route);
-            _advertisedPrefixes.Add(new IpPrefix(route.Prefix, route.PrefixLength, route.IsIpv4));
-            if (batch.Count >= maxNlriPerUpdate)
-            {
-                await SendV6RouteBatchAsync(v6NextHop, batch, v6AttrCache);
-                sent += batch.Count;
-                batch.Clear();
-            }
+            if (batch.Count < maxNlriPerUpdate) continue;
+            await SendV6RouteBatchAsync(v6NextHop, batch, v6AttrCache);
+            foreach (var sent_route in batch)
+                _advertisedPrefixes.Add(new IpPrefix(sent_route.Prefix, sent_route.PrefixLength, sent_route.IsIpv4));
+            sent += batch.Count;
+            batch.Clear();
         }
 
         if (batch.Count > 0)
         {
             await SendV6RouteBatchAsync(v6NextHop, batch, v6AttrCache);
+            foreach (var sent_route in batch)
+                _advertisedPrefixes.Add(new IpPrefix(sent_route.Prefix, sent_route.PrefixLength, sent_route.IsIpv4));
             sent += batch.Count;
         }
 
