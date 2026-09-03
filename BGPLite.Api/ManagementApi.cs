@@ -241,20 +241,48 @@ public sealed class ManagementApi : IHostedService, IDisposable
         // before this runs is the only unprotected moment (documented in #36).
         var md5Bootstrapped = 0;
         // TCP keys by source IP: if two peer rows share an IP with DIFFERENT keys, the last one
-        // would win non-deterministically — sort for determinism and warn (values never logged).
+        // would win non-deterministically — the shared resolver sorts for determinism and warns
+        // (values never logged). #418: the same resolver re-arms the key on delete/PATCH so the
+        // runtime behavior cannot drift from this bootstrap.
         foreach (var group in (await _store.GetPeerMd5CredentialsAsync(cancellationToken))
                      .GroupBy(c => c.Ip).OrderBy(g => g.Key, StringComparer.Ordinal))
         {
-            var creds = group.OrderBy(c => c.Md5Password, StringComparer.Ordinal).ToList();
-            if (creds.Select(c => c.Md5Password).Distinct().Count() > 1)
-                _logger.LogWarning(
-                    "TCP-MD5: {Count} peer rows on source IP {Ip} configure DIFFERENT keys — TCP-MD5 keys by IP, so one key applies to all of them (peers: {Peers})",
-                    creds.Count, group.Key, string.Join(", ", creds.Select(c => c.Ip)));
-            _sessionManager.SetPeerMd5Key(group.Key, creds[0].Md5Password);
+            var key = ResolveSharedIpKey(group.Key, [.. group]);
+            if (key is null) continue;
+            _sessionManager.SetPeerMd5Key(group.Key, key);
             md5Bootstrapped++;
         }
         if (md5Bootstrapped > 0)
             _logger.LogInformation("TCP-MD5 armed for {Count} peer(s)", md5Bootstrapped);
+    }
+
+    /// <summary>
+    /// Resolves the ONE TCP-MD5 key a source IP's surviving peer rows must share (#36 — TCP keys
+    /// by address, not by (IP, ASN)). Deterministic ordinal pick among the rows, with the same
+    /// warning the startup bootstrap emits when siblings declare DIFFERENT keys; null when no
+    /// surviving row carries a key (#418).
+    /// </summary>
+    private string? ResolveSharedIpKey(string ip, IReadOnlyList<(string Ip, string Md5Password)> rows)
+    {
+        if (rows.Count == 0) return null;
+        var creds = rows.OrderBy(c => c.Md5Password, StringComparer.Ordinal).ToList();
+        if (creds.Select(c => c.Md5Password).Distinct().Count() > 1)
+            _logger.LogWarning(
+                "TCP-MD5: {Count} peer rows on source IP {Ip} configure DIFFERENT keys — TCP-MD5 keys by IP, so one key applies to all of them (peers: {Peers})",
+                creds.Count, ip, string.Join(", ", creds.Select(c => c.Ip)));
+        return creds[0].Md5Password;
+    }
+
+    /// <summary>
+    /// Re-arms the per-IP TCP-MD5 key from the SURVIVING peer rows (#418): deleting a peer or
+    /// clearing its password must fall back to a sibling's key on the same source IP, and setting
+    /// a new one must leave the whole-IP state consistent with the store. The pre-#418 behavior
+    /// armed/unarmed from the single edited row, silently disarming (or overriding) siblings.
+    /// </summary>
+    internal async Task RearmPeerIpMd5KeyAsync(string ip)
+    {
+        var remaining = await _store.GetPeerMd5CredentialsForIpAsync(ip);
+        _sessionManager.SetPeerMd5Key(ip, ResolveSharedIpKey(ip, remaining));
     }
 
     public async Task StopAsync(CancellationToken cancellationToken)
@@ -1070,10 +1098,11 @@ public sealed class ManagementApi : IHostedService, IDisposable
             md5Password: data.Md5Password);
         if (data.Md5Password is not null)
         {
-            // The peer row carries the source IP the key is attached to.
+            // #418: re-arm from ALL surviving rows for this IP — clearing this peer's key must
+            // fall back to a sibling's, not silently disarm the address for every peer on it.
             var md5Peer = await _store.GetDbPeerByIdAsync(peerId);
             if (md5Peer is not null)
-                _sessionManager.SetPeerMd5Key(md5Peer.Ip, md5Peer.Md5Password);
+                await RearmPeerIpMd5KeyAsync(md5Peer.Ip);
         }
 
         _logger.LogInformation("Updated peer {Id}", SanitizeForLog(peerId));
@@ -1101,9 +1130,10 @@ public sealed class ManagementApi : IHostedService, IDisposable
 
         await _store.DeletePeerAsync(peerId);
 
-        // #36: disarm the deleted peer's TCP-MD5 key. Uses the row loaded BEFORE the delete —
-        // a post-delete re-read always returned null (CodeRabbit on #398).
-        _sessionManager.SetPeerMd5Key(peer.Ip, null);
+        // #36 + #418: re-arm the IP's TCP-MD5 key from the SURVIVING rows — deleting one sibling
+        // must not disarm TCP-MD5 for the other peers sharing the source IP (pre-#418 this was an
+        // unconditional SetPeerMd5Key(ip, null)). No key left on the IP resolves to null (disarm).
+        await RearmPeerIpMd5KeyAsync(peer.Ip);
         _logger.LogInformation("Deleted peer {Id} ({Ip})", SanitizeForLog(peerId), peer.Ip);
         return ApiResponse.Ok(new { id = peerId, deleted = true });
     }
