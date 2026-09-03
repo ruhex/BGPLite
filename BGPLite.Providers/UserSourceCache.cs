@@ -97,31 +97,23 @@ internal sealed class UserSourceCache
 
         // Serialize per-key so concurrent callers (e.g. several peers refreshing the same URL) share
         // a single fetch — no thundering herd.
-        var gate = _locks.GetOrAdd(url, _ => new SemaphoreSlim(1, 1));
-        // #450 review: register as an active loader BEFORE the gate is taken — the sweep and
-        // EvictIfAtCapacity never remove a gate that still has loaders (RipeStatPrefixCache's
-        // _inflight invariant, #267 item 3). Without this, a removed-then-recreated gate let two
-        // loaders run concurrently for one URL and the OLDER response could overwrite the newer.
+        // #468: register as an active loader BEFORE taking the gate from _locks. The inverse
+        // ordering let the LAST leaver's gate removal race a caller that had already taken the
+        // (now-removed) gate instance but not yet registered, parking it on an orphaned
+        // semaphore while the next caller minted a second gate. With this order every
+        // participant is counted in _inflight before it can touch _locks, so ExitInflight only
+        // ever removes a gate that nobody holds or queues on.
         _inflight.AddOrUpdate(url, 1, (_, c) => c + 1);
+        var gate = _locks.GetOrAdd(url, _ => new SemaphoreSlim(1, 1));
         var entered = false;
         try
         {
-            try
-            {
-                await gate.WaitAsync(ct);
-                entered = true;
-            }
-            catch (OperationCanceledException) when (ct.IsCancellationRequested)
-            {
-                // #358 review (orphan-lock hygiene for #261): a caller cancelled while queued never
-                // writes a cache entry, so its freshly-created gate would never be evicted (the sweep
-                // removes locks only for removed cache keys) — cancelled URLs accumulated semaphores.
-                // Pair-remove OUR gate instance: a concurrent waiter keeps running on its own
-                // reference, and a fresh caller GetOrAdd's a new gate — the same duplicate-fetch
-                // tradeoff the eviction sweep already accepts.
-                ((ICollection<KeyValuePair<string, SemaphoreSlim>>)_locks).Remove(new KeyValuePair<string, SemaphoreSlim>(url, gate));
-                throw;
-            }
+            // #468: a caller cancelled while queued does NOT remove the gate here — that pair-
+            // removed the shared instance out from under the still-running first loader, minted
+            // a second gate for the next caller and raced a newer load against an older
+            // snapshot. Cleanup is ExitInflight's job: the LAST leaver removes the gate.
+            await gate.WaitAsync(ct);
+            entered = true;
             try
             {
                 if (TryGetFresh(url, out var rechecked))
@@ -170,16 +162,27 @@ internal sealed class UserSourceCache
         }
         finally
         {
-            ExitInflight(url);
+            ExitInflight(url, gate);
         }
     }
 
-    /// <summary>Decrements the active-loader count for <paramref name="url"/> and removes the
-    /// marker when it reaches zero, so the sweeps know the gate is removable (#450 review).</summary>
-    private void ExitInflight(string url)
+    /// <summary>
+    /// Decrements the active-loader count for <paramref name="url"/>; the LAST leaver removes
+    /// the gate, so an unbacked gate cannot outlive its participants (the #358 orphan-lock
+    /// hygiene). #468: a cancelled waiter no longer removes the gate directly — that pair-
+    /// removed the shared instance out from under the still-running first loader, minted a
+    /// second gate for the next caller, and raced a newer load against an older snapshot.
+    /// Removal here can only run when nobody holds or queues on the gate: every participant
+    /// registers in <see cref="_inflight"/> BEFORE taking the gate from <see cref="_locks"/>,
+    /// so a non-zero remaining count means someone else is inside or queued and the gate must
+    /// stay. The sweeps keep their own <c>_inflight &gt; 0</c> guards for the entry-backed path.
+    /// </summary>
+    private void ExitInflight(string url, SemaphoreSlim gate)
     {
-        _inflight.AddOrUpdate(url, 0, (_, c) => c - 1);
+        var remaining = _inflight.AddOrUpdate(url, 0, (_, c) => c - 1);
+        if (remaining > 0) return;
         _inflight.TryRemove(new KeyValuePair<string, int>(url, 0));
+        ((ICollection<KeyValuePair<string, SemaphoreSlim>>)_locks).Remove(new KeyValuePair<string, SemaphoreSlim>(url, gate));
     }
 
     /// <summary>
