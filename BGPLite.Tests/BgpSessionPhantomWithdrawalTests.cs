@@ -135,6 +135,9 @@ public sealed class BgpSessionPhantomWithdrawalTests
         await Task.Delay(TimeSpan.FromMilliseconds(100)); // let the initial dump finish
 
         Assert.True(session.IsEstablished, "the oversize group must not tear down the initial send");
+        // CodeRabbit on the integration review: the dropped group must not inflate the advertised
+        // count — _advertisedCount is the wire truth (#212), so only the healthy /8 counts.
+        Assert.Equal(1, session.AdvertisedPrefixCount);
         var frames = conn.Sent.Select(f => BgpMessageReader.ReadMessage(f)).ToList();
         Assert.DoesNotContain(frames, m => m is BgpNotificationMessage);
         var updates = frames.OfType<BgpUpdateMessage>().ToList();
