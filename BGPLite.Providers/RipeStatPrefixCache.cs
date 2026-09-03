@@ -134,7 +134,12 @@ public sealed class RipeStatPrefixCache
             {
                 prefixes = await _ripe.GetPrefixesAsync(asn, ct);
             }
-            catch (OperationCanceledException) { throw; }
+            // #485 (#320/#324 contract): only CALLER cancellation propagates. A foreign-token OCE
+            // (the per-attempt/body deadline inside RipeStatProvider, fired on a live ct) is a
+            // load FAILURE and takes the stale-on-failure / negative-cache branches below — the
+            // unfiltered rethrow meant every retry re-paid the full fetch budget with no backoff
+            // ever recorded.
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
             catch (Exception ex)
             {
                 // Stale-on-failure (#163): serve the last good copy regardless of its age so a

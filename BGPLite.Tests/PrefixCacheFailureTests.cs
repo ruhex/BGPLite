@@ -1,3 +1,4 @@
+using System.Net.Http;
 using BGPLite.Configuration;
 using BGPLite.Providers;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -134,5 +135,48 @@ public class PrefixCacheFailureTests
         public bool SupportsConditionalRequests => true;
         public Task<SourceLoadResult> LoadAsync(PrefixSourceConfig source, string? etag = null, DateTimeOffset? lastModified = null, CancellationToken ct = default)
             => Task.FromResult(SourceLoadResult.Ok(new List<IpPrefix>()));
+    }
+
+    /// <summary>Succeeds normally; throws the CALLER's OCE once the token is cancelled — how
+    /// RipeStatProvider surfaces host shutdown to the cache (#485).</summary>
+    private sealed class OceWhenCancelledHandler : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
+            => ct.IsCancellationRequested
+                ? Task.FromException<HttpResponseMessage>(new OperationCanceledException(ct))
+                : Task.FromResult(new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+                {
+                    Content = new StringContent(
+                        """{"status":"ok","data":{"resource":"65010","prefixes":{"v4":{"originating":["10.1.10.1/32"]},"v6":{"originating":[]}}}}""")
+                });
+    }
+
+    private sealed class HttpClientFactoryStub(HttpMessageHandler handler) : IHttpClientFactory
+    {
+        public HttpClient CreateClient(string name) => new(handler, disposeHandler: false);
+    }
+
+    [Fact]
+    public async Task WarmUp_CancelledToken_UnwindsTheLoop_NotAWarnPerAsn()
+    {
+        // #485: the per-ASN catch (Exception) swallowed the shutdown OCE once per remaining ASN —
+        // a "WarmUp failed" WARN storm on every stop. Caller cancellation must unwind the loop.
+        var yaml = "Bgp:\n  Asn: 65444\n  RouterId: 10.0.0.1\n" +
+                   "RipeStat:\n  AsnLists:\n    - Name: ru\n      Asns: [65010, 65011]\n";
+        var config = ConfigLoader.LoadFromText(yaml);
+        var cache = new RipeStatPrefixCache(new RipeStatProvider(
+            new HttpClientFactoryStub(new OceWhenCancelledHandler()),
+            NullLogger<RipeStatProvider>.Instance,
+            new RipeStatConfig { RetryAttempts = 0, RetryDelaySeconds = 0 }));
+        var sources = new PrefixSourceService(
+            config,
+            new PrefixSourceProviderFactory([]),
+            NullLogger<PrefixSourceService>.Instance);
+        var service = new PrefixService(config, cache, sources, null!);
+
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
+        // RED pre-fix: both per-ASN OCEs were swallowed (a WARN each) and WarmUp completed normally.
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => service.WarmUpAsync(cts.Token));
     }
 }
