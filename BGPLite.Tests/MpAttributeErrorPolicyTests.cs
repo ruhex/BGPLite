@@ -18,7 +18,8 @@ namespace BGPLite.Tests;
 /// session reset (RFC 4271 §6.3 baseline);</item>
 /// <item>an UNPARSEABLE MP value → the §3(j) "AFI/SAFI disable" choice: the peer's accepted
 /// IPv6 routes are withdrawn, the family is ignored for the rest of the session, the session
-/// stays up (recorded in D17);</item>
+/// stays up (recorded in D17) — scoped to the SUPPORTED tuple: an unsupported AFI/SAFI only
+/// discards its UPDATE, and a value too short to name its tuple resets the session;</item>
 /// <item>a non-global MP_REACH next hop (RFC 2545 §3) → that attribute's routes are excluded,
 /// route-level, session up.</item>
 /// </list>
@@ -65,6 +66,84 @@ public class MpAttributeErrorPolicyTests
     }
 
     [Fact]
+    public async Task PartialMpReachFlags_TearDownSession_WithNotification_3_4()
+    {
+        // #472 review: the Partial bit is equally invalid on a non-transitive attribute — nothing
+        // ever re-advertises it un-understood — and joins the RFC 4271 §6.3 baseline reset.
+        var routeTable = new RouteTable();
+        var (session, run, conn) = await EstablishAsync(routeTable);
+
+        var value = ReachValue(GlobalNextHop, 32, 0x20, 0x01, 0x0D, 0xB8);
+        conn.EnqueueFrame(UpdateFrame(MpReachAttribute(BgpConstants.Attribute.FlagOptional | BgpConstants.Attribute.FlagPartial, value)));
+
+        await AssertResetAsync(session, conn, expectedSubError: BgpConstants.SubError.AttributeFlagsError);
+        await TeardownAsync(session, run);
+    }
+
+    [Fact]
+    public async Task UnsupportedMpFamily_DiscardsTheUpdateOnly_SessionAndFamilyStayUp()
+    {
+        // #472 review: an AFI/SAFI tuple that was never negotiated (RFC 4760 §8) is not a parse
+        // failure of the SUPPORTED family — the whole UPDATE is discarded through the D17
+        // keep-alive path and neither the session nor IPv6/Unicast is touched.
+        var routeTable = new RouteTable();
+        var (session, run, conn) = await EstablishAsync(routeTable);
+
+        conn.EnqueueFrame(UpdateFrame(
+            OriginAsPathAttributes,
+            MpReachAttribute(MpOptionalNonTransitive, ReachValue(GlobalNextHop, 32, 0x20, 0x01, 0x0D, 0xB8))));
+        await SettleAsync(conn, () => routeTable.Count == 1);
+
+        conn.EnqueueFrame(UpdateFrame(MpReachAttribute(MpOptionalNonTransitive,
+            [0x00, 0x01, 0x01, 0x04, 0xC0, 0x00, 0x02, 0x01, 0x00]))); // AFI=1/SAFI=1 — unsupported
+        await SettleAsync(conn);
+
+        Assert.True(session.IsEstablished, "an unsupported tuple is a keep-alive body error, not a reset");
+        Assert.NotNull(routeTable.Get(DocumentedPrefix, 32, isIpv4: false)); // the accepted route survives
+
+        // The supported family is still enabled: a valid announcement still installs.
+        conn.EnqueueFrame(UpdateFrame(
+            OriginAsPathAttributes,
+            MpReachAttribute(MpOptionalNonTransitive, ReachValue(GlobalNextHop, 24, 0x20, 0x01, 0x0D))));
+        await SettleAsync(conn, () => routeTable.Count == 2);
+
+        await TeardownAsync(session, run);
+    }
+
+    [Fact]
+    public async Task AfterFamilyDisable_ThePrefixCapBudgetIsReturned()
+    {
+        // #472 review: RemoveAllOwnedBy does not raise EntryOwnershipLost (the session is
+        // discarding its OWN keys), so DisablePeerMpV6 must drop the family's keys from the
+        // per-peer prefix set itself — otherwise the cap count drifts and phantom IPv6 keys
+        // consume the budget of real IPv4 announcements.
+        var routeTable = new RouteTable();
+        var (session, run, conn) = await EstablishAsync(routeTable, maxPrefixes: 2);
+
+        conn.EnqueueFrame(UpdateFrame(
+            OriginAsPathAttributes,
+            MpReachAttribute(MpOptionalNonTransitive, ReachValue(GlobalNextHop, 32, 0x20, 0x01, 0x0D, 0xB8))));
+        conn.EnqueueFrame(UpdateFrame(
+            OriginAsPathAttributes,
+            MpReachAttribute(MpOptionalNonTransitive, ReachValue(GlobalNextHop, 24, 0x20, 0x01, 0x0D))));
+        await SettleAsync(conn, () => routeTable.Count == 2);
+
+        conn.EnqueueFrame(UpdateFrame(MpReachAttribute(MpOptionalNonTransitive,
+            [0x00, 0x02, 0x01, 0x10, 0x20, 0x01]))); // supported tuple, truncated → disable
+        await SettleAsync(conn, () => routeTable.Count == 0);
+
+        // The two IPv4 announcements must fit the cap of 2 — the withdrawn IPv6 keys must not
+        // be occupying it.
+        conn.EnqueueFrame(AnnounceFrame(24, 0xC0, 0x00, 0x02));
+        conn.EnqueueFrame(AnnounceFrame(24, 0xC0, 0x00, 0x01));
+        await SettleAsync(conn, () => routeTable.Count == 2);
+
+        Assert.True(session.IsEstablished, "reaching the cap through phantom keys would have reset the session");
+
+        await TeardownAsync(session, run);
+    }
+
+    [Fact]
     public async Task MalformedMpReach_WithdrawsAcceptedV6Routes_KeepsSessionUp()
     {
         var routeTable = new RouteTable();
@@ -79,11 +158,11 @@ public class MpAttributeErrorPolicyTests
         await SettleAsync(conn, () => routeTable.Count == 1);
         Assert.NotNull(routeTable.Get(DocumentedPrefix, 32, isIpv4: false));
 
-        // Now an UPDATE whose MP_REACH VALUE cannot be parsed (AFI=1 — the IPv6-only decoder
-        // rejects it structurally). RFC 7606 §3(j): session reset OR AFI/SAFI disable; BGPLite
-        // disables the family — the stale route must NOT survive the malformed update.
+        // Now an UPDATE whose MP_REACH VALUE cannot be parsed — AFI=2/SAFI=1 (the SUPPORTED
+        // tuple) with a truncated body. RFC 7606 §3(j): session reset OR AFI/SAFI disable;
+        // BGPLite disables the family — the stale route must NOT survive the malformed update.
         conn.EnqueueFrame(UpdateFrame(MpReachAttribute(MpOptionalNonTransitive,
-            [0x00, 0x01, 0x01, 0x04, 0xC0, 0x00, 0x02, 0x01, 0x00]))); // AFI=1, truncated value
+            [0x00, 0x02, 0x01, 0x10, 0x20, 0x01]))); // our AFI/SAFI, truncated next hop
         await SettleAsync(conn, () => routeTable.Count == 0);
 
         Assert.Null(routeTable.Get(DocumentedPrefix, 32, isIpv4: false));
@@ -101,7 +180,7 @@ public class MpAttributeErrorPolicyTests
         var (session, run, conn) = await EstablishAsync(routeTable);
 
         conn.EnqueueFrame(UpdateFrame(MpReachAttribute(MpOptionalNonTransitive,
-            [0x00, 0x01, 0x01, 0x04, 0xC0, 0x00, 0x02, 0x01, 0x00]))); // unparseable → disable
+            [0x00, 0x02, 0x01, 0x10, 0x20, 0x01]))); // supported tuple, truncated → disable
         await SettleAsync(conn);
 
         // A later VALID MP_REACH announcement is ignored: the family is disabled.
@@ -115,6 +194,20 @@ public class MpAttributeErrorPolicyTests
         await SettleAsync(conn, () => routeTable.Count == 1);
         Assert.Equal(1, routeTable.Count);
 
+        await TeardownAsync(session, run);
+    }
+
+    [Fact]
+    public async Task UnreadableMpTuple_ResetsSession_CannotBeScopedToAFamily()
+    {
+        // #472 review: a value too short to even name its AFI/SAFI cannot be scoped to a
+        // family, so the RFC 7606 §3(j) fallback is the session reset (NOTIFICATION 3/1).
+        var routeTable = new RouteTable();
+        var (session, run, conn) = await EstablishAsync(routeTable);
+
+        conn.EnqueueFrame(UpdateFrame(MpReachAttribute(MpOptionalNonTransitive, [0x00, 0x02])));
+
+        await AssertResetAsync(session, conn, expectedSubError: BgpConstants.SubError.MalformedAttributeList);
         await TeardownAsync(session, run);
     }
 
@@ -214,10 +307,11 @@ public class MpAttributeErrorPolicyTests
 
     // ---- session lifecycle (the #289 test pattern) ----
 
-    private static async Task<(BgpSession Session, Task Run, ScriptedConnection Conn)> EstablishAsync(RouteTable routeTable)
+    private static async Task<(BgpSession Session, Task Run, ScriptedConnection Conn)> EstablishAsync(
+        RouteTable routeTable, uint routerId = 0x0A000002, int? maxPrefixes = null)
     {
         var conn = new ScriptedConnection();
-        var config = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1", HoldTime = 0, KeepAlive = 0 };
+        var config = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1", HoldTime = 0, KeepAlive = 0, MaxPrefixesPerPeer = maxPrefixes ?? 0 };
         var session = new BgpSession(
             conn,
             new PeerConfig { Address = "127.0.0.1" },
