@@ -37,6 +37,8 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
     private Task? _acceptTask;
     private PeriodicTimer? _statusTimer;
     private Task? _statusTask;
+    // #428: pause before retrying after a failed accept — see the catch in AcceptLoopAsync.
+    private static readonly TimeSpan AcceptFailureBackoff = TimeSpan.FromMilliseconds(500);
 
     public BgpMetrics Metrics => _metrics;
     public RouteTable Routes => _routeTable;
@@ -365,6 +367,12 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
                 if (Volatile.Read(ref _acceptingConnections) == 0)
                     break;
                 _logger.LogError(ex, "Error accepting connection");
+                // #428: a persistent accept failure (fd exhaustion/EMFILE is the classic) used to
+                // spin this loop at full speed — log + immediate retry thousands of times a
+                // second, exactly when the host is already out of resources. Bound the retry
+                // rate; the shutdown token breaks the wait so shutdown latency is unaffected.
+                try { await Task.Delay(AcceptFailureBackoff, cancellationToken); }
+                catch (OperationCanceledException) { break; }
             }
         }
     }
