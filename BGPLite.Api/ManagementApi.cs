@@ -60,6 +60,14 @@ public sealed class ManagementApi : IHostedService, IDisposable
     /// </summary>
     private const int DefaultInflightCap = 64;
     private readonly SemaphoreSlim _inflightCap = new(DefaultInflightCap);
+    /// <summary>
+    /// #424: wall-clock budget for the GET endpoints that can trigger external fetches
+    /// (<c>/api/asn-lists</c>, <c>/api/peers/&#123;id&#125;/prefixes</c>). A cold RIPEstat fetch is
+    /// minutes-scale per ASN (180s timeout × retries), so N such GETs used to monopolize the
+    /// global in-flight cap and starve every other route for minutes. On expiry the handlers serve
+    /// their PARTIAL result with a warning; shutdown still propagates. internal settable for tests.
+    /// </summary>
+    internal TimeSpan ExternalFetchBudget { get; set; } = TimeSpan.FromSeconds(30);
     // #258: in-flight tracking is a COUNT plus an idle Task (completed whenever the count is 0),
     // not a List<Task> — the #248 design appended every handler and never removed it, so each
     // completed request leaked its Task (and its exception, if faulted) for the process lifetime
@@ -1307,7 +1315,22 @@ public sealed class ManagementApi : IHostedService, IDisposable
         if (peer is null)
             return ApiResponse.Error("Peer not found", 404);
 
-        var prefixes = await CollectPeerPrefixes(peerId, _shutdownCts.Token);
+        // #424: same wall-clock budget as /api/asn-lists — cold subscription fetches are
+        // minutes-scale and must not pin the request (and its in-flight slot) indefinitely.
+        using var budget = CancellationTokenSource.CreateLinkedTokenSource(_shutdownCts.Token);
+        budget.CancelAfter(ExternalFetchBudget);
+        List<string> prefixes;
+        try
+        {
+            prefixes = await CollectPeerPrefixes(peerId, budget.Token);
+        }
+        catch (OperationCanceledException) when (!_shutdownCts.IsCancellationRequested)
+        {
+            _logger.LogWarning(
+                "GET /api/peers/{Id}/prefixes exceeded the {Seconds:0}s external-fetch budget — serving a partial list",
+                SanitizeForLog(peerId), ExternalFetchBudget.TotalSeconds);
+            prefixes = [];
+        }
 
         var format = ctx.Request.QueryString["format"] ?? "txt";
         if (format == "json")
@@ -1339,7 +1362,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
                 foreach (var p in fetched)
                     prefixes.Add(new IpPrefix(p.Prefix, p.Length, p.IsIpv4).ToString());
             }
-            catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }  // #114/#337: only shutdown cancellation — a provider-timeout OCE (live token) is a fetch failure below
+            catch (OperationCanceledException) when (_shutdownCts.IsCancellationRequested) { throw; }  // #114/#337/#424: only SHUTDOWN propagates — budget expiry degrades to the partial list
             catch (Exception ex) { _logger.LogWarning(ex, "CollectPeerPrefixes: ASN fetch failed"); }
         }
 
@@ -1352,7 +1375,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
                 foreach (var p in ruPrefixes)
                     prefixes.Add(new IpPrefix(p.Prefix, p.Length, p.IsIpv4).ToString());
             }
-            catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }  // #114/#337: only shutdown cancellation — a provider-timeout OCE (live token) is a fetch failure below
+            catch (OperationCanceledException) when (_shutdownCts.IsCancellationRequested) { throw; }  // #114/#337/#424: see above
             catch (Exception ex) { _logger.LogWarning(ex, "CollectPeerPrefixes: RU prefix fetch failed"); }
         }
 
@@ -1369,7 +1392,12 @@ public sealed class ManagementApi : IHostedService, IDisposable
 
     private async Task<ApiResponse> HandleGetAsnListsAsync()
     {
-        var ct = _shutdownCts.Token;
+        // #424: bound the whole handler — see ExternalFetchBudget. Shutdown still propagates;
+        // budget expiry degrades to the partial counts collected so far (each later fetch fails
+        // fast against the cancelled token) instead of pinning the request for minutes.
+        using var budget = CancellationTokenSource.CreateLinkedTokenSource(_shutdownCts.Token);
+        budget.CancelAfter(ExternalFetchBudget);
+        var ct = budget.Token;
         var lists = _config.RipeStat?.AsnLists ?? [];
         var result = new List<object>();
 
@@ -1381,14 +1409,14 @@ public sealed class ManagementApi : IHostedService, IDisposable
                 foreach (var asn in l.Asns)
                 {
                     try { prefixCount += await _prefixService.GetPrefixCountAsync(asn, ct); }
-                    catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }  // #114/#337: only shutdown cancellation — a provider-timeout OCE (live token) is a fetch failure below
+                    catch (OperationCanceledException) when (_shutdownCts.IsCancellationRequested) { throw; }  // #114/#337/#424: only SHUTDOWN propagates — the #424 fetch budget fires as OCE on a live shutdown token and degrades below
                     catch (Exception ex) { _logger.LogWarning(ex, "Failed to get prefix count for AS{Asn}", asn); }
                 }
             }
             else if (l.Country is not null)
             {
                 try { prefixCount = (await _prefixService.GetRuPrefixesAsync(ct)).Count; }
-                catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }  // #114/#337: only shutdown cancellation — a provider-timeout OCE (live token) is a fetch failure below
+                catch (OperationCanceledException) when (_shutdownCts.IsCancellationRequested) { throw; }  // #114/#337/#424: see above
                 catch (Exception ex) { _logger.LogWarning(ex, "Failed to get RU prefix count"); }
             }
 
@@ -1421,6 +1449,11 @@ public sealed class ManagementApi : IHostedService, IDisposable
                 type = source.Kind == "asn" ? "asn" : "list"
             });
         }
+
+        if (ct.IsCancellationRequested && !_shutdownCts.IsCancellationRequested)
+            _logger.LogWarning(
+                "GET /api/asn-lists exceeded the {Seconds:0}s external-fetch budget — serving partial prefix counts",
+                ExternalFetchBudget.TotalSeconds);
 
         return ApiResponse.Ok(result);
     }
