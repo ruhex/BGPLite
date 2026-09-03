@@ -351,3 +351,22 @@ For section-by-section RFC conformance status, see `RFC_COMPLIANCE.md` (2026-07-
   treated-as-withdraw; routes never install with an empty path (which the AS-loop exclusion,
   RFC 4271 §9.1.2, could never match anyway — D23).
 - **Tracker:** #486.
+
+### D26. Outbound policy under failure — total-source failure fails CLOSED; seed-takeover loss is accepted
+- **Decision (RU fallback):** a CONFIGURED peer whose routes resolve to zero falls back to the RU
+  default list ONLY when its sources legitimately resolved to nothing. When every configured fetch
+  FAILED (RIPEstat outage / network partition), the fallback is suppressed — the peer keeps an
+  empty set (fail closed) instead of receiving the entire RU table it never asked for.
+  Implemented via a per-build failure flag in `RouteAssembler` (`#488`).
+- **Decision (seed takeover):** a peer's announcement of a seeded prefix takes over the shared-table
+  entry (D12), and that session's teardown then removes the entry WITHOUT restoring the seed value.
+  Accepted: in the production composition the outbound path reads sources, never the shared table
+  (D13), so only `GET /api/routes` / LPM lose the prefix until restart; the degraded composition is
+  a named error mode of its own. Restoring seeds would require retaining seed data in `RouteTable`
+  — revisit only if the degraded composition ever becomes supported.
+- **Context:** both behaviors were silent policy gaps found by the 2026-09-04 audit (#488); neither
+  corrupted state — one substituted a huge unintended set on failure, the other lost an API-view row.
+- **Consequence:** during a total source outage, subscribed peers keep an empty advertisement (they
+  were withdrawn at refresh start anyway); an unknown subscription name now logs a Warning per build
+  instead of being silently ignored.
+- **Tracker:** #488.
