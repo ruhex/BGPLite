@@ -58,7 +58,7 @@ public static class CapabilityHelper
     }
 
     /// <summary>Returns the peer's Graceful Restart parameters, or null if not advertised / malformed.</summary>
-    public static (bool RestartState, ushort RestartTime, bool Ipv4UnicastForwarding)? GetGracefulRestart(BgpOpenMessage open)
+    public static (bool RestartState, ushort RestartTime, bool Ipv4UnicastForwarding, bool Ipv6UnicastForwarding)? GetGracefulRestart(BgpOpenMessage open)
     {
         foreach (var cap in open.Capabilities)
         {
