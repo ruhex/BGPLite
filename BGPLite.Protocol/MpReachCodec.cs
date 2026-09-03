@@ -24,6 +24,22 @@ public static class MpReachCodec
 
     public readonly record struct MpReachV6(UInt128 NextHop, IReadOnlyList<IpPrefix> Prefixes);
 
+    /// <summary>
+    /// #467 (RFC 2545 §3): the MP_REACH next hop must be a GLOBAL IPv6 address. Rejects the
+    /// unspecified address (::), loopback (::1), multicast (ff00::/8) and link-local
+    /// (fe80::/10) — a lone link-local is only meaningful on a shared subnet and rides as the
+    /// SECOND half of the RFC 2545 32-byte form, which the decoder never adopts. IPv4-mapped
+    /// forms are global-scope representations and are accepted.
+    /// </summary>
+    public static bool IsGlobalUnicastNextHop(UInt128 nextHop)
+    {
+        if (nextHop == UInt128.Zero) return false;                              // ::
+        if (nextHop == UInt128.One) return false;                               // ::1
+        if ((nextHop >> 120) == (UInt128)0xFF) return false;                    // ff00::/8
+        if ((nextHop >> 118) == (UInt128)0b1111111010) return false;            // fe80::/10
+        return true;
+    }
+
     /// <summary>Builds the MP_REACH_NLRI (type 14) attribute VALUE for IPv6/Unicast:
     /// a 16-byte global next hop plus the NLRI prefix list.</summary>
     public static byte[] EncodeMpReachV6(UInt128 nextHop, IReadOnlyList<IpPrefix> prefixes)

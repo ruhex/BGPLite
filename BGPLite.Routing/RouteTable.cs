@@ -148,11 +148,24 @@ public sealed class RouteTable
     /// </summary>
     public int RemoveAllOwnedBy(object owner)
     {
+        return RemoveAllOwnedBy(owner, isIpv4: true) + RemoveAllOwnedBy(owner, isIpv4: false);
+    }
+
+    /// <summary>
+    /// #467: family-scoped variant — removes every entry still owned by <paramref name="owner"/>
+    /// in ONE address family and returns how many went (the RFC 7606 §3(j) "AFI/SAFI disable"
+    /// withdrawal). Each removal is the same atomic compare-and-remove as the full scan, so an
+    /// entry another peer has taken over between the scan and the delete stays put.
+    /// </summary>
+    public int RemoveAllOwnedBy(object owner, bool isIpv4)
+    {
         ArgumentNullException.ThrowIfNull(owner);
 
         var removed = 0;
         foreach (var pair in _routes)
         {
+            if (pair.Key.IsIpv4 != isIpv4)
+                continue;
             if (!ReferenceEquals(pair.Value.Owner, owner))
                 continue;
             if (((ICollection<KeyValuePair<(UInt128 Prefix, byte Length, bool IsIpv4), Entry>>)_routes).Remove(pair))

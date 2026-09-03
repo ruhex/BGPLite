@@ -198,6 +198,17 @@ For section-by-section RFC conformance status, see `RFC_COMPLIANCE.md` (2026-07-
   Established is an FSM error (NOTIFICATION 5/0, #427) — RFC 4271 §8.2.2 makes ANY OPEN in
   Established an FSM input regardless of body validity, so there is nothing to "keep alive" for
   that message class.
+- **MP carve-out (#467, recorded 2026-09-03):** RFC 7606 explicitly leaves MP_REACH_NLRI and
+  MP_UNREACH_NLRI outside the keep-alive revision, so their failure classes follow their own
+  policy instead of the paragraph above. A DUPLICATE MP attribute is answered with exactly one
+  NOTIFICATION 3/1 (Malformed Attribute List) and a session reset — RFC 7606 §3(g) MUST. An MP
+  flags conflict (RFC 4760 §4: both attributes are optional NON-transitive) is a session reset
+  with 3/4 per the RFC 4271 §6.3 baseline. An UNPARSEABLE MP VALUE takes the RFC 7606 §3(j)
+  "AFI/SAFI disable" choice: every IPv6 route the session accepted from the peer is withdrawn,
+  the family is ignored for the rest of the session, and the session itself stays up — the
+  route-server rationale above, family-scoped. Additionally, an MP_REACH next hop that is not
+  a global IPv6 address (::, ::1, ff00::/8, fe80::/10 — RFC 2545 §3) excludes that attribute's
+  routes only: route-level exclusion, like the AS-loop rule, not a session error.
 - **Consequence:** a peer sending structurally valid but semantically rejected UPDATEs gets them
   silently dropped (log Warning + `UpdatesRejected` metric) instead of a session reset; operators
   comparing against RFC-strict speakers will see BGPLite retain sessions others would close.

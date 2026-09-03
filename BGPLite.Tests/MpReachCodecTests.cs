@@ -159,4 +159,22 @@ public class MpReachCodecTests
         foreach (var c in hex) value = (value << 4) | (UInt128)Uri.FromHex(c);
         return value;
     }
+
+    /// <summary>
+    /// #467 (RFC 2545 §3): the MP_REACH next hop must be a GLOBAL IPv6 address — ::, ::1,
+    /// ff00::/8 (multicast) and fe80::/10 (link-local) are rejected; global unicast and
+    /// IPv4-mapped representations are accepted.
+    /// </summary>
+    [Theory]
+    [InlineData("00000000000000000000000000000000", false)] // ::
+    [InlineData("00000000000000000000000000000001", false)] // ::1 loopback
+    [InlineData("ff020000000000000000000000000001", false)] // ff02::1 multicast
+    [InlineData("fe800000000000000000000000000001", false)] // fe80::1 link-local
+    [InlineData("20010db8000000000000000000000001", true)]  // 2001:db8::1 global
+    [InlineData("26060670000000000000000000001111", true)]  // global unicast
+    [InlineData("00000000000000000000ffffc0000201", true)]  // ::ffff:192.0.2.1 (mapped, global scope)
+    public void IsGlobalUnicastNextHop_FollowsRfc2545(string hex, bool expected)
+    {
+        Assert.Equal(expected, MpReachCodec.IsGlobalUnicastNextHop(ToV6(hex)));
+    }
 }
