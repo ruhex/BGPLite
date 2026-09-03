@@ -68,6 +68,64 @@ public sealed class OpenConfirmFsmErrorTests
         await runTask.WaitAsync(TimeSpan.FromSeconds(5));
     }
 
+    [Fact]
+    public async Task NotificationBeforeOpen_IsNeverRepliedTo()
+    {
+        // #483 (RFC 4271 §6.3/§4.5, D8): a peer NOTIFICATION as the FIRST message must close the
+        // session silently. Pre-fix, it fell into the not-OPEN branch and was answered with
+        // NOTIFICATION 2/0 — replying to a NOTIFICATION.
+        var (server, client) = ConnectedPair();
+        using var clientSock = client;
+        using var session = new BgpSession(
+            new SocketBgpConnection(server),
+            new PeerConfig { Address = "127.0.0.1" },
+            new BgpConfig { Asn = 65001, RouterId = "127.0.0.1", HoldTime = 0, KeepAlive = 0 },
+            new RouteTable(),
+            AllowAllFilter.Instance,
+            new BgpMetrics(),
+            new NopLogger<BgpSession>());
+        var runTask = session.RunAsync();
+
+        Send(client, new BgpNotificationMessage
+        {
+            ErrorCode = BgpConstants.Error.Cease,
+            SubErrorCode = BgpConstants.SubError.Unspecific
+        });
+
+        await runTask.WaitAsync(TimeSpan.FromSeconds(5));
+        var sent = await DrainAsync(client, TimeSpan.FromSeconds(1));
+        Assert.Empty(sent.OfType<BgpNotificationMessage>());   // RED pre-fix: exactly one 2/0 reply
+        Assert.Empty(sent.OfType<BgpOpenMessage>());           // no OPEN is sent after a NOTIFICATION
+    }
+
+    [Fact]
+    public async Task KeepaliveBeforeOpen_IsFsmError_5_0_NotOpenMessageError()
+    {
+        // #483 (RFC 4271 §8.2.2, the #427/#453 class): the handshake accepts only OPEN and
+        // NOTIFICATION — a KEEPALIVE as the first message is an FSM error (5/0), not an
+        // Open Message Error (the previous 2/0 misreported an OPEN-body problem).
+        var (server, client) = ConnectedPair();
+        using var clientSock = client;
+        using var session = new BgpSession(
+            new SocketBgpConnection(server),
+            new PeerConfig { Address = "127.0.0.1" },
+            new BgpConfig { Asn = 65001, RouterId = "127.0.0.1", HoldTime = 0, KeepAlive = 0 },
+            new RouteTable(),
+            AllowAllFilter.Instance,
+            new BgpMetrics(),
+            new NopLogger<BgpSession>());
+        var runTask = session.RunAsync();
+
+        Send(client, BgpKeepaliveMessage.Instance);
+
+        await runTask.WaitAsync(TimeSpan.FromSeconds(5));
+        var sent = await DrainAsync(client, TimeSpan.FromSeconds(1));
+        var notification = Assert.Single(sent.OfType<BgpNotificationMessage>());
+        Assert.Equal(BgpConstants.Error.FiniteStateMachineError, notification.ErrorCode);   // RED pre-fix: OpenMessageError
+        Assert.Equal(BgpConstants.SubError.Unspecific, notification.SubErrorCode);
+        Assert.False(session.IsEstablished);
+    }
+
     private static (Socket server, Socket client) ConnectedPair()
     {
         using var listener = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
