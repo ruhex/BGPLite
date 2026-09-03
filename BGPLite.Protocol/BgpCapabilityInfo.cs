@@ -68,6 +68,9 @@ public sealed class BgpCapabilityInfo
     public static (bool RestartState, ushort RestartTime, bool Ipv4UnicastForwarding, bool Ipv6UnicastForwarding)? TryParseGracefulRestart(ReadOnlySpan<byte> data)
     {
         if (data.Length < 2) return null;
+        // RFC 4724 §2: the value is the 2-byte header followed by COMPLETE 4-byte <AFI, SAFI, F>
+        // tuples — a trailing partial tuple means a malformed capability, not "ignore the tail".
+        if ((data.Length - 2) % 4 != 0) return null;
         var restartState = (data[0] & BgpConstants.GracefulRestartFlag.RestartState) != 0;
         var restartTime = (ushort)(((data[0] & 0x0F) << 8) | data[1]);
         var ipv4UnicastForwarding = false;

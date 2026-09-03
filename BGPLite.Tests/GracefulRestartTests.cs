@@ -58,6 +58,10 @@ public class GracefulRestartTests
     {
         Assert.Null(BgpCapabilityInfo.TryParseGracefulRestart([]));
         Assert.Null(BgpCapabilityInfo.TryParseGracefulRestart(new byte[] { 0x80 })); // only 1 byte
+        // RFC 4724 §2: the value is a 2-byte header plus COMPLETE 4-byte tuples — a trailing
+        // partial tuple is malformed, not a tail to ignore.
+        Assert.Null(BgpCapabilityInfo.TryParseGracefulRestart(new byte[] { 0x80, 0x3C, 0x00, 0x01, 0x01 }));
+        Assert.Null(BgpCapabilityInfo.TryParseGracefulRestart(new byte[] { 0x80, 0x3C, 0x00 }));
     }
 
     [Fact]

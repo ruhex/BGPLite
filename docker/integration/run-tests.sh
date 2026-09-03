@@ -86,6 +86,8 @@ grep -q '"error"' "$TMP/create-peer.json" && fail "POST /api/peers rejected: $(c
 echo "created: $(cat "$TMP/create-peer.json")"
 
 # The IPv6-transport peer is registered too — the API accepts IPv6 peers (#14 phase 5).
+# It is registered with NO lists/custom prefixes, so it exercises the "configured peer with
+# zero resolved prefixes falls back to the RU/default source" branch of the assembler.
 V6_BODY='{"ip":"2001:db8:cccc::20","asn":65002,"description":"integration-bird-v6"}'
 V6_STATUS=$(api_post "$API/api/peers" "$V6_BODY" | tail -1)
 [ "$V6_STATUS" = "200" ] || fail "IPv6 peer registration returned $V6_STATUS"

@@ -52,6 +52,11 @@ Requirements: `docker` with the compose v2 plugin (daemon running), `curl`,
 polls until assertions pass, and always tears the stand down
 (`docker compose down -v`). Exit code is the test verdict.
 
+API assertions go through an in-network `probe` sidecar (curlimages/curl) —
+no host port publishing is required. For interactive poking, `exec` into the
+probe: `docker compose -f docker/integration/docker-compose.yml exec probe
+curl http://server:5001/api/server`.
+
 **Traffic capture (`--capture`)**: a tcpdump sidecar joins the server's network
 namespace and records everything on port 179 (both transports) to
 `docker/integration/captures/bgp.pcap` — open it in Wireshark (filter `bgp`)
