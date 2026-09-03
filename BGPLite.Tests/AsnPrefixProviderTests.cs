@@ -108,4 +108,29 @@ public class AsnPrefixProviderTests
             provider.LoadAsync(new PrefixSourceConfig { Name = "x", Kind = "asn", Asn = 65010 }));
         Assert.Equal(primedCalls + 1, handler.Calls);   // exactly one provider-driven wire attempt
     }
+
+    [Fact]
+    public async Task RipeStatCache_ExpiredEntries_Swept_EvenBelowTheCap()
+    {
+        // #426: expired per-ASN entries used to be pinned until the 4096-entry cap was hit —
+        // steady-state memory was "every ASN fetched recently", not "live ASNs". The amortized
+        // sweep drops them regardless of the cap (in-flight ASNs excepted).
+        var time = new Microsoft.Extensions.Time.Testing.FakeTimeProvider();
+        var handler = new CountingRipeHandler();
+        var cache = new RipeStatPrefixCache(
+            new RipeStatProvider(new StubFactory(handler), NullLogger<RipeStatProvider>.Instance,
+                new RipeStatConfig { RetryAttempts = 0, RetryDelaySeconds = 0 }),
+            cacheTtl: TimeSpan.FromMilliseconds(100),
+            timeProvider: time,
+            sweepEvery: 1);
+
+        _ = await cache.GetPrefixesAsync(65010);
+        _ = await cache.GetPrefixesAsync(65011);
+        Assert.Equal(2, cache.TrackedCount);
+
+        time.Advance(TimeSpan.FromMilliseconds(150)); // both entries expire
+        _ = await cache.GetPrefixesAsync(65012);      // sweep drops 65010/65011, then fetches 65012
+
+        Assert.Equal(1, cache.TrackedCount);
+    }
 }
