@@ -4,6 +4,7 @@ using BGPLite.Routing;
 using BGPLite.Server;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
+using BGPLite.Protocol;
 
 namespace BGPLite.Tests;
 
@@ -60,17 +61,17 @@ public sealed class RouteAssemblerCancellationTests
     /// <summary>Every fetch succeeds except the RU list, which reports a cancelled task.</summary>
     private sealed class CancelledRuFetchPrefixService : IPrefixService
     {
-        public Task<IReadOnlyList<(uint Prefix, byte Length)>> GetPrefixesAsync(uint asn, CancellationToken ct = default)
-            => Task.FromResult<IReadOnlyList<(uint Prefix, byte Length)>>([]);
-        public Task<List<(uint Prefix, byte Length, uint Asn)>> GetPrefixesForAsns(IEnumerable<uint> asns, CancellationToken ct = default)
-            => Task.FromResult(new List<(uint Prefix, byte Length, uint Asn)>());
+        public Task<IReadOnlyList<(UInt128 Prefix, byte Length, bool IsIpv4)>> GetPrefixesAsync(uint asn, CancellationToken ct = default)
+            => Task.FromResult<IReadOnlyList<(UInt128 Prefix, byte Length, bool IsIpv4)>>([]);
+        public Task<List<(UInt128 Prefix, byte Length, bool IsIpv4, uint Asn)>> GetPrefixesForAsns(IEnumerable<uint> asns, CancellationToken ct = default)
+            => Task.FromResult(new List<(UInt128 Prefix, byte Length, bool IsIpv4, uint Asn)>());
         public Task<int> GetPrefixCountAsync(uint asn, CancellationToken ct = default) => Task.FromResult(0);
-        public Task<List<(uint Prefix, byte Length, uint Asn)>> GetRuPrefixesAsync(CancellationToken ct = default)
-            => Task.FromCanceled<List<(uint Prefix, byte Length, uint Asn)>>(new CancellationToken(canceled: true));
-        public Task<IReadOnlyList<(uint Prefix, byte Length)>> GetSourcePrefixesAsync(string name, CancellationToken ct = default)
-            => Task.FromResult<IReadOnlyList<(uint Prefix, byte Length)>>([]);
-        public Task<IReadOnlyList<(uint Prefix, byte Length)>> GetUserSourcePrefixesAsync(string name, string url, string? community, CancellationToken ct = default)
-            => Task.FromResult<IReadOnlyList<(uint Prefix, byte Length)>>([]);
+        public Task<List<(UInt128 Prefix, byte Length, bool IsIpv4, uint Asn)>> GetRuPrefixesAsync(CancellationToken ct = default)
+            => Task.FromCanceled<List<(UInt128 Prefix, byte Length, bool IsIpv4, uint Asn)>>(new CancellationToken(canceled: true));
+        public Task<IReadOnlyList<(UInt128 Prefix, byte Length, bool IsIpv4)>> GetSourcePrefixesAsync(string name, CancellationToken ct = default)
+            => Task.FromResult<IReadOnlyList<(UInt128 Prefix, byte Length, bool IsIpv4)>>([]);
+        public Task<IReadOnlyList<(UInt128 Prefix, byte Length, bool IsIpv4)>> GetUserSourcePrefixesAsync(string name, string url, string? community, CancellationToken ct = default)
+            => Task.FromResult<IReadOnlyList<(UInt128 Prefix, byte Length, bool IsIpv4)>>([]);
         public Task WarmUpAsync(CancellationToken ct = default) => Task.CompletedTask;
     }
 

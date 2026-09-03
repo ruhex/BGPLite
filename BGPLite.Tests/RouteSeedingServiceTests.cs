@@ -23,34 +23,34 @@ public class RouteSeedingServiceTests
         // into WarmUpAsync (where it becomes WarmUpGate.Task.WaitAsync(ct)).
         public Task WarmUpCompleted { get; private set; } = new TaskCompletionSource().Task;
 
-        public Task<IReadOnlyList<(uint Prefix, byte Length)>> GetPrefixesAsync(uint asn, CancellationToken ct = default) =>
-            Task.FromResult<IReadOnlyList<(uint Prefix, byte Length)>>([]);
-        public Task<List<(uint Prefix, byte Length, uint Asn)>> GetPrefixesForAsns(IEnumerable<uint> asns, CancellationToken ct = default) => Task.FromResult(new List<(uint, byte, uint)>());
+        public Task<IReadOnlyList<(UInt128 Prefix, byte Length, bool IsIpv4)>> GetPrefixesAsync(uint asn, CancellationToken ct = default) =>
+            Task.FromResult<IReadOnlyList<(UInt128 Prefix, byte Length, bool IsIpv4)>>([]);
+        public Task<List<(UInt128 Prefix, byte Length, bool IsIpv4, uint Asn)>> GetPrefixesForAsns(IEnumerable<uint> asns, CancellationToken ct = default) => Task.FromResult(new List<(UInt128, byte, bool, uint)>());
         public Task<int> GetPrefixCountAsync(uint asn, CancellationToken ct = default) => Task.FromResult(0);
-        public Task<List<(uint Prefix, byte Length, uint Asn)>> GetRuPrefixesAsync(CancellationToken ct = default) => Task.FromResult(new List<(uint, byte, uint)>());
-        public Task<IReadOnlyList<(uint Prefix, byte Length)>> GetSourcePrefixesAsync(string name, CancellationToken ct = default) =>
-            Task.FromResult<IReadOnlyList<(uint Prefix, byte Length)>>([]);
-        public Task<IReadOnlyList<(uint Prefix, byte Length)>> GetUserSourcePrefixesAsync(string name, string url, string? community, CancellationToken ct = default) =>
-            Task.FromResult<IReadOnlyList<(uint Prefix, byte Length)>>([]);
+        public Task<List<(UInt128 Prefix, byte Length, bool IsIpv4, uint Asn)>> GetRuPrefixesAsync(CancellationToken ct = default) => Task.FromResult(new List<(UInt128, byte, bool, uint)>());
+        public Task<IReadOnlyList<(UInt128 Prefix, byte Length, bool IsIpv4)>> GetSourcePrefixesAsync(string name, CancellationToken ct = default) =>
+            Task.FromResult<IReadOnlyList<(UInt128 Prefix, byte Length, bool IsIpv4)>>([]);
+        public Task<IReadOnlyList<(UInt128 Prefix, byte Length, bool IsIpv4)>> GetUserSourcePrefixesAsync(string name, string url, string? community, CancellationToken ct = default) =>
+            Task.FromResult<IReadOnlyList<(UInt128 Prefix, byte Length, bool IsIpv4)>>([]);
         public Task WarmUpAsync(CancellationToken ct = default) =>
             WarmUpCompleted = WarmUpGate.Task.WaitAsync(ct);
     }
 
     private sealed class FakeSourceService : IPrefixSourceService
     {
-        private readonly IReadOnlyList<(PrefixSourceConfig Source, IReadOnlyList<(uint Prefix, byte Length)> Prefixes)> _sources;
+        private readonly IReadOnlyList<(PrefixSourceConfig Source, IReadOnlyList<IpPrefix> Prefixes)> _sources;
 
-        public FakeSourceService(IReadOnlyList<(PrefixSourceConfig, IReadOnlyList<(uint, byte)>)>? sources = null) =>
+        public FakeSourceService(IReadOnlyList<(PrefixSourceConfig, IReadOnlyList<IpPrefix>)>? sources = null) =>
             _sources = sources ??
             [
                 (new PrefixSourceConfig { Name = "nets", Kind = "file", Url = "nets.txt" },
-                    new List<(uint, byte)> { (0xC0A80000u, 24), (0x0A000000u, 8) })
+                    new List<IpPrefix> { new(0xC0A80000u, 24), new(0x0A000000u, 8) })
             ];
 
-        public Task<IReadOnlyList<(PrefixSourceConfig Source, IReadOnlyList<(uint Prefix, byte Length)> Prefixes)>> LoadAllAsync(CancellationToken ct = default) =>
+        public Task<IReadOnlyList<(PrefixSourceConfig Source, IReadOnlyList<IpPrefix> Prefixes)>> LoadAllAsync(CancellationToken ct = default) =>
             Task.FromResult(_sources);
-        public Task<IReadOnlyList<(uint Prefix, byte Length)>> GetAsync(string name, CancellationToken ct = default) => Task.FromResult<IReadOnlyList<(uint Prefix, byte Length)>>([]);
-        public Task<IReadOnlyList<(uint Prefix, byte Length)>> GetDefaultAsync(CancellationToken ct = default) => Task.FromResult<IReadOnlyList<(uint Prefix, byte Length)>>([]);
+        public Task<IReadOnlyList<IpPrefix>> GetAsync(string name, CancellationToken ct = default) => Task.FromResult<IReadOnlyList<IpPrefix>>([]);
+        public Task<IReadOnlyList<IpPrefix>> GetDefaultAsync(CancellationToken ct = default) => Task.FromResult<IReadOnlyList<IpPrefix>>([]);
         public Task WarmUpAsync(CancellationToken ct = default) => Task.CompletedTask;
         public Task<bool> RefreshAsync(string sourceName, CancellationToken ct = default) => Task.FromResult(false);
         public bool SourceSupportsConditional(string sourceName) => false;
@@ -115,9 +115,9 @@ public class RouteSeedingServiceTests
         var sources = new FakeSourceService(
         [
             (new PrefixSourceConfig { Name = "bad", Kind = "file", Url = "a.txt", Community = "65444:99999" },
-                new List<(uint, byte)> { (0xAC100000u, 12) }),
+                new List<IpPrefix> { new(0xAC100000u, 12) }),
             (new PrefixSourceConfig { Name = "good", Kind = "file", Url = "b.txt", Community = "65000:100" },
-                new List<(uint, byte)> { (0xC0A80000u, 24) }),
+                new List<IpPrefix> { new(0xC0A80000u, 24) }),
         ]);
         using var service = NewService(prefix, sources, table, new RecordingSessionManager());
 

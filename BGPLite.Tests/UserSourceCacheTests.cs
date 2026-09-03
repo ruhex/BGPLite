@@ -1,5 +1,6 @@
 using BGPLite.Providers;
 using Xunit;
+using BGPLite.Protocol;
 
 namespace BGPLite.Tests;
 
@@ -11,16 +12,16 @@ namespace BGPLite.Tests;
 /// </summary>
 public class UserSourceCacheTests
 {
-    private static IReadOnlyList<(uint Prefix, byte Length)> P(params (uint, byte)[] xs) =>
-        xs.Select(x => (x.Item1, x.Item2)).ToList();
+    private static IReadOnlyList<IpPrefix> P(params (UInt128 Address, byte Length, bool IsIpv4)[] xs) =>
+        xs.Select(x => new IpPrefix(x.Item1, x.Item2, x.Item3)).ToList();
 
     /// <summary>A controllable fetcher: counts calls, returns a canned list or throws.</summary>
     private sealed class Fetcher
     {
         public int Calls;
-        public Func<IReadOnlyList<(uint Prefix, byte Length)>>? OnSuccess;
+        public Func<IReadOnlyList<IpPrefix>>? OnSuccess;
         public Exception? Throw;
-        public Task<IReadOnlyList<(uint Prefix, byte Length)>> Invoke(CancellationToken ct)
+        public Task<IReadOnlyList<IpPrefix>> Invoke(CancellationToken ct)
         {
             Calls++;
             if (Throw is OperationCanceledException oce) throw oce;
@@ -35,7 +36,7 @@ public class UserSourceCacheTests
         // The point of URL-keying (#150): two calls for the same URL — e.g. two peers refreshing the
         // same popular list — share one fetch.
         var cache = new UserSourceCache();
-        var f = new Fetcher { OnSuccess = () => P((0xC0A80000u, (byte)24)) };
+        var f = new Fetcher { OnSuccess = () => P((0xC0A80000u, (byte)24, true)) };
 
         var a = await cache.GetOrLoadAsync("https://example.com/l", "src", f.Invoke, CancellationToken.None);
         var b = await cache.GetOrLoadAsync("https://example.com/l", "src", f.Invoke, CancellationToken.None);
@@ -53,15 +54,15 @@ public class UserSourceCacheTests
         var cache = new UserSourceCache();
         var hold = new TaskCompletionSource();
         int calls = 0;
-        Task<IReadOnlyList<(uint Prefix, byte Length)>> Load(CancellationToken ct)
+        Task<IReadOnlyList<IpPrefix>> Load(CancellationToken ct)
         {
             Interlocked.Increment(ref calls);
             return HoldAndReturn();
         }
-        async Task<IReadOnlyList<(uint Prefix, byte Length)>> HoldAndReturn()
+        async Task<IReadOnlyList<IpPrefix>> HoldAndReturn()
         {
             await hold.Task;          // keep the in-flight fetch blocked until all racers are queued
-            return P((0u, 0));
+            return P((0u, (byte)0, true));
         }
 
         var tasks = Enumerable.Range(0, 16)
@@ -92,7 +93,7 @@ public class UserSourceCacheTests
         // Stale-serving only triggers on a refetch that fails — so let the positive entry expire first,
         // then make the refetch throw. The (now-expired) last good copy is served regardless of age.
         var cache = new UserSourceCache(positiveTtl: TimeSpan.FromMilliseconds(80));
-        var f = new Fetcher { OnSuccess = () => P((0u, 0)) };
+        var f = new Fetcher { OnSuccess = () => P((0u, (byte)0, true)) };
         await cache.GetOrLoadAsync("https://example.com/l", "src", f.Invoke, default); // prime positive
         await Task.Delay(120);                                                        // let it expire
 
@@ -136,14 +137,14 @@ public class UserSourceCacheTests
         // on entry explicitly instead of racing Task.Run's start.
         var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 
-        static async Task<IReadOnlyList<(uint Prefix, byte Length)>> Parked(CancellationToken ct, TaskCompletionSource entered)
+        static async Task<IReadOnlyList<IpPrefix>> Parked(CancellationToken ct, TaskCompletionSource entered)
         {
             entered.TrySetResult();
             await Task.Delay(Timeout.InfiniteTimeSpan, ct);
             return [];
         }
 
-        Task<IReadOnlyList<(uint Prefix, byte Length)>> Invoke(CancellationToken ct)
+        Task<IReadOnlyList<IpPrefix>> Invoke(CancellationToken ct)
         {
             calls++;
             return Parked(ct, entered);
@@ -157,7 +158,7 @@ public class UserSourceCacheTests
         Assert.Equal(1, calls);
 
         // No negative cache → the next call reaches the fetcher again.
-        var f = new Fetcher { OnSuccess = () => P((1u, 1)) };
+        var f = new Fetcher { OnSuccess = () => P((1u, (byte)1, true)) };
         var served = await cache.GetOrLoadAsync("https://example.com/l", "src", f.Invoke, default);
         Assert.Equal(1, f.Calls); // a fresh fetcher ran once more
         Assert.Single(served);
@@ -167,7 +168,7 @@ public class UserSourceCacheTests
     public async Task Positive_Ttl_Expiry_Triggers_Refetch()
     {
         var cache = new UserSourceCache(positiveTtl: TimeSpan.FromMilliseconds(80));
-        var f = new Fetcher { OnSuccess = () => P((1u, 1)) };
+        var f = new Fetcher { OnSuccess = () => P((1u, (byte)1, true)) };
 
         await cache.GetOrLoadAsync("https://example.com/l", "src", f.Invoke, default);
         await Task.Delay(120);
@@ -199,7 +200,7 @@ public class UserSourceCacheTests
     public async Task UniqueUrls_BeyondCap_KeepCacheBounded()
     {
         var cache = new UserSourceCache(maxCacheEntries: 5);
-        var f = new Fetcher { OnSuccess = () => P((0x0A000000u, (byte)8)) };
+        var f = new Fetcher { OnSuccess = () => P((0x0A000000u, (byte)8, true)) };
 
         for (var i = 0; i < 12; i++)
             await cache.GetOrLoadAsync($"https://example.com/list-{i}", "src", f.Invoke, CancellationToken.None);
@@ -216,11 +217,11 @@ public class UserSourceCacheTests
     {
         var cache = new UserSourceCache(maxCacheEntries: 3);
         var calls = new Dictionary<string, int>();
-        Task<IReadOnlyList<(uint Prefix, byte Length)>> Load(string url) => Task.Run(async () =>
+        Task<IReadOnlyList<IpPrefix>> Load(string url) => Task.Run(async () =>
         {
             lock (calls) calls[url] = calls.TryGetValue(url, out var c) ? c + 1 : 1;
             await Task.Yield();
-            return P((0x0A000000u, (byte)8));
+            return P((0x0A000000u, (byte)8, true));
         });
 
         await cache.GetOrLoadAsync("https://example.com/a", "a", ct => Load("a"), CancellationToken.None);
@@ -281,10 +282,10 @@ public class UserSourceCacheTests
         var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var holdCts = new CancellationTokenSource();
 
-        Task<IReadOnlyList<(uint Prefix, byte Length)>> Hold(CancellationToken ct)
+        Task<IReadOnlyList<IpPrefix>> Hold(CancellationToken ct)
         {
             entered.TrySetResult();
-            return holder.Task.ContinueWith<IReadOnlyList<(uint Prefix, byte Length)>>(_ => [], CancellationToken.None);
+            return holder.Task.ContinueWith<IReadOnlyList<IpPrefix>>(_ => [], CancellationToken.None);
         }
 
         // First caller holds the gate without completing.
@@ -324,7 +325,7 @@ public class UserSourceCacheTests
             var cts = new CancellationTokenSource();
             cts.Cancel();   // cancelled before the gate is even acquired
             await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
-                cache.GetOrLoadAsync($"https://example.com/never-{i}", "src", ct => Task.FromResult<IReadOnlyList<(uint Prefix, byte Length)>>([]), cts.Token));
+                cache.GetOrLoadAsync($"https://example.com/never-{i}", "src", ct => Task.FromResult<IReadOnlyList<IpPrefix>>([]), cts.Token));
         }
 
         Assert.Equal(0, cache.TrackedGateCount);   // pre-fix: 5 orphan gates

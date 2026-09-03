@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using BGPLite.Configuration;
+using BGPLite.Protocol;
 using Microsoft.Extensions.Logging;
 
 namespace BGPLite.Providers;
@@ -40,7 +41,7 @@ public sealed class RipeStatPrefixCache
     // asn → (prefix list, cached at, is negative). Negative entries (failed RIPEstat fetches) use
     // _negativeTtl. The tuple is shaped to mirror PrefixSourceService so the resilience semantics
     // (stale-on-failure, negative cache, bounded sweep) are identical across both caches.
-    private readonly ConcurrentDictionary<uint, (IReadOnlyList<(uint Prefix, byte Length)> Data, DateTime CachedAt, bool Negative)> _cache = new();
+    private readonly ConcurrentDictionary<uint, (IReadOnlyList<IpPrefix> Data, DateTime CachedAt, bool Negative)> _cache = new();
     // asn → gate serializing the cache-miss fetch path (prevents thundering herd on cold/expired
     // ASNs — #164).
     private readonly ConcurrentDictionary<uint, SemaphoreSlim> _locks = new();
@@ -71,7 +72,7 @@ public sealed class RipeStatPrefixCache
         _timeProvider = timeProvider ?? TimeProvider.System;
     }
 
-    public async Task<IReadOnlyList<(uint Prefix, byte Length)>> GetPrefixesAsync(uint asn, CancellationToken ct = default, bool serveNegativeEntries = true)
+    public async Task<IReadOnlyList<IpPrefix>> GetPrefixesAsync(uint asn, CancellationToken ct = default, bool serveNegativeEntries = true)
     {
         // Fast path: fresh entry (positive, or negative within its TTL when the caller accepts
         // the []-on-recent-failure semantic — the RouteAssembler fan-out does; a source provider
@@ -98,7 +99,7 @@ public sealed class RipeStatPrefixCache
 
     /// <summary>The gated fetch path of <see cref="GetPrefixesAsync"/> — runs under the caller's
     /// in-flight mark, sharing a single RIPEstat fetch per ASN (#164).</summary>
-    private async Task<IReadOnlyList<(uint Prefix, byte Length)>> FetchThroughGateAsync(uint asn, CancellationToken ct, bool serveNegativeEntries)
+    private async Task<IReadOnlyList<IpPrefix>> FetchThroughGateAsync(uint asn, CancellationToken ct, bool serveNegativeEntries)
     {
         // Serialize per-ASN so concurrent callers share a single RIPEstat fetch — no thundering herd
         // on a cold or just-expired ASN (#164).
@@ -112,7 +113,7 @@ public sealed class RipeStatPrefixCache
             if (TryGetFresh(asn, out var rechecked, out var recheckIsNegative) && (serveNegativeEntries || !recheckIsNegative))
                 return rechecked;
 
-            IReadOnlyList<(uint Prefix, byte Length)> prefixes;
+            IReadOnlyList<IpPrefix> prefixes;
             try
             {
                 prefixes = await _ripe.GetPrefixesAsync(asn, ct);
@@ -150,7 +151,7 @@ public sealed class RipeStatPrefixCache
     /// negative within _negativeTtl). #377 review: the negative flag comes out of the SAME read —
     /// a separate IsNegative lookup could miss an eviction racing between the two and serve a
     /// captured [] to a caller that opted out of negatives.</summary>
-    private bool TryGetFresh(uint asn, out IReadOnlyList<(uint Prefix, byte Length)> data, out bool isNegative)
+    private bool TryGetFresh(uint asn, out IReadOnlyList<IpPrefix> data, out bool isNegative)
     {
         data = null!;
         isNegative = false;

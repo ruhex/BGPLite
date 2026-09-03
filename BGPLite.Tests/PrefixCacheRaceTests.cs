@@ -1,6 +1,7 @@
 using BGPLite.Configuration;
 using BGPLite.Providers;
 using Microsoft.Extensions.Logging.Abstractions;
+using BGPLite.Protocol;
 
 namespace BGPLite.Tests;
 
@@ -129,22 +130,22 @@ public class PrefixCacheRaceTests
         public int DefaultCalls => Volatile.Read(ref _defaultCalls);
         public bool FailNext { get; set; }
 
-        public Task<IReadOnlyList<(PrefixSourceConfig Source, IReadOnlyList<(uint Prefix, byte Length)> Prefixes)>> LoadAllAsync(CancellationToken ct = default) =>
+        public Task<IReadOnlyList<(PrefixSourceConfig Source, IReadOnlyList<IpPrefix> Prefixes)>> LoadAllAsync(CancellationToken ct = default) =>
             throw new NotImplementedException();
 
-        public Task<IReadOnlyList<(uint Prefix, byte Length)>> GetAsync(string name, CancellationToken ct = default) =>
+        public Task<IReadOnlyList<IpPrefix>> GetAsync(string name, CancellationToken ct = default) =>
             throw new NotImplementedException();
 
-        public async Task<IReadOnlyList<(uint Prefix, byte Length)>> GetDefaultAsync(CancellationToken ct = default)
+        public async Task<IReadOnlyList<IpPrefix>> GetDefaultAsync(CancellationToken ct = default)
         {
             Interlocked.Increment(ref _defaultCalls);
             // Simulate real I/O latency so concurrent callers actually overlap inside the gate.
             await Task.Delay(20, ct);
             if (FailNext) throw new InvalidOperationException("simulated default-source failure");
-            return new List<(uint Prefix, byte Length)>
+            return new List<IpPrefix>
             {
-                (0x0A000000u, 8),
-                (0xC0A80000u, 16),
+                new(0x0A000000u, 8),
+                new(0xC0A80000u, 16),
             };
         }
 

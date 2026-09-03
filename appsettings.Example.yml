@@ -3,6 +3,10 @@ Bgp:
   RouterId: 1.2.3.4
   KeepAlive: 60
   HoldTime: 180
+  # Optional: the global IPv6 next hop advertised to MP-BGP IPv6/Unicast peers (#14 phase 4,
+  # RFC 2545 §3). Unset = IPv6 routes are never advertised (suppressed with a warning);
+  # set = each MP-IPv6-negotiated session announces IPv6 routes with this next hop.
+  # NextHopIpv6: "2001:db8::1"
   # Listener hardening (#115) — connect-to-OPEN timeout (Slowloris defense) and per-source-IP
   # accept throttle. Both have secure, generous defaults; set to 0 to disable either.
   # OpenTimeoutSeconds: 30                 # drop a peer that connects but never sends OPEN (default 30, 0 = off)

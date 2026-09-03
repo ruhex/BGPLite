@@ -78,12 +78,15 @@ internal sealed class RouteSeedingService(
                     }
                 }
 
-                foreach (var (prefix, length) in prefixes)
+                foreach (var p in prefixes)
                 {
+                    // #14 phase 4: sources yield family-tagged prefixes; seeding is family-blind —
+                    // the route table keys carry IsIpv4, so both families seed side by side.
                     routeTable.AddOrUpdate(new Route
                     {
-                        Prefix = prefix,
-                        PrefixLength = length,
+                        Prefix = p.Address,
+                        IsIpv4 = p.IsIpv4,
+                        PrefixLength = p.Length,
                         NextHop = nextHop,
                         Communities = communities
                     });

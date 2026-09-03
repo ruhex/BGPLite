@@ -7,6 +7,8 @@ Bgp:
   # Short timers: a dead session must be noticed in seconds, not minutes.
   KeepAlive: 5
   HoldTime: 15
+  # Phase 4b: enables IPv6 advertisements via MP_REACH to MP-IPv6-negotiated peers.
+  NextHopIpv6: "2001:db8:cccc::10"
 
 # Reachable from the test runner via the published port (compose: 15001 -> 5001).
 # Loopback (the production default, #90/#181) would be invisible outside the container.

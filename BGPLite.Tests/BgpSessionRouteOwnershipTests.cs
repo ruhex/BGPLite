@@ -189,9 +189,9 @@ public class BgpSessionRouteOwnershipTests
     }
 
     /// <summary>Waits for the initial dump and returns every NLRI the session put on the wire.</summary>
-    private static async Task<List<(uint Prefix, byte Length)>> CollectAdvertisedNlriAsync(ScriptedConnection conn)
+    private static async Task<List<(UInt128 Prefix, byte Length)>> CollectAdvertisedNlriAsync(ScriptedConnection conn)
     {
-        var nlri = new List<(uint, byte)>();
+        var nlri = new List<(UInt128, byte)>();
         for (var i = 0; i < 200; i++)
         {
             nlri.Clear();
@@ -386,7 +386,7 @@ public class BgpSessionRouteOwnershipTests
 
     // ---- harness ----
 
-    private static RouteTable Seeded(params (uint Prefix, byte Length)[] routes)
+    private static RouteTable Seeded(params (UInt128 Prefix, byte Length)[] routes)
     {
         var table = new RouteTable();
         foreach (var (prefix, length) in routes)
