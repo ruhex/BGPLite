@@ -276,3 +276,24 @@ For section-by-section RFC conformance status, see `RFC_COMPLIANCE.md` (2026-07-
   (intentional behavior change, secure by default); such a proxy is otherwise attributed to the
   proxy address, with the one-shot runtime warning pointing at the misconfiguration.
 - **Tracker:** #256.
+
+## Routing
+
+### D23. Outbound routes are re-originated — AS_PATH carries only the local ASN
+- **Decision:** BGPLite never prepends the received AS_PATH. Every advertised prefix
+  (source-fed, custom, or RU-default) is re-originated: the outbound AS_PATH is built from the
+  local ASN alone (`UpdateCodec.BuildUpdateAttributes`/`BuildAsPathAttributes`;
+  `RouteAssembler.MakeRoute` passes `asPath: null`). MED, LOCAL_PREF, and received large
+  communities are likewise not propagated; outbound communities are operator-stamped per source
+  (one community per source/category, `ConfigCommunityResolver`).
+- **Context:** BGPLite is an provisioning route server — it advertises operator-configured prefix
+  sets, not transit routes. Peer-learned routes are never re-advertised at all (D13: the shared
+  table exists for ownership-scoped withdrawals; `SharedTableRouteAssembler` re-advertises only
+  the unowned startup seed). The inbound half of loop prevention IS implemented: a route whose
+  AS_PATH contains the local ASN is excluded from installation (RFC 4271 §9.1.2).
+- **Consequence (RFC 4271 §9.1.2):** AS-loop detection at RECEIVING speakers cannot recognize
+  their own prefix coming back, because the returned path carries only BGPLite's ASN — an origin
+  AS peering with BGPLite will not reject the route by loop detection and must rely on its own
+  policy. Operators comparing against RFC-strict speakers should know the advertised paths are
+  always exactly one ASN long.
+- **Tracker:** #456 (documentation of long-standing behavior, flagged by the 2026-09-03 audit).
