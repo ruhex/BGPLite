@@ -40,7 +40,6 @@ public class PrefixAutoRefreshServiceTests
         public Task<IReadOnlyList<(PrefixSourceConfig Source, IReadOnlyList<IpPrefix> Prefixes)>> LoadAllAsync(CancellationToken ct = default)
             => Task.FromResult<IReadOnlyList<(PrefixSourceConfig, IReadOnlyList<IpPrefix>)>>([]);
         public Task<IReadOnlyList<IpPrefix>> GetAsync(string name, CancellationToken ct = default) => Task.FromResult<IReadOnlyList<IpPrefix>>([]);
-        public Task<IReadOnlyList<IpPrefix>> GetDefaultAsync(CancellationToken ct = default) => Task.FromResult<IReadOnlyList<IpPrefix>>([]);
         public Task<(IReadOnlyList<IpPrefix> Prefixes, bool Changed)> LoadDefaultAsync(CancellationToken ct = default) => Task.FromResult<(IReadOnlyList<IpPrefix>, bool)>(([], false));
         public Task WarmUpAsync(CancellationToken ct = default) => Task.CompletedTask;
     }
