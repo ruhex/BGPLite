@@ -197,6 +197,21 @@ public sealed class PeerStore : IPeerStore
     }
 
     /// <summary>
+    /// Returns (Ip, Md5Password) for every peer row at ONE source IP that carries a TCP-MD5 key.
+    /// Used to re-arm the per-IP key after a delete/PATCH (#418): TCP keys by address (#36), so
+    /// deleting or clearing one sibling must fall back to a surviving row's key instead of
+    /// silently disarming every peer sharing the IP.
+    /// </summary>
+    public async Task<IReadOnlyList<(string Ip, string Md5Password)>> GetPeerMd5CredentialsForIpAsync(string ip, CancellationToken ct = default)
+    {
+        using var db = _dbFactory.CreateDbContext();
+        return await db.Peers.AsNoTracking()
+            .Where(p => p.Ip == ip && p.Md5Password != null && p.Md5Password != "")
+            .Select(p => new ValueTuple<string, string>(p.Ip, p.Md5Password!))
+            .ToListAsync(ct);
+    }
+
+    /// <summary>
     /// Single-roundtrip replacement for the <c>GetPeer</c> + <c>UpdateSessionStatus</c> +
     /// <c>GetSubscriptions</c> + <c>GetCustomPrefixes</c> + <c>GetCustomAsns</c> sequence the BGP
     /// send path used to issue as FIVE separate <c>DbContext</c>s (issue #84). Loads the peer by
