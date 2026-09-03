@@ -334,7 +334,7 @@ public static class BgpMessageReader
                         {
                             // RFC 7606 §3(j): a SUPPORTED tuple whose value cannot be decoded takes
                             // the "AFI/SAFI disable" choice, scoped to that family (D17).
-                            throw new BgpMpParseException(ex.Message, ex.SubErrorCode, ex);
+                            throw new BgpMpParseException(ex.Message, reachIsV4, ex.SubErrorCode, ex);
                         }
                         continue;
                     }
@@ -354,7 +354,7 @@ public static class BgpMessageReader
                     }
                     catch (BgpParseException ex)
                     {
-                        throw new BgpMpParseException(ex.Message, ex.SubErrorCode, ex);
+                        throw new BgpMpParseException(ex.Message, unreachIsV4, ex.SubErrorCode, ex);
                     }
                     continue;
                 }
@@ -572,8 +572,13 @@ public class BgpParseException : Exception
 /// </summary>
 public sealed class BgpMpParseException : BgpParseException
 {
-    public BgpMpParseException(string message, byte? subErrorCode = null, Exception? innerException = null)
+    /// <summary>True when the failing tuple was AFI=1/SAFI=1 (IPv4/Unicast), false for
+    /// AFI=2/SAFI=1 — the recovery must be scoped to the offending family (#472 review).</summary>
+    public bool IsIpv4 { get; }
+
+    public BgpMpParseException(string message, bool isIpv4, byte? subErrorCode = null, Exception? innerException = null)
         : base(message, BgpConstants.Error.UpdateMessageError, subErrorCode, innerException: innerException)
     {
+        IsIpv4 = isIpv4;
     }
 }
