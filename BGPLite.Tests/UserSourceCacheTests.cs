@@ -380,4 +380,64 @@ public class UserSourceCacheTests
 
         Assert.Equal(0, cache.TrackedGateCount);   // pre-fix: 5 orphan gates
     }
+
+    /// <summary>
+    /// #468: a waiter cancelled while queued must not split the gate. Pre-fix it pair-removed
+    /// the shared gate instance out from under the still-running first loader, so the NEXT
+    /// caller minted a second gate and fetched the same URL concurrently — and could overwrite
+    /// the newer snapshot with an older one. The cancelled waiter now leaves the gate alone;
+    /// the last leaver removes it.
+    /// </summary>
+    [Fact]
+    public async Task CancelledWaiter_DoesNotSplitTheGate_SecondLoadNeverStartsEarly()
+    {
+        var cache = new UserSourceCache();
+        var holderEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var holderRelease = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var holderCalls = 0;
+
+        Task<IReadOnlyList<IpPrefix>> Holder(CancellationToken ct)
+        {
+            Interlocked.Increment(ref holderCalls);
+            holderEntered.TrySetResult();
+            return holderRelease.Task.ContinueWith<IReadOnlyList<IpPrefix>>(
+                _ => P((1u, (byte)1, true)), CancellationToken.None);
+        }
+
+        // First caller holds the gate, load parked.
+        var holding = cache.GetOrLoadAsync("https://example.com/l", "src", Holder, CancellationToken.None);
+        await holderEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Equal(1, holderCalls);
+
+        // Second caller queues behind the holder, then is cancelled while queued.
+        var queuedCts = new CancellationTokenSource();
+        var queued = Task.Run(() => cache.GetOrLoadAsync("https://example.com/l", "src", Holder, queuedCts.Token));
+        await Task.Delay(50);            // let it queue behind the holder (the #358 test's idiom)
+        queuedCts.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => queued);
+
+        // A third caller arrives while the holder is STILL parked: it must queue on the SAME
+        // gate. Pre-fix the cancelled waiter had removed that gate, so this load started
+        // immediately in parallel with the holder's.
+        var thirdCalls = 0;
+        Task<IReadOnlyList<IpPrefix>> Third(CancellationToken ct)
+        {
+            Interlocked.Increment(ref thirdCalls);
+            return holderRelease.Task.ContinueWith<IReadOnlyList<IpPrefix>>(_ => [], CancellationToken.None);
+        }
+        var third = cache.GetOrLoadAsync("https://example.com/l", "src", Third, CancellationToken.None);
+        await Task.Delay(100);
+        Assert.Equal(0, thirdCalls);     // RED pre-fix: the parallel second fetch ran here
+
+        // Release the holder. The third caller is then served by the holder's just-written
+        // cache entry (the #450 in-gate recheck) — either way its loader must never run: the
+        // whole scenario fetches the URL exactly once.
+        holderRelease.TrySetResult();
+        await Task.WhenAll(holding, third).WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Equal(1, holderCalls);
+        Assert.Equal(0, thirdCalls);               // served from cache — no second fetch ever
+        Assert.Equal(1, cache.TrackedCount);       // exactly one cache write
+        Assert.Equal(0, cache.TrackedGateCount);   // the last leaver took the gate with it
+    }
 }
