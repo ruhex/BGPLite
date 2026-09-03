@@ -66,4 +66,67 @@ public class BgpSessionOpenCapabilityTests
             session.Dispose();
         }
     }
+
+    /// <summary>
+    /// #466: the OPEN BGPLite sends must NOT echo the peer's MP IPv4/Unicast capability
+    /// (code 1, AFI=1/SAFI=1). The inbound path has no MP_REACH/MP_UNREACH AFI=1 handling at
+    /// all, and RFC 5492 §3 / RFC 4760 §8 make a mutually-advertised capability usable — so
+    /// the echo invited the peer to send IPv4 NLRI via MP_REACH, which was then discarded
+    /// whole. D24: the advertisement must not precede the implementation (the D6 pattern).
+    /// </summary>
+    [Fact]
+    public async Task SentOpen_DoesNotAdvertise_MpIpv4Unicast_EvenWhenPeerOffersIt()
+    {
+        var conn = new ScriptedConnection();
+        var config = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1", HoldTime = 0, KeepAlive = 0 };
+
+        var session = new BgpSession(
+            conn,
+            new PeerConfig { Address = "127.0.0.1" },
+            config,
+            new RouteTable(),
+            AllowAllFilter.Instance,
+            new BgpMetrics(),
+            NullLogger<BgpSession>.Instance);
+
+        var run = session.RunAsync();
+        try
+        {
+            // The peer offers MP IPv4/Unicast — the exact trigger of the old conditional echo.
+            conn.EnqueueMessage(new BgpOpenMessage
+            {
+                Version = BgpConstants.BgpVersion,
+                Asn = 65002,
+                HoldTime = 0,
+                RouterId = 0x0A000002,
+                Capabilities =
+                [
+                    BgpCapabilityInfo.FourOctetAsn(65002),
+                    BgpCapabilityInfo.MultiprotocolIpv4Unicast(),
+                ],
+            });
+            conn.EnqueueMessage(BgpKeepaliveMessage.Instance);
+
+            for (var i = 0; i < 200 && !session.IsEstablished; i++)
+                await Task.Delay(TimeSpan.FromMilliseconds(10));
+            Assert.True(session.IsEstablished, "session must reach Established");
+
+            var sent = conn.Sent;
+            Assert.True(sent.Count > 0, "session must have sent its OPEN");
+            var open = Assert.IsType<BgpOpenMessage>(BgpMessageReader.ReadMessage(sent[0]));
+
+            // RED pre-fix: the peer's AFI=1/SAFI=1 offer was echoed back.
+            Assert.DoesNotContain(open.Capabilities, c =>
+                c.Code == BgpConstants.Capability.Multiprotocol &&
+                c.Data.Length >= 4 && c.Data[0] == 0 && c.Data[1] == 1 && c.Data[3] == BgpConstants.Safi.Unicast);
+            // Sanity: the 4-octet ASN capability — advertised unconditionally — is untouched.
+            Assert.Contains(open.Capabilities, c => c.Code == BgpConstants.Capability.FourOctetAsn);
+        }
+        finally
+        {
+            session.MarkSilentClose();
+            await run.WaitAsync(TimeSpan.FromSeconds(5));
+            session.Dispose();
+        }
+    }
 }

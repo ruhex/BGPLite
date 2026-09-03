@@ -297,3 +297,22 @@ For section-by-section RFC conformance status, see `RFC_COMPLIANCE.md` (2026-07-
   policy. Operators comparing against RFC-strict speakers should know the advertised paths are
   always exactly one ASN long.
 - **Tracker:** #456 (documentation of long-standing behavior, flagged by the 2026-09-03 audit).
+
+### D24. The MP IPv4/Unicast capability is never advertised
+- **Decision:** the OPEN BGPLite sends never carries the Multiprotocol Extensions capability
+  for AFI=1/SAFI=1, regardless of what the peer offers (`BgpSession.SendOpenAsync`).
+  IPv4/Unicast is exchanged via the classic NLRI field only.
+- **Context:** `SendOpenAsync` used to echo the peer's MP IPv4/Unicast offer back. RFC 5492 §3
+  makes a capability usable on a peering only when both sides advertised it, and RFC 4760 §8
+  requires the advertisement to mean the speaker supports that \<AFI, SAFI\> on receive — but
+  the inbound path has no MP_REACH/MP_UNREACH AFI=1 handling at all (`MpReachCodec` accepts
+  AFI=2 only). A conformant peer sending IPv4 NLRI via MP_REACH therefore had every such
+  UPDATE discarded whole (RFC 7606 treat-as-withdraw) with the session looking healthy:
+  negotiated route loss with no diagnostic beyond a Warning log line. Same
+  advertise-without-implementing class as the Graceful Restart case (#318, D6) — the
+  advertisement must not precede the implementation.
+- **Consequence:** a peer that prefers MP carriage for IPv4 falls back to classic NLRI, which
+  is the default family and works unchanged. IPv6/Unicast advertisement is untouched
+  (mirrored when the peer offers it — the AFI=2 receiving half IS implemented). Reintroduce
+  the advertisement only together with an AFI=1 decode path.
+- **Tracker:** #466.

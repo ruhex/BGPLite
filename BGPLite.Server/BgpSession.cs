@@ -1676,10 +1676,6 @@ public sealed class BgpSession : IDisposable
             BgpCapabilityInfo.FourOctetAsn(_bgpConfig.Asn)
         };
 
-        // Only advertise MP IPv4/Unicast if peer specifically supports IPv4/Unicast
-        if (PeerHasMpIpv4Unicast(remoteOpen.Capabilities))
-            capabilities.Add(BgpCapabilityInfo.MultiprotocolIpv4Unicast());
-
         // Only advertise Route Refresh if peer also supports it
         if (remoteOpen.Capabilities.Any(c => c.Code == BgpConstants.Capability.RouteRefresh))
             capabilities.Add(BgpCapabilityInfo.RouteRefresh());
@@ -1687,6 +1683,13 @@ public sealed class BgpSession : IDisposable
         // #15 phase 2: advertise MP IPv6/Unicast only when the peer also supports it.
         if (CapabilityHelper.SupportsMultiprotocolIpv6Unicast(remoteOpen))
             capabilities.Add(BgpCapabilityInfo.MultiprotocolIpv6Unicast());
+
+        // #466 (D24): MP IPv4/Unicast is deliberately NOT advertised. RFC 5492 §3 makes a
+        // capability advertised by both peers usable, and RFC 4760 §8 ties the advertisement
+        // to actually supporting that <AFI, SAFI> on receive — but the inbound path has no
+        // MP_REACH/MP_UNREACH AFI=1 handling at all, so the old peer-offer echo turned every
+        // negotiated IPv4 MP UPDATE into a discarded treat-as-withdraw. IPv4/Unicast needs no
+        // MP capability: it is the default family and rides the classic NLRI field.
 
         // #318: the Graceful Restart capability is deliberately NOT advertised. RFC 4724 §4.2 obliges
         // a speaker engaging GR procedures to retain and stale-mark a restarting peer's routes;
@@ -1714,19 +1717,6 @@ public sealed class BgpSession : IDisposable
         };
 
         await SendMessageAsync(open);
-    }
-
-    private static bool PeerHasMpIpv4Unicast(List<BgpCapabilityInfo> caps)
-    {
-        foreach (var cap in caps)
-        {
-            if (cap.Code != BgpConstants.Capability.Multiprotocol || cap.Data.Length < 4) continue;
-            var afi = (ushort)((cap.Data[0] << 8) | cap.Data[1]);
-            var safi = cap.Data[3];
-            if (afi == BgpConstants.Afi.IPv4 && safi == BgpConstants.Safi.Unicast)
-                return true;
-        }
-        return false;
     }
 
     private Task SendKeepaliveAsync() => SendMessageAsync(BgpKeepaliveMessage.Instance);
