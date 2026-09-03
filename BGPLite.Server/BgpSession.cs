@@ -1555,9 +1555,13 @@ public sealed class BgpSession : IDisposable
                 var comms = existing.Communities.Concat(route.Communities).Distinct().OrderBy(c => c).ToArray();
                 var large = existing.LargeCommunities.Concat(route.LargeCommunities).Distinct().ToArray();
                 // Route is a class (init-only props), not a record — mutate via reassignment.
+                // #476: IsIpv4 must be carried over explicitly — the property defaults to true,
+                // and a merged IPv6 duplicate that lost its family bit landed in the IPv4 batch,
+                // where its >32 length crashed the send (or masked down to a bogus 0.0.0.0/N NLRI).
                 merged[key] = new Route
                 {
                     Prefix = existing.Prefix,
+                    IsIpv4 = existing.IsIpv4,
                     PrefixLength = existing.PrefixLength,
                     NextHop = existing.NextHop,
                     AsPath = existing.AsPath,
