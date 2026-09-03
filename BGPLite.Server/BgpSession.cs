@@ -426,6 +426,23 @@ public sealed class BgpSession : IDisposable
                     }
                     return;
                 }
+                catch (BgpParseException ex) when (ex.ErrorCode == BgpConstants.Error.OpenMessageError)
+                {
+                    // #453 (RFC 4271 §8.2.2): an OPEN received in OpenConfirm is an FSM error
+                    // regardless of body validity — the handshake phase accepts only KEEPALIVE and
+                    // NOTIFICATION. Without this the parse failure escaped to RunAsync's
+                    // catch(BgpParseException) and answered Open Message Error (2/x), misreporting
+                    // "your OPEN body was malformed" when the real fault is sending a second OPEN.
+                    // Mirrors the #427 Established branch in ReadLoopAsync: CAS-latch the teardown,
+                    // exactly one NOTIFICATION 5/0, then Idle.
+                    _logger.LogWarning("OPEN received from {Peer} in OpenConfirm — FSM error (RFC 4271 §8.2.2)", _peer);
+                    if (Interlocked.CompareExchange(ref _teardownReason, (int)TeardownReason.LocalCease, (int)TeardownReason.None) == (int)TeardownReason.None)
+                    {
+                        try { await SendNotificationAsync(BgpConstants.Error.FiniteStateMachineError, BgpConstants.SubError.Unspecific); }
+                        catch { /* best-effort — partial write counts, see RFC 4271 §8.1 */ }
+                    }
+                    return;
+                }
             }
 
             _logger.LogInformation("Received {Type} from {Peer} in OpenConfirm", response.Type, _peer);
