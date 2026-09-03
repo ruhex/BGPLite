@@ -1555,8 +1555,11 @@ public sealed class ManagementApi : IHostedService, IDisposable
     /// <c>ToString()</c> collapses all of them onto the form the BGP path will look for.
     /// </para>
     /// <para>
-    /// IPv6 is rejected rather than mapped: BGPLite is IPv4-unicast only (#14 tracks the rest), so
-    /// <c>::ffff:1.2.3.4</c> would produce a peer no session can match.
+    /// Both families are accepted (#14 phase 5): a peer may be an IPv6 host. Addresses no BGP
+    /// session can ever originate from — unspecified, loopback, multicast, and the IPv4 broadcast
+    /// address — are rejected (#421), the API-side parity of the YAML path's fail-loud validation
+    /// (#390): such rows can never match a session, and a multicast row would even arm a kernel
+    /// TCP-MD5 entry.
     /// </para>
     /// </summary>
     internal static string? NormalizePeerIp(string? ip)
@@ -1567,9 +1570,29 @@ public sealed class ManagementApi : IHostedService, IDisposable
         // plain IPv4 form so the row matches the address form the dual-mode listener reports.
         if (address.IsIPv4MappedToIPv6)
             address = address.MapToIPv4();
-        // Both families are accepted (#14 phase 5): a peer may be an IPv6 host; the canonical
-        // ToString form matches what the accept loop stores.
+        if (IsNonPeerAddress(address))
+            return null;
+        // The canonical ToString form matches what the accept loop stores.
         return address.ToString();
+    }
+
+    /// <summary>
+    /// The unspecified, loopback, multicast and (IPv4) broadcast addresses — unusable as a peer
+    /// identity. internal static for unit tests.
+    /// </summary>
+    internal static bool IsNonPeerAddress(IPAddress address)
+    {
+        if (address.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork)
+        {
+            var b = address.GetAddressBytes();
+            return b[0] == 0                                                 // 0.0.0.0/8 — unspecified / current-network
+                || b[0] == 127                                               // 127/8 — loopback
+                || (b[0] & 0xF0) == 0xE0                                     // 224/4 — multicast
+                || (b[0] == 255 && b[1] == 255 && b[2] == 255 && b[3] == 255); // broadcast
+        }
+        return IPAddress.IPv6Any.Equals(address)
+            || IPAddress.IPv6Loopback.Equals(address)
+            || address.IsIPv6Multicast;
     }
 
     /// <summary>
