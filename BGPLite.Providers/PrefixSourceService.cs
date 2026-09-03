@@ -48,7 +48,8 @@ public sealed class PrefixSourceService : IPrefixSourceService
         TimeProvider? timeProvider = null,
         Func<string, Task>? onSourceChanged = null)
     {
-        var duplicate = config.PrefixSources
+        // #477: "PrefixSources:" (YAML null) is a documented-valid "no sources" config.
+        var duplicate = (config.PrefixSources ?? [])
             .GroupBy(s => s.Name)
             .FirstOrDefault(g => g.Count() > 1);
         if (duplicate != null)
@@ -62,7 +63,7 @@ public sealed class PrefixSourceService : IPrefixSourceService
         _negativeTtl = negativeTtl ?? TimeSpan.FromSeconds(30);
         _timeProvider = timeProvider ?? TimeProvider.System;
         _onSourceChanged = onSourceChanged;
-        _sourcesByName = config.PrefixSources.ToDictionary(s => s.Name);
+        _sourcesByName = (config.PrefixSources ?? []).ToDictionary(s => s.Name);
     }
 
     public async Task<IReadOnlyList<IpPrefix>> GetAsync(string name, CancellationToken ct = default)
@@ -122,7 +123,7 @@ public sealed class PrefixSourceService : IPrefixSourceService
     public async Task<IReadOnlyList<(PrefixSourceConfig Source, IReadOnlyList<IpPrefix> Prefixes)>> LoadAllAsync(CancellationToken ct = default)
     {
         var result = new List<(PrefixSourceConfig Source, IReadOnlyList<IpPrefix> Prefixes)>();
-        foreach (var source in _config.PrefixSources)
+        foreach (var source in _config.PrefixSources ?? [])
         {
             IReadOnlyList<IpPrefix> prefixes;
             try { prefixes = (await LoadCachedAsync(source, ct)).Prefixes; }

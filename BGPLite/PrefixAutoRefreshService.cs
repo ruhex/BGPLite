@@ -58,7 +58,7 @@ internal sealed class PrefixAutoRefreshService : IHostedService, IDisposable
         _logger = logger;
         _timeProvider = timeProvider ?? TimeProvider.System;
         _jitterRandom = jitterRandom ?? new Random();
-        _sourceNames = [.. appConfig.PrefixSources.Select(s => s.Name)];
+        _sourceNames = [.. (appConfig.PrefixSources ?? []).Select(s => s.Name)]; // #477: YAML null = no sources
     }
 
     public Task StartAsync(CancellationToken cancellationToken)
