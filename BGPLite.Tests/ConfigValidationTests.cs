@@ -344,6 +344,15 @@ public class ConfigValidationTests
 
     /// <summary>#304: the per-peer prefix cap validates like the other 0=unlimited knobs.</summary>
     [Fact]
+    public void ShippedMaxPrefixesPerPeerDefault_IsBounded()
+    {
+        // #481: the RFC 4486 defense must be on out of the box — the shipped default is a
+        // generous bound (1M prefixes, above any legitimate provisioning peer, far below memory
+        // exhaustion), not unlimited; 0 remains available as an explicit opt-out.
+        Assert.Equal(1_000_000, new BgpConfig().MaxPrefixesPerPeer);
+    }
+
+    [Fact]
     public void Validate_RejectsNegativeMaxPrefixesPerPeer()
     {
         var config = Config(Bgp(maxPrefixesPerPeer: -1));

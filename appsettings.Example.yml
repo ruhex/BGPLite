@@ -11,6 +11,8 @@ Bgp:
   # accept throttle. Both have secure, generous defaults; set to 0 to disable either.
   # OpenTimeoutSeconds: 30                 # drop a peer that connects but never sends OPEN (default 30, 0 = off)
   # MaxAcceptsPerIpPerMinute: 60           # per-source-IP accept flood limit (default 60, 0 = off)
+  # MaxPrefixesPerPeer: 1000000            # per-peer prefix ceiling (default 1M; exceeding it resets the
+                                           # session per RFC 4486; 0 = unlimited opt-out)
 
 Peers:
   - Address: 10.0.0.1
