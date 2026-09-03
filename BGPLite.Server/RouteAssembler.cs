@@ -153,7 +153,7 @@ public sealed class RouteAssembler : IRouteAssembler
 
             // Prefix-source subscriptions: subscribed names that match a configured PrefixSource.
             var resolvedAsRipe = subscribedLists.Select(l => l.Name).ToHashSet();
-            var prefixSources = _appConfig.PrefixSources;
+            var prefixSources = _appConfig.PrefixSources ?? []; // #477: YAML null = no sources
             var sourceNames = subscriptionIds
                 .Where(n => !resolvedAsRipe.Contains(n) && prefixSources.Any(s => s.Name == n))
                 .ToList();

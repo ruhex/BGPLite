@@ -1,5 +1,6 @@
 using BGPLite.Configuration;
 using BGPLite.Providers;
+using BGPLite.Server;
 using Microsoft.Extensions.Logging.Abstractions;
 using BGPLite.Protocol;
 
@@ -36,6 +37,22 @@ public class PrefixSourceServiceTests
         foreach (var name in names)
             yaml += $"  - Name: {name}\n    Kind: stub\n";
         return ConfigLoader.LoadFromText(yaml);
+    }
+
+    [Fact]
+    public async Task PrefixSources_YamlNull_ConsumersTolerateTheDocumentedEmpty()
+    {
+        // #477: "PrefixSources:" (YAML null) deserializes as a null list — Validate and
+        // ConfigValidationTests bless it as "no sources", so the startup consumers must treat it
+        // as empty instead of crashing with NRE/ANE (ConfigCommunityResolver previously threw
+        // ArgumentNullException at DI resolution → startup failure on a documented-valid config).
+        var config = ConfigWith();
+
+        var resolver = new ConfigCommunityResolver(config, config.Bgp, logger: null);
+        var service = new PrefixSourceService(
+            config, new PrefixSourceProviderFactory([]), NullLogger<PrefixSourceService>.Instance);
+
+        Assert.Empty(await service.LoadAllAsync());
     }
 
     [Fact]

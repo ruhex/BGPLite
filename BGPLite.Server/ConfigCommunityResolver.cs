@@ -49,7 +49,9 @@ public sealed class ConfigCommunityResolver : ICommunityResolver
         _asnListCommunities = (config.RipeStat?.AsnLists ?? [])
             .GroupBy(l => l.Name)
             .ToDictionary(g => g.Key, g => g.Last().Community);
-        _prefixSourceCommunities = config.PrefixSources
+        // #477: "PrefixSources:" (YAML null) is a documented-valid "no sources" config — treat it
+        // as empty instead of crashing DI resolution (same idiom as the AsnLists line above).
+        _prefixSourceCommunities = (config.PrefixSources ?? [])
             .ToDictionary(s => s.Name, s => s.Community);
     }
 

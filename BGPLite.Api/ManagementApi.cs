@@ -1712,7 +1712,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
         if (config.RipeStat?.AsnLists is { } lists)
             foreach (var l in lists)
                 known.Add(l.Name);
-        foreach (var source in config.PrefixSources)
+        foreach (var source in config.PrefixSources ?? []) // #477: YAML null = no sources
             known.Add(source.Name);
         return names.Where(n => !known.Contains(n)).Distinct(StringComparer.Ordinal).ToList();
     }
