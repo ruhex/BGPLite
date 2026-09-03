@@ -208,10 +208,12 @@ For section-by-section RFC conformance status, see `RFC_COMPLIANCE.md` (2026-07-
   this speaker does not support was never negotiated (RFC 4760 §8), so it only discards its
   UPDATE through the keep-alive path above — the session and the supported family stay
   untouched; a supported tuple whose value cannot be decoded takes the RFC 7606 §3(j)
-  "AFI/SAFI disable" choice — every IPv6 route the session accepted from the peer is withdrawn,
-  the family is ignored for the rest of the session, and the session itself stays up — the
-  route-server rationale above, family-scoped; a value too short to even name its AFI/SAFI
-  cannot be scoped to any family, so the §3(j) fallback is the session reset. Additionally, an
+  "AFI/SAFI disable" choice for IPv6/Unicast — every IPv6 route the session accepted from the
+  peer is withdrawn, the family is ignored for the rest of the session, and the session itself
+  stays up — the route-server rationale above, family-scoped. For IPv4/Unicast (#466 receive)
+  the §3(j) fallback is the session reset: the family rides BOTH the classic and the MP
+  carriage, so disabling only the MP carriage would be incoherent; a value too short to even
+  name its AFI/SAFI cannot be scoped to any family, so it resets too. Additionally, an
   MP_REACH next hop that is not a global IPv6 address (::, ::1, ff00::/8, fe80::/10 — RFC 2545
   §3) excludes that attribute's routes only: route-level exclusion, like the AS-loop rule, not
   a session error.

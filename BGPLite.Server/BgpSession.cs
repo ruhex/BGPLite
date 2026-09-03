@@ -770,16 +770,32 @@ public sealed class BgpSession : IDisposable
             {
                 // #467 (RFC 7606 §3(j)): an MP_REACH/MP_UNREACH value that cannot be parsed is
                 // explicitly OUTSIDE the keep-alive revision — the prescribed response is
-                // "session reset" OR "AFI/SAFI disable". The disable choice is recorded in D17:
-                // withdraw every IPv6 route accepted from this peer, stop accepting the family,
-                // keep the session itself up (a route server must not lose every family over one
-                // malformed attribute — the D17/D2 rationale, family-scoped). No NOTIFICATION:
-                // RFC 4271 §6.3 would make its receiver tear down, defeating the disable choice.
+                // "session reset" OR "AFI/SAFI disable", scoped to the offending family
+                // (#472 review: ex.IsIpv4).
+                // IPv6/Unicast → disable (D17): withdraw the peer's accepted IPv6 routes and
+                // ignore the family for the rest of the session; no NOTIFICATION (RFC 4271 §6.3
+                // would make its receiver tear down, defeating the disable choice).
+                // IPv4/Unicast → session reset. That family rides BOTH the classic and the MP
+                // carriage, so disabling only the MP carriage would be incoherent — the §3(j)
+                // fallback applies.
+                if (!ex.IsIpv4)
+                {
+                    _logger.LogWarning(
+                        "Unparseable MP attribute from {Peer}: {Error}/{SubError} — {Reason}; disabling IPv6/Unicast for this session (RFC 7606 §3(j) AFI/SAFI disable)",
+                        _peer, ex.ErrorCode, ex.SubErrorCode ?? BgpConstants.SubError.Unspecific, ex.Message);
+                    DisablePeerMpV6();
+                    continue;
+                }
+
                 _logger.LogWarning(
-                    "Unparseable MP attribute from {Peer}: {Error}/{SubError} — {Reason}; disabling IPv6/Unicast for this session (RFC 7606 §3(j) AFI/SAFI disable)",
+                    "Unparseable IPv4 MP attribute from {Peer}: {Error}/{SubError} — {Reason}; session reset (RFC 7606 §3(j) fallback)",
                     _peer, ex.ErrorCode, ex.SubErrorCode ?? BgpConstants.SubError.Unspecific, ex.Message);
-                DisablePeerMpV6();
-                continue;
+                if (Interlocked.CompareExchange(ref _teardownReason, (int)TeardownReason.LocalCease, (int)TeardownReason.None) == (int)TeardownReason.None)
+                {
+                    try { await SendNotificationAsync(BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.MalformedAttributeList); }
+                    catch { /* best-effort — partial write counts, see RFC 4271 §8.1 */ }
+                }
+                return;
             }
             catch (BgpParseException ex) when (ex.SessionResetRequired)
             {

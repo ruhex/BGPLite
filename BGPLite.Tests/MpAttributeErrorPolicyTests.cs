@@ -288,6 +288,28 @@ public class MpAttributeErrorPolicyTests
     }
 
     [Fact]
+    public async Task MalformedMpReachV4_ResetsSession_ScopedFallback()
+    {
+        // #472 review, IPv4 half: a supported IPv4/Unicast tuple whose value cannot be decoded
+        // cannot take the disable fallback coherently (the family rides BOTH the classic and
+        // the MP carriage), so the §3(j) fallback is the session reset — with the notification
+        // scoped Malformed Attribute List.
+        var routeTable = new RouteTable();
+        var (session, run, conn) = await EstablishAsync(routeTable);
+
+        conn.EnqueueFrame(UpdateFrame(
+            OriginAsPathAttributes,
+            MpReachAttribute(MpOptionalNonTransitive, ReachValueV4(0xC0000201, 24, 0xC0, 0x00, 0x02))));
+        await SettleAsync(conn, () => routeTable.Count == 1);
+
+        conn.EnqueueFrame(UpdateFrame(MpReachAttribute(MpOptionalNonTransitive,
+            [0x00, 0x01, 0x01, 0x10, 0x20]))); // AFI=1/SAFI=1, truncated next hop
+
+        await AssertResetAsync(session, conn, expectedSubError: BgpConstants.SubError.MalformedAttributeList);
+        await TeardownAsync(session, run);
+    }
+
+    [Fact]
     public async Task NonGlobalMpReachNextHop_RoutesExcluded_SessionStaysUp()
     {
         var routeTable = new RouteTable();
