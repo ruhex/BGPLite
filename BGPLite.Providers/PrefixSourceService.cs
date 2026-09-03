@@ -78,26 +78,11 @@ public sealed class PrefixSourceService : IPrefixSourceService
         }
     }
 
-    public async Task<IReadOnlyList<IpPrefix>> GetDefaultAsync(CancellationToken ct = default)
-    {
-        // Deliberately swallowing: GetDefaultAsync is the "best-effort" shape (empty on unset
-        // source, missing source, or fetch failure). #416 split the callback-free, propagating
-        // variant into LoadDefaultAsync for the RU path, whose caller has stale-on-failure
-        // handling a swallowed exception would defeat.
-        try { return (await LoadDefaultAsync(ct)).Prefixes; }
-        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }  // #324: only CALLER cancellation — the #324 default fetch budget fires as a foreign-token OCE (live ct) and must stay a per-source failure below
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Failed to load default prefix source '{Name}'.", _config.DefaultPrefixSource);
-            return [];
-        }
-    }
-
     /// <inheritdoc cref="IPrefixSourceService.LoadDefaultAsync" />
     /// <remarks>
-    /// Same load as <see cref="GetDefaultAsync"/> minus two things, both deliberate (#416):
-    /// the <c>onSourceChanged</c> callback is NOT fired (the caller owns the push, off its own
-    /// locks), and failures PROPAGATE instead of collapsing to <c>[]</c> — the RU caller
+    /// Deliberately different from <see cref="GetAsync"/> in two ways (#416/#417): the
+    /// <c>onSourceChanged</c> callback is NOT fired (the caller owns the push, off its own locks),
+    /// and failures PROPAGATE instead of collapsing to <c>[]</c> — the RU caller
     /// (<c>PrefixService.GetRuPrefixesAsync</c>) has stale-on-failure handling that a swallowed
     /// exception would defeat (a failed cold load must not be cached as a positive empty set).
     /// </remarks>
@@ -113,7 +98,21 @@ public sealed class PrefixSourceService : IPrefixSourceService
             return ([], false);
         }
 
-        return await LoadCachedAsync(source, ct, triggerCallback: false);
+        var (prefixes, changed) = await LoadCachedAsync(source, ct, triggerCallback: false);
+
+        // #417: an empty result served from a fresh NEGATIVE entry is failure backoff, not
+        // content. The negative entry is only ever written by the failure path above, so a
+        // negative hit means "the last real load failed" — surface it as a failure so the RU
+        // caller stale-serves (or throws) instead of positively caching an empty set for the full
+        // RU TTL. A legitimately empty source writes a NON-negative entry and passes through.
+        if (prefixes.Count == 0 && _cache.TryGetValue(source.Name, out var entry) &&
+            entry.Negative && _timeProvider.GetUtcNow().UtcDateTime - entry.CachedAt < _negativeTtl)
+        {
+            throw new InvalidOperationException(
+                $"Default prefix source '{defaultName}' is in failure backoff — the last load failed within the last {_negativeTtl.TotalSeconds:0}s.");
+        }
+
+        return (prefixes, changed);
     }
 
     public async Task<IReadOnlyList<(PrefixSourceConfig Source, IReadOnlyList<IpPrefix> Prefixes)>> LoadAllAsync(CancellationToken ct = default)

@@ -65,7 +65,7 @@ public class PrefixSourceServiceTests
     }
 
     [Fact]
-    public async Task GetDefaultAsync_ResolvesByName()
+    public async Task LoadDefaultAsync_ResolvesByName_AndReportsFirstLoadAsChanged()
     {
         var provider = new CountingProvider([new IpPrefix(1u, 24), new IpPrefix(2u, 16)]);
         var yaml = "Bgp:\n  Asn: 65444\n  RouterId: 10.0.0.1\n" +
@@ -75,19 +75,22 @@ public class PrefixSourceServiceTests
             new PrefixSourceProviderFactory([provider]),
             NullLogger<PrefixSourceService>.Instance);
 
-        var result = await svc.GetDefaultAsync();
-        Assert.Equal(2, result.Count);
+        var (prefixes, changed) = await svc.LoadDefaultAsync();
+        Assert.Equal(2, prefixes.Count);
+        Assert.True(changed); // first-ever load counts as a content change (#214)
     }
 
     [Fact]
-    public async Task GetDefaultAsync_UnsetReturnsEmpty()
+    public async Task LoadDefaultAsync_UnsetReturnsEmptyNoChange()
     {
         var svc = new PrefixSourceService(
             ConfigWith("ru"),
             new PrefixSourceProviderFactory([new CountingProvider([new(1u, 24)])]),
             NullLogger<PrefixSourceService>.Instance);
 
-        Assert.Empty(await svc.GetDefaultAsync());
+        var (prefixes, changed) = await svc.LoadDefaultAsync();
+        Assert.Empty(prefixes);
+        Assert.False(changed);
     }
 
     [Fact]
