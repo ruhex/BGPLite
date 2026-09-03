@@ -1301,17 +1301,16 @@ public sealed class BgpSession : IDisposable
         var attrCache = UpdateCodec.CreateUpdateAttributeCache();
         var v6AttrCache = UpdateCodec.CreateV6UpdateAttributeCache();
 
-        // #430: build-then-commit — a batch's prefixes are recorded in _advertisedPrefixes only
-        // AFTER its UPDATE serialized and hit the wire. A send that throws (e.g. a composed
-        // UPDATE over the 4096-byte maximum) leaves the mirror exactly matching reality: a later
-        // WithdrawAllAsync no longer sends withdrawals for prefixes that were never announced.
+        // #430 + #450 review: build-then-commit at UPDATE granularity — each emitted UPDATE's
+        // prefixes join the mirror only after THAT frame is on the wire (a batch may emit several
+        // UPDATEs, one per community group; a group that throws — e.g. a composed UPDATE over the
+        // 4096-byte maximum — must not take earlier groups' mirror entries down with it, nor may
+        // it record its own). The healthy /8 withdraw+re-announce contract is pinned by tests.
         foreach (var route in v4Routes)
         {
             batch.Add(route);
             if (batch.Count < maxNlriPerUpdate) continue;
             await SendRouteBatchAsync(nextHop, batch, attrCache);
-            foreach (var sent_route in batch)
-                _advertisedPrefixes.Add(new IpPrefix(sent_route.Prefix, sent_route.PrefixLength, sent_route.IsIpv4));
             sent += batch.Count;
             batch.Clear();
         }
@@ -1319,8 +1318,6 @@ public sealed class BgpSession : IDisposable
         if (batch.Count > 0)
         {
             await SendRouteBatchAsync(nextHop, batch, attrCache);
-            foreach (var sent_route in batch)
-                _advertisedPrefixes.Add(new IpPrefix(sent_route.Prefix, sent_route.PrefixLength, sent_route.IsIpv4));
             sent += batch.Count;
         }
 
@@ -1331,8 +1328,6 @@ public sealed class BgpSession : IDisposable
             batch.Add(route);
             if (batch.Count < maxNlriPerUpdate) continue;
             await SendV6RouteBatchAsync(v6NextHop, batch, v6AttrCache);
-            foreach (var sent_route in batch)
-                _advertisedPrefixes.Add(new IpPrefix(sent_route.Prefix, sent_route.PrefixLength, sent_route.IsIpv4));
             sent += batch.Count;
             batch.Clear();
         }
@@ -1340,8 +1335,6 @@ public sealed class BgpSession : IDisposable
         if (batch.Count > 0)
         {
             await SendV6RouteBatchAsync(v6NextHop, batch, v6AttrCache);
-            foreach (var sent_route in batch)
-                _advertisedPrefixes.Add(new IpPrefix(sent_route.Prefix, sent_route.PrefixLength, sent_route.IsIpv4));
             sent += batch.Count;
         }
 
@@ -1447,6 +1440,20 @@ public sealed class BgpSession : IDisposable
         };
 
         await SendMessageAsync(update);
+        // #430 + #450 review: per-UPDATE mirror commit — SendRouteBatchAsync/SendV6RouteBatchAsync
+        // emit one UPDATE per community group, so a group that throws after an earlier group
+        // succeeded must not drag the earlier group's mirror entries down (they ARE on the wire)
+        // nor record its own (they are NOT).
+        if (mpReach is { } reach)
+        {
+            foreach (var p in reach.Prefixes)
+                _advertisedPrefixes.Add(p);
+        }
+        else
+        {
+            foreach (var p in nlri)
+                _advertisedPrefixes.Add(p);
+        }
         _metrics.UpdateSent();
     }
 
