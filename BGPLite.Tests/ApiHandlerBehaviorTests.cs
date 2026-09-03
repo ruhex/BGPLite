@@ -44,7 +44,7 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
         _connection.Dispose();
     }
 
-    private async Task<int> StartAsync(AppConfig template, ISessionManager? sessions = null, ILogger<ManagementApi>? logger = null)
+    private async Task<int> StartAsync(AppConfig template, ISessionManager? sessions = null, ILogger<ManagementApi>? logger = null, IPrefixSourceService? prefixSources = null)
     {
         for (var attempt = 0; ; attempt++)
         {
@@ -54,6 +54,7 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
                 Bgp = template.Bgp,
                 CorsAllowedOrigins = template.CorsAllowedOrigins,
                 ApiRateLimit = template.ApiRateLimit,
+                RipeStat = template.RipeStat,
                 ApiListen = "127.0.0.1",
                 ApiPort = port,
             };
@@ -64,7 +65,7 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
                 new BgpMetrics(),
                 logger ?? NullLogger<ManagementApi>.Instance,
                 new InertPrefixService(),
-                new InertPrefixSources(),
+                prefixSources ?? new InertPrefixSources(),
                 sessions ?? new InertSessions());
             try
             {
@@ -364,5 +365,41 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
 
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);   // the loopback host is rejected
         Assert.DoesNotContain(logger.Messages, m => m.Contains("SECRET123") || m.Contains("token="));
+    }
+
+    /// <summary>LoadAllAsync throws a foreign-token OCE — the deterministic stand-in for the
+    /// #424 external-fetch budget firing mid-load (live shutdown token, cancelled budget token).</summary>
+    private sealed class BudgetExhaustedSources : IPrefixSourceService
+    {
+        public event Action<string>? ContentCommitted;
+        public Task<IReadOnlyList<(PrefixSourceConfig Source, IReadOnlyList<IpPrefix> Prefixes)>> LoadAllAsync(CancellationToken ct = default)
+            => throw new OperationCanceledException();
+        public Task<IReadOnlyList<IpPrefix>> GetAsync(string name, CancellationToken ct = default) => Task.FromResult<IReadOnlyList<IpPrefix>>([]);
+        public Task<(IReadOnlyList<IpPrefix> Prefixes, bool Changed)> LoadDefaultAsync(CancellationToken ct = default) => Task.FromResult<(IReadOnlyList<IpPrefix>, bool)>(([], false));
+        public Task WarmUpAsync(CancellationToken ct = default) => Task.CompletedTask;
+        public Task<bool> RefreshAsync(string sourceName, CancellationToken ct = default) => Task.FromResult(false);
+        public bool SourceSupportsConditional(string sourceName) => false;
+    }
+
+    [Fact]
+    public async Task AsnLists_BudgetExpiryMidSources_ServesPartialJson()
+    {
+        // #480: the budget token firing during LoadAllAsync must degrade to the partial response
+        // (the ASN-list entries collected above), not escape the handler and abort the connection
+        // without a body.
+        _port = await StartAsync(
+            new AppConfig
+            {
+                Bgp = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1" },
+                RipeStat = new RipeStatConfig { AsnLists = [new AsnList { Name = "ru", Country = "RU", Community = "65000:100" }] }
+            },
+            prefixSources: new BudgetExhaustedSources());
+        _client = new HttpClient();
+
+        using var response = await _client.GetAsync($"http://127.0.0.1:{_port}/api/asn-lists");
+        var body = await response.Content.ReadAsStringAsync();
+
+        Assert.True(response.IsSuccessStatusCode, $"expected a partial response, got {(int)response.StatusCode}");   // RED pre-fix: the connection was aborted (HttpRequestException)
+        Assert.Contains("\"ru\"", body);   // the ASN-list half of the response survived
     }
 }
