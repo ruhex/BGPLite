@@ -73,10 +73,10 @@ internal sealed class ClientIpRateLimiter : IDisposable, IAsyncDisposable
         }
         catch (ObjectDisposedException)
         {
-            // Lost a race with the eviction sweep's Dispose: mint a fresh bucket and retry once.
-            // Narrow and benign — the request sees an unfilled bucket instead of failing.
-            limiter = new TokenBucketRateLimiter(_options);
-            _partitions[clientIp] = (limiter, Stamp());
+            // Lost a race with the eviction sweep's Dispose (CodeRabbit on #450): the sweep
+            // removed the dead partition, so re-read via GetOrAdd — this mints a fresh bucket
+            // WITHOUT blindly overwriting whatever a concurrent request may have installed.
+            limiter = GetOrAdd(clientIp);
             lease = limiter.AttemptAcquire();
         }
 
@@ -90,12 +90,13 @@ internal sealed class ClientIpRateLimiter : IDisposable, IAsyncDisposable
         {
             if (_partitions.TryGetValue(clientIp, out var existing))
             {
-                // Touch last-access; the limiter reference is unchanged, so the tuple write is
-                // safe even against a concurrent sweep (compare-remove either wins before the
-                // touch — the request retries on a fresh bucket — or loses and the touch keeps
-                // the partition alive).
-                _partitions[clientIp] = (existing.Limiter, now);
-                return existing.Limiter;
+                // Touch last-access CONDITIONALLY (CodeRabbit on #450): a sweep may have removed
+                // and disposed this partition between the read and the write — a blind indexer
+                // write would resurrect the disposed limiter. TryUpdate succeeds only against
+                // the exact tuple read; on failure the loop re-reads (or mints a fresh bucket).
+                if (_partitions.TryUpdate(clientIp, (existing.Limiter, now), existing))
+                    return existing.Limiter;
+                continue;
             }
 
             var created = new TokenBucketRateLimiter(_options);

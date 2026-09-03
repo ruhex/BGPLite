@@ -120,7 +120,11 @@ public class BgpSessionV6AdvertiseTests
         routeTable.AddOrUpdate(new Route { Prefix = 0x0A000000, PrefixLength = 8, NextHop = 1 });
         var (session, run, conn) = await EstablishAsync(routeTable, routeRefresh: true);
 
-        var initial = CountUpdates(conn);
+        // Wait for the initial dump before snapshotting (Established ≠ dump-complete,
+        // CodeRabbit on #450).
+        var initial = 0;
+        for (var i = 0; i < 300 && (initial = CountUpdates(conn)) == 0; i++)
+            await Task.Delay(TimeSpan.FromMilliseconds(10));
         Assert.True(initial > 0);
 
         conn.EnqueueMessage(new BgpRouteRefreshMessage { Afi = BgpConstants.Afi.IPv4, Reserved = 0, Safi = BgpConstants.Safi.Unicast });

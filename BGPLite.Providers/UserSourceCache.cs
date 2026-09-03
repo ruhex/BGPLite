@@ -54,6 +54,10 @@ internal sealed class UserSourceCache
     private readonly ConcurrentDictionary<string, (IReadOnlyList<IpPrefix> List, DateTime CachedAt, bool Negative)> _cache = new();
     // url → gate serializing the cache-miss fetch path (prevents thundering herd on cold/expired keys).
     private readonly ConcurrentDictionary<string, SemaphoreSlim> _locks = new();
+    // url → ACTIVE-loader count (#450 review): the sweeps never remove a gate whose loaders are
+    // still inside or queued — otherwise two gates coexist and two loaders race one URL, with the
+    // older response able to overwrite the newer (RipeStatPrefixCache's #267-item-3 invariant).
+    private readonly ConcurrentDictionary<string, int> _inflight = new();
 
     public UserSourceCache(TimeSpan? positiveTtl = null, TimeSpan? negativeTtl = null, ILogger? logger = null, TimeProvider? timeProvider = null, int? maxCacheEntries = null, long? maxTotalPrefixes = null, int? sweepEvery = null)
     {
@@ -94,66 +98,88 @@ internal sealed class UserSourceCache
         // Serialize per-key so concurrent callers (e.g. several peers refreshing the same URL) share
         // a single fetch — no thundering herd.
         var gate = _locks.GetOrAdd(url, _ => new SemaphoreSlim(1, 1));
+        // #450 review: register as an active loader BEFORE the gate is taken — the sweep and
+        // EvictIfAtCapacity never remove a gate that still has loaders (RipeStatPrefixCache's
+        // _inflight invariant, #267 item 3). Without this, a removed-then-recreated gate let two
+        // loaders run concurrently for one URL and the OLDER response could overwrite the newer.
+        _inflight.AddOrUpdate(url, 1, (_, c) => c + 1);
+        var entered = false;
         try
         {
-            await gate.WaitAsync(ct);
-        }
-        catch (OperationCanceledException) when (ct.IsCancellationRequested)
-        {
-            // #358 review (orphan-lock hygiene for #261): a caller cancelled while queued never
-            // writes a cache entry, so its freshly-created gate would never be evicted (the sweep
-            // removes locks only for removed cache keys) — cancelled URLs accumulated semaphores.
-            // Pair-remove OUR gate instance: a concurrent waiter keeps running on its own
-            // reference, and a fresh caller GetOrAdd's a new gate — the same duplicate-fetch
-            // tradeoff the eviction sweep already accepts.
-            ((ICollection<KeyValuePair<string, SemaphoreSlim>>)_locks).Remove(new KeyValuePair<string, SemaphoreSlim>(url, gate));
-            throw;
-        }
-        try
-        {
-            if (TryGetFresh(url, out var rechecked))
-                return rechecked;
-
-            IReadOnlyList<IpPrefix> prefixes;
             try
             {
-                prefixes = await loadAsync(ct);
+                await gate.WaitAsync(ct);
+                entered = true;
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
-                // #114: CALLER-initiated cancellation always propagates and is never cached — it
-                // is teardown, not a property of the source. A foreign-token OCE (e.g. the #320
-                // per-fetch budget's linked CTS firing on a live caller token) falls through to
-                // the failure handling below instead: stale-on-failure serve if possible, else a
-                // brief negative-cache so repeated refreshes do not re-pay the full budget.
+                // #358 review (orphan-lock hygiene for #261): a caller cancelled while queued never
+                // writes a cache entry, so its freshly-created gate would never be evicted (the sweep
+                // removes locks only for removed cache keys) — cancelled URLs accumulated semaphores.
+                // Pair-remove OUR gate instance: a concurrent waiter keeps running on its own
+                // reference, and a fresh caller GetOrAdd's a new gate — the same duplicate-fetch
+                // tradeoff the eviction sweep already accepts.
+                ((ICollection<KeyValuePair<string, SemaphoreSlim>>)_locks).Remove(new KeyValuePair<string, SemaphoreSlim>(url, gate));
                 throw;
             }
-            catch (Exception ex)
+            try
             {
-                // Serve the last good copy if we have one (regardless of its age).
-                if (_cache.TryGetValue(url, out var stale) && !stale.Negative)
+                if (TryGetFresh(url, out var rechecked))
+                    return rechecked;
+
+                IReadOnlyList<IpPrefix> prefixes;
+                try
                 {
-                    _logger?.LogWarning(ex, "User-source '{Name}' load failed; serving cached copy ({Count} prefixes).",
-                        logLabel, stale.List.Count);
-                    return stale.List;
+                    prefixes = await loadAsync(ct);
+                }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                {
+                    // #114: CALLER-initiated cancellation always propagates and is never cached — it
+                    // is teardown, not a property of the source. A foreign-token OCE (e.g. the #320
+                    // per-fetch budget's linked CTS firing on a live caller token) falls through to
+                    // the failure handling below instead: stale-on-failure serve if possible, else a
+                    // brief negative-cache so repeated refreshes do not re-pay the full budget.
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    // Serve the last good copy if we have one (regardless of its age).
+                    if (_cache.TryGetValue(url, out var stale) && !stale.Negative)
+                    {
+                        _logger?.LogWarning(ex, "User-source '{Name}' load failed; serving cached copy ({Count} prefixes).",
+                            logLabel, stale.List.Count);
+                        return stale.List;
+                    }
+
+                    // Otherwise remember the failure briefly so repeated calls don't hammer the fetcher.
+                    EvictIfAtCapacity(url);
+                    _cache[url] = ([], _timeProvider.GetUtcNow().UtcDateTime, Negative: true);
+                    _logger?.LogWarning(ex, "User-source '{Name}' load failed (no cached copy); negative-cached for {Seconds}s.",
+                        logLabel, (int)_negativeTtl.TotalSeconds);
+                    throw;
                 }
 
-                // Otherwise remember the failure briefly so repeated calls don't hammer the fetcher.
                 EvictIfAtCapacity(url);
-                _cache[url] = ([], _timeProvider.GetUtcNow().UtcDateTime, Negative: true);
-                _logger?.LogWarning(ex, "User-source '{Name}' load failed (no cached copy); negative-cached for {Seconds}s.",
-                    logLabel, (int)_negativeTtl.TotalSeconds);
-                throw;
+                _cache[url] = (prefixes, _timeProvider.GetUtcNow().UtcDateTime, Negative: false);
+                return prefixes;
             }
-
-            EvictIfAtCapacity(url);
-            _cache[url] = (prefixes, _timeProvider.GetUtcNow().UtcDateTime, Negative: false);
-            return prefixes;
+            finally
+            {
+                if (entered) gate.Release();
+            }
         }
         finally
         {
-            gate.Release();
+            ExitInflight(url);
         }
+    }
+
+    /// <summary>Decrements the active-loader count for <paramref name="url"/> and removes the
+    /// marker when it reaches zero, so the sweeps know the gate is removable (#450 review).</summary>
+    private void ExitInflight(string url)
+    {
+        _inflight.AddOrUpdate(url, 0, (_, c) => c - 1);
+        _inflight.TryRemove(new KeyValuePair<string, int>(url, 0));
     }
 
     /// <summary>
@@ -193,6 +219,8 @@ internal sealed class UserSourceCache
 
         foreach (var key in toEvict)
         {
+            // #450 review: a URL with active loaders keeps its gate (see SweepIfNeeded).
+            if (_inflight.TryGetValue(key, out var active) && active > 0) continue;
             if (_cache.TryRemove(key, out _))
                 _locks.TryRemove(key, out _);
         }
@@ -252,6 +280,9 @@ internal sealed class UserSourceCache
 
         foreach (var key in toEvict)
         {
+            // #450 review: a URL with active loaders keeps its gate (its loader writes the entry
+            // on its own reference) — removing the gate would mint a duplicate concurrent fetch.
+            if (_inflight.TryGetValue(key, out var active) && active > 0) continue;
             if (_cache.TryRemove(key, out _))
                 _locks.TryRemove(key, out _);
         }

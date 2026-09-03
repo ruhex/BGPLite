@@ -319,24 +319,24 @@ public sealed class RouteAssembler : IRouteAssembler
         // instead of scanning the custom list per route — O(routes + customs) instead of the
         // O(routes × customs) mask+compare the per-route Where paid (11k routes × 1k customs ≈
         // 11M compares per peer per refresh, multiplied by fleet size on a RefreshAllEstablished).
+        // #450 review: the per-length network sets are HASH sets (per-route Contains is O(1)),
+        // and the mask is stored once per length (identical for every network of that length).
         var exact = new HashSet<(uint Network, byte Length)>(customRanges);
-        var networksByLength = new Dictionary<byte, List<(uint Network, UInt128 Mask)>>(customRanges.Count);
+        var networksByLength = new Dictionary<byte, (UInt128 Mask, HashSet<UInt128> Networks)>(customRanges.Count);
         foreach (var cr in customRanges)
         {
-            if (!networksByLength.TryGetValue(cr.Length, out var networks))
-                networksByLength[cr.Length] = networks = [];
-            networks.Add((cr.Network, Mask(cr.Length)));
+            if (!networksByLength.TryGetValue(cr.Length, out var entry))
+                networksByLength[cr.Length] = entry = (Mask(cr.Length), []);
+            entry.Networks.Add(cr.Network);
         }
 
         bool IsCovered(Route r)
         {
-            foreach (var (length, networks) in networksByLength)
+            foreach (var (length, (mask, networks)) in networksByLength)
             {
                 if (length >= r.PrefixLength) continue; // only a STRICTLY broader custom covers
-                var mask = Mask(length);
-                foreach (var (network, _) in networks)
-                    if (((uint)r.Prefix & mask) == network)
-                        return true;
+                if (networks.Contains((uint)r.Prefix & mask))
+                    return true;
             }
             return false;
         }
