@@ -60,19 +60,32 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
 
     public Task StartAsync(CancellationToken cancellationToken)
     {
-        // #14 phase 4: a dual-mode IPv6 listener accepts both IPv6 peers and IPv4 peers — the
-        // kernel surfaces the latter as IPv4-mapped addresses, normalized in AcceptLoopAsync.
-        // DualMode must be set before Bind.
-        _listener = new Socket(AddressFamily.InterNetworkV6, SocketType.Stream, ProtocolType.Tcp);
-        _listener.DualMode = true;
-        _listener.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
-        _listener.Bind(new IPEndPoint(IPAddress.IPv6Any, BgpConstants.BgpPort));
+        // #14 phase 4: prefer the dual-mode IPv6 listener — it accepts both IPv6 peers and IPv4
+        // peers (the kernel surfaces the latter as IPv4-mapped addresses, normalized in
+        // AcceptLoopAsync). DualMode must be set before Bind. On hosts with IPv6 disabled we fall
+        // back to the pre-phase-4 IPv4 listener instead of refusing to start: serving IPv4-only
+        // beats not serving at all, and the capability difference is announced loudly.
+        var useDualMode = Socket.OSSupportsIPv6;
+        if (useDualMode)
+        {
+            _listener = new Socket(AddressFamily.InterNetworkV6, SocketType.Stream, ProtocolType.Tcp);
+            _listener.DualMode = true;
+            _listener.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
+            _listener.Bind(new IPEndPoint(IPAddress.IPv6Any, BgpConstants.BgpPort));
+        }
+        else
+        {
+            _listener = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
+            _listener.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
+            _listener.Bind(new IPEndPoint(IPAddress.Any, BgpConstants.BgpPort));
+            _logger.LogWarning("IPv6 is not available on this host — serving IPv4 peers only");
+        }
         // #344: after a restart every peer reconnects at once; backlog 16 dropped SYNs and pushed
         // peers into their own retry backoff, stretching reconvergence for no benefit. A few
         // hundred pending accepts costs nothing on a route-server host.
         _listener.Listen(512);
 
-        _logger.LogInformation("BGP server listening on [::]:{Port} (dual-mode IPv6+IPv4)", BgpConstants.BgpPort);
+        _logger.LogInformation("BGP server listening on {Address}:{Port}", useDualMode ? "[::]" : "0.0.0.0", BgpConstants.BgpPort);
         _logger.LogInformation("Local ASN={Asn}, RouterId={RouterId}", _config.Bgp.Asn, _config.Bgp.RouterId);
 
         _acceptTask = AcceptLoopAsync(_cts.Token);
