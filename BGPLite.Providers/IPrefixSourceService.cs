@@ -19,6 +19,17 @@ public interface IPrefixSourceService
     /// <summary>The source named by <c>AppConfig.DefaultPrefixSource</c>. Empty list if unset/missing.</summary>
     Task<IReadOnlyList<IpPrefix>> GetDefaultAsync(CancellationToken ct = default);
 
+    /// <summary>
+    /// #416: callback-free counterpart of <see cref="GetDefaultAsync"/> — loads the default source
+    /// and reports whether the content actually changed, but NEVER fires the
+    /// <c>onSourceChanged</c> convergence callback. Callers that invoke it while holding a lock
+    /// (the RU gate in <c>PrefixService.GetRuPrefixesAsync</c>) must own the push themselves and
+    /// fire it only AFTER releasing the lock: an inline callback that re-enters the RU path from
+    /// another session's build deadlocked on the caller-held gate (the gate holder awaited the
+    /// push, the push awaited the gate).
+    /// </summary>
+    Task<(IReadOnlyList<IpPrefix> Prefixes, bool Changed)> LoadDefaultAsync(CancellationToken ct = default);
+
     /// <summary>Prime the in-memory cache for all sources.</summary>
     Task WarmUpAsync(CancellationToken ct = default);
 

@@ -184,7 +184,14 @@ builder.Services.AddSingleton<IPrefixService>(sp =>
         sp.GetRequiredService<RipeStatPrefixCache>(),
         sources,
         sp.GetRequiredService<HttpPrefixProvider>(),
-        logger: sp.GetRequiredService<ILogger<PrefixService>>());
+        logger: sp.GetRequiredService<ILogger<PrefixService>>(),
+        // #416: the RU path now owns its convergence push — GetRuPrefixesAsync fires it AFTER
+        // releasing _ruGate (the load itself is callback-free via LoadDefaultAsync), so a changed
+        // default source can no longer deadlock the fleet refresh it triggers.
+        onSourceChanged: async name =>
+        {
+            await sp.GetRequiredService<ISessionManager>().RefreshAllEstablishedAsync();
+        });
 });
 
 // #263: the BGP send path's dependencies are registered explicitly and resolved with

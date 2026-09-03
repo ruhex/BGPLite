@@ -268,6 +268,8 @@ public sealed class PeerDeleteTeardownTests
             => Task.FromResult<IReadOnlyList<IpPrefix>>([]);
         public Task<IReadOnlyList<IpPrefix>> GetDefaultAsync(CancellationToken ct = default)
             => Task.FromResult<IReadOnlyList<IpPrefix>>([]);
+        public Task<(IReadOnlyList<IpPrefix> Prefixes, bool Changed)> LoadDefaultAsync(CancellationToken ct = default)
+            => Task.FromResult<(IReadOnlyList<IpPrefix>, bool)>(([], false));
         public Task WarmUpAsync(CancellationToken ct = default) => Task.CompletedTask;
         public Task<bool> RefreshAsync(string sourceName, CancellationToken ct = default) => Task.FromResult(false);
         public bool SourceSupportsConditional(string sourceName) => false;

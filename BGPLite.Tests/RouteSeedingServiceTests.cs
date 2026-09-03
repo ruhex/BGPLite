@@ -51,6 +51,7 @@ public class RouteSeedingServiceTests
             Task.FromResult(_sources);
         public Task<IReadOnlyList<IpPrefix>> GetAsync(string name, CancellationToken ct = default) => Task.FromResult<IReadOnlyList<IpPrefix>>([]);
         public Task<IReadOnlyList<IpPrefix>> GetDefaultAsync(CancellationToken ct = default) => Task.FromResult<IReadOnlyList<IpPrefix>>([]);
+        public Task<(IReadOnlyList<IpPrefix> Prefixes, bool Changed)> LoadDefaultAsync(CancellationToken ct = default) => Task.FromResult<(IReadOnlyList<IpPrefix>, bool)>(([], false));
         public Task WarmUpAsync(CancellationToken ct = default) => Task.CompletedTask;
         public Task<bool> RefreshAsync(string sourceName, CancellationToken ct = default) => Task.FromResult(false);
         public bool SourceSupportsConditional(string sourceName) => false;
