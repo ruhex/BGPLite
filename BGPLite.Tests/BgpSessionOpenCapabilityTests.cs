@@ -68,14 +68,14 @@ public class BgpSessionOpenCapabilityTests
     }
 
     /// <summary>
-    /// #466: the OPEN BGPLite sends must NOT echo the peer's MP IPv4/Unicast capability
-    /// (code 1, AFI=1/SAFI=1). The inbound path has no MP_REACH/MP_UNREACH AFI=1 handling at
-    /// all, and RFC 5492 §3 / RFC 4760 §8 make a mutually-advertised capability usable — so
-    /// the echo invited the peer to send IPv4 NLRI via MP_REACH, which was then discarded
-    /// whole. D24: the advertisement must not precede the implementation (the D6 pattern).
+    /// #466 (D24, final state): the OPEN advertises MP IPv4/Unicast (code 1, AFI=1/SAFI=1)
+    /// UNCONDITIONALLY. The interim "never advertise" half-measure broke capability-strict
+    /// peers — BIRD 2 with default capabilities answers "Required capability missing" and
+    /// refuses the session — and the receiving half now EXISTS: MP_REACH/MP_UNREACH AFI=1
+    /// decode into the classic IPv4 pipeline.
     /// </summary>
     [Fact]
-    public async Task SentOpen_DoesNotAdvertise_MpIpv4Unicast_EvenWhenPeerOffersIt()
+    public async Task SentOpen_Advertises_MpIpv4Unicast_Unconditionally()
     {
         var conn = new ScriptedConnection();
         var config = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1", HoldTime = 0, KeepAlive = 0 };
@@ -92,18 +92,14 @@ public class BgpSessionOpenCapabilityTests
         var run = session.RunAsync();
         try
         {
-            // The peer offers MP IPv4/Unicast — the exact trigger of the old conditional echo.
+            // The peer does NOT offer MP IPv4/Unicast — the advertisement is ours alone now.
             conn.EnqueueMessage(new BgpOpenMessage
             {
                 Version = BgpConstants.BgpVersion,
                 Asn = 65002,
                 HoldTime = 0,
                 RouterId = 0x0A000002,
-                Capabilities =
-                [
-                    BgpCapabilityInfo.FourOctetAsn(65002),
-                    BgpCapabilityInfo.MultiprotocolIpv4Unicast(),
-                ],
+                Capabilities = [BgpCapabilityInfo.FourOctetAsn(65002)],
             });
             conn.EnqueueMessage(BgpKeepaliveMessage.Instance);
 
@@ -115,12 +111,13 @@ public class BgpSessionOpenCapabilityTests
             Assert.True(sent.Count > 0, "session must have sent its OPEN");
             var open = Assert.IsType<BgpOpenMessage>(BgpMessageReader.ReadMessage(sent[0]));
 
-            // RED pre-fix: the peer's AFI=1/SAFI=1 offer was echoed back.
-            Assert.DoesNotContain(open.Capabilities, c =>
+            var mpV4 = Assert.Single(open.Capabilities, c =>
                 c.Code == BgpConstants.Capability.Multiprotocol &&
                 c.Data.Length >= 4 && c.Data[0] == 0 && c.Data[1] == 1 && c.Data[3] == BgpConstants.Safi.Unicast);
-            // Sanity: the 4-octet ASN capability — advertised unconditionally — is untouched.
+            Assert.Equal([0x00, 0x01, 0x00, BgpConstants.Safi.Unicast], mpV4.Data);
+            // Sanity: 4-octet ASN still advertised; GR (D6) still not.
             Assert.Contains(open.Capabilities, c => c.Code == BgpConstants.Capability.FourOctetAsn);
+            Assert.DoesNotContain(open.Capabilities, c => c.Code == BgpConstants.Capability.GracefulRestart);
         }
         finally
         {

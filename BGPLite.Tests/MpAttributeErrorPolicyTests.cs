@@ -84,7 +84,7 @@ public class MpAttributeErrorPolicyTests
     public async Task UnsupportedMpFamily_DiscardsTheUpdateOnly_SessionAndFamilyStayUp()
     {
         // #472 review: an AFI/SAFI tuple that was never negotiated (RFC 4760 §8) is not a parse
-        // failure of the SUPPORTED family — the whole UPDATE is discarded through the D17
+        // failure of a SUPPORTED family — the whole UPDATE is discarded through the D17
         // keep-alive path and neither the session nor IPv6/Unicast is touched.
         var routeTable = new RouteTable();
         var (session, run, conn) = await EstablishAsync(routeTable);
@@ -95,7 +95,7 @@ public class MpAttributeErrorPolicyTests
         await SettleAsync(conn, () => routeTable.Count == 1);
 
         conn.EnqueueFrame(UpdateFrame(MpReachAttribute(MpOptionalNonTransitive,
-            [0x00, 0x01, 0x01, 0x04, 0xC0, 0x00, 0x02, 0x01, 0x00]))); // AFI=1/SAFI=1 — unsupported
+            [0x00, 0x03, 0x01, 0x04, 0xC0, 0x00, 0x02, 0x01, 0x00]))); // AFI=3/SAFI=1 — unsupported
         await SettleAsync(conn);
 
         Assert.True(session.IsEstablished, "an unsupported tuple is a keep-alive body error, not a reset");
@@ -106,6 +106,82 @@ public class MpAttributeErrorPolicyTests
             OriginAsPathAttributes,
             MpReachAttribute(MpOptionalNonTransitive, ReachValue(GlobalNextHop, 24, 0x20, 0x01, 0x0D))));
         await SettleAsync(conn, () => routeTable.Count == 2);
+
+        await TeardownAsync(session, run);
+    }
+
+    // ---- #466: MP_REACH/MP_UNREACH AFI=1/SAFI=1 (IPv4/Unicast) ----
+
+    /// <summary>MP_REACH_NLRI (AFI=1/SAFI=1) value: AFI(2) + SAFI(1) + NH-Len(4) + next hop +
+    /// Reserved(1) + classic IPv4 NLRI (length byte + significant address bytes).</summary>
+    private static byte[] ReachValueV4(uint nextHop, byte prefixLength, params byte[] addressBytes)
+    {
+        var value = new List<byte> { 0x00, 0x01, 0x01, 0x04 };
+        value.AddRange([(byte)(nextHop >> 24), (byte)(nextHop >> 16), (byte)(nextHop >> 8), (byte)nextHop]);
+        value.Add(0x00); // reserved
+        value.Add(prefixLength);
+        value.AddRange(addressBytes);
+        return [.. value];
+    }
+
+    [Fact]
+    public async Task MpReachV4_Announcement_InstallsLikeClassicNlri()
+    {
+        // #466 final state: an IPv4 announcement riding MP_REACH installs through the same
+        // pipeline as the classic NLRI field — BIRD negotiates MP_IPV4 by default and may
+        // carry IPv4 unicast this way.
+        var routeTable = new RouteTable();
+        var (session, run, conn) = await EstablishAsync(routeTable);
+
+        conn.EnqueueFrame(UpdateFrame(
+            OriginAsPathAttributes,
+            MpReachAttribute(MpOptionalNonTransitive, ReachValueV4(0xC0000201, 24, 0xC0, 0x00, 0x02))));
+        await SettleAsync(conn, () => routeTable.Count == 1);
+
+        Assert.NotNull(routeTable.Get(0xC0000200, 24, isIpv4: true));
+        Assert.True(session.IsEstablished);
+
+        await TeardownAsync(session, run);
+    }
+
+    [Fact]
+    public async Task MpReachV4_InvalidNextHop_TreatAsWithdraw_KeepsSession()
+    {
+        // RFC 4271 §6.3/§6.8 + RFC 7606 §7.3: the MP-carried IPv4 next hop obeys the classic
+        // NEXT_HOP semantics — a multicast value treats the announcement as withdrawn and
+        // keeps the session up.
+        var routeTable = new RouteTable();
+        var (session, run, conn) = await EstablishAsync(routeTable);
+
+        conn.EnqueueFrame(UpdateFrame(
+            OriginAsPathAttributes,
+            MpReachAttribute(MpOptionalNonTransitive, ReachValueV4(0xE0000001, 24, 0xC0, 0x00, 0x02))));
+        await SettleAsync(conn);
+
+        Assert.Equal(0, routeTable.Count);
+        Assert.True(session.IsEstablished, "treat-as-withdraw keeps the session up");
+
+        await TeardownAsync(session, run);
+    }
+
+    [Fact]
+    public async Task MpUnreachV4_WithdrawsTheRoute()
+    {
+        var routeTable = new RouteTable();
+        var (session, run, conn) = await EstablishAsync(routeTable);
+
+        conn.EnqueueFrame(UpdateFrame(
+            OriginAsPathAttributes,
+            MpReachAttribute(MpOptionalNonTransitive, ReachValueV4(0xC0000201, 24, 0xC0, 0x00, 0x02))));
+        await SettleAsync(conn, () => routeTable.Count == 1);
+
+        // MP_UNREACH (AFI=1/SAFI=1): AFI(2) + SAFI(1) + the withdrawn NLRI.
+        conn.EnqueueFrame(UpdateFrame(
+            MpUnreachAttribute(MpOptionalNonTransitive, [0x00, 0x01, 0x01, 0x18, 0xC0, 0x00, 0x02])));
+        await SettleAsync(conn, () => routeTable.Count == 0);
+
+        Assert.Null(routeTable.Get(0xC0000200, 24, isIpv4: true));
+        Assert.True(session.IsEstablished);
 
         await TeardownAsync(session, run);
     }
@@ -248,6 +324,16 @@ public class MpAttributeErrorPolicyTests
         var attr = new byte[3 + value.Length];
         attr[0] = flags;
         attr[1] = MpReachCodec.MpReachNlriType;
+        attr[2] = (byte)value.Length;
+        value.CopyTo(attr, 3);
+        return attr;
+    }
+
+    private static byte[] MpUnreachAttribute(byte flags, byte[] value)
+    {
+        var attr = new byte[3 + value.Length];
+        attr[0] = flags;
+        attr[1] = MpReachCodec.MpUnreachNlriType;
         attr[2] = (byte)value.Length;
         value.CopyTo(attr, 3);
         return attr;

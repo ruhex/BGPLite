@@ -267,6 +267,10 @@ public static class BgpMessageReader
         var attributes = new List<PathAttribute>();
         MpReachCodec.MpReachV6? mpReachV6 = null;
         IReadOnlyList<IpPrefix>? mpUnreachV6 = null;
+        MpReachCodec.MpReachV4? mpReachV4 = null;
+        IReadOnlyList<IpPrefix>? mpUnreachV4 = null;
+        var mpReachSeen = false;
+        var mpUnreachSeen = false;
         if (attrsLen > 0)
         {
             var attrsEnd = offset + attrsLen;
@@ -303,20 +307,28 @@ public static class BgpMessageReader
                             BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.AttributeFlagsError,
                             sessionResetRequired: true);
 
+                    // #466: BOTH supported families decode here — IPv4/Unicast (AFI=1/SAFI=1) into
+                    // the classic NLRI pipeline and IPv6/Unicast (AFI=2/SAFI=1) into MP_REACH_NLRI.
+                    // §3(g) duplicate detection is per ATTRIBUTE TYPE: a second instance of the
+                    // type is a session reset regardless of which family it names.
                     if (attr.TypeCode == MpReachCodec.MpReachNlriType)
                     {
                         // RFC 7606 §3(g): "If the MP_REACH_NLRI attribute or the MP_UNREACH_NLRI
                         // [RFC4760] attribute appears more than once in the UPDATE message then a
                         // NOTIFICATION message MUST be sent with the Error Subcode 'Malformed
                         // Attribute List'." — a session reset, NOT the D17 keep-alive discard.
-                        if (mpReachV6 is not null)
+                        if (mpReachSeen)
                             throw new BgpParseException("Duplicate MP_REACH_NLRI attribute (RFC 7606 §3(g))",
                                 BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.MalformedAttributeList,
                                 sessionResetRequired: true);
-                        ScopeMpValueOrThrow(attr.Data);
+                        mpReachSeen = true;
+                        var reachIsV4 = ScopeMpValueOrThrow(attr.Data);
                         try
                         {
-                            mpReachV6 = MpReachCodec.DecodeMpReachV6(attr.Data);
+                            if (reachIsV4)
+                                mpReachV4 = MpReachCodec.DecodeMpReachV4(attr.Data);
+                            else
+                                mpReachV6 = MpReachCodec.DecodeMpReachV6(attr.Data);
                         }
                         catch (BgpParseException ex)
                         {
@@ -327,14 +339,18 @@ public static class BgpMessageReader
                         continue;
                     }
 
-                    if (mpUnreachV6 is not null)
+                    if (mpUnreachSeen)
                         throw new BgpParseException("Duplicate MP_UNREACH_NLRI attribute (RFC 7606 §3(g))",
                             BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.MalformedAttributeList,
                             sessionResetRequired: true);
-                    ScopeMpValueOrThrow(attr.Data);
+                    mpUnreachSeen = true;
+                    var unreachIsV4 = ScopeMpValueOrThrow(attr.Data);
                     try
                     {
-                        mpUnreachV6 = MpReachCodec.DecodeMpUnreachV6(attr.Data);
+                        if (unreachIsV4)
+                            mpUnreachV4 = MpReachCodec.DecodeMpUnreachV4(attr.Data);
+                        else
+                            mpUnreachV6 = MpReachCodec.DecodeMpUnreachV6(attr.Data);
                     }
                     catch (BgpParseException ex)
                     {
@@ -360,7 +376,9 @@ public static class BgpMessageReader
             PathAttributes = attributes,
             Nlri = nlri,
             MpReachV6 = mpReachV6,
-            MpUnreachV6 = mpUnreachV6
+            MpUnreachV6 = mpUnreachV6,
+            MpReachV4 = mpReachV4,
+            MpUnreachV4 = mpUnreachV4
         };
     }
 
@@ -368,12 +386,12 @@ public static class BgpMessageReader
     /// #472 review: scope MP value failures to the offending AFI/SAFI tuple. A value too short
     /// to name its tuple cannot be scoped to any family — the RFC 7606 §3(j) fallback is the
     /// session reset. A tuple this speaker does not support was never negotiated (RFC 4760 §8):
-    /// its arrival is not a parse failure of the supported family, so it is answered with a
-    /// plain keep-alive body error — the whole UPDATE is discarded (D17) and the supported
-    /// family stays enabled. Only a supported tuple's decode failure reaches the decoder, whose
-    /// <see cref="BgpMpParseException"/> marks the AFI/SAFI disable.
+    /// its arrival is not a parse failure of a supported family, so it is answered with a plain
+    /// keep-alive body error — the whole UPDATE is discarded (D17) and the supported families
+    /// stay enabled. Supported tuples (#466): AFI=1/SAFI=1 and AFI=2/SAFI=1.
     /// </summary>
-    private static void ScopeMpValueOrThrow(ReadOnlySpan<byte> value)
+    /// <returns>true for the IPv4/Unicast tuple, false for IPv6/Unicast.</returns>
+    private static bool ScopeMpValueOrThrow(ReadOnlySpan<byte> value)
     {
         if (value.Length < 3)
             throw new BgpParseException(
@@ -383,10 +401,14 @@ public static class BgpMessageReader
 
         var afi = BinaryPrimitives.ReadUInt16BigEndian(value);
         var safi = value[2];
-        if (afi != MpReachCodec.AfiIpv6 || safi != MpReachCodec.SafiUnicast)
-            throw new BgpParseException(
-                $"MP_REACH/MP_UNREACH for an unsupported address family: AFI={afi}, SAFI={safi}",
-                BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.InvalidNetworkField);
+        if (afi == MpReachCodec.AfiIpv4 && safi == MpReachCodec.SafiUnicast)
+            return true;
+        if (afi == MpReachCodec.AfiIpv6 && safi == MpReachCodec.SafiUnicast)
+            return false;
+
+        throw new BgpParseException(
+            $"MP_REACH/MP_UNREACH for an unsupported address family: AFI={afi}, SAFI={safi}",
+            BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.InvalidNetworkField);
     }
 
     private static (PathAttribute attr, int consumed) ParseAttribute(ReadOnlySpan<byte> data)

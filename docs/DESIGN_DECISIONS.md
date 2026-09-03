@@ -315,21 +315,21 @@ For section-by-section RFC conformance status, see `RFC_COMPLIANCE.md` (2026-07-
   always exactly one ASN long.
 - **Tracker:** #456 (documentation of long-standing behavior, flagged by the 2026-09-03 audit).
 
-### D24. The MP IPv4/Unicast capability is never advertised
-- **Decision:** the OPEN BGPLite sends never carries the Multiprotocol Extensions capability
-  for AFI=1/SAFI=1, regardless of what the peer offers (`BgpSession.SendOpenAsync`).
-  IPv4/Unicast is exchanged via the classic NLRI field only.
-- **Context:** `SendOpenAsync` used to echo the peer's MP IPv4/Unicast offer back. RFC 5492 §3
-  makes a capability usable on a peering only when both sides advertised it, and RFC 4760 §8
-  requires the advertisement to mean the speaker supports that \<AFI, SAFI\> on receive — but
-  the inbound path has no MP_REACH/MP_UNREACH AFI=1 handling at all (`MpReachCodec` accepts
-  AFI=2 only). A conformant peer sending IPv4 NLRI via MP_REACH therefore had every such
-  UPDATE discarded whole (RFC 7606 treat-as-withdraw) with the session looking healthy:
-  negotiated route loss with no diagnostic beyond a Warning log line. Same
-  advertise-without-implementing class as the Graceful Restart case (#318, D6) — the
-  advertisement must not precede the implementation.
-- **Consequence:** a peer that prefers MP carriage for IPv4 falls back to classic NLRI, which
-  is the default family and works unchanged. IPv6/Unicast advertisement is untouched
-  (mirrored when the peer offers it — the AFI=2 receiving half IS implemented). Reintroduce
-  the advertisement only together with an AFI=1 decode path.
-- **Tracker:** #466.
+### D24. MP IPv4/Unicast is advertised AND received
+- **Decision:** the OPEN carries the Multiprotocol Extensions capability for AFI=1/SAFI=1
+  unconditionally, and inbound MP_REACH_NLRI / MP_UNREACH_NLRI AFI=1/SAFI=1 decode into the
+  classic IPv4 pipeline: announcements install like classic NLRI (NEXT_HOP semantics applied
+  to the MP-carried next hop), withdrawals remove the peer's routes.
+- **Context:** `SendOpenAsync` used to ECHO the peer's MP IPv4/Unicast offer while the inbound
+  path had no AFI=1 handling — a negotiated IPv4 MP UPDATE was discarded whole
+  (treat-as-withdraw) with the session looking healthy: silent route loss (#466). The interim
+  removal of the advertisement closed the route loss but broke capability-strict peers in
+  return: BIRD 2 with default `capabilities` requires the peer's MP_IPV4 tuple for the ipv4
+  channel ("Required capability missing") and refuses the session — caught by the
+  `compose-integration` stand. The honest fix is both halves: receive AFI=1 AND advertise it.
+- **Consequence:** a conformant peer may carry IPv4 NLRI in MP_REACH on any session; BGPLite
+  installs it through the same ownership/filter/cap pipeline as classic NLRI. Outbound
+  IPv4/Unicast still rides the classic NLRI field. IPv6/Unicast advertisement stays
+  conditional on the peer's offer (its receiving half has existed since #14).
+- **Tracker:** #466 (echo removed 2026-09-03, receive implemented same day after the
+  `compose-integration` finding).
