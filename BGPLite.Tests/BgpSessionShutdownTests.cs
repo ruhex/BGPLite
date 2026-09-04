@@ -73,6 +73,29 @@ public class BgpSessionShutdownTests
         Assert.Equal(BgpConstants.SubError.CeaseAdministrativeReset, notif.SubErrorCode);
     }
 
+    [Fact]
+    public async Task NotifyCease_SubcodeIs4_AdministrativeReset_PerRfc4486()
+    {
+        // #506: the subcode value itself, asserted as a LITERAL so a wrong constant cannot pass.
+        // RFC 4486 §3 table: 4 = "Administrative Reset"; 6 = "Other Configuration Change".
+        // CeaseAdministrativeReset was 6, mislabeling every graceful reset/shutdown/delete.
+        var (server, client) = ConnectedPair();
+        using var clientSock = client;
+        using var session = NewSession(server);
+
+        await session.NotifyCeaseAsync();
+
+        var buf = new byte[64];
+        ReadExact(client, buf, 0, BgpConstants.MessageHeaderSize);
+        var len = BgpMessageReader.GetMessageLength(buf);
+        ReadExact(client, buf, BgpConstants.MessageHeaderSize, len - BgpConstants.MessageHeaderSize);
+
+        var msg = BgpMessageReader.ReadMessage(buf.AsSpan(0, len));
+        var notif = Assert.IsType<BgpNotificationMessage>(msg);
+        Assert.Equal(BgpConstants.Error.Cease, notif.ErrorCode);
+        Assert.Equal(4, notif.SubErrorCode);   // RED pre-fix: 6
+    }
+
     /// <summary>
     /// Regression #325: UpdateSessionStatus in the RunAsync finally is a best-effort DB write on a
     /// fire-and-forget task (RunSessionAsync has no catch) — a transient store failure must not
