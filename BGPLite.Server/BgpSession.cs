@@ -756,6 +756,11 @@ public sealed class BgpSession : IDisposable
         try { await task; }
         catch (OperationCanceledException) { }
         catch (BgpParseException) { throw; }
+        // #505: a BgpNotificationException faulting a loop (the #304 cap reset thrown from
+        // HandleUpdateAsync on the read loop) must reach RunAsync's handler, which sends the
+        // carried code/subcode — Cease/MaxPrefixes per RFC 4486 §2. The generic catch below
+        // swallowed it, so HoldTime>0 sessions got a bare Cease 6/0 from the finally instead.
+        catch (BgpNotificationException) { throw; }
         catch (Exception ex) { _logger.LogWarning(ex, "{Label} loop faulted for {Peer}", label, _peer); }
     }
 
