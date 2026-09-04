@@ -34,7 +34,11 @@ public sealed class RouteAssemblerPolicyTests
         Bgp = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1" },
         RipeStat = new RipeStatConfig
         {
-            AsnLists = [new AsnList { Name = "tier1", Asns = [65010], Community = "65001:200" }]
+            AsnLists =
+            [
+                new AsnList { Name = "tier1", Asns = [65010], Community = "65001:200" },
+                new AsnList { Name = "tier2", Asns = [65020], Community = "65001:201" }
+            ]
         }
     };
 
@@ -59,8 +63,7 @@ public sealed class RouteAssemblerPolicyTests
     /// <summary>An existing peer subscribed to "tier1" — the configured-peer branch.</summary>
     private sealed class ConfiguredPeerStore : IPeerStore
     {
-        public List<string> Subscriptions { get; set; } = ["tier1"];
-        public Task<string> CreatePeerAsync(string ip, uint asn, string? description, CancellationToken ct = default) => Task.FromResult("id");
+        public List<string> Subscriptions { get; set; } = ["tier1"]; public Task<string> CreatePeerAsync(string ip, uint asn, string? description, CancellationToken ct = default) => Task.FromResult("id");
         public Task UpsertPeerAsync(string ip, uint asn, CancellationToken ct = default) => Task.CompletedTask;
         public Task UpdateSessionStatusAsync(string ip, uint asn, bool active, CancellationToken ct = default) => Task.CompletedTask;
         public Task<int?> GetPeerMaxPrefixAsync(string ip, uint asn, CancellationToken ct = default) => Task.FromResult<int?>(null);
@@ -99,6 +102,32 @@ public sealed class RouteAssemblerPolicyTests
 
         var route = Assert.Single(routes);
         Assert.Equal((RuPrefix, (byte)8), (route.Prefix, route.PrefixLength));
+    }
+
+    [Fact]
+    public async Task MixedFailureAndEmptyResolution_StillFallsBackToRu()
+    {
+        // #503 review (D26 refinement): fail-closed is for TOTAL failure only. tier1 fails
+        // (outage), tier2 RESOLVES to an empty list — a source answered, so the build is not a
+        // total failure and the documented "configured peer resolved 0 prefixes" fallback applies.
+        var store = new ConfiguredPeerStore { Subscriptions = ["tier1", "tier2"] };
+        var config = Config();
+        var service = new StubPrefixService
+        {
+            OnGetPrefixesForAsns = (asns, _) => asns.Contains(65010u)
+                ? throw new InvalidOperationException("simulated outage")
+                : Task.FromResult(new List<(UInt128 Prefix, byte Length, bool IsIpv4, uint Asn)>())
+        };
+        var assembler = new RouteAssembler(
+            service, store,
+            new ConfigCommunityResolver(config, config.Bgp),
+            AllowAllFilter.Instance, config, config.Bgp, NullLogger<RouteAssembler>.Instance);
+
+        var routes = await assembler.BuildOutboundRoutesAsync(
+            "203.0.113.7", 65002, new PeerConfig { Address = "203.0.113.7" }, "203.0.113.7", CancellationToken.None);
+
+        var route = Assert.Single(routes);
+        Assert.Equal((RuPrefix, (byte)8), (route.Prefix, route.PrefixLength));   // the RU fallback fired
     }
 
     [Fact]

@@ -41,14 +41,29 @@ public sealed class FilePrefixProvider(ILogger<FilePrefixProvider> logger) : IPr
         // #321 item 5: async read with the caller's token — the sync ReadAllText held a threadpool
         // thread under the per-source gate for the whole file. The metadata probes above stay
         // sync: they are single stat calls, not reads.
-        // #487: cap parity with the HTTP paths (HttpPrefixProvider.MaxResponseBytes) — the file is
-        // operator-controlled, but a multi-GB "prefix list" is never legitimate and the uncapped
-        // read was an asymmetric memory-amplification footgun.
-        var length = new FileInfo(fullPath).Length;
-        if (length > HttpPrefixProvider.MaxResponseBytes)
-            throw new InvalidOperationException(
-                $"Prefix file for source '{source.Name}' is {length} bytes — over the {HttpPrefixProvider.MaxResponseBytes}-byte cap.");
-        var text = await File.ReadAllTextAsync(fullPath, ct);
+        // #487 + #503 review: cap parity with the HTTP paths (HttpPrefixProvider.MaxResponseBytes),
+        // enforced WHILE reading — a length probe alone races a concurrent writer extending the
+        // file between the stat and the read.
+        string text;
+        await using (var fs = File.OpenRead(fullPath))
+        {
+            if (fs.Length > HttpPrefixProvider.MaxResponseBytes)
+                throw new InvalidOperationException(
+                    $"Prefix file for source '{source.Name}' is {fs.Length} bytes — over the {HttpPrefixProvider.MaxResponseBytes}-byte cap.");
+            using var ms = new MemoryStream(capacity: (int)Math.Min(fs.Length, HttpPrefixProvider.MaxResponseBytes));
+            var buffer = new byte[81920];
+            int read;
+            long total = 0;
+            while ((read = await fs.ReadAsync(buffer, ct)) > 0)
+            {
+                total += read;
+                if (total > HttpPrefixProvider.MaxResponseBytes)
+                    throw new InvalidOperationException(
+                        $"Prefix file for source '{source.Name}' grew past the {HttpPrefixProvider.MaxResponseBytes}-byte cap while reading.");
+                ms.Write(buffer, 0, read);
+            }
+            text = System.Text.Encoding.UTF8.GetString(ms.ToArray());
+        }
         var prefixes = PrefixListParser.Parse(text);
         logger.LogInformation("Source '{Name}' (file): loaded {Count} prefixes from {Path}", source.Name, prefixes.Count, fullPath);
         return SourceLoadResult.Ok(prefixes, lastModified: fileMtime);

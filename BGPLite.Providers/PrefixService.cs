@@ -327,7 +327,11 @@ public sealed class PrefixService : IPrefixService
                 await GetPrefixesAsync(asn, ct);
                 _logger?.LogInformation("WarmUp: AS{Asn} cached", asn);
             }
-            catch (OperationCanceledException) { throw; }   // #485: host shutdown unwinds the loop, not a WARN per remaining ASN
+            // #485: host shutdown unwinds the loop, not a WARN per remaining ASN.
+            // #503 review: filter CALLER cancellation — a foreign-token OCE (body deadline on a
+            // cold ASN, escaping RipeStatPrefixCache's no-stale rethrow) is a per-ASN fetch
+            // failure like any other; unfiltered, one cold timeout aborted the whole warm-up.
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
             catch (Exception ex)
             {
                 _logger?.LogWarning(ex, "WarmUp: AS{Asn} failed", asn);

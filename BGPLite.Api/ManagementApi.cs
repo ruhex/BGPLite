@@ -1264,10 +1264,11 @@ public sealed class ManagementApi : IHostedService, IDisposable
         // (unlike ASP.NET Core's RequestAborted), so the timeout is purely time-bounded.
         using var validationCts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
         bool isValid;
-        string? validationError;
         try
         {
-            (isValid, validationError) = await PrefixSourceUrlValidator.ValidateUrlAsync(data.Url, ct: validationCts.Token);
+            // #503 review: the validator's reason string embeds the URL and DNS internals —
+            // discarded; the log names the source and the response carries a fixed classification.
+            (isValid, _) = await PrefixSourceUrlValidator.ValidateUrlAsync(data.Url, ct: validationCts.Token);
         }
         catch (OperationCanceledException) when (validationCts.IsCancellationRequested)
         {
@@ -1279,11 +1280,13 @@ public sealed class ManagementApi : IHostedService, IDisposable
         if (!isValid)
         {
             // #479 (#149): neither the URL nor the validator's message (which embeds it) belongs in
-            // the log. The reason goes to the RESPONSE instead — the operator just submitted this
-            // URL, so echoing it there leaks nothing.
+            // the log. #503 review (CWE-209): the validator's message ALSO embeds resolved
+            // addresses and raw DNS exception text — classify for the response instead of echoing
+            // server-side resolution internals back to the caller.
             _logger.LogWarning("Save-time URL validation rejected source '{Name}' for peer {PeerId}",
                 SanitizeForLog(data.Name), SanitizeForLog(peerId));
-            return ApiResponse.Error($"Invalid URL: {validationError ?? "the host could not be reached or is not allowed"}", 400);
+            return ApiResponse.Error(
+                "Invalid URL: the scheme must be http/https on port 80/443 and the host must resolve to a reachable public address", 400);
         }
 
         var source = await _store.AddCustomSourceAsync(peerId, data.Name, data.Url, data.Community);
