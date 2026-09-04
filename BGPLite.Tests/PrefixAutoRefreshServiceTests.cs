@@ -25,13 +25,14 @@ public class PrefixAutoRefreshServiceTests
     {
 
         public event Action<string>? ContentCommitted;
-        public Dictionary<string, int> RefreshCalls { get; } = new();
+        // #511 review: the service loop writes while the test thread reads — concurrent access.
+        public System.Collections.Concurrent.ConcurrentDictionary<string, int> RefreshCalls { get; } = new();
         public Dictionary<string, bool> Conditional { get; } = new();
         public bool ReportChanged { get; set; }
 
         public Task<bool> RefreshAsync(string sourceName, CancellationToken ct = default)
         {
-            RefreshCalls[sourceName] = RefreshCalls.TryGetValue(sourceName, out var c) ? c + 1 : 1;
+            RefreshCalls.AddOrUpdate(sourceName, 1, (_, c) => c + 1);
             return Task.FromResult(ReportChanged);
         }
 
@@ -49,11 +50,13 @@ public class PrefixAutoRefreshServiceTests
     /// <summary>A no-op ISessionManager that records RefreshAllEstablishedAsync invocations.</summary>
     private sealed class RecordingSessionManager : ISessionManager
     {
-        public int RefreshAllCalls;
+        // #511 review: incremented on the service loop, read on the test thread — atomic access.
+        private int _refreshAllCalls;
+        public int RefreshAllCalls => Volatile.Read(ref _refreshAllCalls);
         public Task RefreshPeerAsync(string peerIp, uint asn) => Task.CompletedTask;
         public List<string> GetActivePeerIps() => [];
         public int GetAdvertisedPrefixCount(string peerIp, uint asn) => 0;
-        public Task RefreshAllEstablishedAsync() { RefreshAllCalls++; return Task.CompletedTask; }
+        public Task RefreshAllEstablishedAsync() { Interlocked.Increment(ref _refreshAllCalls); return Task.CompletedTask; }
         public Task TerminatePeerAsync(string peerIp, uint asn, CancellationToken ct = default) => Task.CompletedTask;
         public Task TerminatePeerByIpAsync(string peerIp, CancellationToken ct = default) => Task.CompletedTask;
         public void SetPeerMd5Key(string peerIp, string? password) { }
@@ -140,17 +143,20 @@ public class PrefixAutoRefreshServiceTests
             Conditional = { ["a"] = true, ["b"] = true }
         };
         var sessions = new RecordingSessionManager();
+        // #511 review: the tick period is 600 s (not 60) so the advance-until-fired loop below has
+        // no tick-2 ceiling — it may step as long as scheduling pressure requires without a second
+        // tick ever changing the counts.
         var config = ConfigWith(
-            new AutoRefreshConfig { Enabled = true, IntervalSeconds = 60, NoEtagIntervalSeconds = 60, MaxJitterMs = 5000 },
+            new AutoRefreshConfig { Enabled = true, IntervalSeconds = 600, NoEtagIntervalSeconds = 600, MaxJitterMs = 5000 },
             ("a", "http"), ("b", "http"));
         using var service = new PrefixAutoRefreshService(svc, sessions, config,
             NullLogger<PrefixAutoRefreshService>.Instance, time, new Random(0));
 
         await service.StartAsync(CancellationToken.None);
 
-        // Tick 1 (t=60s): first source checked immediately (no jitter on the very first check), then
+        // Tick 1 (t=600s): first source checked immediately (no jitter on the very first check), then
         // the second is delayed by jitter (0..5000ms). Advance the clock to release the jittered delay.
-        time.Advance(TimeSpan.FromSeconds(60));
+        time.Advance(TimeSpan.FromSeconds(600));
         // Wait until 'a' (first source, no jitter) has been polled — the loop is then mid-tick,
         // deterministically before 'b' whose jitter delay is FakeTimeProvider-driven and can only
         // be released by the Advance below.
@@ -162,12 +168,12 @@ public class PrefixAutoRefreshServiceTests
         // clock yet when 'a' is observed — the loop thread can be preempted between polling 'a'
         // and registering the delay, and a batch of advances landing before the schedule point
         // would leave the delay in the future with nobody to release it (the CI flake shape).
-        // Therefore interleave: each 1 s step yields REAL time (20 ms) so a preempted loop can
-        // register the delay, and the NEXT step releases it. Jitter ∈ [0, 5000] ms (Random(0) →
-        // 3631), so once registered ≤5 steps suffice; the 55-step cap (~1.1 s of real yield)
-        // tolerates heavy scheduling pressure while never crossing tick 2 at 120 s — counts stay
-        // exactly 1/1.
-        for (var i = 0; i < 55 && svc.RefreshCalls.GetValueOrDefault("b") == 0; i++)
+        // Therefore KEEP ADVANCING until 'b' fires: every 1 s step yields real time (20 ms) so a
+        // preempted loop can register the delay, and the NEXT step releases it. With the 600 s
+        // period, 500 steps (fake +500 s) can never reach tick 2 — the loop is bounded only by
+        // its own goal, so any scheduling latency is tolerated. Jitter ∈ [0, 5000] ms (Random(0)
+        // → 3631), so in practice ≤5 steps fire.
+        while (svc.RefreshCalls.GetValueOrDefault("b") == 0)
         {
             time.Advance(TimeSpan.FromMilliseconds(1000));
             if (svc.RefreshCalls.GetValueOrDefault("b") > 0) break;
