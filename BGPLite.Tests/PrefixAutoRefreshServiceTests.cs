@@ -72,6 +72,23 @@ public class PrefixAutoRefreshServiceTests
     }
 
     /// <summary>
+    /// #507: wait for an OBSERVABLE condition instead of a fixed real-time sleep. The old
+    /// <c>Task.Delay(50)</c> after each clock advance raced the refresh loop's continuation —
+    /// on a loaded runner 50 ms is not always enough for the loop to observe the tick, so the
+    /// assertion counted 0 polls. Condition-polling with a generous deadline is deterministic.
+    /// </summary>
+    private static async Task WaitForAsync(Func<bool> condition, string what, int timeoutMilliseconds = 30_000)
+    {
+        var deadline = Environment.TickCount64 + timeoutMilliseconds;
+        while (!condition())
+        {
+            if (Environment.TickCount64 > deadline)
+                Assert.Fail($"timed out after {timeoutMilliseconds} ms waiting for: {what}");
+            await Task.Delay(5);
+        }
+    }
+
+    /// <summary>
     /// #214: a source supporting conditional requests is polled at IntervalSeconds; a source without
     /// ETag support (asn) is polled at the longer NoEtagIntervalSeconds. On a timer tick that falls
     /// between the two intervals, only the conditional source is re-polled.
@@ -96,13 +113,13 @@ public class PrefixAutoRefreshServiceTests
 
         // Tick 1 (t=60s): both sources due (first check) → 1 call each.
         time.Advance(TimeSpan.FromSeconds(60));
-        await Task.Delay(50); // let the loop observe the tick
+        await WaitForAsync(() => svc.RefreshCalls.GetValueOrDefault("asn-src") >= 1, "tick 1: both sources polled");
         Assert.Equal(1, svc.RefreshCalls.GetValueOrDefault("http-src"));
         Assert.Equal(1, svc.RefreshCalls.GetValueOrDefault("asn-src"));
 
         // Tick 2 (t=120s): http-src due again (interval=60s), asn-src NOT due (next at 60+600=660s).
         time.Advance(TimeSpan.FromSeconds(60));
-        await Task.Delay(50);
+        await WaitForAsync(() => svc.RefreshCalls.GetValueOrDefault("http-src") >= 2, "tick 2: http-src re-polled");
         Assert.Equal(2, svc.RefreshCalls.GetValueOrDefault("http-src"));
         Assert.Equal(1, svc.RefreshCalls.GetValueOrDefault("asn-src"));
 
@@ -134,14 +151,29 @@ public class PrefixAutoRefreshServiceTests
         // Tick 1 (t=60s): first source checked immediately (no jitter on the very first check), then
         // the second is delayed by jitter (0..5000ms). Advance the clock to release the jittered delay.
         time.Advance(TimeSpan.FromSeconds(60));
-        await Task.Delay(50); // let the loop start the tick
-        // Only 'a' (first source, no jitter) has been polled so far; 'b' is waiting on the jitter delay.
+        // Wait until 'a' (first source, no jitter) has been polled — the loop is then mid-tick,
+        // deterministically before 'b' whose jitter delay is FakeTimeProvider-driven and can only
+        // be released by the Advance below.
+        await WaitForAsync(() => svc.RefreshCalls.GetValueOrDefault("a") >= 1, "tick: first source polled");
         Assert.Equal(1, svc.RefreshCalls.GetValueOrDefault("a"));
         Assert.Equal(0, svc.RefreshCalls.GetValueOrDefault("b"));
 
-        // Advance past the jitter window (Random(0).Next(0, 5001) is deterministic = some value ≤5000ms).
-        time.Advance(TimeSpan.FromMilliseconds(5000));
-        await Task.Delay(50);
+        // Advance past the jitter window. #507: the delay for 'b' may not be SCHEDULED on the fake
+        // clock yet when 'a' is observed — the loop thread can be preempted between polling 'a'
+        // and registering the delay, and a batch of advances landing before the schedule point
+        // would leave the delay in the future with nobody to release it (the CI flake shape).
+        // Therefore interleave: each 1 s step yields REAL time (20 ms) so a preempted loop can
+        // register the delay, and the NEXT step releases it. Jitter ∈ [0, 5000] ms (Random(0) →
+        // 3631), so once registered ≤5 steps suffice; the 55-step cap (~1.1 s of real yield)
+        // tolerates heavy scheduling pressure while never crossing tick 2 at 120 s — counts stay
+        // exactly 1/1.
+        for (var i = 0; i < 55 && svc.RefreshCalls.GetValueOrDefault("b") == 0; i++)
+        {
+            time.Advance(TimeSpan.FromMilliseconds(1000));
+            if (svc.RefreshCalls.GetValueOrDefault("b") > 0) break;
+            await Task.Delay(20);
+        }
+        await WaitForAsync(() => svc.RefreshCalls.GetValueOrDefault("b") >= 1, "jitter released: second source polled");
         // Now 'b' has been polled too.
         Assert.Equal(1, svc.RefreshCalls.GetValueOrDefault("b"));
 
@@ -161,9 +193,9 @@ public class PrefixAutoRefreshServiceTests
 
         await service.StartAsync(CancellationToken.None);
 
-        // Advancing the clock must NOT trigger any refresh (service disabled).
+        // Advancing the clock must NOT trigger any refresh (service disabled — StartAsync
+        // created no loop, so there is nothing to synchronize with; assert immediately).
         time.Advance(TimeSpan.FromHours(1));
-        await Task.Delay(50);
         Assert.Empty(svc.RefreshCalls);
         Assert.Equal(0, sessions.RefreshAllCalls);
 
@@ -186,7 +218,7 @@ public class PrefixAutoRefreshServiceTests
         await service.StartAsync(CancellationToken.None);
 
         time.Advance(TimeSpan.FromSeconds(60));
-        await Task.Delay(50);
+        await WaitForAsync(() => sessions.RefreshAllCalls >= 1, "changed source: peer refresh pushed");
 
         Assert.Equal(1, sessions.RefreshAllCalls);
 
@@ -217,7 +249,7 @@ public class PrefixAutoRefreshServiceTests
         await service.StartAsync(CancellationToken.None);
 
         time.Advance(TimeSpan.FromSeconds(60));
-        await Task.Delay(50);
+        await WaitForAsync(() => sessions.RefreshAllCalls >= 1, "changed sources: aggregated peer refresh pushed");
 
         // All 3 sources changed, but exactly ONE aggregated peer refresh (not 3+1).
         Assert.Equal(1, sessions.RefreshAllCalls);
