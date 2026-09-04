@@ -147,7 +147,21 @@ public class RefreshDebounceTests
         using var serverSock = server;
         using var sessionH = session;
 
-        var baseline = store.LoadCalls; // initial dump already ran during establishment
+        // #507: EstablishAsync waits for the Established STATE, not for the initial dump to
+        // finish — and the dump (RouteAssembler → LoadPeerRoutingViewAsync) can still be in
+        // flight here. Under runner load its Load then lands INSIDE the armed gate below,
+        // masquerading as the refresh cycle's load: the "4 callers returned" condition was
+        // satisfied with the winner parked on _advertisedPrefixesLock (held by the dump), and
+        // the final total came out 3 (dump + cycle + lap). Drain the dump deterministically:
+        // a probe refresh can only acquire the dump's lock after the dump released it, so a
+        // completed probe proves the dump is done and `baseline` is stable.
+        var probe = session.RefreshRoutesAsync();
+        await WaitForAsync(
+            () => Volatile.Read(ref store.LoadCalls) >= 1,
+            () => $"probe load={Volatile.Read(ref store.LoadCalls)} (want 1)");
+        await probe.WaitAsync(TimeSpan.FromSeconds(10));
+
+        var baseline = store.LoadCalls; // initial dump AND probe drained — nothing else calls Load
         store.Armed = true;
 
         try

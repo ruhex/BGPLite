@@ -25,13 +25,14 @@ public class PrefixAutoRefreshServiceTests
     {
 
         public event Action<string>? ContentCommitted;
-        public Dictionary<string, int> RefreshCalls { get; } = new();
+        // #511 review: the service loop writes while the test thread reads — concurrent access.
+        public System.Collections.Concurrent.ConcurrentDictionary<string, int> RefreshCalls { get; } = new();
         public Dictionary<string, bool> Conditional { get; } = new();
         public bool ReportChanged { get; set; }
 
         public Task<bool> RefreshAsync(string sourceName, CancellationToken ct = default)
         {
-            RefreshCalls[sourceName] = RefreshCalls.TryGetValue(sourceName, out var c) ? c + 1 : 1;
+            RefreshCalls.AddOrUpdate(sourceName, 1, (_, c) => c + 1);
             return Task.FromResult(ReportChanged);
         }
 
@@ -49,11 +50,13 @@ public class PrefixAutoRefreshServiceTests
     /// <summary>A no-op ISessionManager that records RefreshAllEstablishedAsync invocations.</summary>
     private sealed class RecordingSessionManager : ISessionManager
     {
-        public int RefreshAllCalls;
+        // #511 review: incremented on the service loop, read on the test thread — atomic access.
+        private int _refreshAllCalls;
+        public int RefreshAllCalls => Volatile.Read(ref _refreshAllCalls);
         public Task RefreshPeerAsync(string peerIp, uint asn) => Task.CompletedTask;
         public List<string> GetActivePeerIps() => [];
         public int GetAdvertisedPrefixCount(string peerIp, uint asn) => 0;
-        public Task RefreshAllEstablishedAsync() { RefreshAllCalls++; return Task.CompletedTask; }
+        public Task RefreshAllEstablishedAsync() { Interlocked.Increment(ref _refreshAllCalls); return Task.CompletedTask; }
         public Task TerminatePeerAsync(string peerIp, uint asn, CancellationToken ct = default) => Task.CompletedTask;
         public Task TerminatePeerByIpAsync(string peerIp, CancellationToken ct = default) => Task.CompletedTask;
         public void SetPeerMd5Key(string peerIp, string? password) { }
@@ -69,6 +72,23 @@ public class PrefixAutoRefreshServiceTests
                 $"\n  NoEtagIntervalSeconds: {autoRefresh.NoEtagIntervalSeconds}" +
                 $"\n  MaxJitterMs: {autoRefresh.MaxJitterMs}\n";
         return ConfigLoader.LoadFromText(yaml);
+    }
+
+    /// <summary>
+    /// #507: wait for an OBSERVABLE condition instead of a fixed real-time sleep. The old
+    /// <c>Task.Delay(50)</c> after each clock advance raced the refresh loop's continuation —
+    /// on a loaded runner 50 ms is not always enough for the loop to observe the tick, so the
+    /// assertion counted 0 polls. Condition-polling with a generous deadline is deterministic.
+    /// </summary>
+    private static async Task WaitForAsync(Func<bool> condition, string what, int timeoutMilliseconds = 30_000)
+    {
+        var deadline = Environment.TickCount64 + timeoutMilliseconds;
+        while (!condition())
+        {
+            if (Environment.TickCount64 > deadline)
+                Assert.Fail($"timed out after {timeoutMilliseconds} ms waiting for: {what}");
+            await Task.Delay(5);
+        }
     }
 
     /// <summary>
@@ -96,13 +116,13 @@ public class PrefixAutoRefreshServiceTests
 
         // Tick 1 (t=60s): both sources due (first check) → 1 call each.
         time.Advance(TimeSpan.FromSeconds(60));
-        await Task.Delay(50); // let the loop observe the tick
+        await WaitForAsync(() => svc.RefreshCalls.GetValueOrDefault("asn-src") >= 1, "tick 1: both sources polled");
         Assert.Equal(1, svc.RefreshCalls.GetValueOrDefault("http-src"));
         Assert.Equal(1, svc.RefreshCalls.GetValueOrDefault("asn-src"));
 
         // Tick 2 (t=120s): http-src due again (interval=60s), asn-src NOT due (next at 60+600=660s).
         time.Advance(TimeSpan.FromSeconds(60));
-        await Task.Delay(50);
+        await WaitForAsync(() => svc.RefreshCalls.GetValueOrDefault("http-src") >= 2, "tick 2: http-src re-polled");
         Assert.Equal(2, svc.RefreshCalls.GetValueOrDefault("http-src"));
         Assert.Equal(1, svc.RefreshCalls.GetValueOrDefault("asn-src"));
 
@@ -123,25 +143,43 @@ public class PrefixAutoRefreshServiceTests
             Conditional = { ["a"] = true, ["b"] = true }
         };
         var sessions = new RecordingSessionManager();
+        // #511 review: the tick period is 600 s (not 60) so the advance-until-fired loop below has
+        // no tick-2 ceiling — it may step as long as scheduling pressure requires without a second
+        // tick ever changing the counts.
         var config = ConfigWith(
-            new AutoRefreshConfig { Enabled = true, IntervalSeconds = 60, NoEtagIntervalSeconds = 60, MaxJitterMs = 5000 },
+            new AutoRefreshConfig { Enabled = true, IntervalSeconds = 600, NoEtagIntervalSeconds = 600, MaxJitterMs = 5000 },
             ("a", "http"), ("b", "http"));
         using var service = new PrefixAutoRefreshService(svc, sessions, config,
             NullLogger<PrefixAutoRefreshService>.Instance, time, new Random(0));
 
         await service.StartAsync(CancellationToken.None);
 
-        // Tick 1 (t=60s): first source checked immediately (no jitter on the very first check), then
+        // Tick 1 (t=600s): first source checked immediately (no jitter on the very first check), then
         // the second is delayed by jitter (0..5000ms). Advance the clock to release the jittered delay.
-        time.Advance(TimeSpan.FromSeconds(60));
-        await Task.Delay(50); // let the loop start the tick
-        // Only 'a' (first source, no jitter) has been polled so far; 'b' is waiting on the jitter delay.
+        time.Advance(TimeSpan.FromSeconds(600));
+        // Wait until 'a' (first source, no jitter) has been polled — the loop is then mid-tick,
+        // deterministically before 'b' whose jitter delay is FakeTimeProvider-driven and can only
+        // be released by the Advance below.
+        await WaitForAsync(() => svc.RefreshCalls.GetValueOrDefault("a") >= 1, "tick: first source polled");
         Assert.Equal(1, svc.RefreshCalls.GetValueOrDefault("a"));
         Assert.Equal(0, svc.RefreshCalls.GetValueOrDefault("b"));
 
-        // Advance past the jitter window (Random(0).Next(0, 5001) is deterministic = some value ≤5000ms).
-        time.Advance(TimeSpan.FromMilliseconds(5000));
-        await Task.Delay(50);
+        // Advance past the jitter window. #507: the delay for 'b' may not be SCHEDULED on the fake
+        // clock yet when 'a' is observed — the loop thread can be preempted between polling 'a'
+        // and registering the delay, and a batch of advances landing before the schedule point
+        // would leave the delay in the future with nobody to release it (the CI flake shape).
+        // Therefore KEEP ADVANCING until 'b' fires: every 1 s step yields real time (20 ms) so a
+        // preempted loop can register the delay, and the NEXT step releases it. With the 600 s
+        // period, 500 steps (fake +500 s) can never reach tick 2 — the loop is bounded only by
+        // its own goal, so any scheduling latency is tolerated. Jitter ∈ [0, 5000] ms (Random(0)
+        // → 3631), so in practice ≤5 steps fire.
+        while (svc.RefreshCalls.GetValueOrDefault("b") == 0)
+        {
+            time.Advance(TimeSpan.FromMilliseconds(1000));
+            if (svc.RefreshCalls.GetValueOrDefault("b") > 0) break;
+            await Task.Delay(20);
+        }
+        await WaitForAsync(() => svc.RefreshCalls.GetValueOrDefault("b") >= 1, "jitter released: second source polled");
         // Now 'b' has been polled too.
         Assert.Equal(1, svc.RefreshCalls.GetValueOrDefault("b"));
 
@@ -161,9 +199,9 @@ public class PrefixAutoRefreshServiceTests
 
         await service.StartAsync(CancellationToken.None);
 
-        // Advancing the clock must NOT trigger any refresh (service disabled).
+        // Advancing the clock must NOT trigger any refresh (service disabled — StartAsync
+        // created no loop, so there is nothing to synchronize with; assert immediately).
         time.Advance(TimeSpan.FromHours(1));
-        await Task.Delay(50);
         Assert.Empty(svc.RefreshCalls);
         Assert.Equal(0, sessions.RefreshAllCalls);
 
@@ -186,7 +224,7 @@ public class PrefixAutoRefreshServiceTests
         await service.StartAsync(CancellationToken.None);
 
         time.Advance(TimeSpan.FromSeconds(60));
-        await Task.Delay(50);
+        await WaitForAsync(() => sessions.RefreshAllCalls >= 1, "changed source: peer refresh pushed");
 
         Assert.Equal(1, sessions.RefreshAllCalls);
 
@@ -217,7 +255,7 @@ public class PrefixAutoRefreshServiceTests
         await service.StartAsync(CancellationToken.None);
 
         time.Advance(TimeSpan.FromSeconds(60));
-        await Task.Delay(50);
+        await WaitForAsync(() => sessions.RefreshAllCalls >= 1, "changed sources: aggregated peer refresh pushed");
 
         // All 3 sources changed, but exactly ONE aggregated peer refresh (not 3+1).
         Assert.Equal(1, sessions.RefreshAllCalls);

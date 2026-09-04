@@ -71,7 +71,9 @@ public static class BgpConstants
         public const byte CeaseMaxPrefixes = 1;
         public const byte CeaseAdministrativeShutdown = 2;
         public const byte CeasePeerDeconfigured = 3;
-        public const byte CeaseAdministrativeReset = 6;
+        // #506: RFC 4486 §3 assigns 4 to "Administrative Reset" (6 is "Other Configuration
+        // Change") — the constant was 6, mislabeling every graceful reset on the wire.
+        public const byte CeaseAdministrativeReset = 4;
         public const byte CeaseConnectionRejected = 7;
     }
 

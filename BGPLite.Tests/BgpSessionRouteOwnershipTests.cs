@@ -743,6 +743,52 @@ public class BgpSessionRouteOwnershipTests
         Assert.Equal(0, routeTable.Count);                  // owned routes flushed by the finally
     }
 
+    /// <summary>
+    /// #505: the SAME cap-reset as <see cref="ExceedingMaxPrefixes_SendsCeaseMaxPrefixes_AndFlushesOwned"/>
+    /// but on a HoldTime &gt; 0 session — the read loop runs behind <c>Task.WhenAny</c>, and
+    /// <c>AwaitLoopTaskAsync</c>'s generic catch swallowed the cap's BgpNotificationException
+    /// (it only rethrew BgpParseException), so RunAsync's finally sent a bare Cease 6/0 and the
+    /// RFC 4486 §2 subcode never reached the peer. The rethrow restores the carried subcode here.
+    /// </summary>
+    [Fact]
+    public async Task ExceedingMaxPrefixes_WithHoldTimer_StillCarriesSubcode1()
+    {
+        var routeTable = new RouteTable();
+        var conn = new ScriptedConnection();
+        var config = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1", HoldTime = 30, KeepAlive = 10, MaxPrefixesPerPeer = 2 };
+        var session = new BgpSession(
+            conn, new PeerConfig { Address = "127.0.0.1" }, config, routeTable,
+            AllowAllFilter.Instance, new BgpMetrics(), NullLogger<BgpSession>.Instance);
+        var run = session.RunAsync();
+        conn.EnqueueMessage(new BgpOpenMessage
+        {
+            Version = BgpConstants.BgpVersion,
+            Asn = 65002,
+            HoldTime = 30,
+            RouterId = 0x0A000002,
+            Capabilities = [BgpCapabilityInfo.FourOctetAsn(65002)],
+        });
+        conn.EnqueueMessage(BgpKeepaliveMessage.Instance);
+        for (var i = 0; i < 200 && !session.IsEstablished; i++)
+            await Task.Delay(TimeSpan.FromMilliseconds(10));
+        Assert.True(session.IsEstablished, "session must reach Established");
+
+        conn.EnqueueFrame(AnnounceFrame(8, 0x0A));                  // 1/2
+        conn.EnqueueFrame(AnnounceFrame(24, 0xC0, 0x00, 0x02));     // 2/2
+        conn.EnqueueFrame(AnnounceFrame(16, 0xC0, 0x01));           // 3rd distinct prefix — over
+        await run.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.False(session.IsEstablished);
+
+        var ceases = conn.Sent
+            .Select(b => BgpMessageReader.ReadMessage(b.AsSpan()))
+            .OfType<BgpNotificationMessage>()
+            .Where(n => n.ErrorCode == BgpConstants.Error.Cease)
+            .ToList();
+        var maxPrefixes = Assert.Single(ceases);                    // exactly one Cease on the wire
+        Assert.Equal(BgpConstants.SubError.CeaseMaxPrefixes, maxPrefixes.SubErrorCode);   // RED pre-fix: 0 (Unspecific)
+        Assert.Equal(0, routeTable.Count);                          // flush still happens
+    }
+
     /// <summary>#391: waits for the route table to reach the expected size. Generous timeout:
     /// a cold-JIT first run can take longer than SettleAsync's 2 s window to get from
     /// Established through the establish dump to a started read loop.</summary>
