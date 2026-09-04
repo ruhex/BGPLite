@@ -768,4 +768,53 @@ public class BgpSessionShutdownTests
         Assert.True(sw.Elapsed < TimeSpan.FromSeconds(2),
             $"RefreshRoutesAsync with a cancelled token took {sw.ElapsedMilliseconds}ms — token not honored");
     }
+
+    /// <summary>Captures log events so a test can assert what must never surface at ERROR (#482).</summary>
+    private sealed class RecordingLogger : ILogger<BgpSession>
+    {
+        public List<(LogLevel Level, string Message)> Events { get; } = [];
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+        public bool IsEnabled(LogLevel logLevel) => true;
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
+            => Events.Add((logLevel, formatter(state, exception)));
+    }
+
+    [Fact]
+    public async Task ExternalDisposeDuringEstablished_TearsDownQuietly_NoErrorLog()
+    {
+        // #482: an external Dispose (the API peer-deletion shape) racing the session task's
+        // Task.WhenAny unwind could make CancelAsync throw ObjectDisposedException, which surfaced
+        // as an ERROR-logged "Session error" on a routine teardown and skipped the loop drains.
+        // The ODE window itself is scheduling-dependent (the WhenAny continuation may run inline
+        // inside Cancel() before Dispose reaches _cts.Dispose()), so this test pins the whole
+        // path instead: dispose during Established must complete RunAsync with zero ERROR events.
+        var logger = new RecordingLogger();
+        var conn = new ScriptedConnection();
+        var session = new BgpSession(
+            conn,
+            new PeerConfig { Address = "127.0.0.1" },
+            new BgpConfig { Asn = 65001, RouterId = "127.0.0.1", HoldTime = 30, KeepAlive = 10 },
+            new RouteTable(),
+            AllowAllFilter.Instance,
+            new BgpMetrics(),
+            logger);
+        var run = session.RunAsync();
+        conn.EnqueueMessage(new BgpOpenMessage
+        {
+            Version = BgpConstants.BgpVersion,
+            Asn = 65002,
+            HoldTime = 30,
+            RouterId = 0x0A000002,
+            Capabilities = []
+        });
+        conn.EnqueueMessage(BgpKeepaliveMessage.Instance);
+        for (var i = 0; i < 200 && !session.IsEstablished; i++)
+            await Task.Delay(TimeSpan.FromMilliseconds(10));
+        Assert.True(session.IsEstablished, "session must reach Established");
+
+        session.Dispose();
+        await run.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.DoesNotContain(logger.Events, e => e.Level == LogLevel.Error);
+    }
 }

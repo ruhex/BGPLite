@@ -288,6 +288,47 @@ public class MpAttributeErrorPolicyTests
     }
 
     [Fact]
+    public async Task TreatAsWithdraw_AppliesTheSameUpdatesMpUnreach()
+    {
+        // #484 (RFC 7606 §2): an UPDATE is treated as withdrawn AS A WHOLE. The classic WITHDRAWN
+        // half is applied before the attribute parse and survives a parse failure; the
+        // MP_UNREACH_NLRI half of the same message must not be lost to that failure — pre-fix it
+        // was skipped (its block runs after the announcement block, which the failure unwinds),
+        // leaving a stale IPv6 route alive until session teardown.
+        var routeTable = new RouteTable();
+        var (session, run, conn) = await EstablishAsync(routeTable);
+
+        // Install one IPv6 route via a valid MP_REACH announcement.
+        conn.EnqueueFrame(UpdateFrame(
+            OriginAsPathAttributes,
+            MpReachAttribute(MpOptionalNonTransitive, ReachValue(GlobalNextHop, 32, 0x20, 0x01, 0x0D, 0xB8))));
+        await SettleAsync(conn, () => routeTable.Count == 1);
+        Assert.NotNull(routeTable.Get(DocumentedPrefix, 32, isIpv4: false));
+
+        // An UPDATE with classic NLRI + a malformed ORIGIN (length 2 — Attribute Length Error →
+        // treat-as-withdraw) whose MP_UNREACH withdraws exactly that v6 prefix. The NLRI is what
+        // drives the announcement block into the failing parse — without it the whole block is
+        // skipped and the bug cannot show.
+        var attrs = new List<byte[]>
+        {
+            new byte[] { 0x40, 0x01, 0x02, 0x00, 0x00 },   // ORIGIN with length 2 — malformed per RFC 7606 §7.1
+            MpUnreachAttribute(MpOptionalNonTransitive, new byte[] { 0x00, 0x02, 0x01, 0x20, 0x20, 0x01, 0x0D, 0xB8 }),
+        };
+        var attrsLen = attrs.Sum(a => a.Length);
+        var payload = new List<byte> { 0x00, 0x00, (byte)(attrsLen >> 8), (byte)attrsLen };
+        foreach (var a in attrs) payload.AddRange(a);
+        payload.Add(24);                       // classic NLRI: 192.0.2.0/24
+        payload.AddRange([0xC0, 0x00, 0x02]);
+        conn.EnqueueFrame(Frame(BgpMessageType.Update, [.. payload]));
+        await SettleAsync(conn, () => routeTable.Count == 0);
+
+        Assert.Null(routeTable.Get(DocumentedPrefix, 32, isIpv4: false));   // RED pre-fix: stale route survived
+        Assert.True(session.IsEstablished, "treat-as-withdraw keeps the session up");
+
+        await TeardownAsync(session, run);
+    }
+
+    [Fact]
     public async Task MalformedMpReachV4_ResetsSession_ScopedFallback()
     {
         // #472 review, IPv4 half: a supported IPv4/Unicast tuple whose value cannot be decoded

@@ -250,7 +250,10 @@ public sealed class PrefixService : IPrefixService
                 projected = prefixes.Select(p => (p.Address, p.Length, p.IsIpv4, 0u)).ToList();
                 changed = loadChanged;
             }
-            catch (OperationCanceledException) { throw; }
+            // #485 (#320/#324 contract): only CALLER cancellation propagates. A foreign-token OCE
+            // (the default source's fetch budget firing on a live ct) is a load FAILURE and takes
+            // the stale-on-failure branch below instead of escaping as "cancellation".
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
             catch (Exception ex)
             {
                 // Stale-on-failure (#163 parity): serve the last good copy regardless of its age so
@@ -324,6 +327,11 @@ public sealed class PrefixService : IPrefixService
                 await GetPrefixesAsync(asn, ct);
                 _logger?.LogInformation("WarmUp: AS{Asn} cached", asn);
             }
+            // #485: host shutdown unwinds the loop, not a WARN per remaining ASN.
+            // #503 review: filter CALLER cancellation — a foreign-token OCE (body deadline on a
+            // cold ASN, escaping RipeStatPrefixCache's no-stale rethrow) is a per-ASN fetch
+            // failure like any other; unfiltered, one cold timeout aborted the whole warm-up.
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
             catch (Exception ex)
             {
                 _logger?.LogWarning(ex, "WarmUp: AS{Asn} failed", asn);

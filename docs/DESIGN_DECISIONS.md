@@ -335,3 +335,40 @@ For section-by-section RFC conformance status, see `RFC_COMPLIANCE.md` (2026-07-
   conditional on the peer's offer (its receiving half has existed since #14).
 - **Tracker:** #466 (echo removed 2026-09-03, receive implemented same day after the
   `compose-integration` finding).
+
+### D25. A zero-length AS_PATH is rejected at the eBGP policy layer (Malformed AS_PATH)
+- **Decision:** an inbound UPDATE whose AS_PATH attribute has a zero-length value is rejected as
+  Malformed AS_PATH (subcode 11, treat-as-withdraw) in `UpdateCodec.ParseRouteAttributes`. The
+  codec (`AttributeHelper.ReadAsPath`/`WriteAsPath`) stays encoding-neutral — a zero-length
+  attribute is the on-wire form of an empty path, and the writer's empty-path roundtrip stands
+  (#248 review). AS4_PATH stays lenient: RFC 6793 leaves an empty one to the merge, which ignores it.
+- **Context:** RFC 4271 §5.1.2 defines a path segment as carrying "one or more AS numbers" and
+  permits an empty path only toward INTERNAL peers (iBGP); BGPLite serves eBGP exclusively, where
+  the sender's own ASN must be present — an empty path is malformed in practice (major
+  implementations reject it), though the RFC does not state it verbatim. #238 settled the
+  empty-SEGMENT case; #486 settled the empty-ATTRIBUTE case.
+- **Consequence:** an UPDATE a maximally lenient implementation might accept is
+  treated-as-withdraw; routes never install with an empty path (which the AS-loop exclusion,
+  RFC 4271 §9.1.2, could never match anyway — D23).
+- **Tracker:** #486.
+
+### D26. Outbound policy under failure — total-source failure fails CLOSED; seed-takeover loss is accepted
+- **Decision (RU fallback):** a CONFIGURED peer whose routes resolve to zero falls back to the RU
+  default list unless EVERY attempted fetch failed (a total failure — RIPEstat outage / network
+  partition). On total failure the fallback is suppressed: the peer keeps an empty set (fail
+  closed) instead of receiving the entire RU table it never asked for. A MIXED build — some sources
+  failed, others resolved (even to empty lists) — is not total and keeps the documented fallback.
+  Implemented via per-build fetch attempt/failure counters in `RouteAssembler` (`#488`, refined by
+  the #503 review).
+- **Decision (seed takeover):** a peer's announcement of a seeded prefix takes over the shared-table
+  entry (D12), and that session's teardown then removes the entry WITHOUT restoring the seed value.
+  Accepted: in the production composition the outbound path reads sources, never the shared table
+  (D13), so only `GET /api/routes` / LPM lose the prefix until restart; the degraded composition is
+  a named error mode of its own. Restoring seeds would require retaining seed data in `RouteTable`
+  — revisit only if the degraded composition ever becomes supported.
+- **Context:** both behaviors were silent policy gaps found by the 2026-09-04 audit (#488); neither
+  corrupted state — one substituted a huge unintended set on failure, the other lost an API-view row.
+- **Consequence:** during a total source outage, subscribed peers keep an empty advertisement (they
+  were withdrawn at refresh start anyway); an unknown subscription name now logs a Warning per build
+  instead of being silently ignored.
+- **Tracker:** #488.

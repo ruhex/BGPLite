@@ -58,6 +58,13 @@ internal sealed class UserSourceCache
     // still inside or queued — otherwise two gates coexist and two loaders race one URL, with the
     // older response able to overwrite the newer (RipeStatPrefixCache's #267-item-3 invariant).
     private readonly ConcurrentDictionary<string, int> _inflight = new();
+    // #478: serializes the COMPOUND bookkeeping over _inflight and _locks — registration,
+    // last-leaver gate removal, and the sweeps' inflight-check-then-remove. Without it the
+    // decrement→zero-check→gate-removal sequence in ExitInflight could interleave with a fresh
+    // registration, pair-removing a gate its loader still held (duplicate concurrent fetch — the
+    // #468 consequence in a nanosecond window). Never held across an await: the gate Wait/Release
+    // stay outside.
+    private readonly object _gateSync = new();
 
     public UserSourceCache(TimeSpan? positiveTtl = null, TimeSpan? negativeTtl = null, ILogger? logger = null, TimeProvider? timeProvider = null, int? maxCacheEntries = null, long? maxTotalPrefixes = null, int? sweepEvery = null)
     {
@@ -102,9 +109,15 @@ internal sealed class UserSourceCache
         // (now-removed) gate instance but not yet registered, parking it on an orphaned
         // semaphore while the next caller minted a second gate. With this order every
         // participant is counted in _inflight before it can touch _locks, so ExitInflight only
-        // ever removes a gate that nobody holds or queues on.
-        _inflight.AddOrUpdate(url, 1, (_, c) => c + 1);
-        var gate = _locks.GetOrAdd(url, _ => new SemaphoreSlim(1, 1));
+        // ever removes a gate that nobody holds or queues on. #478: register+take run as one
+        // atomic section under _gateSync — the counter bump and the gate lookup must not be
+        // split by a concurrent last-leaver removal.
+        SemaphoreSlim gate;
+        lock (_gateSync)
+        {
+            _inflight.AddOrUpdate(url, 1, (_, c) => c + 1);
+            gate = _locks.GetOrAdd(url, _ => new SemaphoreSlim(1, 1));
+        }
         var entered = false;
         try
         {
@@ -172,17 +185,21 @@ internal sealed class UserSourceCache
     /// hygiene). #468: a cancelled waiter no longer removes the gate directly — that pair-
     /// removed the shared instance out from under the still-running first loader, minted a
     /// second gate for the next caller, and raced a newer load against an older snapshot.
-    /// Removal here can only run when nobody holds or queues on the gate: every participant
-    /// registers in <see cref="_inflight"/> BEFORE taking the gate from <see cref="_locks"/>,
-    /// so a non-zero remaining count means someone else is inside or queued and the gate must
-    /// stay. The sweeps keep their own <c>_inflight &gt; 0</c> guards for the entry-backed path.
+    /// #478: the whole sequence runs as one atomic section under <see cref="_gateSync"/>, with
+    /// registration taking the same lock — the previous unlocked decrement→zero-check→gate-
+    /// removal could interleave with a fresh registration landing between the check and the
+    /// pair-removal, deleting a gate its loader still held (duplicate concurrent fetch,
+    /// last-writer-wins on the cache entry).
     /// </summary>
     private void ExitInflight(string url, SemaphoreSlim gate)
     {
-        var remaining = _inflight.AddOrUpdate(url, 0, (_, c) => c - 1);
-        if (remaining > 0) return;
-        _inflight.TryRemove(new KeyValuePair<string, int>(url, 0));
-        ((ICollection<KeyValuePair<string, SemaphoreSlim>>)_locks).Remove(new KeyValuePair<string, SemaphoreSlim>(url, gate));
+        lock (_gateSync)
+        {
+            var remaining = _inflight.AddOrUpdate(url, 0, (_, c) => c - 1);
+            if (remaining > 0) return;
+            _inflight.TryRemove(new KeyValuePair<string, int>(url, 0));
+            ((ICollection<KeyValuePair<string, SemaphoreSlim>>)_locks).Remove(new KeyValuePair<string, SemaphoreSlim>(url, gate));
+        }
     }
 
     /// <summary>
@@ -199,7 +216,9 @@ internal sealed class UserSourceCache
         if (_cache.ContainsKey(insertingUrl)) return; // already present, no insert coming
 
         var now = _timeProvider.GetUtcNow().UtcDateTime;
-        var toEvict = new List<string>();
+        // #487: HashSet — the Contains in the oldest-selection loop below made eviction O(n²) at
+        // the 1024-entry cap.
+        var toEvict = new HashSet<string>();
         foreach (var (key, entry) in _cache)
         {
             var ttl = entry.Negative ? _negativeTtl : _positiveTtl;
@@ -223,9 +242,14 @@ internal sealed class UserSourceCache
         foreach (var key in toEvict)
         {
             // #450 review: a URL with active loaders keeps its gate (see SweepIfNeeded).
-            if (_inflight.TryGetValue(key, out var active) && active > 0) continue;
-            if (_cache.TryRemove(key, out _))
-                _locks.TryRemove(key, out _);
+            // #478: inflight-check and gate removal run under _gateSync so a loader registering
+            // between the check and the removal cannot lose its gate to the eviction.
+            lock (_gateSync)
+            {
+                if (_inflight.TryGetValue(key, out var active) && active > 0) continue;
+                if (_cache.TryRemove(key, out _))
+                    _locks.TryRemove(key, out _);
+            }
         }
     }
 
@@ -258,7 +282,7 @@ internal sealed class UserSourceCache
         Volatile.Write(ref _callsSinceSweep, 0);
 
         var now = _timeProvider.GetUtcNow().UtcDateTime;
-        var toEvict = new List<string>();
+        var toEvict = new HashSet<string>();   // #487: O(1) Contains for the budget loop below
         long total = 0;
         foreach (var (key, entry) in _cache)
         {
@@ -285,9 +309,13 @@ internal sealed class UserSourceCache
         {
             // #450 review: a URL with active loaders keeps its gate (its loader writes the entry
             // on its own reference) — removing the gate would mint a duplicate concurrent fetch.
-            if (_inflight.TryGetValue(key, out var active) && active > 0) continue;
-            if (_cache.TryRemove(key, out _))
-                _locks.TryRemove(key, out _);
+            // #478: same _gateSync atomicity as EvictIfAtCapacity's removal loop.
+            lock (_gateSync)
+            {
+                if (_inflight.TryGetValue(key, out var active) && active > 0) continue;
+                if (_cache.TryRemove(key, out _))
+                    _locks.TryRemove(key, out _);
+            }
         }
     }
 }

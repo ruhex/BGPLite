@@ -95,6 +95,13 @@ public sealed class RouteAssembler : IRouteAssembler
 
             _logger.LogInformation("Peer {Peer} subscriptions: [{Subs}]", peerLabel, string.Join(", ", subscriptionIds));
 
+            // #488 (D26): fetch outcome counters — the RU fallback below is suppressed only on a
+            // TOTAL failure (every attempted fetch failed). A mixed build (one source failed,
+            // another resolved — even to an empty list) is not total: the fallback keeps the
+            // documented "configured peer resolved 0 prefixes" behavior.
+            var fetchAttempts = 0;
+            var fetchFailures = 0;
+
             var subscribedLists = _appConfig.RipeStat?.AsnLists
                 .Where(l => subscriptionIds.Contains(l.Name))
                 .ToList() ?? [];
@@ -110,6 +117,7 @@ public sealed class RouteAssembler : IRouteAssembler
                 var before = routes.Count;
                 foreach (var list in asnLists)
                 {
+                    fetchAttempts++;
                     try
                     {
                         var comms = _communityResolver.Resolve(
@@ -124,6 +132,7 @@ public sealed class RouteAssembler : IRouteAssembler
                     catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }  // #114/#330
                     catch (Exception ex)
                     {
+                        fetchFailures++;   // #488
                         _logger.LogError(ex, "Failed to fetch prefixes for {Peer} (list '{List}')", peerLabel, list.Name);
                     }
                 }
@@ -135,6 +144,7 @@ public sealed class RouteAssembler : IRouteAssembler
             var countryLists = subscribedLists.Where(l => l.Asns.Count == 0 && l.Country is not null).ToList();
             if (countryLists.Count > 0)
             {
+                fetchAttempts++;
                 try
                 {
                     var comms = _communityResolver.Resolve(
@@ -147,18 +157,30 @@ public sealed class RouteAssembler : IRouteAssembler
                 catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }  // #114/#330
                 catch (Exception ex)
                 {
+                    fetchFailures++;   // #488
                     _logger.LogError(ex, "Failed to fetch RU prefixes for {Peer}", peerLabel);
                 }
             }
 
             // Prefix-source subscriptions: subscribed names that match a configured PrefixSource.
             var resolvedAsRipe = subscribedLists.Select(l => l.Name).ToHashSet();
-            var prefixSources = _appConfig.PrefixSources;
+            var prefixSources = _appConfig.PrefixSources ?? []; // #477: YAML null = no sources
             var sourceNames = subscriptionIds
                 .Where(n => !resolvedAsRipe.Contains(n) && prefixSources.Any(s => s.Name == n))
                 .ToList();
+
+            // #488: a subscription matching no AsnLists entry and no PrefixSource is a config
+            // typo — invisible until now (silently ignored on every build). Name it so the row
+            // can be fixed.
+            foreach (var unknown in subscriptionIds.Where(n =>
+                         !resolvedAsRipe.Contains(n) && !prefixSources.Any(s => s.Name == n)))
+                _logger.LogWarning(
+                    "Subscription '{Name}' on {Peer} matches no RipeStat.AsnLists entry and no PrefixSource — ignored (fix the peer's subscription)",
+                    unknown, peerLabel);
+
             foreach (var name in sourceNames)
             {
+                fetchAttempts++;
                 try
                 {
                     var comms = _communityResolver.Resolve(new CommunitySource(CommunitySourceKind.PrefixSource, name));
@@ -171,6 +193,7 @@ public sealed class RouteAssembler : IRouteAssembler
                 catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }  // #114/#330
                 catch (Exception ex)
                 {
+                    fetchFailures++;   // #488
                     _logger.LogError(ex, "Failed to fetch source '{Source}' for {Peer}", name, peerLabel);
                 }
             }
@@ -199,6 +222,7 @@ public sealed class RouteAssembler : IRouteAssembler
             // Add custom AS prefixes. Custom-AS routes carry the static "custom AS" community.
             if (customAsns.Count > 0)
             {
+                fetchAttempts++;
                 try
                 {
                     var customAsnComms = _communityResolver.Resolve(new CommunitySource(CommunitySourceKind.CustomAsn));
@@ -211,6 +235,7 @@ public sealed class RouteAssembler : IRouteAssembler
                 catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }  // #114/#330
                 catch (Exception ex)
                 {
+                    fetchFailures++;   // #488
                     _logger.LogError(ex, "Failed to fetch custom AS prefixes for {Peer}", peerLabel);
                 }
             }
@@ -218,8 +243,10 @@ public sealed class RouteAssembler : IRouteAssembler
             // Per-peer user URL sources (#143/#147): each Active source fetched + community-stamped.
             foreach (var source in peer.UserSources)
             {
-                await AddUserSourceRoutesAsync(
-                    routes, source, nextHop, _prefixService, _communityResolver, _logger, peerLabel, ct);
+                fetchAttempts++;
+                if (!await AddUserSourceRoutesAsync(
+                        routes, source, nextHop, _prefixService, _communityResolver, _logger, peerLabel, ct))
+                    fetchFailures++;
             }
 
             // #220 "suppress more-specifics": a custom prefix is an explicit operator override, so
@@ -237,8 +264,19 @@ public sealed class RouteAssembler : IRouteAssembler
 
             _logger.LogInformation("Sending {Count} total routes to {Peer}", routes.Count, peerLabel);
 
-            // Configured peer resolved 0 prefixes — fall back to RU.
-            if (routes.Count == 0)
+            // Configured peer resolved 0 prefixes — fall back to RU. #488 (D26): suppressed only
+            // on a TOTAL failure — every attempted fetch failed (RIPEstat outage / network
+            // partition). Substituting the full RU dump then would advertise hundreds of thousands
+            // of prefixes the peer never asked for — fail CLOSED: the peer keeps an empty set and
+            // the per-source errors above carry the cause. A MIXED build (some failed, some
+            // resolved to empty) is not total and keeps the documented fallback.
+            if (routes.Count == 0 && fetchAttempts > 0 && fetchFailures == fetchAttempts)
+            {
+                _logger.LogWarning(
+                    "Peer {Peer} resolved 0 prefixes WITH fetch failures — NOT falling back to RU defaults (total-source failure fails closed)",
+                    peerLabel);
+            }
+            else if (routes.Count == 0)
             {
                 _logger.LogInformation("Peer {Peer} resolved 0 prefixes, falling back to RU defaults", peerLabel);
                 try
@@ -378,7 +416,9 @@ public sealed class RouteAssembler : IRouteAssembler
     /// e.g. #320's linked CTS in HttpPrefixProvider) is a fetch failure like any other, so one
     /// slow URL skips its source instead of aborting the whole dump.
     /// </summary>
-    internal static async Task AddUserSourceRoutesAsync(
+    /// <returns><c>true</c> when the source loaded (even to an empty list); <c>false</c> when the
+    /// fetch failed — the #488 fail-closed fallback gate consumes the failure signal.</returns>
+    internal static async Task<bool> AddUserSourceRoutesAsync(
         List<Route> routes, CustomSourceView source, uint nextHop,
         IPrefixService prefixService, ICommunityResolver communityResolver,
         ILogger logger, string peerLabel, CancellationToken ct)
@@ -391,11 +431,13 @@ public sealed class RouteAssembler : IRouteAssembler
             foreach (var p in prefixes)
                 routes.Add(MakeRoute(p.Prefix, p.Length, p.IsIpv4, nextHop, null, comms));
             logger.LogInformation("User-source '{Name}': {Count} prefixes for {Peer}", source.Name, prefixes.Count, peerLabel);
+            return true;
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }  // #114/#342: only CALLER cancellation — a per-source timeout OCE (#320's linked CTS, live ct) must stay a fetch failure below
         catch (Exception ex)
         {
             logger.LogWarning(ex, "User-source '{Name}' failed for {Peer}; skipped", source.Name, peerLabel);
+            return false;
         }
     }
 

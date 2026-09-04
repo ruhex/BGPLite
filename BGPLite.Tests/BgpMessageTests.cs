@@ -654,6 +654,33 @@ public class BgpMessageTests
     }
 
     [Fact]
+    public void AsPath_ZeroLengthAttribute_IsMalformedOnEbgp_PolicyLayer()
+    {
+        // #486 (D25): a zero-length AS_PATH is the on-wire form of an EMPTY path — legal only
+        // toward internal peers (RFC 4271 §5.1.2). BGPLite is eBGP-only, so the inbound policy
+        // layer rejects it as Malformed AS_PATH (treat-as-withdraw); the codec itself stays
+        // encoding-neutral (see AsPath_Empty_RoundtripsAsZeroLengthAttribute).
+        var update = new BgpUpdateMessage
+        {
+            PathAttributes =
+            [
+                new PathAttribute { Flags = BgpConstants.Attribute.FlagTransitive, TypeCode = BgpConstants.Attribute.AsPath, Data = [] },
+                new PathAttribute { Flags = BgpConstants.Attribute.FlagTransitive, TypeCode = BgpConstants.Attribute.Origin, Data = [0] },
+                new PathAttribute { Flags = BgpConstants.Attribute.FlagTransitive, TypeCode = BgpConstants.Attribute.NextHop, Data = [0xC0, 0x00, 0x02, 0x01] }
+            ],
+            Nlri = [new IpPrefix(0xC0000200, 24)]
+        };
+
+        var ex = Assert.Throws<BgpNotificationException>(() =>
+            UpdateCodec.ParseRouteAttributes(update, fourByteAsnSession: false, localRouterId: 0x0A000001));
+        Assert.Equal(BgpConstants.Error.UpdateMessageError, ex.ErrorCode);
+        Assert.Equal(BgpConstants.SubError.MalformedAsPath, ex.SubErrorCode);
+
+        // The codec layer is untouched: the zero-length attribute still decodes (as an empty path).
+        Assert.Empty(AttributeHelper.ReadAsPath(update.PathAttributes[0], fourByteAsn: false));
+    }
+
+    [Fact]
     public void As4Path_WithAsTrans_Throws()
     {
         // AS_TRANS (23456) is the 2-octet placeholder for a non-mappable 4-octet AS — meaningless

@@ -31,8 +31,9 @@ public sealed class BgpSession : IDisposable
     private readonly ILogger<BgpSession> _logger;
     private readonly CancellationTokenSource _cts = new();
     private readonly Func<string, uint, CancellationToken, Task>? _onPeerIdentified;
-    // #15 phase 2: the peer advertised MP-BGP IPv6/Unicast.
-    private bool _peerMpIpv6Unicast;
+    // #15 phase 2: the peer advertised MP-BGP IPv6/Unicast. Written once on the session thread
+    // (ValidateOpenAsync); read cross-thread on the API-refresh/send paths — volatile (#487).
+    private volatile bool _peerMpIpv6Unicast;
     // #467 (RFC 7606 §3(j) "AFI/SAFI disable"): set when an unparseable MP attribute withdraws
     // the family — subsequent MP_REACH/MP_UNREACH payloads from this peer are ignored and its
     // accepted IPv6 routes are gone. Volatile: written on the read loop, read on send paths.
@@ -72,7 +73,10 @@ public sealed class BgpSession : IDisposable
     // StopAsync/replace path), read by the RunAsync finally-block on a different thread.
     private int _teardownReason = (int)TeardownReason.None;
     private int _disposed;
-    private uint _remoteAsn;
+    // Negotiated from the peer's OPEN (OpenNegotiator). Written on the session thread before
+    // Established; read cross-thread by BgpServer's (Ip, Asn) filters and the refresh/send paths
+    // — volatile for guaranteed visibility (#487, matching _peerMpV6Disabled).
+    private volatile uint _remoteAsn;
     private bool _remoteFourByteAsn;
     private bool _remoteRouteRefresh;
     private bool _localFourByteAsn; // derived from negotiated OPEN capability (RFC 6793)
@@ -368,9 +372,31 @@ public sealed class BgpSession : IDisposable
                 openMessage = await ReceiveMessageAsync(linkedCts.Token);
             }
 
+            if (openMessage is BgpNotificationMessage earlyNotification)
+            {
+                // #483 (RFC 4271 §6.3/§4.5, D8): on receiving a NOTIFICATION, release resources and
+                // close — NEVER reply. Previously this fell into the not-OPEN branch below and
+                // answered 2/0, violating the no-reply rule the OpenConfirm and Established arms
+                // follow. Latch RemoteNotification so the finally-block stays silent too.
+                _logger.LogWarning("NotificationReceived from {Peer} before OPEN: {Error}/{SubError}",
+                    _peer, earlyNotification.ErrorCode, earlyNotification.SubErrorCode);
+                Interlocked.CompareExchange(ref _teardownReason, (int)TeardownReason.RemoteNotification, (int)TeardownReason.None);
+                return;
+            }
+
             if (openMessage is not BgpOpenMessage remoteOpen)
             {
-                await SendNotificationAsync(BgpConstants.Error.OpenMessageError, BgpConstants.SubError.Unspecific);
+                // #483 (RFC 4271 §8.2.2, the #427/#453 class): the handshake phase accepts only
+                // OPEN and NOTIFICATION — any other first message is an FSM error, not an OPEN-body
+                // problem (the previous 2/0 misreported "your OPEN body was malformed"). CAS-latch
+                // the teardown before sending, like every other pre-close NOTIFICATION send.
+                _logger.LogWarning("Unexpected message {Type} from {Peer} before OPEN — FSM error (RFC 4271 §8.2.2)",
+                    openMessage.Type, _peer);
+                if (Interlocked.CompareExchange(ref _teardownReason, (int)TeardownReason.LocalCease, (int)TeardownReason.None) == (int)TeardownReason.None)
+                {
+                    try { await SendNotificationAsync(BgpConstants.Error.FiniteStateMachineError, BgpConstants.SubError.Unspecific); }
+                    catch { /* best-effort — partial write counts, see RFC 4271 §8.1 */ }
+                }
                 return;
             }
 
@@ -464,8 +490,15 @@ public sealed class BgpSession : IDisposable
                         _peer, notif.ErrorCode, notif.SubErrorCode, dataHex);
                     return;
                 default:
-                    _logger.LogError("Unexpected message {Type} from {Peer} in OpenConfirm", response.Type, _peer);
-                    await SendNotificationAsync(BgpConstants.Error.FiniteStateMachineError, BgpConstants.SubError.Unspecific);
+                    // #483: CAS-latch before sending (the #453/#427 shape) — the un-latched send
+                    // let a concurrent replacement's SilentClose be answered with a 5/0.
+                    _logger.LogWarning("Unexpected message {Type} from {Peer} in OpenConfirm — FSM error (RFC 4271 §8.2.2)",
+                        response.Type, _peer);
+                    if (Interlocked.CompareExchange(ref _teardownReason, (int)TeardownReason.LocalCease, (int)TeardownReason.None) == (int)TeardownReason.None)
+                    {
+                        try { await SendNotificationAsync(BgpConstants.Error.FiniteStateMachineError, BgpConstants.SubError.Unspecific); }
+                        catch { /* best-effort — partial write counts, see RFC 4271 §8.1 */ }
+                    }
                     return;
             }
 
@@ -478,7 +511,15 @@ public sealed class BgpSession : IDisposable
             // Send initial routes. _sendLock is acquired inside SendMessageAsync for byte-level
             // ordering; _advertisedPrefixesLock guards the list across the initial-send vs. a
             // RefreshRoutesAsync fired from the API the instant IsEstablished became true.
-            await _advertisedPrefixesLock.WaitAsync(linkedCts.Token);
+            // #482: the acquire/release are OCE/ODE-guarded exactly like RefreshCycleAsync's —
+            // an external Dispose during the dump otherwise surfaced as an ERROR-logged
+            // "Session error" (WaitAsync on a disposed semaphore / Release after dispose)
+            // instead of a clean unwind.
+            try
+            {
+                await _advertisedPrefixesLock.WaitAsync(linkedCts.Token);
+            }
+            catch (ObjectDisposedException) { return; } // session disposed mid-dump — nothing to send
             try
             {
                 await SendAllRoutesAsync();
@@ -487,7 +528,12 @@ public sealed class BgpSession : IDisposable
                 if (_bgpConfig.GracefulRestart)
                     await SendEndOfRibAsync();
             }
-            finally { _advertisedPrefixesLock.Release(); }
+            finally
+            {
+                try { _advertisedPrefixesLock.Release(); }
+                catch (ObjectDisposedException) { /* session disposed — fine */ }
+                catch (SemaphoreFullException) { /* double-release guard, shouldn't happen */ }
+            }
 
             // Run main loop: read messages + send keepalives
             await RunEstablishedAsync(linkedCts.Token);
@@ -666,7 +712,7 @@ public sealed class BgpSession : IDisposable
         if (_negotiatedHoldTime == 0)
         {
             await ReadLoopAsync(cancellationToken);
-            await _cts.CancelAsync();
+            await CancelSessionCtsAsync();
             return;
         }
 
@@ -677,10 +723,24 @@ public sealed class BgpSession : IDisposable
         var keepaliveTask = HoldTimerLoopAsync(keepaliveTimer, cancellationToken);
 
         await Task.WhenAny(readTask, keepaliveTask);
-        await _cts.CancelAsync();
+        await CancelSessionCtsAsync();
 
         await AwaitLoopTaskAsync(readTask, "read");
         await AwaitLoopTaskAsync(keepaliveTask, "keepalive");
+    }
+
+    /// <summary>
+    /// #482: an external Dispose (API peer deletion / server shutdown) can complete
+    /// <c>_cts.Cancel()</c> + <c>_cts.Dispose()</c> while this session task is still parked on
+    /// <c>Task.WhenAny</c> — <c>CancelAsync</c> on the disposed CTS then throws ObjectDisposedException,
+    /// which escaped to RunAsync's generic catch as an ERROR-logged "Session error" on a routine
+    /// teardown and skipped the loop-task drains. MarkSilentClose/FaultSession already guard the
+    /// synchronous Cancel the same way; unwinding is the goal either way, so the ODE is swallowed.
+    /// </summary>
+    private async Task CancelSessionCtsAsync()
+    {
+        try { await _cts.CancelAsync(); }
+        catch (ObjectDisposedException) { /* session disposed mid-unwind — nothing left to cancel */ }
     }
 
     private async Task AwaitLoopTaskAsync(Task task, string label)
@@ -1079,6 +1139,9 @@ public sealed class BgpSession : IDisposable
                 // the parse; this closes the asymmetry on the NLRI side.
                 // Same ownership rule as an explicit withdrawal (#289): treat-as-withdraw removes
                 // what this peer installed, not whatever is at that prefix.
+                // #484 (RFC 7606 §2): the MP_UNREACH_NLRI half of the SAME message is applied too —
+                // the classic WITHDRAWN field is honored even when the parse fails (it ran before
+                // the parse), so the MP withdrawal must not be lost to the same failure.
                 foreach (var nlri in update.Nlri)
                     WithdrawIfOwned(nlri, "Route withdrawn (treat-as-withdraw)");
                 if (mpReach is { } failedReach)
@@ -1087,6 +1150,12 @@ public sealed class BgpSession : IDisposable
                 if (mpReachV4 is { } failedReach4)
                     foreach (var p in failedReach4.Prefixes)
                         WithdrawIfOwned(p, "Route withdrawn (treat-as-withdraw, MP_REACH IPv4)");
+                if (update.MpUnreachV6 is { Count: > 0 } failedUnreach)
+                    foreach (var p in failedUnreach)
+                        WithdrawIfOwned(p, "Route withdrawn (treat-as-withdraw, MP_UNREACH)");
+                if (update.MpUnreachV4 is { Count: > 0 } failedUnreach4)
+                    foreach (var p in failedUnreach4)
+                        WithdrawIfOwned(p, "Route withdrawn (treat-as-withdraw, MP_UNREACH IPv4)");
                 _metrics.SetRouteCount(_routeTable.Count);
                 throw;
             }
@@ -1368,6 +1437,14 @@ public sealed class BgpSession : IDisposable
     /// </summary>
     private async Task SendAllRoutesAsync()
     {
+        // #482: _cts.Token throws ObjectDisposedException once Dispose has run — a send cycle that
+        // outlives its session otherwise logs a misleading MaxPrefix/refresh failure (a normal
+        // unwind reads as an ERROR). RefreshRoutesAsync guards the same read; capture the token
+        // once and bail quietly on a disposed session.
+        CancellationToken sessionToken;
+        try { sessionToken = _cts.Token; }
+        catch (ObjectDisposedException) { return; }
+
         // #391: refresh the effective per-peer prefix ceiling once per cycle — the peer row's
         // MaxPrefix override when the peer is configured (operator edits apply on the next
         // refresh), else the global default. Unknown peers (auto-register path) read null here
@@ -1379,7 +1456,7 @@ public sealed class BgpSession : IDisposable
             // until some later successful refresh. Keep the last known cap instead.
             try
             {
-                var overrideCap = await _peerStore.GetPeerMaxPrefixAsync(_peerConfig.Address, _remoteAsn, _cts.Token);
+                var overrideCap = await _peerStore.GetPeerMaxPrefixAsync(_peerConfig.Address, _remoteAsn, sessionToken);
                 Volatile.Write(ref _effectiveMaxPrefix, overrideCap ?? _bgpConfig.MaxPrefixesPerPeer);
             }
             catch (OperationCanceledException) when (_cts.IsCancellationRequested) { throw; }
@@ -1393,7 +1470,7 @@ public sealed class BgpSession : IDisposable
 
         var nextHop = BgpConstants.IPAddressToUint(_bgpConfig.GetRouterIdAddress());
         var routes = await _routeAssembler.BuildOutboundRoutesAsync(
-            _peerConfig.Address, _remoteAsn, GetFilterPeerConfig(), _peer, _cts.Token);
+            _peerConfig.Address, _remoteAsn, GetFilterPeerConfig(), _peer, sessionToken);
         if (routes.Count > 0)
             await SendRoutesAsync(nextHop, routes);
     }
@@ -1555,9 +1632,13 @@ public sealed class BgpSession : IDisposable
                 var comms = existing.Communities.Concat(route.Communities).Distinct().OrderBy(c => c).ToArray();
                 var large = existing.LargeCommunities.Concat(route.LargeCommunities).Distinct().ToArray();
                 // Route is a class (init-only props), not a record — mutate via reassignment.
+                // #476: IsIpv4 must be carried over explicitly — the property defaults to true,
+                // and a merged IPv6 duplicate that lost its family bit landed in the IPv4 batch,
+                // where its >32 length crashed the send (or masked down to a bogus 0.0.0.0/N NLRI).
                 merged[key] = new Route
                 {
                     Prefix = existing.Prefix,
+                    IsIpv4 = existing.IsIpv4,
                     PrefixLength = existing.PrefixLength,
                     NextHop = existing.NextHop,
                     AsPath = existing.AsPath,
@@ -1641,7 +1722,13 @@ public sealed class BgpSession : IDisposable
             return false;
         }
 
-        await SendMessageAsync(update);
+        // #482: a false here means the send was abandoned (session disposed mid-send — the
+        // #341 dispose-wake or a disposed connection), so NOTHING reached the wire: skip the
+        // mirror commit and report unsent, keeping _advertisedPrefixes/_advertisedCount at wire
+        // truth (#212/#457). A truncated-frame abort still throws IOException from the transport
+        // (#285 latch) and never returns false.
+        if (!await SendMessageAsync(update))
+            return false;
         // #430 + #450 review: per-UPDATE mirror commit — SendRouteBatchAsync/SendV6RouteBatchAsync
         // emit one UPDATE per community group, so a group that throws after an earlier group
         // succeeded must not drag the earlier group's mirror entries down (they ARE on the wire)

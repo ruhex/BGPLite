@@ -136,6 +136,15 @@ public class BgpSessionV6AdvertiseTests
         await TeardownAsync(session, run);
     }
 
+    /// <summary>Serves a fixed outbound route list — the seam for driving SendRoutesAsync with
+    /// inputs the shared RouteTable cannot hold (e.g. cross-community duplicates, #476).</summary>
+    private sealed class StubRouteAssembler(List<Route> routes) : IRouteAssembler
+    {
+        public Task<List<Route>> BuildOutboundRoutesAsync(
+            string peerIp, uint remoteAsn, PeerConfig filterPeerConfig, string peerLabel, CancellationToken ct)
+            => Task.FromResult(routes);
+    }
+
     private static int CountUpdates(ScriptedConnection conn) =>
         conn.Sent.Select(f => BgpMessageReader.ReadMessage(f)).OfType<BgpUpdateMessage>().Count();
 
@@ -281,6 +290,55 @@ public class BgpSessionV6AdvertiseTests
         var eor = await SentUpdatesAsync(conn, u => u.MpUnreachV6 is { Count: 0 });
         var mpEor = Assert.Single(eor, u => u.MpUnreachV6 is { Count: 0 });
         Assert.Empty(mpEor.Nlri);
+
+        await TeardownAsync(session, run);
+    }
+
+    [Fact]
+    public async Task DuplicateV6Prefixes_AcrossCommunitySets_MergeKeepsTheFamily()
+    {
+        // #476: two sources can announce the SAME IPv6 prefix with different community sets (the
+        // aggregator keeps them in separate groups); MergeDuplicatePrefixes then unions them. The
+        // merged route must stay IPv6 — before the fix the family bit was lost, the route landed in
+        // the IPv4 batch and its /48 length crashed the send (AOORE → Cease → teardown on every
+        // connect). The union must ride ONE MP_REACH UPDATE carrying both communities.
+        var routes = new List<Route>
+        {
+            new() { Prefix = V6PrefixNet, IsIpv4 = false, PrefixLength = 48, NextHop = V6NextHop, Communities = [200u] },
+            new() { Prefix = V6PrefixNet, IsIpv4 = false, PrefixLength = 48, NextHop = V6NextHop, Communities = [100u] }
+        };
+        var conn = new ScriptedConnection();
+        var session = new BgpSession(
+            conn,
+            new PeerConfig { Address = "127.0.0.1" },
+            Config(),
+            new RouteTable(),
+            AllowAllFilter.Instance,
+            new BgpMetrics(),
+            NullLogger<BgpSession>.Instance,
+            routeAssembler: new StubRouteAssembler(routes));
+        var run = session.RunAsync();
+        conn.EnqueueMessage(new BgpOpenMessage
+        {
+            Version = BgpConstants.BgpVersion,
+            Asn = 65002,
+            HoldTime = 0,
+            RouterId = 0x0A000002,
+            Capabilities = [BgpCapabilityInfo.FourOctetAsn(65002), BgpCapabilityInfo.MultiprotocolIpv6Unicast()]
+        });
+        conn.EnqueueMessage(BgpKeepaliveMessage.Instance);
+        for (var i = 0; i < 200 && !session.IsEstablished; i++)
+            await Task.Delay(TimeSpan.FromMilliseconds(10));
+
+        var updates = await SentUpdatesAsync(conn, u => u.MpReachV6 is not null);
+        var v6Update = Assert.Single(updates, u => u.MpReachV6 is not null);
+        var pfx = Assert.Single(v6Update.MpReachV6!.Value.Prefixes);
+        Assert.False(pfx.IsIpv4, "the merged duplicate must stay IPv6");
+        Assert.Equal((V6PrefixNet, (byte)48), (pfx.Address, pfx.Length));
+        Assert.Empty(v6Update.Nlri); // never a bogus classic-IPv4 NLRI for a v6 prefix
+        var communityAttr = Assert.Single(v6Update.PathAttributes, a => a.TypeCode == BgpConstants.Attribute.Community);
+        Assert.Equal(new[] { 100u, 200u }, AttributeHelper.ReadCommunities(communityAttr));
+        Assert.True(session.IsEstablished, "the duplicate merge must not tear the session down");
 
         await TeardownAsync(session, run);
     }

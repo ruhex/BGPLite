@@ -133,4 +133,42 @@ public class AsnPrefixProviderTests
 
         Assert.Equal(1, cache.TrackedCount);
     }
+
+    /// <summary>Succeeds on the first call, throws a foreign-token OCE (live ct) afterwards —
+    /// the deterministic stand-in for the #324 body deadline firing mid-response (#485).</summary>
+    private sealed class OceAfterFirstHandler : HttpMessageHandler
+    {
+        public int Calls { get; private set; }
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
+        {
+            Calls++;
+            return Calls > 1
+                ? Task.FromException<HttpResponseMessage>(new OperationCanceledException())
+                : Task.FromResult(new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+                {
+                    Content = new StringContent(
+                        """{"status":"ok","data":{"resource":"65010","prefixes":{"v4":{"originating":["10.1.10.1/32"]},"v6":{"originating":[]}}}}""")
+                });
+        }
+    }
+
+    [Fact]
+    public async Task ForeignOceFromRipeStat_IsAFailure_StaleIsServed()
+    {
+        // #485 (#320/#324 contract): a foreign-token OCE (live ct) is a load FAILURE — the
+        // stale-on-failure copy must be served. The unfiltered rethrow escaped the cache instead,
+        // so every retry re-paid the full fetch budget with no backoff ever recorded.
+        var handler = new OceAfterFirstHandler();
+        var cache = new RipeStatPrefixCache(
+            new RipeStatProvider(new StubFactory(handler), NullLogger<RipeStatProvider>.Instance,
+                new RipeStatConfig { RetryAttempts = 0, RetryDelaySeconds = 0 }),
+            cacheTtl: TimeSpan.Zero);   // every call past the first refetches
+
+        var first = await cache.GetPrefixesAsync(65010);
+        Assert.Single(first);
+
+        var second = await cache.GetPrefixesAsync(65010);   // RED pre-fix: OperationCanceledException escapes
+        Assert.Single(second);                              // the stale copy is served as the failure remedy
+        Assert.Equal(2, handler.Calls);
+    }
 }

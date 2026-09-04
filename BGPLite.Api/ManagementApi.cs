@@ -68,6 +68,12 @@ public sealed class ManagementApi : IHostedService, IDisposable
     /// their PARTIAL result with a warning; shutdown still propagates. internal settable for tests.
     /// </summary>
     internal TimeSpan ExternalFetchBudget { get; set; } = TimeSpan.FromSeconds(30);
+
+    // #487: bounds for peer-supplied custom sources — generous ceilings that only reject abuse
+    // (repeated POSTs growing the DB without limit; megabyte-scale names/URLs in logs and rows).
+    internal const int MaxSourceNameLength = 200;
+    internal const int MaxSourceUrlLength = 2048;
+    internal const int MaxSourcesPerPeer = 64;
     // #258: in-flight tracking is a COUNT plus an idle Task (completed whenever the count is 0),
     // not a List<Task> — the #248 design appended every handler and never removed it, so each
     // completed request leaked its Task (and its exception, if faulted) for the process lifetime
@@ -721,7 +727,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
         {
             asn = bgp.Asn,
             routerId = bgp.RouterId,
-            bgpPort = 179,
+            bgpPort = BgpConstants.BgpPort,
             apiPort = _port,
             holdTime = bgp.HoldTime,
             keepalive = bgp.KeepAlive,
@@ -1115,13 +1121,18 @@ public sealed class ManagementApi : IHostedService, IDisposable
 
         await _store.UpdatePeerConfigurationAsync(peerId, data.Description, data.Lists, parsedPrefixes, data.CustomAsns, data.MaxPrefix,
             md5Password: data.Md5Password);
+        // #487: a concurrent DELETE between the top-of-handler GET and this UPDATE left the
+        // ExecuteUpdates touching 0 rows while the handler still logged "Updated peer", answered
+        // 200 and fired a refresh — the follow-up GET then 404ed. Re-check the row and answer 404
+        // directly (the write itself is harmless: transaction-scoped, 0 rows affected).
+        var surviving = await _store.GetDbPeerByIdAsync(peerId);
+        if (surviving is null)
+            return ApiResponse.Error("Peer not found", 404);
         if (data.Md5Password is not null)
         {
             // #418: re-arm from ALL surviving rows for this IP — clearing this peer's key must
             // fall back to a sibling's, not silently disarm the address for every peer on it.
-            var md5Peer = await _store.GetDbPeerByIdAsync(peerId);
-            if (md5Peer is not null)
-                await RearmPeerIpMd5KeyAsync(md5Peer.Ip);
+            await RearmPeerIpMd5KeyAsync(surviving.Ip);
         }
 
         _logger.LogInformation("Updated peer {Id}", SanitizeForLog(peerId));
@@ -1217,6 +1228,16 @@ public sealed class ManagementApi : IHostedService, IDisposable
         if (data is null || string.IsNullOrWhiteSpace(data.Name) || string.IsNullOrWhiteSpace(data.Url))
             return ApiResponse.Error("Name and Url are required", 400);
 
+        // #487: bound the peer-supplied fields and the per-peer source count. The 1 MiB body cap
+        // bounds ONE request; nothing bounded repeated posts, and the DB rows outlive the request.
+        // Generous limits: a longer name/URL is never legitimate, and a peer needs far fewer
+        // sources than the user-source cache's 1024-URL entry cap.
+        if (data.Name.Length > MaxSourceNameLength || data.Url.Length > MaxSourceUrlLength)
+            return ApiResponse.Error(
+                $"Name must be at most {MaxSourceNameLength} characters and Url at most {MaxSourceUrlLength}.", 400);
+        if ((await _store.GetCustomSourcesAsync(peerId)).Count >= MaxSourcesPerPeer)
+            return ApiResponse.Error($"Peer already has the maximum of {MaxSourcesPerPeer} custom sources.", 400);
+
         // #266 item 3: the community is peer-supplied and reaches the wire through
         // CommunityCodec at send time — validate the SAME contract at the API boundary (#255
         // posture). #328 made the codec reject out-of-range halves instead of masking them, so
@@ -1243,21 +1264,29 @@ public sealed class ManagementApi : IHostedService, IDisposable
         // (unlike ASP.NET Core's RequestAborted), so the timeout is purely time-bounded.
         using var validationCts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
         bool isValid;
-        string? validationError;
         try
         {
-            (isValid, validationError) = await PrefixSourceUrlValidator.ValidateUrlAsync(data.Url, ct: validationCts.Token);
+            // #503 review: the validator's reason string embeds the URL and DNS internals —
+            // discarded; the log names the source and the response carries a fixed classification.
+            (isValid, _) = await PrefixSourceUrlValidator.ValidateUrlAsync(data.Url, ct: validationCts.Token);
         }
         catch (OperationCanceledException) when (validationCts.IsCancellationRequested)
         {
-            // DNS-resolution timeout (5s).
-            _logger.LogWarning("Save-time URL validation timed out for '{Url}'", SanitizeForLog(data.Url));
+            // DNS-resolution timeout (5s). #479 (#149): source URLs may carry query-string tokens —
+            // the log names the source, never the URL.
+            _logger.LogWarning("Save-time URL validation timed out for source '{Name}'", SanitizeForLog(data.Name));
             return ApiResponse.Error("URL validation timed out (DNS resolution took too long)", 400);
         }
         if (!isValid)
         {
-            _logger.LogWarning("Save-time URL validation rejected '{Url}': {Error}", SanitizeForLog(data.Url), validationError);
-            return ApiResponse.Error($"Invalid URL: the host could not be reached or is not allowed", 400);
+            // #479 (#149): neither the URL nor the validator's message (which embeds it) belongs in
+            // the log. #503 review (CWE-209): the validator's message ALSO embeds resolved
+            // addresses and raw DNS exception text — classify for the response instead of echoing
+            // server-side resolution internals back to the caller.
+            _logger.LogWarning("Save-time URL validation rejected source '{Name}' for peer {PeerId}",
+                SanitizeForLog(data.Name), SanitizeForLog(peerId));
+            return ApiResponse.Error(
+                "Invalid URL: the scheme must be http/https on port 80/443 and the host must resolve to a reachable public address", 400);
         }
 
         var source = await _store.AddCustomSourceAsync(peerId, data.Name, data.Url, data.Community);
@@ -1266,8 +1295,9 @@ public sealed class ManagementApi : IHostedService, IDisposable
         // same pattern as CreatePeer/UpdatePeer. Pass ASN so shared-IP peers aren't refreshed (#200).
         RequestPeerRefresh(peerId, peer);
 
-        _logger.LogInformation("Added source '{Name}' ({Url}) to peer {PeerId}",
-            SanitizeForLog(data.Name), SanitizeForLog(data.Url), SanitizeForLog(peerId));
+        // #479 (#149): log the source Name, not the URL (query-string tokens are secrets).
+        _logger.LogInformation("Added source '{Name}' to peer {PeerId}",
+            SanitizeForLog(data.Name), SanitizeForLog(peerId));
         return ApiResponse.Ok(new { id = source.Id, name = source.Name, url = source.Url, community = source.Community, active = source.Active });
     }
 
@@ -1439,20 +1469,31 @@ public sealed class ManagementApi : IHostedService, IDisposable
 
         // Append configured PrefixSources (file/http) alongside the legacy RipeStat ASN-lists,
         // reusing the same response shape. "Kind" is intentionally not exposed.
+        // #480: the budget token firing mid-LoadAllAsync surfaces as a foreign-token OCE (live
+        // shutdown token) — without this catch it escaped the handler and closed the connection
+        // without a body, discarding the partial result assembled above. Degrade like the
+        // per-source loops above; the tail warning below reports the budget expiry (both paths).
         var seen = lists.Select(l => l.Name).ToHashSet();
-        foreach (var (source, prefixes) in await _prefixSources.LoadAllAsync(ct))
+        try
         {
-            if (!seen.Add(source.Name)) continue; // skip names already present (e.g. shared "ru")
-            result.Add(new
+            foreach (var (source, prefixes) in await _prefixSources.LoadAllAsync(ct))
             {
-                id = source.Name,
-                Name = source.Name,
-                Description = source.Description,
-                Country = (string?)null,
-                Community = source.Community,
-                prefixCount = prefixes.Count,
-                type = source.Kind == "asn" ? "asn" : "list"
-            });
+                if (!seen.Add(source.Name)) continue; // skip names already present (e.g. shared "ru")
+                result.Add(new
+                {
+                    id = source.Name,
+                    Name = source.Name,
+                    Description = source.Description,
+                    Country = (string?)null,
+                    Community = source.Community,
+                    prefixCount = prefixes.Count,
+                    type = source.Kind == "asn" ? "asn" : "list"
+                });
+            }
+        }
+        catch (OperationCanceledException) when (!_shutdownCts.IsCancellationRequested)
+        {
+            // Budget expiry, not shutdown — serve the partial result (see above).
         }
 
         if (ct.IsCancellationRequested && !_shutdownCts.IsCancellationRequested)
@@ -1712,7 +1753,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
         if (config.RipeStat?.AsnLists is { } lists)
             foreach (var l in lists)
                 known.Add(l.Name);
-        foreach (var source in config.PrefixSources)
+        foreach (var source in config.PrefixSources ?? []) // #477: YAML null = no sources
             known.Add(source.Name);
         return names.Where(n => !known.Contains(n)).Distinct(StringComparer.Ordinal).ToList();
     }

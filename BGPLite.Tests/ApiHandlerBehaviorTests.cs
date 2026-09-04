@@ -8,6 +8,7 @@ using BGPLite.Providers;
 using BGPLite.Routing;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Data.Sqlite;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Xunit;
 using BGPLite.Protocol;
@@ -43,7 +44,7 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
         _connection.Dispose();
     }
 
-    private async Task<int> StartAsync(AppConfig template, ISessionManager? sessions = null)
+    private async Task<int> StartAsync(AppConfig template, ISessionManager? sessions = null, ILogger<ManagementApi>? logger = null, IPrefixSourceService? prefixSources = null)
     {
         for (var attempt = 0; ; attempt++)
         {
@@ -53,6 +54,7 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
                 Bgp = template.Bgp,
                 CorsAllowedOrigins = template.CorsAllowedOrigins,
                 ApiRateLimit = template.ApiRateLimit,
+                RipeStat = template.RipeStat,
                 ApiListen = "127.0.0.1",
                 ApiPort = port,
             };
@@ -61,9 +63,9 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
                 new RouteTable(),
                 config,
                 new BgpMetrics(),
-                NullLogger<ManagementApi>.Instance,
+                logger ?? NullLogger<ManagementApi>.Instance,
                 new InertPrefixService(),
-                new InertPrefixSources(),
+                prefixSources ?? new InertPrefixSources(),
                 sessions ?? new InertSessions());
             try
             {
@@ -333,5 +335,99 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
         public void SetPeerMd5Key(string peerIp, string? password) => Md5Keys.Add((peerIp, password));
         public int GetAdvertisedPrefixCount(string peerIp, uint asn) => 0;
         public Task RefreshAllEstablishedAsync() => Task.CompletedTask;
+    }
+
+    /// <summary>Captures formatted log messages so a test can assert what must NEVER be logged (#479).</summary>
+    private sealed class RecordingLogger : ILogger<ManagementApi>
+    {
+        public List<string> Messages { get; } = [];
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+        public bool IsEnabled(LogLevel logLevel) => true;
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
+            => Messages.Add(formatter(state, exception));
+    }
+
+    [Fact]
+    public async Task AddSource_RejectedUrl_IsNeverLogged()
+    {
+        // #479 (#149): peer-source URLs may carry query-string tokens — the log events around
+        // save-time validation must name the source, never the URL. The loopback host is blocked
+        // by the SSRF validator without any network access, so the rejected path fires offline.
+        var store = new PeerStore(new StaticOptionsFactory(new DbContextOptionsBuilder<BgpDbContext>().UseSqlite(_connection).Options));
+        var id = (await store.SavePeerConfigurationAsync("198.51.100.7", 65090, null, [], [], [])).Id;
+        var logger = new RecordingLogger();
+        _port = await StartAsync(new AppConfig { Bgp = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1" } }, logger: logger);
+        _client = new HttpClient();
+
+        var body = JsonSerializer.Serialize(new { name = "leaky", url = "http://127.0.0.1:9/list?token=SECRET123" });
+        using var response = await _client.PostAsync($"http://127.0.0.1:{_port}/api/peers/{id}/sources",
+            new StringContent(body, Encoding.UTF8, "application/json"));
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);   // the loopback host is rejected
+        Assert.DoesNotContain(logger.Messages, m => m.Contains("SECRET123") || m.Contains("token="));
+    }
+
+    /// <summary>LoadAllAsync throws a foreign-token OCE — the deterministic stand-in for the
+    /// #424 external-fetch budget firing mid-load (live shutdown token, cancelled budget token).</summary>
+    private sealed class BudgetExhaustedSources : IPrefixSourceService
+    {
+        public event Action<string>? ContentCommitted;
+        public Task<IReadOnlyList<(PrefixSourceConfig Source, IReadOnlyList<IpPrefix> Prefixes)>> LoadAllAsync(CancellationToken ct = default)
+            => throw new OperationCanceledException();
+        public Task<IReadOnlyList<IpPrefix>> GetAsync(string name, CancellationToken ct = default) => Task.FromResult<IReadOnlyList<IpPrefix>>([]);
+        public Task<(IReadOnlyList<IpPrefix> Prefixes, bool Changed)> LoadDefaultAsync(CancellationToken ct = default) => Task.FromResult<(IReadOnlyList<IpPrefix>, bool)>(([], false));
+        public Task WarmUpAsync(CancellationToken ct = default) => Task.CompletedTask;
+        public Task<bool> RefreshAsync(string sourceName, CancellationToken ct = default) => Task.FromResult(false);
+        public bool SourceSupportsConditional(string sourceName) => false;
+    }
+
+    [Fact]
+    public async Task AddSource_FieldLimits_And_PerPeerCap_AreEnforced()
+    {
+        // #487: repeated POSTs bounded — name/URL length ceilings and a per-peer source-count cap
+        // (the 1 MiB body cap bounds ONE request; the DB rows outlive it).
+        var store = new PeerStore(new StaticOptionsFactory(new DbContextOptionsBuilder<BgpDbContext>().UseSqlite(_connection).Options));
+        var id = (await store.SavePeerConfigurationAsync("198.51.100.8", 65091, null, [], [], [])).Id;
+        _port = await StartAsync(new AppConfig { Bgp = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1" } });
+        _client = new HttpClient();
+
+        var longName = new string('n', ManagementApi.MaxSourceNameLength + 1);
+        using var badName = await _client.PostAsync($"http://127.0.0.1:{_port}/api/peers/{id}/sources",
+            new StringContent(JsonSerializer.Serialize(new { name = longName, url = "https://example.com/l" }), Encoding.UTF8, "application/json"));
+        Assert.Equal(HttpStatusCode.BadRequest, badName.StatusCode);
+
+        var longUrl = "https://example.com/" + new string('u', ManagementApi.MaxSourceUrlLength);
+        using var badUrl = await _client.PostAsync($"http://127.0.0.1:{_port}/api/peers/{id}/sources",
+            new StringContent(JsonSerializer.Serialize(new { name = "ok", url = longUrl }), Encoding.UTF8, "application/json"));
+        Assert.Equal(HttpStatusCode.BadRequest, badUrl.StatusCode);
+
+        // Seed the per-peer cap directly through the store, then POST one more → 400.
+        for (var i = 0; i < ManagementApi.MaxSourcesPerPeer; i++)
+            await store.AddCustomSourceAsync(id, $"s{i}", $"https://example.com/{i}", null);
+        using var capped = await _client.PostAsync($"http://127.0.0.1:{_port}/api/peers/{id}/sources",
+            new StringContent(JsonSerializer.Serialize(new { name = "one-too-many", url = "https://example.com/x" }), Encoding.UTF8, "application/json"));
+        Assert.Equal(HttpStatusCode.BadRequest, capped.StatusCode);
+    }
+
+    [Fact]
+    public async Task AsnLists_BudgetExpiryMidSources_ServesPartialJson()
+    {
+        // #480: the budget token firing during LoadAllAsync must degrade to the partial response
+        // (the ASN-list entries collected above), not escape the handler and abort the connection
+        // without a body.
+        _port = await StartAsync(
+            new AppConfig
+            {
+                Bgp = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1" },
+                RipeStat = new RipeStatConfig { AsnLists = [new AsnList { Name = "ru", Country = "RU", Community = "65000:100" }] }
+            },
+            prefixSources: new BudgetExhaustedSources());
+        _client = new HttpClient();
+
+        using var response = await _client.GetAsync($"http://127.0.0.1:{_port}/api/asn-lists");
+        var body = await response.Content.ReadAsStringAsync();
+
+        Assert.True(response.IsSuccessStatusCode, $"expected a partial response, got {(int)response.StatusCode}");   // RED pre-fix: the connection was aborted (HttpRequestException)
+        Assert.Contains("\"ru\"", body);   // the ASN-list half of the response survived
     }
 }
