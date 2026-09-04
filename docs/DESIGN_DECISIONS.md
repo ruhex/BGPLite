@@ -354,10 +354,12 @@ For section-by-section RFC conformance status, see `RFC_COMPLIANCE.md` (2026-07-
 
 ### D26. Outbound policy under failure — total-source failure fails CLOSED; seed-takeover loss is accepted
 - **Decision (RU fallback):** a CONFIGURED peer whose routes resolve to zero falls back to the RU
-  default list ONLY when its sources legitimately resolved to nothing. When every configured fetch
-  FAILED (RIPEstat outage / network partition), the fallback is suppressed — the peer keeps an
-  empty set (fail closed) instead of receiving the entire RU table it never asked for.
-  Implemented via a per-build failure flag in `RouteAssembler` (`#488`).
+  default list unless EVERY attempted fetch failed (a total failure — RIPEstat outage / network
+  partition). On total failure the fallback is suppressed: the peer keeps an empty set (fail
+  closed) instead of receiving the entire RU table it never asked for. A MIXED build — some sources
+  failed, others resolved (even to empty lists) — is not total and keeps the documented fallback.
+  Implemented via per-build fetch attempt/failure counters in `RouteAssembler` (`#488`, refined by
+  the #503 review).
 - **Decision (seed takeover):** a peer's announcement of a seeded prefix takes over the shared-table
   entry (D12), and that session's teardown then removes the entry WITHOUT restoring the seed value.
   Accepted: in the production composition the outbound path reads sources, never the shared table
