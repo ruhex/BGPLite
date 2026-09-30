@@ -37,7 +37,9 @@ public interface ISessionManager
     /// <summary>
     /// Sets or clears the TCP-MD5 (RFC 2385) shared key for a peer's source IP. A password
     /// enables enforcement on the listening socket (unsigned segments from that peer are dropped
-    /// by the kernel); null/empty disables it. Passwords are never logged.
+    /// by the kernel); null/empty disables it. Passwords are never logged. Arming is Linux-only:
+    /// passing a non-empty password on any other platform throws
+    /// <see cref="PlatformNotSupportedException"/> instead of silently storing an unverifiable key.
     /// </summary>
     void SetPeerMd5Key(string peerIp, string? password);
 }

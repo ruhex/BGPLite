@@ -173,8 +173,9 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
     public void SetPeerMd5Key(string peerIp, string? password)
     {
         // Opt-in per peer — a password enables RFC 2385 enforcement for the peer's source IP;
-        // clearing it returns the peer to plain TCP. On unsupported platforms this is a logged
-        // no-op (fail-visible: TCP-MD5 is Linux/macOS-only), never a crash.
+        // clearing it returns the peer to plain TCP. A password on a platform WITHOUT TCP-MD5
+        // is a configuration error, not a runtime degradation: fail loud instead of storing a
+        // key nobody will ever verify (the control plane's tcpMd5 flag must mean "armed").
         if (!IPAddress.TryParse(peerIp, out var address))
         {
             _logger.LogWarning("TCP-MD5: ignoring unparseable peer IP '{PeerIp}'", peerIp);
@@ -193,6 +194,11 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
             _logger.LogWarning("TCP-MD5: rejecting a password with an invalid length (must be 1..{Max} UTF-8 bytes)", TcpMd5.PasswordMaxBytes);
             return;
         }
+
+        if (!TcpMd5.IsSupported)
+            throw new PlatformNotSupportedException(
+                $"TCP-MD5 (RFC 2385) cannot be armed on this platform — it is Linux-only. " +
+                $"Remove Md5Password for peer {peerIp} or run the server on Linux.");
 
         var key = TcpMd5.KeyBytes(password);
         _md5Keys[address] = key;
@@ -214,7 +220,7 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
         catch (Exception ex)
         {
             _logger.LogWarning(ex,
-                "TCP-MD5: could not {Verb} the key for {Peer} on this platform — the peer keeps {State} (RFC 2385 support is Linux/macOS-only)",
+                "TCP-MD5: could not {Verb} the key for {Peer} on this platform — the peer keeps {State} (kernel TCP-MD5 unavailable; RFC 2385 arming is Linux-only)",
                 key is null ? "clear" : "set", peer, key is null ? "unprotected" : "unprotected until supported");
         }
     }

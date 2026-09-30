@@ -271,7 +271,9 @@ public sealed class ManagementApi : IHostedService, IDisposable
 
         // Arm the listening socket with every peer's TCP-MD5 key. ManagementApi starts after
         // BgpServer (registration order), so only the sub-second window before this loop is
-        // unprotected.
+        // unprotected. A stored password on a platform without TCP-MD5 (Linux-only) cannot be
+        // armed: SetPeerMd5Key throws and startup aborts instead of running with a false
+        // tcpMd5=true indicator.
         var md5Bootstrapped = 0;
         // TCP keys by source IP: a DIFFERENT key on a sibling row would otherwise win
         // non-deterministically — the resolver picks one deterministically and warns (values never
@@ -926,7 +928,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
             status = peer.Status,
             createdAt = peer.CreatedAt,
             maxPrefix = peer.MaxPrefix,
-            tcpMd5 = !string.IsNullOrEmpty(peer.Md5Password),
+            tcpMd5 = TcpMd5.IsSupported && !string.IsNullOrEmpty(peer.Md5Password),
             lastSessionAt = peer.LastSessionAt,
             lists = peer.Subscriptions,
             customPrefixes = peer.CustomPrefixes,
@@ -992,6 +994,11 @@ public sealed class ManagementApi : IHostedService, IDisposable
         if (!string.IsNullOrEmpty(data.Md5Password) && !TcpMd5.IsValidPassword(data.Md5Password))
             return ApiResponse.Error($"Invalid Md5Password: must be 1..{TcpMd5.PasswordMaxBytes} UTF-8 bytes (empty means plain TCP).", 400);
 
+        // Server-side validation is authoritative: accepting a password this host can never arm
+        // would make every response report tcpMd5=true for a feature that never engages.
+        if (!string.IsNullOrEmpty(data.Md5Password) && !TcpMd5.IsSupported)
+            return ApiResponse.Error("TCP-MD5 (RFC 2385) is supported on Linux only — this host cannot arm an md5Password; remove it or run the server on Linux.", 400);
+
         if (data.CustomPrefixes is not null)
         {
             foreach (var cidr in data.CustomPrefixes)
@@ -1035,7 +1042,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
             status = saved.Status,
             createdAt = saved.CreatedAt,
             maxPrefix = saved.MaxPrefix,
-            tcpMd5 = !string.IsNullOrEmpty(data.Md5Password),
+            tcpMd5 = TcpMd5.IsSupported && !string.IsNullOrEmpty(data.Md5Password),
             lists = asnLists,
             customPrefixes = data.CustomPrefixes ?? [],
             customAsns = data.CustomAsns ?? []
@@ -1058,7 +1065,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
             status = peer.Status,
             createdAt = peer.CreatedAt,
             maxPrefix = peer.MaxPrefix,
-            tcpMd5 = !string.IsNullOrEmpty(peer.Md5Password),
+            tcpMd5 = TcpMd5.IsSupported && !string.IsNullOrEmpty(peer.Md5Password),
             lastSessionAt = peer.LastSessionAt,
             lists = peer.Subscriptions,
             customPrefixes = peer.CustomPrefixes,
@@ -1134,6 +1141,11 @@ public sealed class ManagementApi : IHostedService, IDisposable
         // Md5Password PATCH — omitted leaves it, "" clears (plain TCP), a value sets it.
         if (data.Md5Password is not null && !TcpMd5.IsValidPassword(data.Md5Password) && data.Md5Password.Length > 0)
             return ApiResponse.Error($"Invalid Md5Password: must be 1..{TcpMd5.PasswordMaxBytes} UTF-8 bytes, or an empty string to disable.", 400);
+
+        // Setting a password this host can never arm is rejected (clearing stays allowed
+        // everywhere — an unsupported host must still be able to drop a legacy key).
+        if (!string.IsNullOrEmpty(data.Md5Password) && !TcpMd5.IsSupported)
+            return ApiResponse.Error("TCP-MD5 (RFC 2385) is supported on Linux only — this host cannot arm an md5Password; remove it or run the server on Linux.", 400);
 
         await _store.UpdatePeerConfigurationAsync(peerId, data.Description, data.Lists, parsedPrefixes, data.CustomAsns, data.MaxPrefix,
             md5Password: data.Md5Password);
