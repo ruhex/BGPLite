@@ -96,9 +96,11 @@ public sealed class RouteAssembler : IRouteAssembler
             var fetchAttempts = 0;
             var fetchFailures = 0;
 
-            var subscribedLists = _appConfig.RipeStat?.AsnLists
+            // Explicit YAML null ("AsnLists:") means "none" — same contract as PrefixSources below:
+            // ?. alone only covers a null RipeStat section, ?? [] covers the null collection inside it.
+            var subscribedLists = (_appConfig.RipeStat?.AsnLists ?? [])
                 .Where(l => subscriptionIds.Contains(l.Name))
-                .ToList() ?? [];
+                .ToList();
 
             // ASN-based lists — resolve per list so each list's community is stamped on its prefixes.
             var asnLists = subscribedLists.Where(l => l.Asns.Count > 0).ToList();

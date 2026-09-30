@@ -149,6 +149,34 @@ public sealed class RouteAssemblerPolicyTests
         Assert.Contains(logger.Entries, e => e.Level == LogLevel.Warning && e.Message.Contains("no-such-list"));
     }
 
+    [Fact]
+    public async Task NullAsnListsCollection_IsTreatedAsEmpty_NotNre()
+    {
+        // Explicit YAML null ("AsnLists:") passes Validate as "none", so the build must treat it
+        // the same way: the old expression only guarded a null RipeStat section and dereferenced
+        // the null collection itself — the build crashed before subscription resolution ran.
+        var logger = new CapturingLogger();
+        var config = new AppConfig
+        {
+            Bgp = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1" },
+            RipeStat = new RipeStatConfig { AsnLists = null! }
+        };
+        var store = new ConfiguredPeerStore { Subscriptions = ["tier1"] };
+        var assembler = new RouteAssembler(
+            new StubPrefixService(), store,
+            new ConfigCommunityResolver(config, config.Bgp),
+            AllowAllFilter.Instance, config, config.Bgp, logger);
+
+        var routes = await assembler.BuildOutboundRoutesAsync(
+            "203.0.113.7", 65002, new PeerConfig { Address = "203.0.113.7" }, "203.0.113.7", CancellationToken.None);
+
+        // No lists = the subscription resolves to nothing (warned as unknown), no fetch is
+        // attempted, and the documented zero-routes fallback still applies.
+        Assert.Contains(logger.Entries, e => e.Level == LogLevel.Warning && e.Message.Contains("tier1"));
+        var route = Assert.Single(routes);
+        Assert.Equal((RuPrefix, (byte)8), (route.Prefix, route.PrefixLength));
+    }
+
     private sealed class CapturingLogger : ILogger<RouteAssembler>
     {
         public List<(LogLevel Level, string Message)> Entries { get; } = [];
