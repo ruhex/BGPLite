@@ -218,6 +218,70 @@ public class RefreshDebounceTests
         return completed;
     }
 
+    [Fact]
+    public async Task TriggerLandingInExitWindow_SchedulesPendingLap_NotLost()
+    {
+        // The coalesce test gates losers INSIDE the in-flight cycle; this one pins the exit
+        // window itself — after the runner's final _refreshPending read, before the
+        // _refreshRunning release. A trigger landing there must still get its lap: without it
+        // the caller returns success, the flag is never read again, and the peer keeps a stale
+        // advertisement until the next unrelated trigger.
+        var (session, store, client, server) = await NewEstablishedSessionAsync();
+        using var clientSock = client;
+        using var serverSock = server;
+        using var sessionH = session;
+
+        // Drain the initial dump (same reason as the coalesce test) — baseline must be stable.
+        var probe = session.RefreshRoutesAsync();
+        await WaitForAsync(
+            () => Volatile.Read(ref store.LoadCalls) >= 1,
+            () => $"probe load={Volatile.Read(ref store.LoadCalls)} (want 1)");
+        await probe.WaitAsync(TimeSpan.FromSeconds(10));
+        var baseline = store.LoadCalls;
+
+        using var reachedWindow = new SemaphoreSlim(0);
+        using var resumeRunner = new SemaphoreSlim(0);
+        var parked = 0;
+        session.RefreshExitWindowProbe = () =>
+        {
+            // Only the first pass parks: the pending lap the fix schedules passes through the
+            // same finally on its way out and must run to completion.
+            if (Interlocked.CompareExchange(ref parked, 1, 0) == 0)
+            {
+                reachedWindow.Release();
+                resumeRunner.Wait(TimeSpan.FromSeconds(10)); // LongRunning thread — blocking is fine
+            }
+        };
+
+        try
+        {
+            // LongRunning: the runner parks its own thread inside the seam (same rationale as
+            // the coalesce test's per-caller threads — no dependency on pool growth).
+            var runner = Task.Factory.StartNew(
+                () => session.RefreshRoutesAsync(),
+                CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default).Unwrap();
+
+            await reachedWindow.WaitAsync(TimeSpan.FromSeconds(10));
+            Assert.Equal(baseline + 1, Volatile.Read(ref store.LoadCalls)); // cycle done, release pending
+
+            // The trigger lands inside the window: the CAS still sees the slot taken, so this
+            // caller sets _refreshPending and returns believing a lap is scheduled for it.
+            await session.RefreshRoutesAsync().WaitAsync(TimeSpan.FromSeconds(10));
+
+            resumeRunner.Release();
+            await runner.WaitAsync(TimeSpan.FromSeconds(10));
+
+            // One cycle for the runner + one for the window trigger. A lost wakeup stops at
+            // baseline + 1: the flag was set after the runner's final read and nobody re-reads it.
+            Assert.Equal(baseline + 2, Volatile.Read(ref store.LoadCalls));
+        }
+        finally
+        {
+            session.RefreshExitWindowProbe = null;
+            resumeRunner.Release(); // never leave the parked thread blocked on an assertion failure
+        }
+    }
+
     /// <summary>
     /// Polls until <paramref name="condition"/> holds, failing with what was actually observed once
     /// the deadline passes. A generous deadline is safe here precisely because it is never waited

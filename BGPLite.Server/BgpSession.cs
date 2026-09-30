@@ -155,6 +155,11 @@ public sealed class BgpSession : IDisposable
         }
         finally
         {
+            // Test seam: parks the runner after the final _refreshPending read and before the
+            // release Exchange — i.e. inside the debounce exit window. Null in production;
+            // RefreshDebounceTests releases it to land a trigger in that window deterministically
+            // instead of racing for it.
+            _refreshExitWindowProbe?.Invoke();
             Interlocked.Exchange(ref _refreshRunning, 0);
         }
     }
@@ -701,6 +706,11 @@ public sealed class BgpSession : IDisposable
     // _refreshPending and the running cycle performs one coalesced extra lap for them.
     private int _refreshRunning;
     private volatile bool _refreshPending;
+    // Test seam used by RefreshDebounceTests: parks the runner between the final
+    // _refreshPending read and the _refreshRunning release — the debounce exit window.
+    // Null in production; the property mirrors StillRegisteredProbe's setter-only shape.
+    private Action? _refreshExitWindowProbe;
+    internal Action? RefreshExitWindowProbe { get => _refreshExitWindowProbe; set => _refreshExitWindowProbe = value; }
 
     private async Task RunEstablishedAsync(CancellationToken cancellationToken)
     {
