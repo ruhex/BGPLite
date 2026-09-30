@@ -139,23 +139,47 @@ public sealed class BgpSession : IDisposable
         // dumps on the wire. One cycle runs; requests arriving mid-cycle set _refreshPending and
         // return immediately — the runner's do/while coalesces them into a single extra lap, so the
         // worst case is one in-flight cycle + one pending lap regardless of trigger count.
+        //
+        // The flag is written BEFORE the CAS, not after losing it: a loser must publish
+        // _refreshPending while the winner still holds _refreshRunning, so the winner's
+        // post-release recheck below — sequenced after its Exchange by the Interlocked full
+        // fence — cannot miss it. Flag-then-CAS on one side against Exchange-then-recheck on the
+        // other is the Dekker pairing that closes the exit-window lost wakeup (a loser landing
+        // between the final while-read and the release used to be swallowed: it saw the slot
+        // taken, set the flag after the runner's final read, and no one ever read the flag again).
+        _refreshPending = true;
         if (Interlocked.CompareExchange(ref _refreshRunning, 1, 0) != 0)
-        {
-            _refreshPending = true;
             return;
-        }
 
-        try
+        while (true)
         {
-            do
+            try
             {
-                _refreshPending = false;
-                await RefreshCycleAsync(ct);
-            } while (_refreshPending && !ct.IsCancellationRequested);
-        }
-        finally
-        {
-            Interlocked.Exchange(ref _refreshRunning, 0);
+                do
+                {
+                    _refreshPending = false;
+                    await RefreshCycleAsync(ct);
+                } while (_refreshPending && !ct.IsCancellationRequested);
+            }
+            finally
+            {
+                // Test seam: parks the runner after the final _refreshPending read and before the
+                // release Exchange — i.e. inside the debounce exit window. Null in production;
+                // RefreshDebounceTests releases it to land a trigger in that window deterministically
+                // instead of racing for it.
+                _refreshExitWindowProbe?.Invoke();
+                Interlocked.Exchange(ref _refreshRunning, 0);
+            }
+
+            // Exit-window recheck: a loser that set _refreshPending after our final while-read but
+            // before the Exchange above has returned believing a lap is scheduled — re-acquire and
+            // run it. A lost CAS here means another caller took the slot; its own cycle starts
+            // after every flag published so far and serves them (a refresh re-advertises the
+            // current table, so any cycle started after a request covers that request).
+            if (!_refreshPending || ct.IsCancellationRequested)
+                return;
+            if (Interlocked.CompareExchange(ref _refreshRunning, 1, 0) != 0)
+                return;
         }
     }
 
@@ -701,6 +725,11 @@ public sealed class BgpSession : IDisposable
     // _refreshPending and the running cycle performs one coalesced extra lap for them.
     private int _refreshRunning;
     private volatile bool _refreshPending;
+    // Test seam used by RefreshDebounceTests: parks the runner between the final
+    // _refreshPending read and the _refreshRunning release — the debounce exit window.
+    // Null in production; the property mirrors StillRegisteredProbe's setter-only shape.
+    private Action? _refreshExitWindowProbe;
+    internal Action? RefreshExitWindowProbe { get => _refreshExitWindowProbe; set => _refreshExitWindowProbe = value; }
 
     private async Task RunEstablishedAsync(CancellationToken cancellationToken)
     {
