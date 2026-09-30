@@ -69,6 +69,25 @@ public sealed class ManagementApi : IHostedService, IDisposable
     /// </summary>
     internal TimeSpan ExternalFetchBudget { get; set; } = TimeSpan.FromSeconds(30);
 
+    /// <summary>
+    /// Single creation point for the external-fetch budget: a wall-clock deadline
+    /// (<see cref="ExternalFetchBudget"/>) linked to shutdown, so one cold upstream fetch
+    /// (the minutes-scale timeout×retries chain above) cannot pin a request and its in-flight
+    /// slot. The degradation contract lives with it: budget expiry surfaces as an
+    /// OperationCanceledException while <c>_shutdownCts</c> is NOT cancelled (catch filters read
+    /// <c>when (!_shutdownCts.IsCancellationRequested)</c>), and a shutdown OCE always propagates.
+    /// Each endpoint then degrades to whatever its response shape allows — a partial result
+    /// (peer prefixes, asn-lists) or a stable 503 (the AS prefix count, which has nothing
+    /// partial to serve). Hand-rolling a second linked source is exactly how this budget kept
+    /// regressing endpoint-by-endpoint; a source-scan test pins the one call site.
+    /// </summary>
+    private CancellationTokenSource CreateExternalFetchBudget()
+    {
+        var budget = CancellationTokenSource.CreateLinkedTokenSource(_shutdownCts.Token);
+        budget.CancelAfter(ExternalFetchBudget);
+        return budget;
+    }
+
     // Bounds for peer-supplied custom sources — generous ceilings that only reject abuse
     // (repeated POSTs growing the DB without limit; megabyte-scale names/URLs in logs and rows).
     internal const int MaxSourceNameLength = 200;
@@ -1349,8 +1368,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
 
         // Same wall-clock budget as /api/asn-lists — cold subscription fetches are
         // minutes-scale and must not pin the request (and its in-flight slot) indefinitely.
-        using var budget = CancellationTokenSource.CreateLinkedTokenSource(_shutdownCts.Token);
-        budget.CancelAfter(ExternalFetchBudget);
+        using var budget = CreateExternalFetchBudget();
         List<string> prefixes;
         try
         {
@@ -1427,8 +1445,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
         // Bound the whole handler — see ExternalFetchBudget. Shutdown still propagates;
         // budget expiry degrades to the partial counts collected so far (each later fetch fails
         // fast against the cancelled token) instead of pinning the request for minutes.
-        using var budget = CancellationTokenSource.CreateLinkedTokenSource(_shutdownCts.Token);
-        budget.CancelAfter(ExternalFetchBudget);
+        using var budget = CreateExternalFetchBudget();
         var ct = budget.Token;
         var lists = _config.RipeStat?.AsnLists ?? [];
         var result = new List<object>();
@@ -1570,8 +1587,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
             // timeout×retries chain. Unlike those endpoints, a count cannot
             // degrade to a partial list, so budget expiry answers a stable 503; shutdown still
             // propagates.
-            using var budget = CancellationTokenSource.CreateLinkedTokenSource(_shutdownCts.Token);
-            budget.CancelAfter(ExternalFetchBudget);
+            using var budget = CreateExternalFetchBudget();
             try
             {
                 var count = await _prefixService.GetPrefixCountAsync(asn, budget.Token);

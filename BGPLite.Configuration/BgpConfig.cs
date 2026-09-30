@@ -105,9 +105,8 @@ public sealed class BgpConfig
     /// </summary>
     public void Validate()
     {
-        if (Asn == 0)
-            throw new InvalidOperationException(
-                $"Invalid configuration: Bgp.Asn must be greater than 0 (got 0).");
+        // AS 0 goes through the single validation point (see AsnValidation).
+        AsnValidation.RequirePositive(Asn, "Bgp.Asn");
 
         // RFC 4271 §6.8: the BGP Identifier (RouterId) must be a non-zero IPv4 address. The peer-side
         // OPEN validator already rejects 0.0.0.0; this catches the local side before it is advertised.

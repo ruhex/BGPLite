@@ -1,5 +1,7 @@
+using System.Collections;
 using System.Net;
 using System.Net.Sockets;
+using System.Reflection;
 using BGPLite.Protocol;
 using YamlDotNet.Serialization;
 
@@ -111,6 +113,13 @@ public sealed class AppConfig
     /// </summary>
     public void Validate()
     {
+        // Structural pass FIRST: it walks the whole config graph and rejects null list ELEMENTS
+        // (an empty YAML "- " item) with their full path, before any hand-rolled per-list loop
+        // below gets the chance to dereference one. Reflection is deliberate — a new collection
+        // property added to any config type is covered automatically, so the invariant is a
+        // property of the graph, not of each call site.
+        ValidateListElements(this, "");
+
         Bgp.Validate();
 
         if (ApiPort < 1 || ApiPort > 65535)
@@ -127,9 +136,12 @@ public sealed class AppConfig
                 $"Invalid configuration: MaxRequestBodyBytes must be between 1024 and 67108864 bytes " +
                 $"(got {MaxRequestBodyBytes}).");
 
-        for (var i = 0; i < Peers.Count; i++)
+        // An explicit YAML null ("Peers:") deserializes to a null collection — same contract as
+        // PrefixSources: it means "none" (auto-registration only), never an NRE at Peers.Count.
+        var peers = Peers ?? [];
+        for (var i = 0; i < peers.Count; i++)
         {
-            var peer = Peers[i];
+            var peer = peers[i];
             // An omitted Address must not slip through as the all-zeros placeholder — require a
             // real unicast address and reject 0.0.0.0 explicitly.
             if (string.IsNullOrWhiteSpace(peer.Address))
@@ -149,6 +161,8 @@ public sealed class AppConfig
                 throw new InvalidOperationException(
                     $"Invalid configuration: Peers[{i}].RemoteAsn is required for a configured peer " +
                     "(omit the Peers entry entirely to rely on auto-registration).");
+            // Same AS 0 rule as every other configured ASN, via the single validation point.
+            AsnValidation.RequirePositive(peer.RemoteAsn.Value, $"Peers[{i}].RemoteAsn");
         }
 
         // Prefix-source errors otherwise surface only at load time, where LoadAllAsync absorbs
@@ -162,12 +176,8 @@ public sealed class AppConfig
         var sourceNames = new HashSet<string>(StringComparer.Ordinal);
         for (var i = 0; i < prefixSources.Count; i++)
         {
+            // Null elements are rejected by the structural pass at the top of Validate.
             var source = prefixSources[i];
-            // An empty YAML list item ("- ") deserializes as a null element — reject it with a
-            // message instead of an NRE, like the null-collection case above.
-            if (source is null)
-                throw new InvalidOperationException(
-                    $"Invalid configuration: PrefixSources[{i}] is empty — each item must be a mapping (Kind, Name, ...).");
             var at = $"PrefixSources[{i}] ('{source.Name}')";
 
             if (string.IsNullOrWhiteSpace(source.Name))
@@ -197,9 +207,8 @@ public sealed class AppConfig
                 case "asn":
                     if (!source.Asn.HasValue)
                         throw new InvalidOperationException($"Invalid configuration: {at}: Kind=asn requires an Asn.");
-                    if (source.Asn.Value == 0)
-                        throw new InvalidOperationException(
-                            $"Invalid configuration: {at}: Asn must be a positive AS number (RFC 7607 rejects AS 0).");
+                    // AS 0 goes through the single validation point (see AsnValidation).
+                    AsnValidation.RequirePositive(source.Asn.Value, $"{at}: Asn");
                     break;
                 default:
                     throw new InvalidOperationException(
@@ -225,10 +234,17 @@ public sealed class AppConfig
         for (var i = 0; i < asnLists.Count; i++)
         {
             var list = asnLists[i];
-            if (list is null)
+            // Null elements were already rejected by the structural pass above. A null Asns
+            // COLLECTION ("Asns:" with no value) is different: every runtime consumer
+            // dereferences it unconditionally, so accepting it as "none" would only move the
+            // NRE from startup to the first route build. "None" here is [] (or omitting the
+            // key, which deserializes to the empty default) — reject with the path instead.
+            if (list.Asns is null)
                 throw new InvalidOperationException(
-                    $"Invalid configuration: RipeStat.AsnLists[{i}] is empty — each item must be a mapping (Name, Asns, ...).");
+                    $"Invalid configuration: RipeStat.AsnLists[{i}].Asns is null — use [] (or omit the key) for a country-only list.");
             ValidateCommunity(list.Community, $"RipeStat.AsnLists[{i}] ('{list.Name}'): Community");
+            for (var j = 0; j < list.Asns.Count; j++)
+                AsnValidation.RequirePositive(list.Asns[j], $"RipeStat.AsnLists[{i}].Asns[{j}]");
         }
 
         // Resilience/auto-refresh tunables are applied verbatim: a negative value would silently
@@ -276,4 +292,52 @@ public sealed class AppConfig
                 $"Invalid configuration: {field} is not a valid 'ASN:VALUE' community — {ex.Message}", ex);
         }
     }
+
+    /// <summary>
+    /// The structural choke point for collection shape: recurses the config graph (objects and
+    /// list elements alike) and rejects a null ELEMENT with its full path. A null COLLECTION is
+    /// deliberately NOT rejected — an explicit YAML null ("Peers:", "PrefixSources:") means "none"
+    /// and every consumer normalizes with <c>?? []</c>; it is the null element (an empty list item
+    /// "-" that YamlDotNet materializes as null) that used to reach a hand-rolled loop and die as
+    /// a bare NullReferenceException with no hint about which key was malformed. Value-type
+    /// elements (e.g. <c>Asns: List&lt;uint&gt;</c>) can never be null and are skipped by the
+    /// <c>item is null</c> check naturally; their semantic rules (AS 0) belong to
+    /// <see cref="AsnValidation"/>, not to this shape pass.
+    /// </summary>
+    private static void ValidateListElements(object node, string path)
+    {
+        foreach (var property in node.GetType().GetProperties(BindingFlags.Public | BindingFlags.Instance))
+        {
+            if (property.GetIndexParameters().Length != 0)
+                continue;
+            var value = property.GetValue(node);
+            if (value is null || value is string)
+                continue;
+
+            var childPath = path.Length == 0 ? property.Name : $"{path}.{property.Name}";
+            if (value is IEnumerable items)
+            {
+                var index = 0;
+                foreach (var item in items)
+                {
+                    if (item is null)
+                        throw new InvalidOperationException(
+                            $"Invalid configuration: {childPath}[{index}] is empty — each item must be a " +
+                            "non-null value (an empty YAML list item '-' deserializes to null).");
+                    if (IsConfigNode(item))
+                        ValidateListElements(item, $"{childPath}[{index}]");
+                    index++;
+                }
+            }
+            else if (IsConfigNode(value))
+            {
+                ValidateListElements(value, childPath);
+            }
+        }
+    }
+
+    /// <summary>Whether <paramref name="value"/> is a nested config record worth recursing into —
+    /// anything else (primitives, framework types) carries no collections of ours.</summary>
+    private static bool IsConfigNode(object value) =>
+        value.GetType().Namespace == typeof(AppConfig).Namespace;
 }

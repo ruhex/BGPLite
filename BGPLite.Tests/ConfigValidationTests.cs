@@ -1,3 +1,5 @@
+using System.Collections;
+using System.Reflection;
 using BGPLite.Configuration;
 
 namespace BGPLite.Tests;
@@ -283,6 +285,104 @@ public class ConfigValidationTests
         Assert.Contains("RipeStat.AsnLists[0] is empty", ex.Message);
     }
 
+    // ---- structural choke point: null list elements & AS 0 — one rule, every surface --------
+
+    [Fact]
+    public void Validate_NullPeerElement_ThrowsWithIndex()
+    {
+        // The Peers loop had no element guard (its siblings did) — a bare NRE instead of a message.
+        var config = Config(peers: [null!]);
+
+        var ex = Assert.Throws<InvalidOperationException>(config.Validate);
+        Assert.Contains("Peers[0] is empty", ex.Message);
+    }
+
+    [Fact]
+    public void Validate_YamlNullPeersCollection_IsTreatedAsEmpty()
+    {
+        // "Peers:" with no value deserializes as a null collection — same contract as
+        // PrefixSources/AsnLists: it means "none", and Validate must pass, not NRE at Peers.Count.
+        var config = ConfigLoader.LoadFromText("Bgp:\n  Asn: 65001\n  RouterId: 10.0.0.1\nPeers:\n");
+
+        config.Validate();
+    }
+
+    [Fact]
+    public void Validate_YamlNullPeerElement_ThrowsWithIndexNotNre()
+    {
+        // An empty YAML list item ("- ") deserializes as a null element: a message naming the
+        // index, not the bare NullReferenceException the Peers loop used to throw.
+        var config = ConfigLoader.LoadFromText("Bgp:\n  Asn: 65001\n  RouterId: 10.0.0.1\nPeers:\n  -\n");
+
+        var ex = Assert.Throws<InvalidOperationException>(config.Validate);
+        Assert.Contains("Peers[0] is empty", ex.Message);
+    }
+
+    [Fact]
+    public void Validate_YamlNullAsnsCollection_ThrowsWithPathNotNre()
+    {
+        // Explicit YAML null ("Asns:" with no value) deserializes to a null collection. The
+        // structural walker correctly skips it (null = none), but every runtime consumer
+        // dereferences Asns unconditionally — validation must reject it with the full path
+        // instead of letting the first route build NRE later.
+        var config = ConfigLoader.LoadFromText(
+            "Bgp:\n  Asn: 65001\n  RouterId: 10.0.0.1\nRipeStat:\n  AsnLists:\n    - Name: ru\n      Asns:\n");
+
+        var ex = Assert.Throws<InvalidOperationException>(config.Validate);
+        Assert.Contains("RipeStat.AsnLists[0].Asns is null", ex.Message);
+    }
+
+    [Fact]
+    public void Validate_AsnListWithZeroAsn_Throws()
+    {
+        // AsnLists.Asns was the last config surface that accepted AS 0 — the value went
+        // straight to ris-prefixes?resource=AS0 and back out as re-originated NLRI.
+        var config = new AppConfig
+        {
+            Bgp = Bgp(),
+            RipeStat = new RipeStatConfig { AsnLists = [new AsnList { Name = "bad", Asns = [0] }] }
+        };
+
+        var ex = Assert.Throws<InvalidOperationException>(config.Validate);
+        Assert.Contains("RipeStat.AsnLists[0].Asns[0]", ex.Message);
+        Assert.Contains("positive AS number", ex.Message);
+    }
+
+    [Fact]
+    public void Validate_PeerRemoteAsnZero_Throws()
+    {
+        // A configured peer with RemoteAsn 0 can never match an OPEN (RFC 7607 rejects AS 0
+        // there), so the row would be dead weight from startup — same rule as Bgp.Asn.
+        var config = Config(peers: [new PeerConfig { Address = "10.0.0.2", RemoteAsn = 0 }]);
+
+        var ex = Assert.Throws<InvalidOperationException>(config.Validate);
+        Assert.Contains("Peers[0].RemoteAsn", ex.Message);
+        Assert.Contains("positive AS number", ex.Message);
+    }
+
+    [Fact]
+    public void Validate_NullElement_InEveryReferenceTypeListProperty_ThrowsWithPathNotNre()
+    {
+        // Choke-point acceptance: discovery is reflection-driven, so a NEW collection property
+        // added to any config type is covered by this test and by AppConfig.ValidateListElements
+        // alike — the invariant no longer depends on remembering a per-surface guard.
+        var paths = DiscoverReferenceListPaths(typeof(AppConfig));
+        Assert.Contains("Peers", paths);
+        Assert.Contains("PrefixSources", paths);
+        Assert.Contains("RipeStat.AsnLists", paths);
+        Assert.Contains("TrustedProxies", paths);
+
+        foreach (var path in paths)
+        {
+            var config = BuildConfigWithNullListElement(path.Split('.'));
+            var thrown = Record.Exception(config.Validate);
+            Assert.True(thrown?.GetType() == typeof(InvalidOperationException),
+                $"{path}: expected InvalidOperationException with a message, got " +
+                (thrown is null ? "no exception" : thrown.GetType().FullName));
+            Assert.Contains(path + "[0]", thrown!.Message);
+        }
+    }
+
     [Fact]
     public void Validate_AcceptsZeroHoldTime_KeepAliveSkipped()
     {
@@ -530,5 +630,61 @@ public class ConfigValidationTests
         var act = () => config.Validate();
 
         act();
+    }
+
+    // Reflection helpers for the choke-point acceptance test: discover every list property whose
+    // elements CAN be null (reference types), then plant a null at exactly that path.
+    private static List<string> DiscoverReferenceListPaths(Type type, string prefix = "")
+    {
+        var found = new List<string>();
+        foreach (var property in type.GetProperties(BindingFlags.Public | BindingFlags.Instance))
+        {
+            if (property.GetIndexParameters().Length != 0)
+                continue;
+            var path = prefix.Length == 0 ? property.Name : $"{prefix}.{property.Name}";
+            var elementType = FindEnumerableElementType(property.PropertyType);
+            // Value-type elements (List<uint>) can never hold null — nothing to guard.
+            if (elementType is not null && !elementType.IsValueType)
+                found.Add(path);
+
+            // Recurse into nested config records — plain objects and list elements alike.
+            var recurseInto = property.PropertyType.Namespace == typeof(AppConfig).Namespace
+                ? property.PropertyType
+                : elementType is not null && elementType.Namespace == typeof(AppConfig).Namespace
+                    ? elementType
+                    : null;
+            if (recurseInto is not null)
+                found.AddRange(DiscoverReferenceListPaths(recurseInto, path));
+        }
+        return found.Distinct().ToList();
+    }
+
+    private static Type? FindEnumerableElementType(Type type)
+    {
+        if (type.IsGenericType && type.GetGenericTypeDefinition() == typeof(List<>))
+            return type.GetGenericArguments()[0];
+        return type.GetInterfaces()
+            .FirstOrDefault(i => i.IsGenericType && i.GetGenericTypeDefinition() == typeof(IEnumerable<>))
+            ?.GetGenericArguments()[0];
+    }
+
+    private static AppConfig BuildConfigWithNullListElement(string[] segments)
+    {
+        var root = new AppConfig();
+        object node = root;
+        for (var i = 0; i < segments.Length - 1; i++)
+        {
+            var property = node.GetType().GetProperty(segments[i])!;
+            // A null intermediate (e.g. RipeStat:) is instantiated so the leaf can be planted;
+            // init-only setters accept reflection writes.
+            var child = property.GetValue(node) ?? Activator.CreateInstance(property.PropertyType)!;
+            property.SetValue(node, child);
+            node = child;
+        }
+        var leaf = node.GetType().GetProperty(segments[^1])!;
+        var list = leaf.GetValue(node) ?? Activator.CreateInstance(leaf.PropertyType)!;
+        leaf.SetValue(node, list);
+        ((IList)list).Add(null!);
+        return root;
     }
 }
