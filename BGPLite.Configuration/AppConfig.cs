@@ -234,7 +234,14 @@ public sealed class AppConfig
         for (var i = 0; i < asnLists.Count; i++)
         {
             var list = asnLists[i];
-            // Null elements were already rejected by the structural pass above.
+            // Null elements were already rejected by the structural pass above. A null Asns
+            // COLLECTION ("Asns:" with no value) is different: every runtime consumer
+            // dereferences it unconditionally, so accepting it as "none" would only move the
+            // NRE from startup to the first route build. "None" here is [] (or omitting the
+            // key, which deserializes to the empty default) — reject with the path instead.
+            if (list.Asns is null)
+                throw new InvalidOperationException(
+                    $"Invalid configuration: RipeStat.AsnLists[{i}].Asns is null — use [] (or omit the key) for a country-only list.");
             ValidateCommunity(list.Community, $"RipeStat.AsnLists[{i}] ('{list.Name}'): Community");
             for (var j = 0; j < list.Asns.Count; j++)
                 AsnValidation.RequirePositive(list.Asns[j], $"RipeStat.AsnLists[{i}].Asns[{j}]");

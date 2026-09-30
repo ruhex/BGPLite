@@ -319,6 +319,20 @@ public class ConfigValidationTests
     }
 
     [Fact]
+    public void Validate_YamlNullAsnsCollection_ThrowsWithPathNotNre()
+    {
+        // Explicit YAML null ("Asns:" with no value) deserializes to a null collection. The
+        // structural walker correctly skips it (null = none), but every runtime consumer
+        // dereferences Asns unconditionally — validation must reject it with the full path
+        // instead of letting the first route build NRE later.
+        var config = ConfigLoader.LoadFromText(
+            "Bgp:\n  Asn: 65001\n  RouterId: 10.0.0.1\nRipeStat:\n  AsnLists:\n    - Name: ru\n      Asns:\n");
+
+        var ex = Assert.Throws<InvalidOperationException>(config.Validate);
+        Assert.Contains("RipeStat.AsnLists[0].Asns is null", ex.Message);
+    }
+
+    [Fact]
     public void Validate_AsnListWithZeroAsn_Throws()
     {
         // AsnLists.Asns was the last config surface that accepted AS 0 — the value went
