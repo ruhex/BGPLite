@@ -1,6 +1,10 @@
 using System.Net;
 using System.Net.Sockets;
+using BGPLite.Configuration;
 using BGPLite.Contracts;
+using BGPLite.Routing;
+using BGPLite.Server;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace BGPLite.Tests;
 
@@ -133,5 +137,65 @@ public class TcpMd5Tests
 
         goodClient.Dispose();
         accepted.Dispose();
+    }
+
+    [Fact]
+    public void IsSupported_IsLinuxOnly_MacOsMustNotClaimSupport()
+    {
+        // XNU never shipped TCP_MD5SIG: setsockopt(IPPROTO_TCP, 0x10) on Darwin hits
+        // TCP_KEEPALIVE (netinet/tcp.h:223), not an MD5 signature — claiming macOS support
+        // armed nothing while the control plane reported tcpMd5=true. Pinned per-OS so the
+        // claim cannot silently return.
+        if (OperatingSystem.IsMacOS())
+            Assert.False(TcpMd5.IsSupported);
+        else if (OperatingSystem.IsLinux())
+            Assert.True(TcpMd5.IsSupported);
+        // Windows and others: no TCP-MD5 anywhere; excluded on both sides of the branch above.
+    }
+
+    [Fact]
+    public void ApplyAndClear_OnUnsupportedPlatform_ThrowInsteadOfMutatingSockets()
+    {
+        if (!OperatingSystem.IsMacOS()) return; // Linux arming is covered by the Linux_* tests
+
+        using var socket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
+        socket.Bind(new IPEndPoint(IPAddress.Loopback, 0));
+        socket.Listen(1);
+
+        // Pre-fix these calls "succeeded": a 209-byte buffer either failed setsockopt with
+        // EINVAL (swallowed by the caller) or, for a 1-2 byte key, silently overwrote the
+        // listener's TCP keepalive idle time — never an MD5 key.
+        Assert.Throws<PlatformNotSupportedException>(() => TcpMd5.Apply(socket, IPAddress.Loopback, Key));
+        Assert.Throws<PlatformNotSupportedException>(() => TcpMd5.Clear(socket, IPAddress.Loopback));
+    }
+
+    [Fact]
+    public void SetPeerMd5Key_FailsLoud_WhenPlatformCannotArmTheKey()
+    {
+        var server = new BgpServer(
+            new AppConfig { Bgp = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1" } },
+            new RouteTable(),
+            AllowAllFilter.Instance,
+            new BgpMetrics(),
+            new NoopSessionFactory(),
+            NullLogger<BgpServer>.Instance);
+
+        if (OperatingSystem.IsMacOS())
+        {
+            // Pre-fix: the key was stored and the listener never armed (ApplyMd5 swallowed the
+            // failure into a Warning) — the API kept answering tcpMd5=true.
+            Assert.Throws<PlatformNotSupportedException>(() => server.SetPeerMd5Key("192.0.2.10", "secret"));
+        }
+        else if (OperatingSystem.IsLinux())
+        {
+            // The supported platform keeps its contract: a valid password is accepted (the
+            // listener is not started here, so there is nothing to arm yet — no throw).
+            Assert.Null(Record.Exception(() => server.SetPeerMd5Key("192.0.2.10", "secret")));
+        }
+    }
+
+    private sealed class NoopSessionFactory : IBgpSessionFactory
+    {
+        public BgpSession Create(IBgpConnection connection, PeerConfig peerConfig) => null!;
     }
 }
