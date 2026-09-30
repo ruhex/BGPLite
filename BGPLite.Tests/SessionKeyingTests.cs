@@ -8,7 +8,7 @@ using Xunit;
 namespace BGPLite.Tests;
 
 /// <summary>
-/// Regression coverage for issue #18: the live-session map must be keyed by the accepted TCP
+/// Regression coverage: the live-session map must be keyed by the accepted TCP
 /// connection (remote IP + remote source port), so several distinct peers that arrive from the
 /// same source IP (behind a NAT/VPN) coexist instead of clobbering each other. Per RFC 4271
 /// §8.2.1 there is one session per TCP connection; per §6.8 two peers with different BGP
@@ -79,7 +79,7 @@ public class SessionKeyingTests
     /// <summary>
     /// The session-log peer label is <c>Address</c> alone when no port is known (configured/test
     /// peers), and <c>Address:Port</c> for an accepted connection — so peers behind one source IP
-    /// are distinguishable in logs (issue #18). Peer-store lookups keep using Address directly.
+    /// are distinguishable in logs. Peer-store lookups keep using Address directly.
     /// </summary>
     [Fact]
     public void PeerConfig_ToString_Labels_Address_Port()

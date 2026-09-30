@@ -6,7 +6,7 @@ using BGPLite.Server;
 namespace BGPLite.Tests;
 
 /// <summary>
-/// #14 phase 4: the dual-mode listener surfaces IPv4 peers as IPv4-mapped IPv6 addresses —
+/// The dual-mode listener surfaces IPv4 peers as IPv4-mapped IPv6 addresses —
 /// these cover the address-form conversions that keep session identity, the PeerStore lookup
 /// and TCP-MD5 keys working across both transport families.
 /// </summary>

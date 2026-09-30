@@ -10,7 +10,7 @@ public class BgpDbContext : DbContext
     public BgpDbContext(DbContextOptions<BgpDbContext> options) : base(options) { }
 
     /// <summary>
-    /// Applies pending EF Migrations and deactivates all peers on startup (#237).
+    /// Applies pending EF Migrations and deactivates all peers on startup.
     /// <para>
     /// Fresh databases get the full schema via the Init migration. Databases from the
     /// EnsureCreated + ad-hoc-DDL era (a Peers table but no __EFMigrationsHistory) are stamped
@@ -39,7 +39,7 @@ public class BgpDbContext : DbContext
         {
             if (TableExists("Peers") && !TableExists("__EFMigrationsHistory"))
             {
-                // #264: converge the Peers COLUMN set before stamping — the converger migration
+                // Converge the Peers COLUMN set before stamping — the converger migration
                 // reconciles child tables and indexes, never Peers' own columns.
                 ConvergeLegacyPeersColumns(connection);
 
@@ -61,14 +61,14 @@ public class BgpDbContext : DbContext
 
         db.Database.Migrate();
 
-        // Startup deactivation (#204 semantics preserved): sessions do not survive a restart, so
-        // every peer starts inactive. A single ExecuteUpdate is atomic under SQLite.
+        // Startup deactivation: sessions do not survive a restart, so every peer starts inactive.
+        // A single ExecuteUpdate is atomic under SQLite.
         db.Peers.Where(p => p.Status == "active").ExecuteUpdate(
             s => s.SetProperty(p => p.Status, "inactive"));
     }
 
     /// <summary>
-    /// Expected <c>Peers</c> columns with the Init-migration DDL (#264). Nullable/defaulted only —
+    /// Expected <c>Peers</c> columns with the Init-migration DDL. Nullable/defaulted only —
     /// a required column without a default cannot be ALTERed onto existing rows, and
     /// <see cref="ConvergeLegacyPeersColumns"/> refuses loudly for it instead of stamping an
     /// unusable schema.
@@ -85,7 +85,7 @@ public class BgpDbContext : DbContext
     ];
 
     /// <summary>
-    /// #264: before the legacy stamp, converge the <c>Peers</c> column set. The converger MIGRATION
+    /// Before the legacy stamp, converge the <c>Peers</c> column set. The converger MIGRATION
     /// reconciles child tables and indexes but never Peers' own columns, so an early EnsureCreated-era
     /// build missing one would stamp Init and fail its first raw write at runtime ("no such column").
     /// </summary>
@@ -122,7 +122,7 @@ public class BgpDbContext : DbContext
         {
             e.HasKey(p => p.Id);
             // Composite identity (Ip, Asn): distinct peers behind one source IP with different AS
-            // must be separate rows (issue #19). Named so the idempotent migration in Initialize
+            // must be separate rows. Named so the idempotent migration in Initialize
             // can recreate it deterministically across fresh and existing databases.
             e.HasIndex(p => new { p.Ip, p.Asn }).IsUnique().HasDatabaseName("UX_Peers_Ip_Asn");
             e.Property(p => p.Status).HasDefaultValue("inactive");

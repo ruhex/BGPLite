@@ -12,7 +12,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 namespace BGPLite.Tests;
 
 /// <summary>
-/// #323: deleting a peer through the management API must terminate its live BGP session(s) before
+/// Deleting a peer through the management API must terminate its live BGP session(s) before
 /// the row is deleted — otherwise the session keeps advertising, and the next refresh lands in
 /// RouteAssembler's unknown-peer branch and re-creates the just-deleted row (auto-register).
 /// </summary>
@@ -56,10 +56,10 @@ public sealed class PeerDeleteTeardownTests
     [Fact]
     public async Task DeletePeer_NullAsn_TerminatesByIp_NotSilentNoOp()
     {
-        // #422: a legacy NULL-Asn row cannot match a live session by (Ip, Asn) — no session ever
-        // has RemoteAsn 0 (AS 0 OPENs are rejected, #300) — so the pre-#422 `asn ?? 0` teardown
-        // was a SILENT no-op: the row was deleted while its session kept advertising. The delete
-        // must terminate by IP instead.
+        // A legacy NULL-Asn row cannot match a live session by (Ip, Asn) — no session ever
+        // has RemoteAsn 0 (AS 0 OPENs are rejected) — so matching with `asn ?? 0` was a SILENT
+        // no-op: the row was deleted while its session kept advertising. The delete must
+        // terminate by IP instead.
         using var connection = NewOpenConnection();
         var store = NewStore(connection);
         InsertLegacyNullAsnRow(connection, "203.0.113.9");
@@ -75,7 +75,7 @@ public sealed class PeerDeleteTeardownTests
         Assert.Null(await store.GetDbPeerByIdAsync(row.Id));
     }
 
-    /// <summary>A row from the Ip-only era: no Asn column value (#19 pre-#422 legacy shape).</summary>
+    /// <summary>A row from the Ip-only era: no Asn column value (legacy shape).</summary>
     private static void InsertLegacyNullAsnRow(SqliteConnection connection, string ip)
     {
         using var cmd = connection.CreateCommand();
@@ -89,7 +89,7 @@ public sealed class PeerDeleteTeardownTests
         cmd.ExecuteNonQuery();
     }
 
-    // ---- management API: TCP-MD5 key re-arm on delete (#418) ----
+    // ---- management API: TCP-MD5 key re-arm on delete ----
 
     [Fact]
     public async Task DeletePeer_RearmsIpKey_FromSurvivingSibling()
@@ -106,7 +106,7 @@ public sealed class PeerDeleteTeardownTests
         var response = await api.HandleDeletePeer(idB);
 
         Assert.Equal(200, response.StatusCode);
-        // Pre-#418 the delete armed null — silently disarming TCP-MD5 for the surviving sibling.
+        // The delete used to arm null — silently disarming TCP-MD5 for the surviving sibling.
         var armed = Assert.Single(manager.Md5Keys);
         Assert.Equal("203.0.113.7", armed.Ip);
         Assert.Equal("key-a", armed.Password);
@@ -203,7 +203,7 @@ public sealed class PeerDeleteTeardownTests
         }
     }
 
-    // ---- RouteAssembler: no auto-register for a dying session (#323 resurrection guard) ----
+    // ---- RouteAssembler: no auto-register for a dying session (resurrection guard) ----
 
     [Fact]
     public async Task BuildOutboundRoutes_CancelledToken_UnknownPeer_DoesNotAutoRegister()
@@ -213,9 +213,9 @@ public sealed class PeerDeleteTeardownTests
         using var cts = new CancellationTokenSource();
         cts.Cancel();
 
-        // #262: the async store surfaces an already-cancelled token as OCE from the load itself
+        // The async store surfaces an already-cancelled token as OCE from the load itself
         // (previously the sync read ran through and the assembler returned an empty set). Either
-        // way the auto-register branch must not be reached — that is the #323 resurrection guard.
+        // way the auto-register branch must not be reached.
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
             NewAssembler(store).BuildOutboundRoutesAsync(
                 "203.0.113.9", 65002, new PeerConfig { Address = "203.0.113.9" }, "203.0.113.9", cts.Token));

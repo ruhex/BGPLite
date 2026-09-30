@@ -6,7 +6,7 @@ using Microsoft.EntityFrameworkCore;
 namespace BGPLite.Tests;
 
 /// <summary>
-/// Regression coverage for issue #19: the peer table is keyed by (Ip, Asn), so several distinct
+/// Regression coverage: the peer table is keyed by (Ip, Asn), so several distinct
 /// peers arriving from the same source IP (different AS) are separate rows with independent
 /// subscriptions / prefixes / status. Per RFC 4271 §4.2 the OPEN "My Autonomous System" identifies
 /// the sender; a configured neighbor is conventionally (address, ASN). Uses a real in-memory
@@ -103,7 +103,7 @@ public class PeerStoreKeyingTests
     }
 
     /// <summary>
-    /// Regression for issue #84: <see cref="PeerStore.LoadPeerRoutingView"/> must return the SAME
+    /// Regression: <see cref="PeerStore.LoadPeerRoutingView"/> must return the SAME
     /// data the five standalone calls used to produce (GetPeer + GetSubscriptions + GetCustomPrefixes
     /// + GetCustomAsns) AND fold the session-status update into the same DbContext
     /// (<see cref="PeerStore.UpdateSessionStatus"/>(active:true)). Asserts both equivalence of shape
@@ -143,7 +143,7 @@ public class PeerStoreKeyingTests
         Assert.Equal(new uint[] { 65001, 65002 }, view.CustomAsns.Order().ToArray());
 
         // The folded status write took effect: Status="active" and LastSessionAt stamped at/after
-        // the call (was a separate UpdateSessionStatus call on its own DbContext before #84).
+        // the call (it used to be a separate UpdateSessionStatus call on its own DbContext).
         var peer = (await store.GetDbPeerByIdAsync(id))!;
         Assert.Equal("active", peer.Status);
         Assert.NotNull(peer.LastSessionAt);
@@ -163,7 +163,7 @@ public class PeerStoreKeyingTests
     [Fact]
     public async Task LoadPeerRoutingView_UserSources_Only_Active_Loaded()
     {
-        // Issue #147: paused (Active=false) sources never leave the DB — only Active ones are
+        // Paused (Active=false) sources never leave the DB — only Active ones are
         // advertised. AddCustomSource defaults Active=false; SetSourceActive toggles.
         var (store, connection) = NewStore();
         using var conn = connection;
@@ -259,7 +259,7 @@ public class PeerStoreKeyingTests
     }
 
     /// <summary>
-    /// #264: a legacy EnsureCreated-era database MISSING expected Peers columns (an early build
+    /// A legacy EnsureCreated-era database MISSING expected Peers columns (an early build
     /// without Description/LastSessionAt) must be converged at Initialize — the stamp alone left
     /// the first runtime write failing with "no such column".
     /// </summary>
@@ -311,7 +311,7 @@ public class PeerStoreKeyingTests
     }
 
     /// <summary>
-    /// #237: Initialize runs the EF migration pipeline — a fresh database gets Init +
+    /// Initialize runs the EF migration pipeline — a fresh database gets Init +
     /// LegacyEnsureCreated applied in order and recorded in __EFMigrationsHistory, and a second
     /// startup is an idempotent no-op (Migrate() finds nothing pending).
     /// </summary>

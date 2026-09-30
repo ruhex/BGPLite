@@ -71,7 +71,7 @@ public class BgpMessageTests
 
     // Builds a raw OPEN message: marker + length + type + fixed 10-byte body + optional parameters.
     // Unlike BgpMessageWriter, this lets a test declare an optParamsLen that disagrees with the
-    // bytes actually present — the malformed framing the #234 truncation cases need.
+    // bytes actually present — the malformed framing the truncation cases need.
     private static byte[] BuildRawOpen(byte optParamsLen, byte[] optParams)
     {
         var length = BgpConstants.MessageHeaderSize + 10 + optParams.Length;
@@ -91,7 +91,7 @@ public class BgpMessageTests
     [Fact]
     public void Open_UnsupportedVersion_CarriesMaxSupportedVersionData()
     {
-        // RFC 4271 §6.2 (#317): the Unsupported Version NOTIFICATION's Data field must carry the
+        // RFC 4271 §6.2: the Unsupported Version NOTIFICATION's Data field must carry the
         // 2-octet version hint. BGPLite supports only v4 — both §6.2 branches resolve to 4.
         var message = BuildRawOpen(0, []);
         message[19] = 3; // BGPv3
@@ -121,7 +121,7 @@ public class BgpMessageTests
     public void Open_OptParamsLengthExceedsMessage_Rejected()
     {
         // Declared optParamsLen=10 but only 4 parameter bytes present — previously parsing was
-        // silently skipped and all capabilities dropped (#234).
+        // silently skipped and all capabilities dropped.
         var message = BuildRawOpen(10, [0x02, 0x02, 0x41, 0x00]);
 
         var ex = Assert.Throws<BgpParseException>(() => BgpMessageReader.ReadMessage(message));
@@ -152,7 +152,7 @@ public class BgpMessageTests
     [Fact]
     public void Open_UnrecognizedOptionalParameterType_RejectedWithSubcode4()
     {
-        // RFC 4271 §6.2 / #329: only type 2 (Capabilities) is supported; any other optional
+        // RFC 4271 §6.2: only type 2 (Capabilities) is supported; any other optional
         // parameter type must yield Open Message Error / Unsupported Optional Parameter (2/4),
         // not silent acceptance — the sender otherwise assumes the parameter was honored.
         // Well-formed TLV (type 1, the deprecated Authentication parameter), so the rejection is
@@ -170,7 +170,7 @@ public class BgpMessageTests
         // RFC 9072 Extended Optional Parameters (type 255) — the realistic modern trigger for
         // the same rule: an extended-message speaker must learn we do not support the parameter.
         // A valid Route Refresh capability precedes it, proving the rejection fires mid-list
-        // after well-formed parameters were consumed (CodeRabbit suggestion).
+        // after well-formed parameters were consumed.
         var message = BuildRawOpen(6, [0x02, 0x02, 0x02, 0x00, 0xFF, 0x00]);
 
         var ex = Assert.Throws<BgpParseException>(() => BgpMessageReader.ReadMessage(message));
@@ -191,7 +191,7 @@ public class BgpMessageTests
     [Fact]
     public void Open_TruncatedFourOctetAsnCapability_Rejected()
     {
-        // The #234 headline case: a Four-Octet-ASN TLV declaring 4 data bytes with only 2 present.
+        // The headline truncation case: a Four-Octet-ASN TLV declaring 4 data bytes with only 2 present.
         // Previously the capability was silently dropped and the session downgraded to a 2-byte AS.
         var message = BuildRawOpen(6, [0x02, 0x04, 0x41, 0x04, 0x00, 0x00]);
 
@@ -203,7 +203,7 @@ public class BgpMessageTests
     public void Open_SurplusBytesAfterOptParams_Rejected()
     {
         // optParamsLen declares 0 but one surplus byte follows — the declared length must match
-        // the message exactly (RFC 4271 §4.2, CodeRabbit review on #244).
+        // the message exactly (RFC 4271 §4.2).
         var message = BuildRawOpen(0, [0x00]);
 
         var ex = Assert.Throws<BgpParseException>(() => BgpMessageReader.ReadMessage(message));
@@ -389,7 +389,7 @@ public class BgpMessageTests
     [Fact]
     public void ReadMessage_Incomplete_Throws()
     {
-        // #392: declared length larger than the actual buffer — the frame is truncated mid-body.
+        // Declared length larger than the actual buffer — the frame is truncated mid-body.
         const int declaredLength = 40;                       // header + 21 body bytes
         var frame = new byte[BgpConstants.MessageHeaderSize + 10]; // only 10 body bytes present
         BgpConstants.Marker.CopyTo(frame.AsSpan(0, BgpConstants.MarkerSize));
@@ -401,7 +401,7 @@ public class BgpMessageTests
 
     private static byte[] ShortBodyFrame(BgpMessageType type, int bodyBytes)
     {
-        // #392 review: a valid 19-byte header (marker + length + type) with a TOO-SHORT body —
+        // A valid 19-byte header (marker + length + type) with a TOO-SHORT body —
         // otherwise ReadMessage rejects the header and the body guards are never exercised.
         var frame = new byte[BgpConstants.MessageHeaderSize + bodyBytes];
         BgpConstants.Marker.CopyTo(frame.AsSpan(0, BgpConstants.MarkerSize));
@@ -429,7 +429,7 @@ public class BgpMessageTests
     [Fact]
     public void Open_EmptyCapabilities_Roundtrip()
     {
-        // #392: a well-formed OPEN with zero optional parameters (no capabilities at all) must
+        // a well-formed OPEN with zero optional parameters (no capabilities at all) must
         // survive the encode/decode roundtrip unchanged.
         var open = new BgpOpenMessage
         {
@@ -640,7 +640,7 @@ public class BgpMessageTests
     public void AsPath_EmptySegment_Throws()
     {
         // RFC 4271 §4.3: a path segment value contains "one or more AS numbers" — a zero-length
-        // segment is malformed (#238).
+        // segment is malformed.
         var attr = new PathAttribute
         {
             Flags = BgpConstants.Attribute.FlagTransitive,
@@ -656,7 +656,7 @@ public class BgpMessageTests
     [Fact]
     public void AsPath_ZeroLengthAttribute_IsMalformedOnEbgp_PolicyLayer()
     {
-        // #486 (D25): a zero-length AS_PATH is the on-wire form of an EMPTY path — legal only
+        // D25: a zero-length AS_PATH is the on-wire form of an EMPTY path — legal only
         // toward internal peers (RFC 4271 §5.1.2). BGPLite is eBGP-only, so the inbound policy
         // layer rejects it as Malformed AS_PATH (treat-as-withdraw); the codec itself stays
         // encoding-neutral (see AsPath_Empty_RoundtripsAsZeroLengthAttribute).
@@ -684,7 +684,7 @@ public class BgpMessageTests
     public void As4Path_WithAsTrans_Throws()
     {
         // AS_TRANS (23456) is the 2-octet placeholder for a non-mappable 4-octet AS — meaningless
-        // inside the 4-octet-encoded AS4_PATH (#238 defensive check).
+        // inside the 4-octet-encoded AS4_PATH (defensive check).
         var attr = new PathAttribute
         {
             Flags = BgpConstants.Attribute.FlagOptional | BgpConstants.Attribute.FlagTransitive,
@@ -701,7 +701,7 @@ public class BgpMessageTests
     public void AsPath_Empty_RoundtripsAsZeroLengthAttribute()
     {
         // RFC 4271 §4.3: an empty path is a ZERO-LENGTH attribute — a zero-length SEGMENT is
-        // malformed. The writer must not emit what the reader rejects (#248 review).
+        // malformed. The writer must not emit what the reader rejects.
         var attr = AttributeHelper.WriteAsPath([], fourByteAsn: true);
 
         Assert.Empty(attr.Data);
@@ -711,7 +711,7 @@ public class BgpMessageTests
     [Fact]
     public void As4Path_Write_WithAsTrans_Throws()
     {
-        // Write-side symmetry with the reader's AS_TRANS rejection (#248 review).
+        // Write-side symmetry with the reader's AS_TRANS rejection.
         Assert.Throws<ArgumentOutOfRangeException>(
             () => AttributeHelper.WriteAs4Path([BgpConstants.AsPath.AsTrans]));
     }
@@ -719,7 +719,7 @@ public class BgpMessageTests
     [Fact]
     public void Update_Writer_SortsAttributesByTypeCode_OnWire()
     {
-        // #272 / epic #6: RFC 4271 §5 — well-known attributes ordered by type code on the wire,
+        // RFC 4271 §5 — well-known attributes ordered by type code on the wire,
         // regardless of the order the caller supplied.
         var update = new BgpUpdateMessage
         {
@@ -749,7 +749,7 @@ public class BgpMessageTests
     [Fact]
     public void Update_Writer_SortIsStable_ForEqualTypeCodes()
     {
-        // #273 review: equal type codes must keep their caller-supplied relative order — the
+        // equal type codes must keep their caller-supplied relative order — the
         // sort must be stable (List.Sort is not; OrderBy is).
         var first = AttributeHelper.WriteCommunities([0x11111111u]);
         var second = AttributeHelper.WriteCommunities([0x22222222u]);
@@ -775,7 +775,7 @@ public class BgpMessageTests
     [InlineData(7)]
     public void Communities_NonMultipleOf4Length_Rejected(int length)
     {
-        // RFC 1997 §3: every community is exactly 4 octets (#272) — mirrors the % 12 rule of
+        // RFC 1997 §3: every community is exactly 4 octets — mirrors the % 12 rule of
         // ReadLargeCommunities.
         var attr = new PathAttribute
         {
@@ -792,7 +792,7 @@ public class BgpMessageTests
     [Fact]
     public void AsPath_TrailingByteAfterSegment_Throws()
     {
-        // #235: a complete 1-ASN segment followed by one stray byte — offset != data.Length.
+        // a complete 1-ASN segment followed by one stray byte — offset != data.Length.
         var attr = new PathAttribute
         {
             Flags = BgpConstants.Attribute.FlagTransitive,
@@ -828,7 +828,7 @@ public class BgpMessageTests
     [InlineData(255)]
     public void Origin_InvalidValues_Rejected(byte value)
     {
-        // #233: ORIGIN outside {0,1,2} is a malformed UPDATE — Invalid ORIGIN Attribute (§6.3
+        // ORIGIN outside {0,1,2} is a malformed UPDATE — Invalid ORIGIN Attribute (§6.3
         // subcode 6), surfaced through treat-as-withdraw instead of being silently accepted.
         var attr = new PathAttribute
         {
@@ -1009,14 +1009,14 @@ public class BgpMessageTests
         Assert.All(buffer, b => Assert.Equal(sentinel, b));
     }
 
-    // ---- #291: Extended Length flag must match the length field actually written ----
+    // ---- Extended Length flag must match the length field actually written ----
 
     /// <summary>
     /// RFC 4271 §4.3 lets the Extended Length bit select the length-field width independently of the
     /// value length — it is required above 255 octets, not forbidden below. The writer emitted the
     /// caller's flags byte verbatim but derived the field width from <c>Data.Length &gt; 255</c>, so an
     /// attribute arriving with 0x10 already set and a short value produced a TLV whose flags declared
-    /// a two-octet length followed by a one-octet one — a frame BGPLite's own reader rejects (#291).
+    /// a two-octet length followed by a one-octet one — a frame BGPLite's own reader rejects.
     /// </summary>
     [Theory]
     [InlineData(0)]
@@ -1078,7 +1078,7 @@ public class BgpMessageTests
     }
 
     /// <summary>
-    /// The exact frame from #291: flags 0xD0 with a 4-octet COMMUNITY. The reader used to read the
+    /// The regression frame: flags 0xD0 with a 4-octet COMMUNITY. The reader used to read the
     /// length as 0x0400 = 1024 and throw Attribute Length Error on the writer's own output.
     /// </summary>
     [Fact]
@@ -1105,9 +1105,9 @@ public class BgpMessageTests
     }
 
     /// <summary>
-    /// RFC 4271 §4.3: flag bit 0x08 is reserved and MUST be zero. The reader rejects it (#272), so
+    /// RFC 4271 §4.3: flag bit 0x08 is reserved and MUST be zero. The reader rejects it, so
     /// emitting it would make the writer produce a frame its own reader refuses — the same
-    /// round-trip break this PR fixes for the Extended Length bit (#291 review).
+    /// round-trip break fixed for the Extended Length bit.
     /// </summary>
     [Theory]
     [InlineData((byte)0x08)]                      // reserved alone
@@ -1145,7 +1145,7 @@ public class BgpMessageTests
         Assert.Equal(canary.AsSpan(attrRegion).ToArray(), buffer.AsSpan(attrRegion).ToArray());
     }
 
-    // ---- #300: RFC 4271 §6.1 header validation + RFC 7607 AS 0 ----
+    // ---- RFC 4271 §6.1 header validation + RFC 7607 AS 0 ----
 
     /// <summary>
     /// RFC 4271 §6.1: "if the Length field of a KEEPALIVE message is not equal to 19 ... then the
@@ -1289,7 +1289,7 @@ public class BgpMessageTests
     /// <summary>
     /// RFC 4271 §6.1: "If the Marker field of the message header is not as expected, then a
     /// synchronization error has occurred and the Error Subcode MUST be set to Connection Not
-    /// Synchronized." Previously emitted Unspecific (#300 review).
+    /// Synchronized." Previously emitted Unspecific.
     /// </summary>
     [Theory]
     [InlineData(0)]   // first marker octet corrupted

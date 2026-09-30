@@ -150,7 +150,7 @@ public static class BgpMessageWriter
         // RFC 4271 does NOT require attributes to be ordered. Producers already emit ordered
         // (UpdateCodec.BuildUpdateAttributes); an OrderBy here makes the writer guarantee
         // it for any future producer — LINQ OrderBy is stable, so equal type codes keep their
-        // caller-supplied relative order (#272, epic #6).
+        // caller-supplied relative order.
         var attrs = msg.PathAttributes.Count > 1
             ? [.. msg.PathAttributes.OrderBy(static a => a.TypeCode)]
             : msg.PathAttributes;
@@ -186,10 +186,10 @@ public static class BgpMessageWriter
     /// honoured rather than ignored.
     /// <para>
     /// The single source of truth for both <see cref="GetAttributesLength"/> and
-    /// <see cref="WriteAttribute"/>: previously they each re-derived it from
-    /// <c>Data.Length &gt; 255</c> while the flags byte was written through verbatim, so an
-    /// attribute arriving with 0x10 already set and a value of 255 octets or fewer produced a TLV
-    /// whose flags declared a two-octet length field followed by a one-octet one (#291).
+    /// <see cref="WriteAttribute"/>: deriving it separately from <c>Data.Length &gt; 255</c>
+    /// while writing the flags byte through verbatim used to produce a TLV whose flags declared
+    /// a two-octet length field followed by a one-octet one, for an attribute arriving with 0x10
+    /// already set and a value of 255 octets or fewer.
     /// </para>
     /// </summary>
     private static bool UsesExtendedLength(PathAttribute attr) =>
@@ -210,8 +210,8 @@ public static class BgpMessageWriter
     private static int WriteAttribute(PathAttribute attr, Span<byte> buffer)
     {
         // RFC 4271 §4.3: flag bit 0x08 is reserved and MUST be zero on the wire. BgpMessageReader
-        // rejects it on the way in (#272); emitting it would make the writer produce a frame its
-        // own reader refuses — the same round-trip break this PR fixes for the Extended Length bit.
+        // rejects it on the way in; emitting it would make the writer produce a frame its
+        // own reader refuses — the same round-trip break fixed for the Extended Length bit.
         // Checked BEFORE anything is written so a rejected attribute leaves the caller's span
         // untouched, matching WriteOpen's RequireFitsByte guard.
         if ((attr.Flags & BgpConstants.Attribute.FlagReserved) != 0)

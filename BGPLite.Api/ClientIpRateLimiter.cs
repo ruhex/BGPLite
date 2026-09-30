@@ -5,7 +5,7 @@ using BGPLite.Configuration;
 namespace BGPLite.Api;
 
 /// <summary>
-/// Per-client-IP token-bucket rate limiter with IDLE-PARTITION EVICTION (#423).
+/// Per-client-IP token-bucket rate limiter with idle-partition eviction.
 /// <para>
 /// System.Threading.RateLimiting's <c>PartitionedRateLimiter</c> has no idle eviction: every
 /// client IP ever seen held its bucket (and its AutoReplenishment timer) for the process lifetime —
@@ -19,7 +19,7 @@ namespace BGPLite.Api;
 /// <para>
 /// A request racing a sweep's dispose gets a fresh bucket (the acquire retries once) — a rare
 /// request loses its refill state, never correctness. 429/deny semantics, queue-free, are
-/// identical to the <c>PartitionedRateLimiter</c> this replaces (#116).
+/// identical to the <c>PartitionedRateLimiter</c> this replaces.
 /// </para>
 /// </summary>
 internal sealed class ClientIpRateLimiter : IDisposable, IAsyncDisposable
@@ -58,7 +58,7 @@ internal sealed class ClientIpRateLimiter : IDisposable, IAsyncDisposable
 
     public ValueTask<RateLimitLease> AcquireAsync(string clientIp)
     {
-        // #423: amortized idle-partition eviction — see the class doc.
+        // Amortized idle-partition eviction — see the class doc.
         if (Interlocked.Increment(ref _acquiresSinceSweep) >= _sweepEvery)
         {
             Volatile.Write(ref _acquiresSinceSweep, 0);
@@ -73,7 +73,7 @@ internal sealed class ClientIpRateLimiter : IDisposable, IAsyncDisposable
         }
         catch (ObjectDisposedException)
         {
-            // Lost a race with the eviction sweep's Dispose (CodeRabbit on #450): the sweep
+            // Lost a race with the eviction sweep's Dispose: the sweep
             // removed the dead partition, so re-read via GetOrAdd — this mints a fresh bucket
             // WITHOUT blindly overwriting whatever a concurrent request may have installed.
             limiter = GetOrAdd(clientIp);
@@ -90,7 +90,7 @@ internal sealed class ClientIpRateLimiter : IDisposable, IAsyncDisposable
         {
             if (_partitions.TryGetValue(clientIp, out var existing))
             {
-                // Touch last-access CONDITIONALLY (CodeRabbit on #450): a sweep may have removed
+                // Touch last-access CONDITIONALLY: a sweep may have removed
                 // and disposed this partition between the read and the write — a blind indexer
                 // write would resurrect the disposed limiter. TryUpdate succeeds only against
                 // the exact tuple read; on failure the loop re-reads (or mints a fresh bucket).

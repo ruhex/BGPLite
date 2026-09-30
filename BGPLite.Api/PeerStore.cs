@@ -5,7 +5,7 @@ using BGPLite.Contracts;
 
 namespace BGPLite.Api;
 
-/// <summary>The persisted state of a peer row right after an upsert (#267 item 6): everything the
+/// <summary>The persisted state of a peer row right after an upsert: everything the
 /// POST /api/peers response needs, returned from the upsert's RETURNING clause instead of a
 /// follow-up read.</summary>
 public sealed record SavedPeer(string Id, string Status, DateTime CreatedAt, int? MaxPrefix = null);
@@ -18,8 +18,7 @@ public sealed class PeerStore : IPeerStore
 
     /// <summary>
     /// Creates or upserts the peer row alone. Callers configuring a peer in full should use
-    /// <see cref="SavePeerConfigurationAsync"/> instead, so the row and its collections commit together
-    /// (#259).
+    /// <see cref="SavePeerConfigurationAsync"/> instead, so the row and its collections commit together.
     /// </summary>
     public async Task<string> CreatePeerAsync(string ip, uint asn, string? description, CancellationToken ct = default)
     {
@@ -29,12 +28,12 @@ public sealed class PeerStore : IPeerStore
 
     /// <summary>
     /// The peer-row upsert, on a caller-supplied <see cref="BgpDbContext"/> so it can participate in
-    /// an enclosing transaction (#259) instead of always committing on its own. Behaviour is
-    /// unchanged from the #227 implementation this was extracted from.
+    /// an enclosing transaction instead of always committing on its own. Behaviour is
+    /// unchanged from the implementation this was extracted from.
     /// </summary>
     private static async Task<SavedPeer> UpsertPeerRowAsync(BgpDbContext db, string ip, uint asn, string? description, CancellationToken ct, int? maxPrefix = null)
     {
-        // #227: atomic SQLite upsert eliminates the read-then-write race on the composite unique
+        // Atomic SQLite upsert eliminates the read-then-write race on the composite unique
         // index UX_Peers_Ip_Asn. Two concurrent CreatePeer calls for the same (Ip, Asn) previously
         // both observed `existing is null`, both INSERTed, and the second threw DbUpdateException
         // (UNIQUE constraint failed). Now a single INSERT ... ON CONFLICT DO UPDATE ... RETURNING
@@ -45,7 +44,7 @@ public sealed class PeerStore : IPeerStore
         //
         // EF Core's SqlQuery<T> is documented only for SELECT/composable queries, so for a DML
         // statement with RETURNING we go through the underlying ADO.NET connection — the documented
-        // path for results from non-composable SQL. #267 item 6: the statement returns the row's
+        // path for results from non-composable SQL. The statement returns the row's
         // Status and CreatedAt alongside the Id so the caller can build its response without a
         // follow-up roundtrip; neither column is touched by the ON CONFLICT branch, so the returned
         // values describe the row exactly as it exists after the upsert.
@@ -98,9 +97,10 @@ public sealed class PeerStore : IPeerStore
     public async Task UpsertPeerAsync(string ip, uint asn, CancellationToken ct = default)
     {
         using var db = _dbFactory.CreateDbContext();
-        // #227: atomic upsert — see CreatePeerAsync. UpsertPeer is called from the BGP connect path
-        // (Program.cs _onPeerIdentified), where there is no HTTP caller to receive a 409, so the
-        // previous read-then-write race could throw DbUpdateException into the session handler.
+        // Atomic upsert — see UpsertPeerRowAsync. UpsertPeer is called from the BGP connect path
+        // (BgpSessionFactory wires it as onPeerIdentified), where there is no HTTP caller to receive
+        // a 409, so the previous read-then-write race could throw DbUpdateException into the session
+        // handler.
         var id = Guid.NewGuid().ToString("N");
         var now = DateTime.UtcNow.ToString("O");
         await db.Database.ExecuteSqlInterpolatedAsync($@"
@@ -112,7 +112,7 @@ public sealed class PeerStore : IPeerStore
     public async Task UpdateSessionStatusAsync(string ip, uint asn, bool active, CancellationToken ct = default)
     {
         using var db = _dbFactory.CreateDbContext();
-        // #227: single-statement UPDATE avoids the read-then-write race and is a no-op (0 rows
+        // Single-statement UPDATE avoids the read-then-write race and is a no-op (0 rows
         // affected) if the peer was concurrently deleted, instead of throwing on a null entity.
         var status = active ? "active" : "inactive";
         var now = DateTime.UtcNow.ToString("O");
@@ -143,7 +143,7 @@ public sealed class PeerStore : IPeerStore
     }
 
     /// <summary>
-    /// Returns ALL peers at the given IP (#23). When several peers share one source IP (NAT/VPN),
+    /// Returns ALL peers at the given IP. When several peers share one source IP (NAT/VPN),
     /// each is a distinct record with its own Id, subscriptions, and communities. Used by /api/me
     /// to return a multi-peer array when disambiguation is needed.
     /// </summary>
@@ -158,7 +158,7 @@ public sealed class PeerStore : IPeerStore
 
     /// <summary>
     /// Resolves a peer by its durable identity <c>(Ip, Asn)</c> — the form a BGP session knows once
-    /// it has parsed the peer's OPEN (issue #19). Several peers may share a source IP with distinct
+    /// it has parsed the peer's OPEN. Several peers may share a source IP with distinct
     /// AS; this returns the specific one, unlike the Ip-only lookup.
     /// </summary>
     public async Task<PeerInfo?> GetPeerAsync(string ip, uint asn, CancellationToken ct = default)
@@ -169,7 +169,7 @@ public sealed class PeerStore : IPeerStore
     }
 
     /// <summary>
-    /// Resolves the peer's per-peer prefix ceiling (#391): the row's <c>MaxPrefix</c> override or
+    /// Resolves the peer's per-peer prefix ceiling: the row's <c>MaxPrefix</c> override or
     /// <c>null</c> when the peer is unknown / has no override. A light single-column read — the
     /// session calls it once per establish/refresh cycle, never per UPDATE.
     /// </summary>
@@ -183,7 +183,7 @@ public sealed class PeerStore : IPeerStore
     }
 
     /// <summary>
-    /// Returns (Ip, Md5Password) for every peer with a configured TCP-MD5 key (#36). Used once at
+    /// Returns (Ip, Md5Password) for every peer with a configured TCP-MD5 key. Used once at
     /// startup to arm the listening socket — and only the IP and key leave the store, never the
     /// key alone (API reads use the enabled flag instead).
     /// </summary>
@@ -198,7 +198,7 @@ public sealed class PeerStore : IPeerStore
 
     /// <summary>
     /// Returns (Ip, Md5Password) for every peer row at ONE source IP that carries a TCP-MD5 key.
-    /// Used to re-arm the per-IP key after a delete/PATCH (#418): TCP keys by address (#36), so
+    /// Used to re-arm the per-IP key after a delete/PATCH: TCP keys by address, so
     /// deleting or clearing one sibling must fall back to a surviving row's key instead of
     /// silently disarming every peer sharing the IP.
     /// </summary>
@@ -214,7 +214,7 @@ public sealed class PeerStore : IPeerStore
     /// <summary>
     /// Single-roundtrip replacement for the <c>GetPeer</c> + <c>UpdateSessionStatus</c> +
     /// <c>GetSubscriptions</c> + <c>GetCustomPrefixes</c> + <c>GetCustomAsns</c> sequence the BGP
-    /// send path used to issue as FIVE separate <c>DbContext</c>s (issue #84). Loads the peer by
+    /// send path used to issue as FIVE separate <c>DbContext</c>s. Loads the peer by
     /// <c>(Ip, Asn)</c> with the four routing-relevant child collections <c>Include</c>'d in ONE
     /// <c>AsNoTracking</c> query (read-only intent, consistent with the other getters), then folds
     /// the "session active" status write into the SAME <c>DbContext</c> via <c>ExecuteUpdate</c> —
@@ -229,16 +229,17 @@ public sealed class PeerStore : IPeerStore
         // the driver materializes subs x prefixes x asns x sources rows. Measured on a real SQLite
         // file, 200 iterations: a peer with 3 subscriptions / 200 custom prefixes / 5 ASNs /
         // 2 sources produces 6,000 rows and takes 31 ms per call; 5/1000/10/3 produces 150,000 rows
-        // and takes 814 ms. Split, the same reads are 0.33 ms and 1.4 ms — 96x and 596x (#260).
+        // and takes 814 ms. Split, the same reads are 0.33 ms and 1.4 ms — 96x and 596x.
         //
         // This runs on the BGP send path (every session establish, every RefreshRoutesAsync, and
         // RefreshAllEstablishedAsync fires it for all peers at once), so it is the read a user waits
         // on before their selected prefixes reach the wire.
         //
         // The read is wrapped in a transaction because splitting gives up the single-statement
-        // consistency #138 relied on: the four SELECTs would otherwise each see their own snapshot,
-        // and a UI edit landing between them would advertise a mixed configuration. SQLite runs in
-        // WAL here (#95), so a read transaction takes no write lock and does not block writers.
+        // consistency the old Include-based load relied on: the four SELECTs would otherwise each see
+        // their own snapshot, and a UI edit landing between them would advertise a mixed
+        // configuration. SQLite runs in WAL here, so a read transaction takes no write lock and does
+        // not block writers.
         Peer? peer;
         using (var read = await db.Database.BeginTransactionAsync(ct))
         {
@@ -265,7 +266,7 @@ public sealed class PeerStore : IPeerStore
             peer.Subscriptions.Select(s => s.AsnListName).ToList(),
             peer.CustomPrefixes.Select(c => c.Prefix + "/" + c.PrefixLength).ToList(),
             peer.CustomAsns.Select(c => c.Asn).ToList(),
-            // Only Active user sources are advertised (issue #147); the filtered Include above
+            // Only Active user sources are advertised; the filtered Include above
             // already excluded paused rows at the SQL level.
             peer.CustomSources
                 .Select(c => new CustomSourceView(c.Name, c.Url, c.Community))
@@ -278,16 +279,13 @@ public sealed class PeerStore : IPeerStore
     /// <c>GetCustomPrefixes</c> + <c>GetCustomAsns</c> + <c>GetCustomSources</c> +
     /// <c>GetCommunities</c> sequence the management API's GET endpoints used to issue as 5–6
     /// separate <c>DbContext</c> instances (each opening its own SQLite connection + running the
-    /// PRAGMA trio) — issue #228. Loads the peer and ALL its child collections through ONE
+    /// PRAGMA trio). Loads the peer and ALL its child collections through ONE
     /// read-only <c>DbContext</c> via an EF Core projection.
     /// <para>
-    /// This doc previously claimed EF "auto-splits the collection subqueries inside a projection ...
-    /// so there is no Cartesian-product row explosion". That is not what EF emits: the projection
-    /// produced a single statement LEFT JOINing all five collections, byte-for-byte the same shape
-    /// as an Include-based load, and this method carried the full N x M x K x ... explosion since
-    /// #228. Verified by dumping the SQL — one SELECT before, six after adding
-    /// <c>AsSplitQuery</c> (#260). For a peer with 200 custom prefixes that is 120 ms per call
-    /// against 0.17 ms, on the path the management UI hits to render a peer.
+    /// A projection alone does NOT split collection subqueries: EF emits a single statement
+    /// LEFT JOINing all five collections — the same Cartesian-product explosion an Include-based
+    /// load has — so <c>AsSplitQuery</c> is required. For a peer with 200 custom prefixes that is
+    /// 120 ms per call against 0.17 ms split, on the path the management UI hits to render a peer.
     /// </para>
     /// Read-only (<c>AsNoTracking</c>); unlike <see cref="LoadPeerRoutingView"/> it
     /// does NOT fold a status update (the GET path does not mutate). Returns null if the peer does
@@ -297,7 +295,7 @@ public sealed class PeerStore : IPeerStore
     {
         using var db = _dbFactory.CreateDbContext();
         // AsSplitQuery is what makes each collection its own SELECT — a projection alone does not
-        // split (#260). Read transaction for the same reason as LoadPeerRoutingViewAsync: the six
+        // split. Read transaction for the same reason as LoadPeerRoutingViewAsync: the six
         // statements must see one snapshot, and in WAL a read transaction blocks nobody.
         using var read = await db.Database.BeginTransactionAsync(ct);
         var detail = await db.Peers.AsNoTracking()
@@ -319,9 +317,9 @@ public sealed class PeerStore : IPeerStore
                     .ToList(),
                 // Communities stored as long (PeerCommunity.Community); the API formats to "ASN:VAL".
                 p.Communities.Select(c => c.Community).ToList(),
-                // #391: the per-peer prefix ceiling (NULL = inherit Bgp.MaxPrefixesPerPeer).
+                // The per-peer prefix ceiling (NULL = inherit Bgp.MaxPrefixesPerPeer).
                 p.MaxPrefix,
-                // #36: the raw TCP-MD5 key — the API projects it to a boolean flag, never the value.
+                // The raw TCP-MD5 key — the API projects it to a boolean flag, never the value.
                 p.Md5Password))
             .AsSplitQuery()
             .FirstOrDefaultAsync(ct);
@@ -330,11 +328,11 @@ public sealed class PeerStore : IPeerStore
     }
 
     /// <summary>
-    /// Creates (or upserts) a peer and applies its whole configuration in ONE transaction (#259).
+    /// Creates (or upserts) a peer and applies its whole configuration in ONE transaction.
     /// <para>
     /// The management API previously chained <c>CreatePeer</c> → <c>SetSubscriptions</c> →
     /// <c>SetCustomPrefixes</c> → <c>SetCustomAsns</c>, each opening its own <c>DbContext</c> and
-    /// transaction. #226/#227 made each individual step atomic; the composition was not. A failure
+    /// transaction. Each individual step was made atomic first; the composition was not. A failure
     /// part-way — a duplicate CIDR violating the <c>(PeerId, Prefix, PrefixLength)</c> key is the
     /// reported trigger — returned 500 to the client over an already-committed peer row, leaving a
     /// half-configured peer that the client's retry then had to reconcile. It also opened a window
@@ -371,7 +369,7 @@ public sealed class PeerStore : IPeerStore
     }
 
     /// <summary>
-    /// Applies a partial peer update in ONE transaction (#259). A <c>null</c> argument means "leave
+    /// Applies a partial peer update in ONE transaction. A <c>null</c> argument means "leave
     /// this alone", matching the PATCH semantics the management API exposes — an empty list means
     /// "clear it", which is a different request and is honoured as such.
     /// </summary>
@@ -390,14 +388,14 @@ public sealed class PeerStore : IPeerStore
             await db.Peers.Where(p => p.Id == peerId)
                 .ExecuteUpdateAsync(s => s.SetProperty(p => p.Description, description), ct);
         }
-        // #391: maxPrefix follows the PATCH pattern — null means "leave it alone"; an explicit
+        // maxPrefix follows the PATCH pattern — null means "leave it alone"; an explicit
         // value (including 0 = unlimited for this peer) is set. The create path always sets it.
         if (maxPrefix is not null)
         {
             await db.Peers.Where(p => p.Id == peerId)
                 .ExecuteUpdateAsync(s => s.SetProperty(p => p.MaxPrefix, maxPrefix), ct);
         }
-        // #36: md5Password PATCH — null leaves it, "" clears (plain TCP), a value sets it.
+        // md5Password PATCH — null leaves it, "" clears (plain TCP), a value sets it.
         if (md5Password is not null)
         {
             await db.Peers.Where(p => p.Id == peerId)
@@ -443,8 +441,8 @@ public sealed class PeerStore : IPeerStore
     }
 
     // AsNoTracking is a read-only-intent marker here — a no-op for this scalar projection (no
-    // entities are materialized to track). #267 item 4: no Include — SelectMany over the
-    // navigation composes in SQL on its own; the Include was redundant load-hint noise.
+    // entities are materialized to track). No Include — SelectMany over the
+    // navigation composes in SQL on its own; the Include would be redundant load-hint noise.
     public async Task<HashSet<uint>> GetCommunitiesAsync(string peerId, CancellationToken ct = default)
     {
         using var db = _dbFactory.CreateDbContext();
@@ -480,7 +478,7 @@ public sealed class PeerStore : IPeerStore
     public async Task SetCommunitiesAsync(string peerId, HashSet<uint> communities, CancellationToken ct = default)
     {
         using var db = _dbFactory.CreateDbContext();
-        // #226: ExecuteDelete runs in its own implicit transaction and AddRange/SaveChanges in
+        // ExecuteDelete runs in its own implicit transaction and AddRange/SaveChanges in
         // another; without an explicit transaction a failure between them leaves the peer with an
         // EMPTY collection (delete committed, insert did not). Wrap both in one transaction so the
         // replace is atomic.
@@ -505,7 +503,7 @@ public sealed class PeerStore : IPeerStore
     public async Task SetSubscriptionsAsync(string peerId, List<string> asnListNames, CancellationToken ct = default)
     {
         using var db = _dbFactory.CreateDbContext();
-        // #226: wrap delete+insert in a transaction — see SetCommunitiesAsync.
+        // Wrap delete+insert in a transaction — see SetCommunitiesAsync.
         using var tx = await db.Database.BeginTransactionAsync(ct);
         await db.Set<PeerSubscription>().Where(s => s.PeerId == peerId).ExecuteDeleteAsync(ct);
         db.Set<PeerSubscription>().AddRange(
@@ -527,7 +525,7 @@ public sealed class PeerStore : IPeerStore
     public async Task SetCustomPrefixesAsync(string peerId, List<(string Prefix, byte Length)> prefixes, CancellationToken ct = default)
     {
         using var db = _dbFactory.CreateDbContext();
-        // #226: wrap delete+insert in a transaction — see SetCommunitiesAsync.
+        // Wrap delete+insert in a transaction — see SetCommunitiesAsync.
         using var tx = await db.Database.BeginTransactionAsync(ct);
         await db.Set<PeerCustomPrefix>().Where(c => c.PeerId == peerId).ExecuteDeleteAsync(ct);
         db.Set<PeerCustomPrefix>().AddRange(
@@ -549,7 +547,7 @@ public sealed class PeerStore : IPeerStore
     public async Task SetCustomAsnsAsync(string peerId, List<uint> asns, CancellationToken ct = default)
     {
         using var db = _dbFactory.CreateDbContext();
-        // #226: wrap delete+insert in a transaction — see SetCommunitiesAsync.
+        // Wrap delete+insert in a transaction — see SetCommunitiesAsync.
         using var tx = await db.Database.BeginTransactionAsync(ct);
         await db.Set<PeerCustomAsn>().Where(c => c.PeerId == peerId).ExecuteDeleteAsync(ct);
         db.Set<PeerCustomAsn>().AddRange(
@@ -559,7 +557,7 @@ public sealed class PeerStore : IPeerStore
     }
 
     /// <summary>
-    /// Lists all user-supplied URL-based prefix-list sources for a peer (#143). Sources are stored as
+    /// Lists all user-supplied URL-based prefix-list sources for a peer. Sources are stored as
     /// URLs (not parsed); fetched at send time in SendAllRoutesAsync.
     /// </summary>
     public async Task<List<PeerCustomSource>> GetCustomSourcesAsync(string peerId, CancellationToken ct = default)

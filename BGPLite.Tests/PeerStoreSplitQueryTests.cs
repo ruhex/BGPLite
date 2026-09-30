@@ -6,7 +6,7 @@ using Microsoft.EntityFrameworkCore.Diagnostics;
 namespace BGPLite.Tests;
 
 /// <summary>
-/// #260: both peer reads must emit one SELECT per collection, not a single statement LEFT JOINing
+/// Both peer reads must emit one SELECT per collection, not a single statement LEFT JOINing
 /// all of them. Without that, the driver materializes the Cartesian product of the child
 /// collections — measured on a real SQLite file, a peer with 3 subscriptions / 200 custom prefixes /
 /// 5 ASNs / 2 sources produced 6,000 rows and took 31 ms per <c>LoadPeerRoutingView</c> call
@@ -38,7 +38,7 @@ public class PeerStoreSplitQueryTests
         // peer row + 4 collections; a single-query load would emit exactly 1 SELECT.
         Assert.True(selects.Count > 1,
             $"expected a split query (one SELECT per collection), got {selects.Count} SELECT statement(s) — " +
-            "the Cartesian-product shape is back (#260)");
+            "the Cartesian-product shape is back");
     }
 
     [Fact]
@@ -54,7 +54,7 @@ public class PeerStoreSplitQueryTests
         Assert.NotNull(detail);
         Assert.True(selects.Count > 1,
             $"expected a split query (one SELECT per collection), got {selects.Count} SELECT statement(s) — " +
-            "a projection does NOT auto-split, AsSplitQuery is what does it (#260)");
+            "a projection does NOT auto-split, AsSplitQuery is what does it");
     }
 
     /// <summary>The split must not change what the reads return — the point is the SQL shape, not the data.</summary>
@@ -73,7 +73,7 @@ public class PeerStoreSplitQueryTests
         Assert.Equal(["list-a", "list-b"], view!.Subscriptions);
         Assert.Equal(["10.0.0.0/8", "192.0.2.0/24"], view.CustomPrefixes);
         Assert.Equal([64512u, 64513u], view.CustomAsns);
-        // Only Active sources are advertised (#147); the peer below has one of each.
+        // Only Active sources are advertised; the peer below has one of each.
         var source = Assert.Single(view.UserSources);
         Assert.Equal("active-src", source.Name);
 

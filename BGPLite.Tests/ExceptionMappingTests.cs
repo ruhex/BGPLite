@@ -6,7 +6,7 @@ using Microsoft.EntityFrameworkCore;
 namespace BGPLite.Tests;
 
 /// <summary>
-/// Regression coverage for #157: raw exception messages must NOT reach the client (EF Core /
+/// Regression coverage: raw exception messages must NOT reach the client (EF Core /
 /// SQLite / JSON internals — table names, constraint text, file paths — are reconnaissance
 /// surface). <see cref="ManagementApi.MapExceptionToResponse"/> maps unhandled exceptions to a
 /// stable, non-revealing client response with the correct status code.
@@ -28,8 +28,8 @@ public class ExceptionMappingTests
     [Fact]
     public void DbUpdateException_WithoutSqliteInner_MapsTo_500()
     {
-        // #431: a DbUpdateException WITHOUT a SqliteException inner (an EF-level failure, e.g. a
-        // value conversion) is a server-side problem — the pre-#431 mapping answered 409 "already
+        // A DbUpdateException WITHOUT a SqliteException inner (an EF-level failure, e.g. a
+        // value conversion) is a server-side problem — the old mapping answered 409 "already
         // exists" for it, misleading every client debugging the conflict.
         var inner = new InvalidOperationException("UNIQUE constraint failed: Peers.Ip, Peers.Asn");
         var ex = new DbUpdateException("An error occurred while saving the entity changes.", inner);
@@ -72,7 +72,7 @@ public class ExceptionMappingTests
     }
 
     /// <summary>
-    /// CodeRabbit #172 follow-up: cancellation is never an error. The HandleAsync catch-all filters
+    /// Cancellation is never an error. The HandleAsync catch-all filters
     /// OperationCanceledException out (via `when (ex is not OperationCanceledException)`), so it
     /// propagates to the host's cancellation handling instead of being mapped to a 500. This test
     /// documents the contract: MapExceptionToResponse itself would return 500 for an OCE (it does
@@ -90,7 +90,7 @@ public class ExceptionMappingTests
     }
 
     /// <summary>
-    /// #266 item 8: an FK violation (SQLite code 19) after a concurrent DELETE removed the parent
+    /// An FK violation (SQLite code 19) after a concurrent DELETE removed the parent
     /// peer row must answer 404 "removed", not 409 "already exists" for a resource that is gone.
     /// </summary>
     [Fact]
@@ -121,7 +121,7 @@ public class ExceptionMappingTests
     [InlineData(275)]  // SQLITE_CONSTRAINT_CHECK
     public void DbUpdateException_NonConflictConstraint_MapsTo_500(int extendedCode)
     {
-        // #431: the pre-#431 catch-all labeled every non-FK constraint 409 "already exists" —
+        // The old catch-all labeled every non-FK constraint 409 "already exists" —
         // including NOT NULL / CHECK violations, which are server-side bugs. Only UNIQUE (2067)
         // is a conflict.
         var ex = new DbUpdateException("constraint failed", new SqliteException("constraint failed", 19, extendedCode));

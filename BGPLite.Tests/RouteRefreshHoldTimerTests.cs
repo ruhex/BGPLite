@@ -12,7 +12,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 namespace BGPLite.Tests;
 
 /// <summary>
-/// #253: ROUTE_REFRESH must be handled OFF the read loop. A refresh that blocks (cold TTL cache /
+/// ROUTE_REFRESH must be handled OFF the read loop. A refresh that blocks (cold TTL cache /
 /// slow RIPEstat / slow store) used to starve the loop: the peer's KEEPALIVEs sat unread and a
 /// completely live session was killed by a false Hold Timer Expired. This test hangs the refresh
 /// mid-flight on a gated IPeerStore, keeps sending KEEPALIVEs, and asserts the session survives
@@ -23,7 +23,7 @@ public class RouteRefreshHoldTimerTests
     private sealed class GatedStore : IPeerStore
     {
         public volatile bool Armed;
-        // #262: the contract is async now, so the gate awaits instead of parking a pool thread.
+        // The contract is async, so the gate awaits instead of parking a pool thread.
         public readonly TaskCompletionSource Release = new(TaskCreationOptions.RunContinuationsAsynchronously);
         /// <summary>Completes when a gated Load has actually ENTERED the block — the test waits
         /// for it before measuring liveness, so a delayed ROUTE_REFRESH cannot pass vacuously.</summary>
@@ -95,7 +95,7 @@ public class RouteRefreshHoldTimerTests
             new BgpMetrics(),
             new NopLogger<BgpSession>(),
             peerStore: store,
-            // #263: the assembler is injected now, so the test supplies the same store it asserts on.
+            // The assembler is injected, so the test supplies the same store it asserts on.
             routeAssembler: new RouteAssembler(
                 new EmptyPrefixService(), store, NullCommunityResolver.Instance,
                 AllowAllFilter.Instance, new AppConfig(), cfg,
@@ -153,7 +153,7 @@ public class RouteRefreshHoldTimerTests
         var rrLen = BgpMessageWriter.WriteMessage(rr, rrBuf);
         client.Send(rrBuf, 0, rrLen, SocketFlags.None);
 
-        // The refresh must actually reach the gate before liveness is measured (CodeRabbit #281):
+        // The refresh must actually reach the gate before liveness is measured:
         // if ROUTE_REFRESH processing were delayed, the gate would never engage and the KEEPALIVE
         // assertions would pass without exercising the blocked-refresh path.
         await store.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));

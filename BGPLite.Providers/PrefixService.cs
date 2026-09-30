@@ -8,10 +8,10 @@ namespace BGPLite.Providers;
 
 public sealed class PrefixService : IPrefixService
 {
-    // #267 item 5: the per-ASN RIPEstat cache is a shared component — PrefixService (RipeStat
+    // The per-ASN RIPEstat cache is a shared component — PrefixService (RipeStat
     // AsnLists + custom ASNs) and AsnPrefixProvider (Kind: asn sources) consume ONE instance, so
     // an ASN configured in both mechanisms is fetched and cached once. TTL/stale-on-failure/
-    // negative-cache/eviction (#163/#164/#165) live there now.
+    // negative-cache/eviction live there.
     private readonly RipeStatPrefixCache _ripeStatCache;
     private readonly IPrefixSourceService _prefixSources;
     private readonly AppConfig _config;
@@ -22,7 +22,7 @@ public sealed class PrefixService : IPrefixService
     private readonly TimeProvider _timeProvider;
     private readonly UserSourceCache _userSourceCache;
     private readonly IPrefixSourceProvider _userSourceHttpProvider;
-    // #229: gate serializing the RU/default-prefix cache-miss fetch path. The RU set is a single
+    // Gate serializing the RU/default-prefix cache-miss fetch path. The RU set is a single
     // shared cache (unlike the per-ASN _cache), so a single SemaphoreSlim is enough — it prevents a
     // thundering herd of N concurrent sessions from all re-fetching the ~11k-prefix default list
     // when the TTL elapses. Mirrors the per-ASN gate pattern in GetPrefixesAsync.
@@ -37,19 +37,19 @@ public sealed class PrefixService : IPrefixService
         _ruCacheTtl = ruCacheTtl ?? TimeSpan.FromHours(1);
         _logger = logger;
         _timeProvider = timeProvider ?? TimeProvider.System;
-        // #320: fetch budget for peer-supplied URL sources — generous for a real prefix list
+        // Fetch budget for peer-supplied URL sources — generous for a real prefix list
         // (10 MB cap streams in well under it), bounded enough that a dripping/hung body cannot
         // stall the route dump behind the per-URL gate.
         _userSourceTimeoutSeconds = userSourceTimeoutSeconds ?? DefaultUserSourceTimeoutSeconds;
         _userSourceCache = new UserSourceCache(logger: logger, timeProvider: _timeProvider);
-        // #416: convergence push for default-source changes detected on the RU path. Fired AFTER
+        // Convergence push for default-source changes detected on the RU path. Fired AFTER
         // _ruGate.Release() in GetRuPrefixesAsync — never while the gate is held.
         _onSourceChanged = onSourceChanged;
-        // #425: the peer-supplied user-source path uses its OWN http provider (the retry-only
+        // The peer-supplied user-source path uses its OWN http provider (the retry-only
         // pipeline) so peer-controlled failures cannot open the breaker gating operator sources;
         // falls back to the operator provider when not wired (tests).
         _userSourceHttpProvider = userSourceHttpProvider ?? httpProvider;
-        // #452: a committed content change to the DEFAULT source must invalidate the RU projection
+        // A committed content change to the DEFAULT source must invalidate the RU projection
         // immediately — the auto-refresh path (RefreshAsync) never fires the push callback, so
         // without this the fleet rebuild triggered afterwards re-reads the stale fast path for up
         // to the RU TTL. The handler is a Volatile.Write: cheap, non-blocking, safe off the
@@ -61,7 +61,7 @@ public sealed class PrefixService : IPrefixService
     }
 
     /// <summary>
-    /// #452 handler for <see cref="IPrefixSourceService.ContentCommitted"/>: drops the cached RU
+    /// Handler for <see cref="IPrefixSourceService.ContentCommitted"/>: drops the cached RU
     /// projection when the changed source is the one it is projected from. The next
     /// <see cref="GetRuPrefixesAsync"/> takes the gate path, re-projects from the already-new
     /// source-level cache, and reports no change — so the fleet push is not duplicated.
@@ -73,26 +73,25 @@ public sealed class PrefixService : IPrefixService
         Volatile.Write(ref _ruCache, null);
     }
 
-    /// <summary>Default per-fetch budget for peer-supplied URL sources (#320).</summary>
+    /// <summary>Default per-fetch budget for peer-supplied URL sources.</summary>
     public const int DefaultUserSourceTimeoutSeconds = 30;
     private readonly int _userSourceTimeoutSeconds;
 
     /// <summary>
-    /// Fetches a per-peer user-supplied URL prefix-list source (issues #147 / #150). The URL is
+    /// Fetches a per-peer user-supplied URL prefix-list source. The URL is
     /// peer-supplied (not in <c>AppConfig.PrefixSources</c>, so the name-keyed <see cref="PrefixSourceService"/>
     /// cache can't help); instead a URL-keyed TTL cache (<see cref="UserSourceCache"/>) dedupes fetches
-    /// across peers and serves a stale copy on transient failure. SSRF defense (#144) is inherited from
+    /// across peers and serves a stale copy on transient failure. SSRF defense is inherited from
     /// the http provider's named client. The <c>Active</c>
     /// lifecycle is handled by the caller (LoadPeerRoutingView filters Active before this is reached),
     /// so paused sources are never advertised regardless of cache state.
     /// <para>
-    /// #320: the config is built WITH a fetch budget. Without one, HttpPrefixProvider's linked-CTS
+    /// The config is built WITH a fetch budget. Without one, HttpPrefixProvider's linked-CTS
     /// timeout is never armed and the body-read loop is guarded only by the session token — a
     /// server that answers headers then drips (or never sends) the body hangs the whole route dump
     /// behind the per-URL gate while the session stays Established (KEEPALIVEs keep the hold timer
-    /// fed). A timed-out fetch throws OCE with a live caller token — a per-source fetch failure per
-    /// the #342 boundary — and is negative-cached by <see cref="UserSourceCache"/>, so repeated
-    /// refreshes do not re-pay the budget.
+    /// fed). A timed-out fetch throws OCE with a live caller token, and is negative-cached by
+    /// <see cref="UserSourceCache"/>, so repeated refreshes do not re-pay the budget.
     /// </para>
     /// </summary>
     public async Task<IReadOnlyList<(UInt128 Prefix, byte Length, bool IsIpv4)>> GetUserSourcePrefixesAsync(string name, string url, string? community, CancellationToken ct = default)
@@ -114,8 +113,8 @@ public sealed class PrefixService : IPrefixService
     }
 
     public async Task<IReadOnlyList<(UInt128 Prefix, byte Length, bool IsIpv4)>> GetPrefixesAsync(uint asn, CancellationToken ct = default)
-        // Per-ASN caching, stale-on-failure, negative TTL, fetch gates, and the #165 eviction
-        // sweep all live in the shared cache (#267 item 5) — one wire fetch per ASN regardless
+        // Per-ASN caching, stale-on-failure, negative TTL, fetch gates, and the eviction
+        // sweep all live in the shared cache — one wire fetch per ASN regardless
         // of which mechanism asked.
         => ToContract(await _ripeStatCache.GetPrefixesAsync(asn, ct));
 
@@ -131,7 +130,7 @@ public sealed class PrefixService : IPrefixService
 
         // Resolve each DISTINCT ASN concurrently (bounded) — latency is max, not sum, on cold
         // RIPEstat misses. Duplicates are coalesced for the fan-out so they cannot race the cold
-        // per-ASN cache and double-fetch (CodeRabbit #130); output multiplicity is preserved below.
+        // per-ASN cache and double-fetch; output multiplicity is preserved below.
         // Each ASN keeps its own try/catch so one failure (incl. cancellation) can't drop the others.
         using var gate = new SemaphoreSlim(MaxDegreeOfParallelism, MaxDegreeOfParallelism);
         var resolvedByAsn = new Dictionary<uint, Task<IReadOnlyList<(UInt128 Prefix, byte Length, bool IsIpv4)>>>();
@@ -167,11 +166,10 @@ public sealed class PrefixService : IPrefixService
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
-            // #225: when the caller's token is cancelled (shutdown / refresh-with-cancel), the OCE
+            // When the caller's token is cancelled (shutdown / refresh-with-cancel), the OCE
             // MUST propagate — otherwise GetPrefixesForAsns silently returns a partial prefix list
-            // (cancelled ASNs dropped to []) instead of throwing. This is the specific shutdown-path
-            // regression #225 fixes; it mirrors the OCP-propagation policy enforced across the rest
-            // of the prefix-sourcing stack (UserSourceCache #114, GetPrefixesAsync:97).
+            // (cancelled ASNs dropped to []) instead of throwing. It mirrors the OCE-propagation
+            // policy enforced across the rest of the prefix-sourcing stack.
             //
             // The `when (ct.IsCancellationRequested)` guard is narrow on purpose: an OCE raised by
             // something OTHER than the caller's token (e.g. a Polly pipeline internal timeout using
@@ -185,7 +183,7 @@ public sealed class PrefixService : IPrefixService
         {
             // Skip the failed ASN (a transient RIPEstat error) and continue with the others — but
             // not silently: its prefixes vanish from this cycle's advertisement, and the operator
-            // must be able to tell "ASN no longer has prefixes" from "fetch failed" (#330).
+            // must be able to tell "ASN no longer has prefixes" from "fetch failed".
             _logger?.LogWarning(ex, "AS{Asn}: RIPEstat resolve failed — advertising no prefixes for this ASN this cycle", asn);
             return [];
         }
@@ -201,15 +199,15 @@ public sealed class PrefixService : IPrefixService
     /// The projection is cached for one TTL so repeated calls (multiple sessions / refreshes)
     /// don't re-allocate the same ~11k-entry list.
     /// <para>
-    /// #229: the cache is a single immutable <see cref="RuCacheEntry"/> reference swapped atomically
+    /// The cache is a single immutable <see cref="RuCacheEntry"/> reference swapped atomically
     /// via <see cref="Interlocked.Exchange(ref RuCacheEntry?, RuCacheEntry?)"/>, so a reader always
     /// observes a consistent (projection, timestamp) pair — no torn read where the new projection
     /// is paired with the old timestamp. A <see cref="SemaphoreSlim"/> gate serializes the cache-miss
     /// fetch so concurrent callers share one default-source load (thundering-herd defense), and
-    /// stale-on-failure serves the last good copy on a transient fetch error (#163 parity).
+    /// stale-on-failure serves the last good copy on a transient fetch error.
     /// </para>
     /// <para>
-    /// #416: the convergence push for a detected content change fires AFTER <c>_ruGate.Release()</c>
+    /// The convergence push for a detected content change fires AFTER <c>_ruGate.Release()</c>
     /// — the load itself runs callback-free (<see cref="IPrefixSourceService.LoadDefaultAsync"/>).
     /// Firing it while the gate was held deadlocked the fleet refresh: the push re-enters this
     /// method from other sessions' builds, which blocked on the gate the triggering frame still
@@ -230,7 +228,7 @@ public sealed class PrefixService : IPrefixService
             return cached.Projected;
 
         // Serialize the cache-miss fetch so concurrent callers share one default-source fetch
-        // (thundering-herd defense — #229). Mirrors the per-ASN gate in GetPrefixesAsync.
+        // (thundering-herd defense). Mirrors the per-ASN gate in GetPrefixesAsync.
         List<(UInt128 Prefix, byte Length, bool IsIpv4, uint Asn)> projected;
         var changed = false;
         await _ruGate.WaitAsync(ct);
@@ -243,23 +241,22 @@ public sealed class PrefixService : IPrefixService
 
             try
             {
-                // Callback-free load (#416): no onSourceChanged can fire while this frame holds
+                // Callback-free load: no onSourceChanged can fire while this frame holds
                 // the gate. Failures propagate so the stale-on-failure branch below stays live —
                 // a failed cold load must not be cached as a positive empty set.
                 var (prefixes, loadChanged) = await _prefixSources.LoadDefaultAsync(ct);
                 projected = prefixes.Select(p => (p.Address, p.Length, p.IsIpv4, 0u)).ToList();
                 changed = loadChanged;
             }
-            // #485 (#320/#324 contract): only CALLER cancellation propagates. A foreign-token OCE
-            // (the default source's fetch budget firing on a live ct) is a load FAILURE and takes
-            // the stale-on-failure branch below instead of escaping as "cancellation".
+            // Only CALLER cancellation propagates. A foreign-token OCE (the default source's
+            // fetch budget firing on a live ct) is a load FAILURE and takes the stale-on-failure
+            // branch below instead of escaping as "cancellation".
             catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
             catch (Exception ex)
             {
-                // Stale-on-failure (#163 parity): serve the last good copy regardless of its age so
+                // Stale-on-failure: serve the last good copy regardless of its age so
                 // a transient default-source outage does not drop the RU/default routes the instant
-                // the TTL elapses. Asymmetric with the no-cache path — previously the throw
-                // propagated and unconfigured/unknown peers lost their RU routes.
+                // the TTL elapses. Asymmetric with the no-cache path, where the throw propagates.
                 var stale = Volatile.Read(ref _ruCache);
                 if (stale is not null)
                 {
@@ -279,7 +276,7 @@ public sealed class PrefixService : IPrefixService
             _ruGate.Release();
         }
 
-        // #416: the push runs AFTER the gate is released — a re-entrant GetRuPrefixesAsync (another
+        // The push runs AFTER the gate is released — a re-entrant GetRuPrefixesAsync (another
         // session's build) takes the fast path against the just-written cache instead of blocking
         // on this frame. A failure is logged, never propagated into the caller's route dump.
         if (changed && _onSourceChanged is not null)
@@ -302,10 +299,10 @@ public sealed class PrefixService : IPrefixService
     /// Provider-native <see cref="IpPrefix"/> values mapped onto the Contracts tuple layout
     /// (Contracts is a dependency-free leaf and cannot see the Protocol type).
     /// <para>
-    /// #429: the projection is memoized by the NATIVE list instance (ConditionalWeakTable — freed
+    /// The projection is memoized by the NATIVE list instance (ConditionalWeakTable — freed
     /// with it, no eviction needed). All three cache layers return the SAME list instance until
-    /// their next reload, so every warm call was re-projecting an 11k-entry list per peer per
-    /// refresh; now the tuple list is built once per load and shared read-only.
+    /// their next reload, so without the memo every warm call would re-project an 11k-entry list
+    /// per peer per refresh; now the tuple list is built once per load and shared read-only.
     /// </para>
     /// </summary>
     private static readonly System.Runtime.CompilerServices.ConditionalWeakTable
@@ -327,8 +324,8 @@ public sealed class PrefixService : IPrefixService
                 await GetPrefixesAsync(asn, ct);
                 _logger?.LogInformation("WarmUp: AS{Asn} cached", asn);
             }
-            // #485: host shutdown unwinds the loop, not a WARN per remaining ASN.
-            // #503 review: filter CALLER cancellation — a foreign-token OCE (body deadline on a
+            // Host shutdown unwinds the loop, not a WARN per remaining ASN.
+            // Filter CALLER cancellation — a foreign-token OCE (body deadline on a
             // cold ASN, escaping RipeStatPrefixCache's no-stale rethrow) is a per-ASN fetch
             // failure like any other; unfiltered, one cold timeout aborted the whole warm-up.
             catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }

@@ -59,7 +59,7 @@ public class PrefixCodecTests
     [Fact]
     public void Roundtrip_BoundaryLengths()
     {
-        // #392: every byte-aligned boundary plus the non-aligned ones around it. Encode masks to
+        // Every byte-aligned boundary plus the non-aligned ones around it. Encode masks to
         // the network address, so the expected value is the address & mask for each length.
         var lengths = new[] { (byte)1, (byte)7, (byte)9, (byte)23, (byte)25, (byte)31 };
         foreach (var length in lengths)
@@ -80,7 +80,7 @@ public class PrefixCodecTests
     [Fact]
     public void Decode_MasksHostBits()
     {
-        // #392: host bits on the wire are masked to the network address at the parse boundary —
+        // Host bits on the wire are masked to the network address at the parse boundary —
         // a /23 NLRI carries three data bytes, so its low-order bits are host bits: "10.0.1.0/23"
         // must decode to 10.0.0.0/23 (the RouteTable key), never 10.0.1.0.
         var nlri = new byte[] { 23, 10, 0, 1 };
@@ -159,7 +159,7 @@ public class PrefixCodecTests
     [InlineData(255)]
     public void Decode_LengthAbove32_Throws(int badLength)
     {
-        // #222: a malformed NLRI prefix-length byte is a wire-level error and now surfaces as
+        // A malformed NLRI prefix-length byte is a wire-level error and now surfaces as
         // BgpParseException (Update Message Error) so the session can treat-as-withdraw instead of
         // tearing down. Previously this was ArgumentOutOfRangeException which escaped the read loop.
         var buffer = new byte[8] { (byte)badLength, 0xC0, 0xA8, 0x00, 0x00, 0, 0, 0 };
@@ -212,7 +212,7 @@ public class PrefixCodecTests
     [Fact]
     public void Decode_EmptyBuffer_Throws()
     {
-        // #222: a truncated NLRI is now BgpParseException (Update Message Error), not
+        // A truncated NLRI is now BgpParseException (Update Message Error), not
         // ArgumentOutOfRangeException — so the session treats it as withdraw, not teardown.
         var buffer = Array.Empty<byte>();
         var ex = Assert.Throws<BgpParseException>(() =>
@@ -229,7 +229,7 @@ public class PrefixCodecTests
     {
         // /24 needs 4 bytes total (1 length + 3 data). 2-byte buffer is truncated
         // mid-prefix and must be rejected before any read past the length byte.
-        // #222: surfaces as BgpParseException (Update Message Error).
+        // Surfaces as BgpParseException (Update Message Error).
         var buffer = new byte[] { 24, 0xC0 };
 
         var ex = Assert.Throws<BgpParseException>(() => PrefixCodec.Decode(buffer));

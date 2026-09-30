@@ -158,7 +158,7 @@ public class CommunityResolverTests
         Assert.Empty(r.Resolve(new CommunitySource(CommunitySourceKind.Custom)));
     }
 
-    // --- UserSource (#143 / #147) — auto-gen from a reserved 5XX range, override via Community ---
+    // --- UserSource — auto-gen from a reserved 5XX range, override via Community ---
 
     [Fact]
     public void Resolve_UserSource_ExplicitCommunity_Wins()
@@ -233,7 +233,7 @@ public class CommunityResolverTests
     }
 
     /// <summary>
-    /// Regression for #159: ConfigCommunityResolver is a DI singleton shared by every BgpSession,
+    /// ConfigCommunityResolver is a DI singleton shared by every BgpSession,
     /// and Resolve() runs on every SendAllRoutesAsync. Under ≥2 concurrently-establishing peers,
     /// the cache must be thread-safe — a plain Dictionary.TryAdd/indexer-set races and can corrupt
     /// the bucket chain (IndexOutOfRange / NullReferenceException / torn reads). ConcurrentDictionary

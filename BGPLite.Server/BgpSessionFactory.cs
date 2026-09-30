@@ -7,9 +7,9 @@ namespace BGPLite.Server;
 
 /// <summary>
 /// Creates a <see cref="BgpSession"/> for an accepted connection. The seam exists so
-/// <see cref="BgpServer"/> stops carrying the session's dependencies (#263): the accept loop needs
-/// none of the peer store, prefix service, aggregator or community resolver for itself — it only
-/// forwarded them — and every one of them was optional, so a dropped DI registration turned into
+/// <see cref="BgpServer"/> stops carrying the session's dependencies: the accept loop needs none
+/// of the peer store, prefix service, aggregator or community resolver for itself — it only
+/// forwards them — and every one of them was optional, so a dropped DI registration turned into
 /// wrong route sets at runtime instead of a startup failure.
 /// </summary>
 public interface IBgpSessionFactory
@@ -62,8 +62,7 @@ public sealed class BgpSessionFactory : IBgpSessionFactory
     public BgpSession Create(IBgpConnection connection, PeerConfig peerConfig) =>
         new(connection, peerConfig, _bgpConfig, _routeTable, _routeFilter, _metrics, _sessionLogger,
             // The peer row is upserted as soon as OPEN identifies the peer, so a peer that has never
-            // been configured in the UI still shows up there. Previously a lambda hand-wired in
-            // Program.cs and threaded through BgpServer. Async since #262 — the upsert ran
+            // been configured in the UI still shows up there. Async because the upsert used to run
             // synchronously on the OPEN-handshake path.
             onPeerIdentified: (ip, asn, ct) => _peerStore.UpsertPeerAsync(ip, asn, ct),
             peerStore: _peerStore,

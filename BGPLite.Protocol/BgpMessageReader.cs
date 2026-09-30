@@ -23,22 +23,21 @@ public static class BgpMessageReader
         // RFC 4271 §6.1: "if the Length field of a KEEPALIVE message is not equal to 19 ... then the
         // Error Subcode MUST be set to Bad Message Length." Nothing checked this — type 4 mapped
         // straight to the singleton and any trailing bytes were silently ignored, so a peer could
-        // pad a KEEPALIVE arbitrarily and BGPLite would accept it (#300).
+        // pad a KEEPALIVE arbitrarily and BGPLite would accept it.
         //
         // ONLY KEEPALIVE is validated here, deliberately. §6.1 also gives per-type minimums for
         // OPEN (29), UPDATE (23) and NOTIFICATION (21), and all three are already rejected today —
         // but by their body parsers, as Open/Update Message Error rather than as header errors.
         // Reclassifying them would change behaviour in ways that are not improvements:
-        //   - OPEN: #223 deliberately made a too-short OPEN report Open Message Error (2), with a
-        //     test asserting it. Moving it to Message Header Error would flip that decision, and
+        //   - OPEN: a too-short OPEN deliberately reports Open Message Error (2), with a test
+        //     asserting it. Moving it to Message Header Error would flip that decision, and
         //     would make ParseOpen's own `payload.Length < 10` guard unreachable.
         //   - UPDATE: a body error is routed to treat-as-withdraw and the session SURVIVES. A header
-        //     error tears it down — so a 22-byte UPDATE would become a remote session kill, exactly
-        //     the class of defect #222 and #284 closed. RFC 7606 §3 revises UPDATE error handling
-        //     toward keeping the session, and that direction wins here.
+        //     error tears it down — so a 22-byte UPDATE would become a remote session kill.
+        //     RFC 7606 §3 revises UPDATE error handling toward keeping the session, and that
+        //     direction wins here.
         //   - NOTIFICATION: already a header error, just without the subcode; not worth a special
         //     case of its own.
-        // Recorded rather than silently skipped; see the PR for the full reasoning.
         if (type == BgpMessageType.Keepalive && length != BgpConstants.MessageHeaderSize)
             throw BadMessageLength(length);
 
@@ -63,7 +62,7 @@ public static class BgpMessageReader
     /// <c>ErrorCode</c> is deliberately left <c>null</c> — that is how <c>BgpSession.ReadLoopAsync</c>
     /// tells a fixed-header failure (tear the session down) from a message-body failure
     /// (treat-as-withdraw), and turning it into a body error here would both violate §6.1 and
-    /// desync the stream, since the payload has not been consumed (#223, #300).
+    /// desync the stream, since the payload has not been consumed.
     /// </summary>
     private static BgpParseException BadMessageLength(int length) =>
         new($"Invalid message length: {length}",
@@ -79,14 +78,14 @@ public static class BgpMessageReader
 
     private static void ValidateMarker(ReadOnlySpan<byte> marker)
     {
-        // #105: SequenceEqual over ReadOnlySpan<byte> replaces the hand-rolled byte-by-byte loop —
+        // SequenceEqual over ReadOnlySpan<byte> replaces a hand-rolled byte-by-byte loop —
         // idiomatic, vectorizable by the JIT, and the same semantics.
         //
         // RFC 4271 §6.1: "If the Marker field of the message header is not as expected, then a
         // synchronization error has occurred and the Error Subcode MUST be set to Connection Not
         // Synchronized." This previously emitted Unspecific, which tells the peer's operator
-        // nothing about the one header failure that actually means "our streams have diverged"
-        // (#300). ErrorCode stays null so it remains a fixed-header failure that tears the session
+        // nothing about the one header failure that actually means "our streams have diverged".
+        // ErrorCode stays null so it remains a fixed-header failure that tears the session
         // down, which is exactly right for a desync.
         if (!marker.SequenceEqual(BgpConstants.Marker))
             throw new BgpParseException("Invalid BGP marker",
@@ -108,7 +107,7 @@ public static class BgpMessageReader
             // or if the smallest locally-supported version number is larger than the peer's bid,
             // the smallest locally-supported version number". BGPLite supports only version 4, so
             // both branches resolve to 4: bid>4 → largest-below-bid is 4; bid<4 → smallest is 4.
-            // Without the field a BGPv3 speaker gets no downgrade hint (#317). Byte-identical
+            // Without the field a BGPv3 speaker gets no downgrade hint. Byte-identical
             // with OpenNegotiator.Validate, the other reject site for the same condition.
             throw new BgpParseException($"Unsupported BGP version: {version}",
                 BgpConstants.Error.OpenMessageError, BgpConstants.SubError.UnsupportedVersion,
@@ -120,7 +119,7 @@ public static class BgpMessageReader
         var optParamsLen = payload[9];
 
         var capabilities = new List<BgpCapabilityInfo>();
-        // #234: the declared optional-parameters length is authoritative (RFC 4271 §4.2) — it
+        // The declared optional-parameters length is authoritative (RFC 4271 §4.2) — it
         // must match the bytes present exactly, including the zero-length case. Previously a
         // length running past the message silently skipped parsing (dropping capabilities, e.g.
         // corrupting a Four-Octet-ASN TLV into a 2-byte-AS session), while surplus trailing
@@ -142,10 +141,10 @@ public static class BgpMessageReader
         };
     }
 
-    // #234: a TLV whose declared length runs past the buffer is malformed OPEN content
-    // (RFC 4271 §4.2, RFC 5492 §3) and must reject the message — the previous silent `break`
-    // treated truncation as "capability absent", masking wire corruption (e.g. a truncated
-    // Four-Octet-ASN TLV silently downgraded the session to a 2-byte AS).
+    // A TLV whose declared length runs past the buffer is malformed OPEN content
+    // (RFC 4271 §4.2, RFC 5492 §3) and must reject the message — treating truncation as
+    // "capability absent" masks wire corruption (e.g. a truncated Four-Octet-ASN TLV would
+    // silently downgrade the session to a 2-byte AS).
     private static void ParseOptParameters(ReadOnlySpan<byte> data, List<BgpCapabilityInfo> capabilities)
     {
         var offset = 0;
@@ -169,7 +168,7 @@ public static class BgpMessageReader
             }
             else
             {
-                // RFC 4271 §6.2 (#329): an optional parameter type this speaker does not recognize
+                // RFC 4271 §6.2: an optional parameter type this speaker does not recognize
                 // must be answered with Unsupported Optional Parameter (2/4) — the sender otherwise
                 // believes the parameter was accepted (e.g. RFC 9072 Extended Optional Parameters,
                 // type 255). Unrecognized CAPABILITIES inside type 2 stay ignored per RFC 5492 §4.2.
@@ -221,7 +220,7 @@ public static class BgpMessageReader
 
         var withdrawnLen = BinaryPrimitives.ReadUInt16BigEndian(payload[offset..]);
         offset += 2;
-        // #222: a declared length that runs past the payload is stream-level corruption, not a
+        // A declared length that runs past the payload is stream-level corruption, not a
         // per-UPDATE content error — surface it as a parse exception (Update Message Error) so the
         // caller can treat-as-withdraw instead of throwing ArgumentOutOfRangeException out of Slice.
         // RFC 4271 §6.3: "If the Withdrawn Routes Length or Total Attribute Length is too large
@@ -237,13 +236,13 @@ public static class BgpMessageReader
             while (offset < withdrawnEnd)
             {
                 // Slice to the declared end of the withdrawn-routes section (not payload end), the
-                // same rule the attribute loop below already follows (#245). Decoding against the
+                // same rule the attribute loop below already follows. Decoding against the
                 // payload let a prefix whose declared value crosses withdrawnEnd consume the bytes
                 // of the next field: either desyncing every subsequent field (a prefix the peer
                 // never withdrew was reported as withdrawn) or, when the overrun reached the end of
                 // the payload, throwing ArgumentOutOfRangeException out of the codec — which is not
                 // a BgpParseException, so ReadLoopAsync's treat-as-withdraw filter never saw it and
-                // a 23-byte UPDATE tore down the session (#284, same failure mode as #222).
+                // a 23-byte UPDATE tore down the session.
                 var (prefix, consumed) = PrefixCodec.Decode(payload[offset..withdrawnEnd]);
                 withdrawn.Add(prefix);
                 offset += consumed;
@@ -252,7 +251,7 @@ public static class BgpMessageReader
 
         // The withdrawn-routes section may end exactly at the payload end, leaving no room for the
         // Total Path Attribute Length field. The `payload.Length < 4` guard above only covers an
-        // UPDATE with no withdrawn routes, so bounds-check here as well (#284).
+        // UPDATE with no withdrawn routes, so bounds-check here as well.
         if (offset + 2 > payload.Length)
             throw new BgpParseException(
                 $"UPDATE truncated before Total Path Attribute Length: have {payload.Length - offset} bytes at offset {offset}, need 2",
@@ -278,26 +277,24 @@ public static class BgpMessageReader
             {
                 // Slice to the declared end of the attribute section (not payload end): an
                 // attribute TLV whose declared value crosses attrsEnd must be rejected instead
-                // of silently consuming NLRI bytes as attribute data (#245 review finding).
+                // of silently consuming NLRI bytes as attribute data.
                 var (attr, consumed) = ParseAttribute(payload.Slice(offset, attrsEnd - offset));
                 offset += consumed;
 
-                // #15 phase 2 (RFC 4760): MP_REACH_NLRI (14) / MP_UNREACH_NLRI (15) carry the
+                // RFC 4760: MP_REACH_NLRI (14) / MP_UNREACH_NLRI (15) carry the
                 // IPv6 announcements/withdrawals — decode them into typed fields here and remove
                 // from the generic list so ParseRouteAttributes treats the UPDATE as v4-only.
                 // Malformed AFI=2 payloads throw BgpParseException (Update Message Error) — the
                 // whole UPDATE is discarded with the session kept (D17), matching RFC 7606 §2
                 // (the attribute carries NLRI ⇒ treat-as-withdraw).
-                // #467: the MP attributes are extracted here and never reach ParseRouteAttributes'
-                // flag/duplicate pipeline, so their RFC-prescribed error policy is applied at this
-                // extraction point. RFC 4760 §4/§5 make both attributes OPTIONAL NON-TRANSITIVE and
-                // RFC 7606 leaves them explicitly unrevised — the RFC 4271 §6.3 baseline applies to
-                // their shape, so a flags conflict is a session-reset error (3/4), not a discard.
+                // The MP attributes are extracted here and never reach ParseRouteAttributes'
+                // flag/duplicate pipeline, so their RFC-prescribed error policy is applied at
+                // this extraction point.
                 if (attr.TypeCode is MpReachCodec.MpReachNlriType or MpReachCodec.MpUnreachNlriType)
                 {
                     // RFC 4760 §4/§5 make both attributes OPTIONAL NON-TRANSITIVE; the Partial bit
                     // is equally invalid on them — a non-transitive attribute is never re-advertised
-                    // by a speaker lacking the family, so nothing can set it (#472 review). The
+                    // by a speaker lacking the family, so nothing can set it. The
                     // Extended Length bit stays legal. RFC 7606 leaves the MP attributes explicitly
                     // unrevised — the RFC 4271 §6.3 baseline applies to their shape, so a flags
                     // conflict is a session-reset error (3/4), not a discard.
@@ -307,7 +304,7 @@ public static class BgpMessageReader
                             BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.AttributeFlagsError,
                             sessionResetRequired: true);
 
-                    // #466: BOTH supported families decode here — IPv4/Unicast (AFI=1/SAFI=1) into
+                    // BOTH supported families decode here — IPv4/Unicast (AFI=1/SAFI=1) into
                     // the classic NLRI pipeline and IPv6/Unicast (AFI=2/SAFI=1) into MP_REACH_NLRI.
                     // §3(g) duplicate detection is per ATTRIBUTE TYPE: a second instance of the
                     // type is a session reset regardless of which family it names.
@@ -383,12 +380,12 @@ public static class BgpMessageReader
     }
 
     /// <summary>
-    /// #472 review: scope MP value failures to the offending AFI/SAFI tuple. A value too short
+    /// Scope MP value failures to the offending AFI/SAFI tuple. A value too short
     /// to name its tuple cannot be scoped to any family — the RFC 7606 §3(j) fallback is the
     /// session reset. A tuple this speaker does not support was never negotiated (RFC 4760 §8):
     /// its arrival is not a parse failure of a supported family, so it is answered with a plain
     /// keep-alive body error — the whole UPDATE is discarded (D17) and the supported families
-    /// stay enabled. Supported tuples (#466): AFI=1/SAFI=1 and AFI=2/SAFI=1.
+    /// stay enabled. Supported tuples: AFI=1/SAFI=1 and AFI=2/SAFI=1.
     /// </summary>
     /// <returns>true for the IPv4/Unicast tuple, false for IPv6/Unicast.</returns>
     private static bool ScopeMpValueOrThrow(ReadOnlySpan<byte> value)
@@ -413,12 +410,12 @@ public static class BgpMessageReader
 
     private static (PathAttribute attr, int consumed) ParseAttribute(ReadOnlySpan<byte> data)
     {
-        // #222: bounds-check before every indexed read. Previously a truncated TLV (declared length
+        // Bounds-check before every indexed read. Previously a truncated TLV (declared length
         // larger than the buffer, or fewer than 2 header bytes) threw ArgumentOutOfRangeException out
         // of Span.Slice / indexing, which escaped ReadLoopAsync (it only catches OCE/IOException) and
         // tore down the session with a generic Cease — a single malformed UPDATE killed the peer.
         // Now these surface as BgpParseException (Update Message Error) and are handled by the
-        // treat-as-withdraw path. RFC 7606 §2 / RFC 4271 §6.3. Subcodes (#235): a header that
+        // treat-as-withdraw path. RFC 7606 §2 / RFC 4271 §6.3. Subcodes: a header that
         // cannot even be read (flags/type/length bytes missing) is a malformed attribute list (1);
         // a readable header whose declared value length overshoots the buffer is an attribute
         // length error (5).
@@ -428,7 +425,7 @@ public static class BgpMessageReader
 
         var flags = data[0];
         // RFC 4271 §4.3: flag bit 0x08 is reserved and MUST be zero — an attribute with it set
-        // is malformed (Attribute Flags Error, subcode 4) and is rejected via treat-as-withdraw (#272).
+        // is malformed (Attribute Flags Error, subcode 4) and is rejected via treat-as-withdraw.
         if ((flags & BgpConstants.Attribute.FlagReserved) != 0)
             throw new BgpParseException($"Reserved attribute flag bit 0x08 set (flags=0x{flags:X2})",
                 BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.AttributeFlagsError);
@@ -514,7 +511,7 @@ public static class BgpMessageReader
 /// Thrown by the BGP message codec when an inbound message is malformed. Carries the
 /// RFC 4271 NOTIFICATION error code/subcode that should be sent to the peer so the session
 /// handler (<c>BgpSession.RunAsync</c>) emits the right NOTIFICATION instead of a generic
-/// Message Header Error (issue #223).
+/// Message Header Error.
 /// <para>
 /// <see cref="ErrorCode"/>/<see cref="SubErrorCode"/> are nullable: a <c>null</c> error code
 /// means "this was a fixed-header (marker/length/type) parse failure" → Message Header Error
@@ -546,13 +543,13 @@ public class BgpParseException : Exception
     /// Contents of the NOTIFICATION Data field, or <c>null</c> when the failure carries none.
     /// RFC 4271 §6.1 requires the erroneous Length field for Bad Message Length and the erroneous
     /// Message Type for Bad Message Type, so the peer's operator gets a usable diagnostic instead
-    /// of a bare "unknown error" (#300). Cloned in and out, mirroring
+    /// of a bare "unknown error". Cloned in and out, mirroring
     /// <see cref="BgpNotificationException.NotificationData"/>.
     /// </summary>
     public byte[]? NotificationData => _notificationData is null ? null : (byte[])_notificationData.Clone();
 
     /// <summary>
-    /// #467: true when the RFC error policy for this failure class mandates a session reset
+    /// True when the RFC error policy for this failure class mandates a session reset
     /// rather than the D17 keep-alive treatment — RFC 7606 §3(g) for a duplicated
     /// MP_REACH_NLRI/MP_UNREACH_NLRI attribute (NOTIFICATION "Malformed Attribute List" MUST)
     /// and the RFC 4271 §6.3 baseline for their flags conflicts (RFC 7606 leaves the MP
@@ -563,7 +560,7 @@ public class BgpParseException : Exception
 }
 
 /// <summary>
-/// #467: thrown by <see cref="BgpMessageReader.ReadMessage"/> when an MP_REACH_NLRI /
+/// Thrown by <see cref="BgpMessageReader.ReadMessage"/> when an MP_REACH_NLRI /
 /// MP_UNREACH_NLRI VALUE cannot be decoded (unsupported AFI/SAFI, truncated value, invalid
 /// next-hop length). RFC 7606 §3(j) places these attributes outside the keep-alive revision:
 /// an unparseable MP attribute MUST be answered with the "session reset" OR the "AFI/SAFI
@@ -573,7 +570,7 @@ public class BgpParseException : Exception
 public sealed class BgpMpParseException : BgpParseException
 {
     /// <summary>True when the failing tuple was AFI=1/SAFI=1 (IPv4/Unicast), false for
-    /// AFI=2/SAFI=1 — the recovery must be scoped to the offending family (#472 review).</summary>
+    /// AFI=2/SAFI=1 — the recovery must be scoped to the offending family.</summary>
     public bool IsIpv4 { get; }
 
     public BgpMpParseException(string message, bool isIpv4, byte? subErrorCode = null, Exception? innerException = null)

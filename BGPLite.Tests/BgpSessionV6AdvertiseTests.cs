@@ -8,7 +8,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 namespace BGPLite.Tests;
 
 /// <summary>
-/// #14 phase 4: outbound IPv6 advertisement — the family split at the send path. IPv4 rides
+/// Outbound IPv6 advertisement — the family split at the send path. IPv4 rides
 /// classic NLRI with a NEXT_HOP (RFC 4271 §4.3); IPv6 rides MP_REACH_NLRI with the next hop
 /// inside the attribute (RFC 4760 §5, RFC 2545 §3) and ONLY when the peer negotiated
 /// MP IPv6/Unicast AND Bgp.NextHopIpv6 is configured. Withdrawals mirror the split (RFC 4760 §7).
@@ -73,7 +73,7 @@ public class BgpSessionV6AdvertiseTests
     [Fact]
     public async Task RouteRefresh_Afi2_RereadvertisesV6Routes()
     {
-        // #420 (RFC 2918 §2): a refresh request names the AFI/SAFI to re-send. An MP-IPv6-
+        // RFC 2918 §2: a refresh request names the AFI/SAFI to re-send. An MP-IPv6-
         // negotiated peer's AFI=2/SAFI=1 request was silently ignored — the only way to get the
         // routes re-advertised was bouncing the session. It must trigger the same debounced
         // re-announcement dump the AFI=1 request does.
@@ -115,13 +115,12 @@ public class BgpSessionV6AdvertiseTests
     [Fact]
     public async Task RouteRefresh_Afi1_StillRereadvertises()
     {
-        // Control for the #420 gate refactor: the IPv4/Unicast refresh path is unchanged.
+        // Control for the refresh-gate change: the IPv4/Unicast refresh path is unchanged.
         var routeTable = new RouteTable();
         routeTable.AddOrUpdate(new Route { Prefix = 0x0A000000, PrefixLength = 8, NextHop = 1 });
         var (session, run, conn) = await EstablishAsync(routeTable, routeRefresh: true);
 
-        // Wait for the initial dump before snapshotting (Established ≠ dump-complete,
-        // CodeRabbit on #450).
+        // Wait for the initial dump before snapshotting (Established ≠ dump-complete).
         var initial = 0;
         for (var i = 0; i < 300 && (initial = CountUpdates(conn)) == 0; i++)
             await Task.Delay(TimeSpan.FromMilliseconds(10));
@@ -137,7 +136,7 @@ public class BgpSessionV6AdvertiseTests
     }
 
     /// <summary>Serves a fixed outbound route list — the seam for driving SendRoutesAsync with
-    /// inputs the shared RouteTable cannot hold (e.g. cross-community duplicates, #476).</summary>
+    /// inputs the shared RouteTable cannot hold (e.g. cross-community duplicates).</summary>
     private sealed class StubRouteAssembler(List<Route> routes) : IRouteAssembler
     {
         public Task<List<Route>> BuildOutboundRoutesAsync(
@@ -297,7 +296,7 @@ public class BgpSessionV6AdvertiseTests
     [Fact]
     public async Task DuplicateV6Prefixes_AcrossCommunitySets_MergeKeepsTheFamily()
     {
-        // #476: two sources can announce the SAME IPv6 prefix with different community sets (the
+        // Two sources can announce the SAME IPv6 prefix with different community sets (the
         // aggregator keeps them in separate groups); MergeDuplicatePrefixes then unions them. The
         // merged route must stay IPv6 — before the fix the family bit was lost, the route landed in
         // the IPv4 batch and its /48 length crashed the send (AOORE → Cease → teardown on every

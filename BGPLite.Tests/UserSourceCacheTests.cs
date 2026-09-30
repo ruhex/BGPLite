@@ -5,10 +5,10 @@ using BGPLite.Protocol;
 namespace BGPLite.Tests;
 
 /// <summary>
-/// Unit coverage for <see cref="UserSourceCache"/> (#150) — the URL-keyed TTL cache for per-peer
+/// Unit coverage for <see cref="UserSourceCache"/> — the URL-keyed TTL cache for per-peer
 /// user-supplied prefix-list sources. Exercises the cache directly with a fake fetch delegate, so no
 /// <c>HttpPrefixProvider</c>/HTTP layer is involved. Mirrors the shape of <c>PrefixSourceService</c>'s
-/// cache: positive/negative TTL, per-key serialization, stale-on-failure, OCE propagation (#114).
+/// cache: positive/negative TTL, per-key serialization, stale-on-failure, OCE propagation.
 /// </summary>
 public class UserSourceCacheTests
 {
@@ -33,7 +33,7 @@ public class UserSourceCacheTests
     [Fact]
     public async Task Same_Url_Dedupes_Across_Calls_FetcherInvokedOnce()
     {
-        // The point of URL-keying (#150): two calls for the same URL — e.g. two peers refreshing the
+        // The point of URL-keying: two calls for the same URL — e.g. two peers refreshing the
         // same popular list — share one fetch.
         var cache = new UserSourceCache();
         var f = new Fetcher { OnSuccess = () => P((0xC0A80000u, (byte)24, true)) };
@@ -48,7 +48,7 @@ public class UserSourceCacheTests
     [Fact]
     public async Task ExpiredEntries_Swept_EvenBelowTheCap()
     {
-        // #426: expired entries used to be PINNED until the entry cap was hit — steady-state
+        // Expired entries used to be PINNED until the entry cap was hit — steady-state
         // memory was "everything fetched recently", not "live entries". The amortized sweep
         // drops them regardless of the cap.
         var time = new Microsoft.Extensions.Time.Testing.FakeTimeProvider();
@@ -67,7 +67,7 @@ public class UserSourceCacheTests
     [Fact]
     public async Task PrefixBudget_EvictsOldestPositives_EvenBelowTheCap()
     {
-        // #426: the entry-count cap says nothing about MEMORY — a handful of huge entries could
+        // The entry-count cap says nothing about MEMORY — a handful of huge entries could
         // hold millions of parsed prefixes. Over the total-prefix budget the sweep drops the
         // OLDEST positive entries even though the entry cap is nowhere near reached. Budget = 5:
         // big(4) + small(2) = 6 over budget; the next sweep evicts big (oldest) → 2 ≤ 5.
@@ -174,8 +174,8 @@ public class UserSourceCacheTests
     [Fact]
     public async Task OperationCanceled_Propagates_And_Is_Not_Negative_Cached()
     {
-        // #114: CALLER cancellation must propagate and must not be recorded as a negative entry.
-        // #320 refined the discriminator: the cache rethrows only OCEs whose CALLER token is
+        // CALLER cancellation must propagate and must not be recorded as a negative entry.
+        // The cache rethrows only OCEs whose CALLER token is
         // cancelled — a foreign-token OCE (the per-fetch budget) is a load failure and IS
         // negative-cached (see ForeignTokenOCE_IsAFailure_NegativeCachedAndThrottled). The
         // faithful simulation is cancellation arriving WHILE the fetch is in flight (a
@@ -183,7 +183,7 @@ public class UserSourceCacheTests
         var cache = new UserSourceCache();
         var cts = new CancellationTokenSource();
         var calls = 0;
-        // #358 review: a fixed delay does not prove the caller entered the loader — synchronize
+        // A fixed delay does not prove the caller entered the loader — synchronize
         // on entry explicitly instead of racing Task.Run's start.
         var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 
@@ -243,8 +243,8 @@ public class UserSourceCacheTests
     }
 
     /// <summary>
-    /// #261: unique peer-supplied URLs must not grow the cache without bound — port of the #165
-    /// cap. Inserting more distinct URLs than maxCacheEntries keeps the tracked count at the cap.
+    /// Unique peer-supplied URLs must not grow the cache without bound: inserting more distinct
+    /// URLs than maxCacheEntries keeps the tracked count at the cap.
     /// </summary>
     [Fact]
     public async Task UniqueUrls_BeyondCap_KeepCacheBounded()
@@ -259,7 +259,7 @@ public class UserSourceCacheTests
     }
 
     /// <summary>
-    /// #261: the sweep drops the OLDEST entries (expired-first, then by CachedAt), so a fresh
+    /// The sweep drops the OLDEST entries (expired-first, then by CachedAt), so a fresh
     /// entry survives and an evicted one refetches on next use.
     /// </summary>
     [Fact]
@@ -294,8 +294,8 @@ public class UserSourceCacheTests
     }
 
     /// <summary>
-    /// #320: a fetch budget fires as a foreign-token OCE (live caller token). It is a load
-    /// FAILURE, not teardown: it still throws (the caller's #342 boundary treats it as a
+    /// A fetch budget fires as a foreign-token OCE (live caller token). It is a load
+    /// FAILURE, not teardown: it still throws (the caller's boundary treats it as a
     /// per-source failure), it is negative-cached, and the negative entry throttles the next
     /// call — no loader invocation, no re-paying the budget.
     /// </summary>
@@ -318,7 +318,7 @@ public class UserSourceCacheTests
     }
 
     /// <summary>
-    /// #358 review (orphan-lock hygiene for #261): a caller cancelled while queued on the gate
+    /// Orphan-lock hygiene: a caller cancelled while queued on the gate
     /// never writes a cache entry, so its freshly-created gate had nothing to evict — cancelled
     /// URLs accumulated SemaphoreSlims forever. The cancellation path must pair-remove its gate.
     /// </summary>
@@ -355,19 +355,19 @@ public class UserSourceCacheTests
         await holding.WaitAsync(TimeSpan.FromSeconds(5));
 
         // The holder is the last participant out, so ExitInflight pair-removes the shared gate
-        // (the cancelled waiter no longer touches it — #468): zero gates, one cached entry,
+        // (the cancelled waiter no longer touches it): zero gates, one cached entry,
         // no orphan.
         Assert.Equal(0, cache.TrackedGateCount);
         Assert.Equal(1, cache.TrackedCount);
     }
 
     /// <summary>
-    /// #478: the #468 single-fetch invariant, end-to-end — across a waiter cancelled mid-queue AND
+    /// The single-fetch invariant, end-to-end — across a waiter cancelled mid-queue AND
     /// a caller arriving after it, exactly one loadAsync may run for the URL. Any gate split (the
     /// cancelled waiter removing the shared gate, or a registration racing the first loader's
     /// last-leaver exit) manifests as a second concurrent load, which the counting fetcher records
     /// deterministically: every load blocks on the same release signal, so nobody finishes before
-    /// the assertion point. (The pre-#478 lock-free window between the decrement and the gate
+    /// the assertion point. (The lock-free window between the decrement and the gate
     /// pair-removal is nanosecond-narrow and cannot be forced from outside; this test pins the
     /// invariant class, the lock closes the window by construction.)
     /// </summary>
@@ -390,7 +390,7 @@ public class UserSourceCacheTests
         var a = cache.GetOrLoadAsync("https://example.com/l", "src", BlockingLoad, CancellationToken.None);
         await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
 
-        // Waiter B queues behind A and is cancelled while queued (the #468 trigger).
+        // Waiter B queues behind A and is cancelled while queued.
         var queuedCts = new CancellationTokenSource();
         var queued = Task.Run(() => cache.GetOrLoadAsync("https://example.com/l", "src", BlockingLoad, queuedCts.Token));
         await Task.Delay(50);            // let it queue behind the holder
@@ -412,7 +412,7 @@ public class UserSourceCacheTests
     }
 
     /// <summary>
-    /// #358 review: repeated cancelled-then-never-loaded URLs must not accumulate gates — the
+    /// Repeated cancelled-then-never-loaded URLs must not accumulate gates — the
     /// observable orphan-growth case (fresh url per cancelled call, no cache entry ever written).
     /// </summary>
     [Fact]
@@ -432,7 +432,7 @@ public class UserSourceCacheTests
     }
 
     /// <summary>
-    /// #468: a waiter cancelled while queued must not split the gate. Pre-fix it pair-removed
+    /// A waiter cancelled while queued must not split the gate. Pre-fix it pair-removed
     /// the shared gate instance out from under the still-running first loader, so the NEXT
     /// caller minted a second gate and fetched the same URL concurrently — and could overwrite
     /// the newer snapshot with an older one. The cancelled waiter now leaves the gate alone;
@@ -462,7 +462,7 @@ public class UserSourceCacheTests
         // Second caller queues behind the holder, then is cancelled while queued.
         var queuedCts = new CancellationTokenSource();
         var queued = Task.Run(() => cache.GetOrLoadAsync("https://example.com/l", "src", Holder, queuedCts.Token));
-        await Task.Delay(50);            // let it queue behind the holder (the #358 test's idiom)
+        await Task.Delay(50);            // let it queue behind the holder
         queuedCts.Cancel();
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => queued);
 
@@ -480,7 +480,7 @@ public class UserSourceCacheTests
         Assert.Equal(0, thirdCalls);     // RED pre-fix: the parallel second fetch ran here
 
         // Release the holder. The third caller is then served by the holder's just-written
-        // cache entry (the #450 in-gate recheck) — either way its loader must never run: the
+        // cache entry (the in-gate recheck) — either way its loader must never run: the
         // whole scenario fetches the URL exactly once.
         holderRelease.TrySetResult();
         await Task.WhenAll(holding, third).WaitAsync(TimeSpan.FromSeconds(5));

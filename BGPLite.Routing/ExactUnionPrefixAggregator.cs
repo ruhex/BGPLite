@@ -6,7 +6,7 @@ namespace BGPLite.Routing;
 /// <summary>
 /// Default <see cref="IPrefixAggregator"/>. Merges adjacent/overlapping prefixes into the
 /// minimal equivalent set whose address range is EXACTLY the union of the inputs — never a
-/// single address more. Dual-stack (#14 phase 3): IPv4 (/0..32) and IPv6 (/0..128) are
+/// single address more. Dual-stack: IPv4 (/0..32) and IPv6 (/0..128) are
 /// aggregated with the same exact-union semantics but never merged together — IPv4 and
 /// IPv6 routes stay in separate groups even with identical tags (ADR 0001 §6). Injectable
 /// as a strategy; inject <see cref="NoOpPrefixAggregator"/> to disable summarization.
@@ -22,7 +22,7 @@ public sealed class ExactUnionPrefixAggregator : IPrefixAggregator
 {
     public IReadOnlyList<Route> Aggregate(IEnumerable<Route> routes)
     {
-        // #82: avoid the defensive ToList when the caller already owns a List<Route>.
+        // Avoid the defensive ToList when the caller already owns a List<Route>.
         // The sole caller (RouteAssembler → SendRoutesAsync) passes a List<Route>, so the
         // `as List<Route>` fast path fires and the ToList allocation is skipped entirely.
         var source = routes as List<Route> ?? routes.ToList();
@@ -31,7 +31,7 @@ public sealed class ExactUnionPrefixAggregator : IPrefixAggregator
 
         var result = new List<Route>(source.Count);
 
-        // #82: manual single-pass partition instead of LINQ GroupBy. GroupBy allocates a
+        // Manual single-pass partition instead of LINQ GroupBy. GroupBy allocates a
         // Lookup + per-group Lists; a Dictionary<AttributeKey, List<Route>> partitions in one
         // pass with the same semantics and less intermediate allocation. The groups preserve
         // encounter order (Dictionary maintains insertion order in .NET), matching GroupBy's
@@ -39,12 +39,12 @@ public sealed class ExactUnionPrefixAggregator : IPrefixAggregator
         // Capacity is the expected number of DISTINCT community sets, not route count.
         // A typical send carries 1-5 community sets even with tens of thousands of routes.
         var groups = new Dictionary<AttributeKey, List<Route>>(4);
-        // #305: normalization was per route — Distinct().ToArray() twice over, so four allocations
-        // for every route on every send. RouteAssembler hands every route built from one source the
-        // SAME community array instance, so a 60k-route dump normalizes a handful of distinct
-        // instances tens of thousands of times. The normalizer memoizes by instance for the duration
-        // of this call; it is a struct with lazily-created dictionaries, so a send whose routes carry
-        // no communities allocates nothing for it at all.
+        // Normalization memoizes by instance for the duration of this call: RouteAssembler hands
+        // every route built from one source the SAME community array instance, so a 60k-route dump
+        // normalizes a handful of distinct instances instead of Distinct().ToArray() twice per
+        // route (four allocations per route per send). The normalizer is a struct with
+        // lazily-created dictionaries, so a send whose routes carry no communities allocates
+        // nothing for it at all.
         var normalizer = default(KeyNormalizer);
         foreach (var route in source)
         {
@@ -184,7 +184,7 @@ public sealed class ExactUnionPrefixAggregator : IPrefixAggregator
             IsIpv4 = isIpv4;
         }
 
-        // #238: Route collections are IReadOnlyList — the key holds privately-owned normalized
+        // Route collections are IReadOnlyList — the key holds privately-owned normalized
         // arrays so it never aliases a route's (shared) backing array. Building them is
         // KeyNormalizer's job.
         internal static AttributeKey Create(
@@ -228,8 +228,7 @@ public sealed class ExactUnionPrefixAggregator : IPrefixAggregator
 
     /// <summary>
     /// Builds <see cref="AttributeKey"/>s, memoizing each normalized set by the identity of the
-    /// backing collection it came from, for the duration of a single <see cref="Aggregate"/> call
-    /// (#305).
+    /// backing collection it came from, for the duration of a single <see cref="Aggregate"/> call.
     /// <para>
     /// The memo is keyed by REFERENCE, not by content: <c>RouteAssembler.MakeRoute</c> passes one
     /// resolved community array to every route built from a source, so identity is exactly the

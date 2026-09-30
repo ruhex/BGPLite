@@ -4,10 +4,10 @@ using BGPLite.Api;
 namespace BGPLite.Tests;
 
 /// <summary>
-/// Unit tests for <see cref="ManagementApi.ResolveClientIp"/> (#91): forwarding headers are honored
+/// Unit tests for <see cref="ManagementApi.ResolveClientIp"/>: forwarding headers are honored
 /// only when the immediate peer is a configured trusted proxy, and X-Forwarded-For is walked
 /// right-to-left past trusted hops so client injection on the left is defeated. X-Real-IP is
-/// consulted only behind the Api.TrustXRealIp opt-in (#256) — its value cannot be verified against
+/// consulted only behind the Api.TrustXRealIp opt-in — its value cannot be verified against
 /// the trusted-hop chain, so a pass-through proxy would otherwise let clients forge their identity.
 /// </summary>
 public class ClientIpResolverTests
@@ -54,7 +54,7 @@ public class ClientIpResolverTests
     [Fact]
     public void TrustedProxy_Ignores_XRealIp_By_Default()
     {
-        // #256 secure default: a spoofed X-Real-IP behind a pass-through proxy must not become the
+        // Secure default: a spoofed X-Real-IP behind a pass-through proxy must not become the
         // client identity — the proxy address is returned instead.
         Assert.Equal("127.0.0.1",
             ManagementApi.ResolveClientIp(IPAddress.Parse("127.0.0.1"), null, "198.51.100.5", Proxy, trustXRealIp: false));
@@ -101,7 +101,7 @@ public class ClientIpResolverTests
     {
         // Linux dual-stack HttpListener (http://+) reports IPv4 peers as ::ffff:x.x.x.x; the
         // address must be normalized to IPv4 before matching against IPv4 trusted-proxy CIDRs,
-        // else the proxy is never trusted and XFF is ignored (CodeRabbit).
+        // else the proxy is never trusted and XFF is ignored.
         var mapped = IPAddress.Parse("::ffff:127.0.0.1");
         Assert.True(mapped.IsIPv4MappedToIPv6);
         Assert.Equal("198.51.100.5",

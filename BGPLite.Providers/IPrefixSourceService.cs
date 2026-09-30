@@ -17,7 +17,7 @@ public interface IPrefixSourceService
     Task<IReadOnlyList<IpPrefix>> GetAsync(string name, CancellationToken ct = default);
 
     /// <summary>
-    /// #416: lock-free convergence load of the source named by <c>AppConfig.DefaultPrefixSource</c> —
+    /// Lock-free convergence load of the source named by <c>AppConfig.DefaultPrefixSource</c> —
     /// returns the prefix list plus whether the content actually changed, and NEVER fires the
     /// <c>onSourceChanged</c> convergence callback. Callers that invoke it while holding a lock
     /// (the RU gate in <c>PrefixService.GetRuPrefixesAsync</c>) must own the push themselves and
@@ -25,7 +25,7 @@ public interface IPrefixSourceService
     /// another session's build deadlocked on the caller-held gate (the gate holder awaited the
     /// push, the push awaited the gate).
     /// <para>
-    /// #417: failures PROPAGATE rather than collapsing to <c>[]</c> — including a fresh negative
+    /// Failures PROPAGATE rather than collapsing to <c>[]</c> — including a fresh negative
     /// (failure-backoff) cache entry, which throws instead of returning an empty list. The RU
     /// caller's stale-on-failure handling needs the real failure; a swallowed one would cache an
     /// empty set positively for the full RU TTL, dropping every unconfigured peer's routes off a
@@ -38,19 +38,19 @@ public interface IPrefixSourceService
     Task WarmUpAsync(CancellationToken ct = default);
 
     /// <summary>
-    /// #214: Force-refresh a single source (bypass TTL), returning whether the content actually
+    /// Force-refresh a single source (bypass TTL), returning whether the content actually
     /// changed. Used by the auto-refresh timer, which polls each source on its own jittered interval.
     /// </summary>
     Task<bool> RefreshAsync(string sourceName, CancellationToken ct = default);
 
     /// <summary>
-    /// #214: Whether the source supports conditional requests (ETag/Last-Modified). Drives the poll
+    /// Whether the source supports conditional requests (ETag/Last-Modified). Drives the poll
     /// interval selection in the auto-refresh timer.
     /// </summary>
     bool SourceSupportsConditional(string sourceName);
 
     /// <summary>
-    /// #452: fired AFTER a source's freshly loaded content is committed to the cache and the load
+    /// Fired AFTER a source's freshly loaded content is committed to the cache and the load
     /// detected an actual change — on EVERY change-detecting entry point, including
     /// <see cref="RefreshAsync"/> (which deliberately never fires the <c>onSourceChanged</c>
     /// BGP-push callback). Cache-layer consumers that project a source's list into their own

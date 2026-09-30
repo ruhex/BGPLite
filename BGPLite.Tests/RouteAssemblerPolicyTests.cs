@@ -9,7 +9,7 @@ using BGPLite.Protocol;
 namespace BGPLite.Tests;
 
 /// <summary>
-/// #488 (D26): the outbound policy under failure. A CONFIGURED peer that resolves zero routes falls
+/// D26: the outbound policy under failure. A CONFIGURED peer that resolves zero routes falls
 /// back to the RU default list only when its sources legitimately resolved to nothing — a TOTAL
 /// fetch failure (RIPEstat outage / network partition) fails CLOSED, because substituting the full
 /// RU dump would advertise hundreds of thousands of prefixes the peer never asked for. An unknown
@@ -74,7 +74,7 @@ public sealed class RouteAssemblerPolicyTests
     [Fact]
     public async Task TotalSourceFailure_FailsClosed_NoRuDump()
     {
-        // #488 (D26): the only configured fetch THROWS (outage) — the RU fallback must NOT fire;
+        // D26: the only configured fetch THROWS (outage) — the RU fallback must NOT fire;
         // the peer keeps an empty set instead of the whole RU table.
         var logger = new CapturingLogger();
         var service = new StubPrefixService
@@ -107,7 +107,7 @@ public sealed class RouteAssemblerPolicyTests
     [Fact]
     public async Task MixedFailureAndEmptyResolution_StillFallsBackToRu()
     {
-        // #503 review (D26 refinement): fail-closed is for TOTAL failure only. tier1 fails
+        // D26 refinement: fail-closed is for TOTAL failure only. tier1 fails
         // (outage), tier2 RESOLVES to an empty list — a source answered, so the build is not a
         // total failure and the documented "configured peer resolved 0 prefixes" fallback applies.
         var store = new ConfiguredPeerStore { Subscriptions = ["tier1", "tier2"] };
@@ -133,7 +133,7 @@ public sealed class RouteAssemblerPolicyTests
     [Fact]
     public async Task UnknownSubscriptionName_IsWarned_NotSilentlyIgnored()
     {
-        // #488: a subscription matching no AsnLists entry and no PrefixSource is a config typo —
+        // A subscription matching no AsnLists entry and no PrefixSource is a config typo —
         // it was silently ignored on every build. Name it in the log.
         var logger = new CapturingLogger();
         var store = new ConfiguredPeerStore { Subscriptions = ["no-such-list"] };

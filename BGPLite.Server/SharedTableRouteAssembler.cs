@@ -5,15 +5,15 @@ using Microsoft.Extensions.Logging;
 namespace BGPLite.Server;
 
 /// <summary>
-/// The explicit degraded assembler (#263): serves every peer the shared route table's SEEDED
-/// routes, with no per-peer configuration at all. This is what a <see cref="BgpSession"/> built
+/// The explicit degraded assembler: serves every peer the shared route table's SEEDED routes,
+/// with no per-peer configuration at all. This is what a <see cref="BgpSession"/> built
 /// without an <see cref="IRouteAssembler"/> falls back to — previously the same behavior arose
 /// implicitly, from <c>RouteAssembler</c> being handed a null peer store / prefix service /
 /// <c>AppConfig</c>, which made a composition mistake indistinguishable from a deliberate choice.
 /// <para>
-/// It logs its activation ONCE at Warning: reaching it in production means peers receive the seed
-/// instead of what their operator selected, which is a wrong route set rather than a disabled
-/// feature, and the per-send warning #307 added would otherwise repeat on every refresh.
+/// It logs its activation ONCE at Warning rather than on every send: reaching it in production
+/// means peers receive the seed instead of what their operator selected — a wrong route set
+/// rather than a disabled feature — and repeating that on every refresh would drown the log.
 /// </para>
 /// </summary>
 public sealed class SharedTableRouteAssembler : IRouteAssembler
@@ -40,12 +40,12 @@ public sealed class SharedTableRouteAssembler : IRouteAssembler
             _logger.LogWarning(
                 "Route assembly is running WITHOUT per-peer configuration — every peer, starting with " +
                 "{Peer}, receives the shared table's seeded routes instead of its configured prefixes. " +
-                "In a production composition this is a wiring error (#263).",
+                "In a production composition this is a wiring error.",
                 peerLabel);
         }
 
         // EnumerateUnowned, not Enumerate: everything a peer announced inbound is installed in this
-        // same table owned by its session (#289). Advertising those here would hand one peer's
+        // same table owned by its session. Advertising those here would hand one peer's
         // injected routes to every other peer — a tenant-isolation failure, not just a wrong list.
         // The startup seed is written with no owner and is what this fallback is meant to serve.
         var allowSet = await _routeFilter.ResolveOutgoingAllowSetAsync(filterPeerConfig, ct);

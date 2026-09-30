@@ -21,7 +21,7 @@ public class AsnPrefixProviderTests
     }
 
     /// <summary>
-    /// #267 item 5: Kind:asn sources and the RipeStat.AsnLists/custom-ASN path share ONE per-ASN
+    /// Kind:asn sources and the RipeStat.AsnLists/custom-ASN path share ONE per-ASN
     /// cache — an ASN configured in both mechanisms is fetched from RIPEstat once. The old
     /// direct-to-wire provider path fetched it twice with independent TTLs.
     /// </summary>
@@ -63,11 +63,11 @@ public class AsnPrefixProviderTests
 
         Assert.Single(viaService);
         Assert.Single(viaSource.Prefixes);
-        Assert.Equal(1, handler.Calls);   // RED on the old direct-to-wire provider: 2
+        Assert.Equal(1, handler.Calls);   // the old direct-to-wire provider fetched twice
     }
 
     /// <summary>
-    /// #377 review (negative-cache regression of #370): a cached RIPEstat failure must PROPAGATE
+    /// A cached RIPEstat failure must PROPAGATE
     /// from the provider path — Ok([]) would store a positive empty list in the name-level cache
     /// and mark the source changed, withdrawing a good advertisement over a transient blip.
     /// The RouteAssembler path keeps its []-on-recent-failure semantic.
@@ -102,7 +102,7 @@ public class AsnPrefixProviderTests
 
         // Provider path: the cached failure must THROW, not come back as Ok([]) — Ok would store a
         // positive empty list in the name-level cache and mark the source changed. The provider
-        // re-fetches (one wire attempt per load — matching its pre-#370 behavior); throttling for
+        // re-fetches (one wire attempt per load); throttling for
         // sources lives at the NAME level (PrefixSourceService stale/negative), not here.
         await Assert.ThrowsAnyAsync<Exception>(() =>
             provider.LoadAsync(new PrefixSourceConfig { Name = "x", Kind = "asn", Asn = 65010 }));
@@ -112,7 +112,7 @@ public class AsnPrefixProviderTests
     [Fact]
     public async Task RipeStatCache_ExpiredEntries_Swept_EvenBelowTheCap()
     {
-        // #426: expired per-ASN entries used to be pinned until the 4096-entry cap was hit —
+        // Expired per-ASN entries used to be pinned until the 4096-entry cap was hit —
         // steady-state memory was "every ASN fetched recently", not "live ASNs". The amortized
         // sweep drops them regardless of the cap (in-flight ASNs excepted).
         var time = new Microsoft.Extensions.Time.Testing.FakeTimeProvider();
@@ -135,7 +135,7 @@ public class AsnPrefixProviderTests
     }
 
     /// <summary>Succeeds on the first call, throws a foreign-token OCE (live ct) afterwards —
-    /// the deterministic stand-in for the #324 body deadline firing mid-response (#485).</summary>
+    /// the deterministic stand-in for a response-body deadline firing mid-response.</summary>
     private sealed class OceAfterFirstHandler : HttpMessageHandler
     {
         public int Calls { get; private set; }
@@ -155,7 +155,7 @@ public class AsnPrefixProviderTests
     [Fact]
     public async Task ForeignOceFromRipeStat_IsAFailure_StaleIsServed()
     {
-        // #485 (#320/#324 contract): a foreign-token OCE (live ct) is a load FAILURE — the
+        // A foreign-token OCE (live ct) is a load FAILURE — the
         // stale-on-failure copy must be served. The unfiltered rethrow escaped the cache instead,
         // so every retry re-paid the full fetch budget with no backoff ever recorded.
         var handler = new OceAfterFirstHandler();
@@ -167,7 +167,7 @@ public class AsnPrefixProviderTests
         var first = await cache.GetPrefixesAsync(65010);
         Assert.Single(first);
 
-        var second = await cache.GetPrefixesAsync(65010);   // RED pre-fix: OperationCanceledException escapes
+        var second = await cache.GetPrefixesAsync(65010);   // pre-fix: OperationCanceledException escapes
         Assert.Single(second);                              // the stale copy is served as the failure remedy
         Assert.Equal(2, handler.Calls);
     }

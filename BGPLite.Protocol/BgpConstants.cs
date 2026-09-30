@@ -71,7 +71,7 @@ public static class BgpConstants
         public const byte CeaseMaxPrefixes = 1;
         public const byte CeaseAdministrativeShutdown = 2;
         public const byte CeasePeerDeconfigured = 3;
-        // #506: RFC 4486 §3 assigns 4 to "Administrative Reset" (6 is "Other Configuration
+        // RFC 4486 §3 assigns 4 to "Administrative Reset" (6 is "Other Configuration
         // Change") — the constant was 6, mislabeling every graceful reset on the wire.
         public const byte CeaseAdministrativeReset = 4;
         public const byte CeaseConnectionRejected = 7;
@@ -129,7 +129,7 @@ public static class BgpConstants
     public static class Afi
     {
         public const ushort IPv4 = 1;
-        public const ushort IPv6 = 2; // RFC 1700 / IANA address family numbers (#15 phase 1)
+        public const ushort IPv6 = 2; // RFC 1700 / IANA address family numbers
     }
 
     public static class Safi
@@ -159,7 +159,7 @@ public static class BgpConstants
     public static IPAddress UintToIPAddress(uint address) =>
         new([(byte)(address >> 24), (byte)(address >> 16), (byte)(address >> 8), (byte)address]);
 
-    // ---- #15 phase 1: 16-byte-aware (de)serializers -------------------------------------------
+    // ---- 16-byte-aware (de)serializers -------------------------------------------------
 
     /// <summary>
     /// Non-truncating 128-bit form of an IP address: IPv4 in the low 32 bits (family carried
@@ -203,7 +203,7 @@ public static class BgpConstants
     }
 
     /// <summary>
-    /// Wrong-family guard for the IPv4-only consumers of a 128-bit value (#13/#15): throws
+    /// Wrong-family guard for the IPv4-only consumers of a 128-bit value: throws
     /// instead of silently truncating the high bits.
     /// </summary>
     public static uint ToUint32OrThrow(UInt128 value, string field)

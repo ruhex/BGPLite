@@ -4,7 +4,7 @@ namespace BGPLite.Providers;
 
 /// <summary>
 /// Result of loading a prefix source — carries the parsed prefixes plus the HTTP validators
-/// (ETag / Last-Modified) that enable conditional re-fetches on subsequent loads (#214).
+/// (ETag / Last-Modified) that enable conditional re-fetches on subsequent loads.
 /// When <see cref="NotModified"/> is true, the server returned 304 Not Modified and the caller
 /// should keep the existing cached data (just refresh the timestamp).
 /// </summary>

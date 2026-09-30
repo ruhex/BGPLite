@@ -8,13 +8,14 @@ using BGPLite.Protocol;
 namespace BGPLite.Tests;
 
 /// <summary>
-/// Regression coverage for #417: a failed load of the default prefix source used to reach the RU
+/// Regression coverage: a failed load of the default prefix source used to reach the RU
 /// cache as a "successful" empty result — either directly (the old GetDefaultAsync swallowed
-/// exceptions) or, after #416's propagation, via the 30s NEGATIVE backoff entry that a retry
-/// within the window hits. In both shapes the empty list was cached POSITIVELY for the full RU
-/// TTL (1h), so a single transient outage dropped every unconfigured peer's routes for up to an
-/// hour. The failure must surface as a failure on every call inside the backoff window; recovery
-/// happens on the first real load after the backoff expires.
+/// exceptions) or, once load failures propagated to the caller, via the 30s NEGATIVE backoff
+/// entry that a retry within the window hits. In both shapes the empty list was cached
+/// POSITIVELY for the full RU TTL (1h), so a single transient outage dropped every
+/// unconfigured peer's routes for up to an hour. The failure must surface as a failure on every
+/// call inside the backoff window; recovery happens on the first real load after the backoff
+/// expires.
 /// </summary>
 public class PrefixCacheFailureTests
 {
@@ -66,7 +67,7 @@ public class PrefixCacheFailureTests
         await Assert.ThrowsAsync<InvalidOperationException>(() => service.GetRuPrefixesAsync());
 
         // 2/3. Retries inside the 30s negative-backoff window surface as failures too — they must
-        // NOT arrive as a successful empty list (pre-#417 they did, and the empty set was cached
+        // NOT arrive as a successful empty list (previously they did, and the empty set was cached
         // positively for the full RU TTL).
         await Assert.ThrowsAsync<InvalidOperationException>(() => service.GetRuPrefixesAsync());
         await Assert.ThrowsAsync<InvalidOperationException>(() => service.GetRuPrefixesAsync());
@@ -90,7 +91,7 @@ public class PrefixCacheFailureTests
         Assert.Single(first);
 
         // The source dies; after the RU TTL the re-fetch fails — the stale copy is served
-        // (stale-on-failure, #163 parity), never an empty set (#417).
+        // (stale-on-failure parity with GetPrefixesAsync), never an empty set.
         provider.FailNext = true;
         time.Advance(TimeSpan.FromHours(2));
         var stale = await service.GetRuPrefixesAsync();
@@ -138,7 +139,7 @@ public class PrefixCacheFailureTests
     }
 
     /// <summary>Succeeds normally; throws the CALLER's OCE once the token is cancelled — how
-    /// RipeStatProvider surfaces host shutdown to the cache (#485).</summary>
+    /// RipeStatProvider surfaces host shutdown to the cache.</summary>
     private sealed class OceWhenCancelledHandler : HttpMessageHandler
     {
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
@@ -159,7 +160,7 @@ public class PrefixCacheFailureTests
     [Fact]
     public async Task WarmUp_CancelledToken_UnwindsTheLoop_NotAWarnPerAsn()
     {
-        // #485: the per-ASN catch (Exception) swallowed the shutdown OCE once per remaining ASN —
+        // The per-ASN catch (Exception) swallowed the shutdown OCE once per remaining ASN —
         // a "WarmUp failed" WARN storm on every stop. Caller cancellation must unwind the loop.
         var yaml = "Bgp:\n  Asn: 65444\n  RouterId: 10.0.0.1\n" +
                    "RipeStat:\n  AsnLists:\n    - Name: ru\n      Asns: [65010, 65011]\n";

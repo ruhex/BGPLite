@@ -5,7 +5,7 @@ using BGPLite.Contracts;
 namespace BGPLite.Tests;
 
 /// <summary>
-/// TCP-MD5 (RFC 2385) per-peer socket plumbing (#36). The smoke test runs everywhere Linux runs
+/// TCP-MD5 (RFC 2385) per-peer socket plumbing. The smoke test runs everywhere Linux runs
 /// (CI): a listening socket accepts <c>TcpMd5.Apply</c> and <c>Clear</c> without error. The
 /// handshake test additionally proves the kernel-level effect on Linux loopback: a client WITH
 /// the key completes the handshake, a client WITHOUT it never does (the kernel drops its SYN).

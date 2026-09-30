@@ -4,7 +4,7 @@ using BGPLite.Server;
 namespace BGPLite.Tests;
 
 /// <summary>
-/// Covers the per-send UPDATE path-attribute cache introduced for #87: identical community
+/// Covers the per-send UPDATE path-attribute cache: identical community
 /// sets must reuse one built <see cref="List{T}"/> of <see cref="PathAttribute"/> across batches,
 /// and the cached payload must serialize to the same bytes as a fresh build (no wire change).
 /// </summary>
@@ -47,7 +47,7 @@ public class BgpSessionBuildUpdateAttributesTests
     public void GetCachedUpdateAttributes_CachedMatchesFreshBuild_OnTheWire()
     {
         // The cached list is reused across batches; assert it serializes byte-identically to a
-        // fresh BuildUpdateAttributes call so caching introduces no behavior change (#87).
+        // fresh BuildUpdateAttributes call so caching introduces no behavior change.
         var cache = UpdateCodec.CreateUpdateAttributeCache();
         var communities = new uint[] { 1234u, 5678u };
 

@@ -4,7 +4,7 @@ using BGPLite.Providers;
 namespace BGPLite.Tests;
 
 /// <summary>
-/// Tests for <see cref="PrefixSourceUrlValidator"/> (#144): SSRF defense — validates that URLs
+/// Tests for <see cref="PrefixSourceUrlValidator"/>: SSRF defense — validates that URLs
 /// resolve to public IPs (not private/loopback/link-local/cloud-metadata).
 /// </summary>
 public class PrefixSourceUrlValidatorTests
@@ -88,7 +88,7 @@ public class PrefixSourceUrlValidatorTests
         Assert.Contains("Invalid URL", error);
     }
 
-    // --- OrderForConnect (#151): IPv4-first so an IPv4-only server (no IPv6 interface) still connects,
+    // --- OrderForConnect: IPv4-first so an IPv4-only server (no IPv6 interface) still connects,
     //     instead of throwing SocketException on a hardcoded IPv4 socket handed an IPv6 addresses[0]. ---
 
     [Fact]
@@ -131,7 +131,7 @@ public class PrefixSourceUrlValidatorTests
     public void OrderForConnect_Empty_Returns_Empty()
         => Assert.Empty(PrefixSourceUrlValidator.OrderForConnect([]).ToArray());
 
-    // --- #158: IPv6 forms that embed a non-public IPv4 must be blocked ---
+    // --- IPv6 forms that embed a non-public IPv4 must be blocked ---
 
     [Theory]
     [InlineData("2002:ac10:0001::")]    // 6to4 encoding 172.16.0.1 (RFC 1918 private)
@@ -140,11 +140,11 @@ public class PrefixSourceUrlValidatorTests
     [InlineData("2001:0:5ef5:79fd:d8c6:e8e9:ac10:0001")] // Teredo-style embedding 172.16.0.1
     [InlineData("::192.168.1.1")]       // IPv4-compatible (deprecated ::a.b.c.d form)
     [InlineData("::ffff:10.0.0.1")]     // IPv4-mapped private (also caught by normalize, defense in depth)
-    [InlineData("64:ff9b::0a00:0001")]  // NAT64 well-known embedding 10.0.0.1 (#321)
-    [InlineData("64:ff9b:1::a9fe:c9fe")] // NAT64 local-use 64:ff9b:1::/48 (RFC 8215) — cloud-metadata embedding (#419)
+    [InlineData("64:ff9b::0a00:0001")]  // NAT64 well-known embedding 10.0.0.1
+    [InlineData("64:ff9b:1::a9fe:c9fe")] // NAT64 local-use 64:ff9b:1::/48 (RFC 8215) — cloud-metadata embedding
     public void IsBlockedAddress_Rejects_IPv4EmbeddingForms(string ip)
     {
-        // Without the #158 ranges, an attacker controlling DNS returns one of these IPv6 addresses
+        // Without these ranges, an attacker controlling DNS returns one of these IPv6 addresses
         // for a peer-supplied URL and reaches an internal IPv4 host via the embedding.
         Assert.True(PrefixSourceUrlValidator.IsBlockedAddress(IPAddress.Parse(ip)));
     }
@@ -152,7 +152,7 @@ public class PrefixSourceUrlValidatorTests
     [Fact]
     public async Task ValidateUrlAsync_Rejects_NonStandardPort()
     {
-        // #158: a peer could otherwise fetch http://internal-host:9000/... and reach internal
+        // A peer could otherwise fetch http://internal-host:9000/... and reach internal
         // services on non-standard ports. The ConnectCallback validates the IP, but the port was
         // attacker-controlled. Allowlist 80/443 only.
         var (isValid, error) = await PrefixSourceUrlValidator.ValidateUrlAsync(
@@ -186,7 +186,7 @@ public class PrefixSourceUrlValidatorTests
     [InlineData(22, false)]
     public void IsAllowedPort_MatchesConnectPathAllowlist(int port, bool expected)
     {
-        // #158: the port allowlist is shared between ValidateUrlAsync (API submission) and
+        // The port allowlist is shared between ValidateUrlAsync (API submission) and
         // CreateValidatedConnectionAsync (live fetch) via IsAllowedPort. Pin the exact allowlist
         // (80/443 only) so the two layers cannot drift.
         Assert.Equal(expected, PrefixSourceUrlValidator.IsAllowedPort(port));

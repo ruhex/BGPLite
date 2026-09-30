@@ -8,7 +8,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 namespace BGPLite.Tests;
 
 /// <summary>
-/// Tests for <see cref="RipeStatProvider"/>. Since #104, retry/circuit-breaker is handled by the
+/// Tests for <see cref="RipeStatProvider"/>. Retry/circuit-breaker is handled by the
 /// Polly resilience handler on the named client (configured in Program.cs), NOT by the provider —
 /// so these tests cover the provider's single-attempt behavior: parsing, error propagation, and
 /// cancellation. The resilience pipeline itself is integration-tested by the live named-client
@@ -51,7 +51,7 @@ public class RipeStatProviderTests
         new(new StubFactory(handler), NullLogger<RipeStatProvider>.Instance, new RipeStatConfig());
 
     /// <summary>
-    /// #358 review (hardens #319): a non-string element in the originating array (number/object)
+    /// A non-string element in the originating array (number/object)
     /// used to throw InvalidOperationException out of GetString() and discard the whole ASN's
     /// valid prefixes; it must be skipped like any other non-canonical row.
     /// </summary>
@@ -83,7 +83,7 @@ public class RipeStatProviderTests
     [Fact]
     public async Task PropagatesTransient5xx_AsHttpRequestException()
     {
-        // #104: with retry moved to the Polly pipeline on the named client, the provider performs a
+        // With retry moved to the Polly pipeline on the named client, the provider performs a
         // single attempt and propagates the transient failure. The resilience pipeline (Program.cs)
         // is what retries — these unit tests cover the provider without the pipeline.
         var handler = new StubHandler(HttpStatusCode.ServiceUnavailable, "");
@@ -143,8 +143,8 @@ public class RipeStatProviderTests
 
 
     /// <summary>
-    /// #319: RIPEstat returns what third parties ANNOUNCED — non-canonical NLRI must go through
-    /// the canonical parser (#236): host bits masked, /0 rejected, length range enforced, garbage
+    /// RIPEstat returns what third parties ANNOUNCED — non-canonical NLRI must go through
+    /// the canonical parser: host bits masked, /0 rejected, length range enforced, garbage
     /// skipped instead of throwing the whole fetch. Pre-fix, "10.0.0.1/8" landed unmasked under a
     /// corrupt route-table key and "0.0.0.0/0" was a default-route leak.
     /// </summary>

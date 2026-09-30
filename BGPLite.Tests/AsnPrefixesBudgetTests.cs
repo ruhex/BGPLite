@@ -12,10 +12,10 @@ using Microsoft.Extensions.Logging.Abstractions;
 namespace BGPLite.Tests;
 
 /// <summary>
-/// #454: <c>GET /api/as/{asn}/prefixes?count=true</code> triggers a cold RIPEstat fetch that is
-/// minutes-scale, and pre-fix ran against the shutdown token only — one (or a few) such GETs
-/// pinned in-flight slots (global cap 64) for the full fetch chain. #424 bounded the other two
-/// cold-fetch GET endpoints with <see cref="ManagementApi.ExternalFetchBudget"/>; this endpoint
+/// <c>GET /api/as/{asn}/prefixes?count=true</c> triggers a cold RIPEstat fetch that is
+/// minutes-scale, and previously ran against the shutdown token only — one (or a few) such GETs
+/// pinned in-flight slots (global cap 64) for the full fetch chain. The other two cold-fetch
+/// GET endpoints already run behind <see cref="ManagementApi.ExternalFetchBudget"/>; this endpoint
 /// gets the same wall-clock budget, answering a stable 503 on expiry (a count cannot degrade to
 /// a partial list) while shutdown still propagates.
 /// </summary>
@@ -62,12 +62,12 @@ public sealed class AsnPrefixesBudgetTests : IDisposable
         _api.ExternalFetchBudget = TimeSpan.FromMilliseconds(300);
 
         using var client = new HttpClient();
-        // RED (pre-#454): the hanging fetch pinned the request forever — this WaitAsync fired.
+        // Without the budget the hanging fetch pins the request forever and this WaitAsync throws.
         using var response = await client.GetAsync($"http://127.0.0.1:{port}/api/as/65001/prefixes?count=true")
             .WaitAsync(TimeSpan.FromSeconds(10));
         Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
         var body = await response.Content.ReadAsStringAsync();
-        Assert.DoesNotContain("RIPEstat", body); // non-revealing error policy (#157)
+        Assert.DoesNotContain("RIPEstat", body); // non-revealing error policy
     }
 
     private static int FreeTcpPort()

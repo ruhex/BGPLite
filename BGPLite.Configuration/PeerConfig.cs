@@ -5,7 +5,7 @@ namespace BGPLite.Configuration;
 
 public sealed class PeerConfig
 {
-    // #390: empty default (was "0.0.0.0") — an omitted Address trips the fail-loud validation
+    // Empty default (was "0.0.0.0") — an omitted Address trips the fail-loud validation
     // instead of silently configuring a peer at the invalid all-zeros address.
     [YamlMember(Alias = "Address")]
     public string Address { get; init; } = "";
@@ -19,7 +19,7 @@ public sealed class PeerConfig
     /// <summary>Remote TCP source port of the accepted connection. Runtime-only — NOT loaded from
     /// YAML (configured peers are matched by address when they connect). Combined with
     /// <see cref="Address"/> in <see cref="ToString"/> so session logs can tell apart the several
-    /// peers that may share one source IP behind a NAT/VPN (issue #18).</summary>
+    /// peers that may share one source IP behind a NAT/VPN.</summary>
     public int Port { get; init; }
 
     public IPAddress GetAddress() => IPAddress.Parse(Address);

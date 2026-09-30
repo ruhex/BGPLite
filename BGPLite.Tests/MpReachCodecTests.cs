@@ -5,7 +5,7 @@ using BGPLite.Protocol;
 namespace BGPLite.Tests;
 
 /// <summary>
-/// #15 phase 2: MP_REACH_NLRI / MP_UNREACH_NLRI (RFC 4760) wire codec for IPv6/Unicast —
+/// MP_REACH_NLRI / MP_UNREACH_NLRI (RFC 4760) wire codec for IPv6/Unicast —
 /// attribute VALUE encode/decode roundtrips at boundary lengths, the RFC 2545 32-byte next-hop
 /// form, and malformed-input handling (truncated header/body, unsupported AFI/SAFI, bad
 /// next-hop length).
@@ -161,7 +161,7 @@ public class MpReachCodecTests
     }
 
     /// <summary>
-    /// #467 (RFC 2545 §3): the MP_REACH next hop must be a GLOBAL IPv6 address — ::, ::1,
+    /// RFC 2545 §3: the MP_REACH next hop must be a GLOBAL IPv6 address — ::, ::1,
     /// ff00::/8 (multicast) and fe80::/10 (link-local) are rejected; global unicast and
     /// IPv4-mapped representations are accepted.
     /// </summary>

@@ -7,7 +7,7 @@ namespace BGPLite.Server;
 /// Resolves the outbound route set for one peer — "which prefixes does this peer get" — without
 /// touching the transport. The caller (<see cref="BgpSession"/>) aggregates, batches and sends.
 /// <para>
-/// The seam exists so <see cref="BgpSession"/> stops constructing its own assembler (#263). The
+/// The seam exists so <see cref="BgpSession"/> stops constructing its own assembler. The
 /// production implementation (<c>RouteAssembler</c>) requires the peer store, prefix service and
 /// <c>AppConfig</c> as non-nullable dependencies, so a composition that cannot serve per-peer
 /// configuration no longer type-checks; the degraded shared-table behavior is a separate, named

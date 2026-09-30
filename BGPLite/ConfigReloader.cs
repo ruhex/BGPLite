@@ -7,7 +7,7 @@ namespace BGPLite;
 
 /// <summary>
 /// Hot-reloads the SOFT (non-session-disrupting) part of <c>appsettings.yml</c> while the BGP
-/// service keeps running (#136). Watches the config file for changes; ~500 ms after the last change
+/// service keeps running. Watches the config file for changes; ~500 ms after the last change
 /// (debounced — editors fire several events per save, and a partial write would be read mid-flight)
 /// it reloads + validates the YAML and tells <see cref="ManagementApi.ApplyConfig"/> to swap the
 /// reloadable derived state (TrustedProxies / CORS / rate &amp; concurrency limiters). Fields baked
@@ -16,7 +16,7 @@ namespace BGPLite;
 ///
 /// Resilience: a bad edit (malformed YAML, a config that fails Validate()) is caught and logged, and
 /// the previous config stays in effect — the service is never crashed by a bad edit. This matches the
-/// strict-YAML (#102) + Validate (#89) pipeline, re-run on every reload.
+/// strict-YAML + Validate startup pipeline, re-run on every reload.
 /// </summary>
 public sealed class ConfigReloader : IHostedService, IDisposable
 {
@@ -71,7 +71,7 @@ public sealed class ConfigReloader : IHostedService, IDisposable
         _watcher.Changed += OnFileChanged;
         _watcher.Created += OnFileChanged;
         _watcher.Renamed += OnFileChanged;
-        // #487: an internal-buffer overflow (busy save storms) drops events SILENTLY — hot reload
+        // An internal-buffer overflow (busy save storms) drops events SILENTLY — hot reload
         // would quietly stop working until the next successful save. Surface it; the operator can
         // then touch the file or restart.
         _watcher.Error += (_, e) => _logger.LogWarning(e.GetException(),
@@ -113,7 +113,7 @@ public sealed class ConfigReloader : IHostedService, IDisposable
             {
                 // A save landed while a reload is still running: the one-shot debounce fired, we
                 // lost the CAS, and without re-arming the timer that save would never be applied
-                // until the NEXT save (#321 item 1). Push the fire time past the in-flight reload.
+                // until the NEXT save. Push the fire time past the in-flight reload.
                 try { _debounceTimer?.Change(DebounceMs, Timeout.Infinite); }
                 catch (ObjectDisposedException) { /* StopAsync raced us — shutting down */ }
                 return;
@@ -158,7 +158,7 @@ public sealed class ConfigReloader : IHostedService, IDisposable
         }
         catch (Exception ex)
         {
-            // Strict-YAML (#102) + Validate (#89) run above; any failure here leaves the previous
+            // Strict-YAML + Validate run above; any failure here leaves the previous
             // config fully in effect. Do NOT rethrow — crashing here would tear the service down,
             // defeating the whole point of hot-reload.
             _logger.LogError(ex, "Config reload failed, keeping previous config: {Message}", ex.Message);
@@ -168,8 +168,8 @@ public sealed class ConfigReloader : IHostedService, IDisposable
     public async Task StopAsync(CancellationToken cancellationToken)
     {
         // Set the stop latch BEFORE disarming the timer: a debounce callback already queued can
-        // still run TriggerReload, which would re-arm and start a reload during shutdown (#321
-        // review). The latch makes both the entry and the re-arm branch no-ops.
+        // still run TriggerReload, which would re-arm and start a reload during shutdown. The latch
+        // makes both the entry and the re-arm branch no-ops.
         Task drain;
         lock (_gate)
         {
@@ -180,7 +180,7 @@ public sealed class ConfigReloader : IHostedService, IDisposable
         if (_watcher is not null)
             _watcher.EnableRaisingEvents = false;
         // An already-admitted reload may still be applying config — let it finish (bounded by the
-        // host token) so ApplyConfig cannot race ManagementApi.Dispose (#321 CodeRabbit review).
+        // host token) so ApplyConfig cannot race ManagementApi.Dispose.
         try { await drain.WaitAsync(cancellationToken); }
         catch { /* host grace elapsed or the reload faulted — previous config stays */ }
     }

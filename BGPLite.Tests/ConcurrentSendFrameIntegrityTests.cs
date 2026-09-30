@@ -9,8 +9,8 @@ using Microsoft.Extensions.Logging.Abstractions;
 namespace BGPLite.Tests;
 
 /// <summary>
-/// #392: N concurrent route refreshes on ONE session must produce only WHOLE BGP frames on the
-/// wire — the per-session send lock (#341/#85 lineage) serializes writers, so an observer reading
+/// N concurrent route refreshes on ONE session must produce only WHOLE BGP frames on the
+/// wire — the per-session send lock serializes writers, so an observer reading
 /// the socket stream must always see length-consistent, parseable frames and never an interleaved
 /// or truncated one. Read over the ScriptedConnection seam: every recorded byte buffer is exactly
 /// one wire frame.

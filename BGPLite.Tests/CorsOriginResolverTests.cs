@@ -3,7 +3,7 @@ using BGPLite.Api;
 namespace BGPLite.Tests;
 
 /// <summary>
-/// Unit tests for <see cref="ManagementApi.ResolveCorsOrigin"/> (#99): the request Origin is echoed
+/// Unit tests for <see cref="ManagementApi.ResolveCorsOrigin"/>: the request Origin is echoed
 /// back only when it is non-empty and exactly allowlisted (case-insensitive); absent/empty Origin
 /// and an empty/absent allowlist both yield <c>null</c>, which AddCorsHeaders maps to "no CORS
 /// headers emitted" (CORS disabled — the secure default that replaces the previous blanket "*").

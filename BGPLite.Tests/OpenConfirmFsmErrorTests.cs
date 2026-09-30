@@ -10,12 +10,12 @@ using BGPLite.Contracts;
 namespace BGPLite.Tests;
 
 /// <summary>
-/// #453 (RFC 4271 §8.2.2): an OPEN received in OpenConfirm is an FSM error regardless of body
+/// RFC 4271 §8.2.2: an OPEN received in OpenConfirm is an FSM error regardless of body
 /// validity — the handshake phase accepts only KEEPALIVE and NOTIFICATION. Pre-fix, a malformed
 /// OPEN body threw <see cref="BgpParseException"/> with the Open Message Error code out of the
-/// handshake read, escaped to <c>RunAsync</c>'s catch (#223 path) and answered NOTIFICATION 2/x —
+/// handshake read, escaped to <c>RunAsync</c>'s catch and answered NOTIFICATION 2/x —
 /// misreporting "your OPEN body was malformed" when the real fault is sending a second OPEN.
-/// The same message class in Established is already an FSM error (#427).
+/// The same message class in Established is already an FSM error.
 /// </summary>
 public sealed class OpenConfirmFsmErrorTests
 {
@@ -50,7 +50,7 @@ public sealed class OpenConfirmFsmErrorTests
             await Task.Delay(TimeSpan.FromMilliseconds(20));
         Assert.Equal(BgpFsmState.OpenConfirm, session.State);
 
-        // Well-framed OPEN, body-invalid (the #427 construction): declares optParamsLen=5 over a
+        // Well-framed OPEN, body-invalid: declares optParamsLen=5 over a
         // payload that carries none — ParseOpen throws Open Message Error before any FSM switch.
         var payload = new byte[10];
         payload[0] = 4;                       // version
@@ -71,7 +71,7 @@ public sealed class OpenConfirmFsmErrorTests
     [Fact]
     public async Task NotificationBeforeOpen_IsNeverRepliedTo()
     {
-        // #483 (RFC 4271 §6.3/§4.5, D8): a peer NOTIFICATION as the FIRST message must close the
+        // RFC 4271 §6.3/§4.5 (D8): a peer NOTIFICATION as the FIRST message must close the
         // session silently. Pre-fix, it fell into the not-OPEN branch and was answered with
         // NOTIFICATION 2/0 — replying to a NOTIFICATION.
         var (server, client) = ConnectedPair();
@@ -101,7 +101,7 @@ public sealed class OpenConfirmFsmErrorTests
     [Fact]
     public async Task KeepaliveBeforeOpen_IsFsmError_5_0_NotOpenMessageError()
     {
-        // #483 (RFC 4271 §8.2.2, the #427/#453 class): the handshake accepts only OPEN and
+        // RFC 4271 §8.2.2: the handshake accepts only OPEN and
         // NOTIFICATION — a KEEPALIVE as the first message is an FSM error (5/0), not an
         // Open Message Error (the previous 2/0 misreported an OPEN-body problem).
         var (server, client) = ConnectedPair();

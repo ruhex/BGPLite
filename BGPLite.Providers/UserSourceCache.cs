@@ -5,7 +5,7 @@ using Microsoft.Extensions.Logging;
 namespace BGPLite.Providers;
 
 /// <summary>
-/// URL-keyed in-memory TTL cache for per-peer user-supplied prefix-list sources (issue #150, epic #143).
+/// URL-keyed in-memory TTL cache for per-peer user-supplied prefix-list sources.
 /// Mirrors <see cref="PrefixSourceService"/>'s cache shape: separate positive/negative TTL, per-key
 /// serialization (no thundering herd on a cold/expired key), and stale-on-failure serving so a peer's
 /// routes stay stable through transient fetch errors. Keyed by URL (not source name) so peers that
@@ -19,8 +19,8 @@ namespace BGPLite.Providers;
 /// is cached</b>. Because the cache is shared across peers (URL-keyed), pausing or deleting a source in
 /// one peer does NOT evict the entry here — another peer with the same URL may still need it; orphaned
 /// entries (no active subscriber) simply expire via TTL. The cache sits above the fetcher and is
-/// transparent to the #144 SSRF defense, which lives in <see cref="HttpPrefixProvider"/>'s named client.
-/// <see cref="OperationCanceledException"/> always propagates (#114) and is never cached as negative.
+/// transparent to the SSRF defense, which lives in <see cref="HttpPrefixProvider"/>'s named client.
+/// <see cref="OperationCanceledException"/> always propagates and is never cached as negative.
 /// </remarks>
 internal sealed class UserSourceCache
 {
@@ -28,21 +28,21 @@ internal sealed class UserSourceCache
     private readonly TimeSpan _negativeTtl;
     private readonly ILogger? _logger;
     private readonly TimeProvider _timeProvider;
-    // Upper bound on _cache/_locks entries (#261, port of PrefixService's #165 pattern). Without a
+    // Upper bound on _cache/_locks entries. Without a
     // cap, every unique peer-supplied URL leaves a permanent entry — up to ~10 MB of parsed prefixes
     // each (the HTTP body cap) plus a SemaphoreSlim — so operator churn or an API client loop grows
     // the cache without limit. Exceeded → sweep expired entries first, then the oldest by CachedAt.
     private readonly int _maxEntries;
-    // #426: entry COUNT caps say nothing about memory — one entry can hold ~1M prefixes (a 10 MB
+    // Entry COUNT caps say nothing about memory — one entry can hold ~1M prefixes (a 10 MB
     // response parsed). The budget bounds the TOTAL parsed prefixes across all entries; over
     // budget → the sweep drops the OLDEST positive entries until under. 2M prefixes ≈ 50 MB worst
     // case — generous for real peer sources, hostile to unbounded growth.
     internal const long DefaultMaxTotalPrefixes = 2_000_000;
     private readonly long _maxTotalPrefixes;
-    // #426: expired entries used to be PINNED until the entry cap was hit — steady-state memory
-    // was "everything fetched recently", not "live entries". The amortized sweep (every
-    // _sweepEvery calls) now removes expired entries and enforces the prefix budget regardless
-    // of the cap. internal-settable via ctor for tests.
+    // Expired entries would otherwise stay PINNED until the entry cap was hit — steady-state memory
+    // would be "everything fetched recently", not "live entries". The amortized sweep (every
+    // _sweepEvery calls) removes expired entries and enforces the prefix budget regardless
+    // of the cap. Settable via ctor for tests.
     private int _callsSinceSweep;
     private readonly int _sweepEvery;
     internal int SweepEvery => _sweepEvery;
@@ -54,15 +54,15 @@ internal sealed class UserSourceCache
     private readonly ConcurrentDictionary<string, (IReadOnlyList<IpPrefix> List, DateTime CachedAt, bool Negative)> _cache = new();
     // url → gate serializing the cache-miss fetch path (prevents thundering herd on cold/expired keys).
     private readonly ConcurrentDictionary<string, SemaphoreSlim> _locks = new();
-    // url → ACTIVE-loader count (#450 review): the sweeps never remove a gate whose loaders are
+    // url → ACTIVE-loader count: the sweeps never remove a gate whose loaders are
     // still inside or queued — otherwise two gates coexist and two loaders race one URL, with the
-    // older response able to overwrite the newer (RipeStatPrefixCache's #267-item-3 invariant).
+    // older response able to overwrite the newer (the same invariant RipeStatPrefixCache keeps).
     private readonly ConcurrentDictionary<string, int> _inflight = new();
-    // #478: serializes the COMPOUND bookkeeping over _inflight and _locks — registration,
+    // Serializes the COMPOUND bookkeeping over _inflight and _locks — registration,
     // last-leaver gate removal, and the sweeps' inflight-check-then-remove. Without it the
     // decrement→zero-check→gate-removal sequence in ExitInflight could interleave with a fresh
-    // registration, pair-removing a gate its loader still held (duplicate concurrent fetch — the
-    // #468 consequence in a nanosecond window). Never held across an await: the gate Wait/Release
+    // registration, pair-removing a gate its loader still held (a duplicate concurrent fetch with
+    // the older load racing the newer one). Never held across an await: the gate Wait/Release
     // stay outside.
     private readonly object _gateSync = new();
 
@@ -82,12 +82,12 @@ internal sealed class UserSourceCache
     /// <summary>Entries currently tracked (test/observability).</summary>
     internal int TrackedCount => _cache.Count;
 
-    /// <summary>Gates currently tracked (test/observability — orphan-lock hygiene, #358 review).</summary>
+    /// <summary>Gates currently tracked (test/observability — orphan-lock hygiene).</summary>
     internal int TrackedGateCount => _locks.Count;
 
     /// <param name="url">Cache key (the source URL — dedupes across peers).</param>
     /// <param name="logLabel">Safe identifier (the source <c>Name</c>) for log lines — the URL itself is
-    /// never logged, since peer URLs may carry query-string tokens (#149).</param>
+    /// never logged, since peer URLs may carry query-string tokens.</param>
     /// <param name="loadAsync">The fetcher ( HttpPrefixProvider.LoadAsync closed over the source config).</param>
     public async Task<IReadOnlyList<IpPrefix>> GetOrLoadAsync(
         string url,
@@ -95,7 +95,7 @@ internal sealed class UserSourceCache
         Func<CancellationToken, Task<IReadOnlyList<IpPrefix>>> loadAsync,
         CancellationToken ct)
     {
-        // #426: amortized expired-entry + prefix-budget sweep — expired entries used to be pinned
+        // Amortized expired-entry + prefix-budget sweep — expired entries would otherwise stay pinned
         // until the entry cap was hit. Cheap (every Nth call), idempotent under concurrency.
         SweepIfNeeded();
 
@@ -104,12 +104,12 @@ internal sealed class UserSourceCache
 
         // Serialize per-key so concurrent callers (e.g. several peers refreshing the same URL) share
         // a single fetch — no thundering herd.
-        // #468: register as an active loader BEFORE taking the gate from _locks. The inverse
+        // Register as an active loader BEFORE taking the gate from _locks. The inverse
         // ordering let the LAST leaver's gate removal race a caller that had already taken the
         // (now-removed) gate instance but not yet registered, parking it on an orphaned
         // semaphore while the next caller minted a second gate. With this order every
         // participant is counted in _inflight before it can touch _locks, so ExitInflight only
-        // ever removes a gate that nobody holds or queues on. #478: register+take run as one
+        // ever removes a gate that nobody holds or queues on. Register+take run as one
         // atomic section under _gateSync — the counter bump and the gate lookup must not be
         // split by a concurrent last-leaver removal.
         SemaphoreSlim gate;
@@ -121,7 +121,7 @@ internal sealed class UserSourceCache
         var entered = false;
         try
         {
-            // #468: a caller cancelled while queued does NOT remove the gate here — that pair-
+            // A caller cancelled while queued does NOT remove the gate here — that pair-
             // removed the shared instance out from under the still-running first loader, minted
             // a second gate for the next caller and raced a newer load against an older
             // snapshot. Cleanup is ExitInflight's job: the LAST leaver removes the gate.
@@ -139,8 +139,8 @@ internal sealed class UserSourceCache
                 }
                 catch (OperationCanceledException) when (ct.IsCancellationRequested)
                 {
-                    // #114: CALLER-initiated cancellation always propagates and is never cached — it
-                    // is teardown, not a property of the source. A foreign-token OCE (e.g. the #320
+                    // CALLER-initiated cancellation always propagates and is never cached — it
+                    // is teardown, not a property of the source. A foreign-token OCE (e.g. a
                     // per-fetch budget's linked CTS firing on a live caller token) falls through to
                     // the failure handling below instead: stale-on-failure serve if possible, else a
                     // brief negative-cache so repeated refreshes do not re-pay the full budget.
@@ -181,13 +181,13 @@ internal sealed class UserSourceCache
 
     /// <summary>
     /// Decrements the active-loader count for <paramref name="url"/>; the LAST leaver removes
-    /// the gate, so an unbacked gate cannot outlive its participants (the #358 orphan-lock
-    /// hygiene). #468: a cancelled waiter no longer removes the gate directly — that pair-
-    /// removed the shared instance out from under the still-running first loader, minted a
+    /// the gate, so an unbacked gate cannot outlive its participants (orphan-lock hygiene).
+    /// A cancelled waiter must NOT remove the gate directly — that pair-removed the shared
+    /// instance out from under the still-running first loader, minted a
     /// second gate for the next caller, and raced a newer load against an older snapshot.
-    /// #478: the whole sequence runs as one atomic section under <see cref="_gateSync"/>, with
-    /// registration taking the same lock — the previous unlocked decrement→zero-check→gate-
-    /// removal could interleave with a fresh registration landing between the check and the
+    /// The whole sequence runs as one atomic section under <see cref="_gateSync"/>, with
+    /// registration taking the same lock — an unlocked decrement→zero-check→gate-removal
+    /// could interleave with a fresh registration landing between the check and the
     /// pair-removal, deleting a gate its loader still held (duplicate concurrent fetch,
     /// last-writer-wins on the cache entry).
     /// </summary>
@@ -203,10 +203,10 @@ internal sealed class UserSourceCache
     }
 
     /// <summary>
-    /// Enforces the _maxEntries bound (#261). Called before inserting a NEW key, under the caller's
+    /// Enforces the _maxEntries bound. Called before inserting a NEW key, under the caller's
     /// per-URL gate. Drops expired entries first (cheapest eviction), then the oldest by CachedAt
     /// until below the cap, removing the matching _locks entries with them. Same tradeoff as
-    /// PrefixService's #165 sweep: a concurrent loader may still hold an evicted URL's semaphore — it
+    /// the other bounded sweeps: a concurrent loader may still hold an evicted URL's semaphore — it
     /// finishes on its own reference and a fresh caller GetOrAdd's a new gate, so the worst case is
     /// one duplicate idempotent GET, never a correctness loss.
     /// </summary>
@@ -216,8 +216,8 @@ internal sealed class UserSourceCache
         if (_cache.ContainsKey(insertingUrl)) return; // already present, no insert coming
 
         var now = _timeProvider.GetUtcNow().UtcDateTime;
-        // #487: HashSet — the Contains in the oldest-selection loop below made eviction O(n²) at
-        // the 1024-entry cap.
+        // HashSet — a Contains on a List in the oldest-selection loop below would make eviction
+        // O(n²) at the 1024-entry cap.
         var toEvict = new HashSet<string>();
         foreach (var (key, entry) in _cache)
         {
@@ -241,8 +241,8 @@ internal sealed class UserSourceCache
 
         foreach (var key in toEvict)
         {
-            // #450 review: a URL with active loaders keeps its gate (see SweepIfNeeded).
-            // #478: inflight-check and gate removal run under _gateSync so a loader registering
+            // A URL with active loaders keeps its gate (see SweepIfNeeded).
+            // The inflight-check and gate removal run under _gateSync so a loader registering
             // between the check and the removal cannot lose its gate to the eviction.
             lock (_gateSync)
             {
@@ -269,8 +269,8 @@ internal sealed class UserSourceCache
     }
 
     /// <summary>
-    /// #426: amortized housekeeping, run every <see cref="_sweepEvery"/> calls. (1) Removes EXPIRED
-    /// entries regardless of the entry cap — they used to be pinned until the cap was hit. (2)
+    /// Amortized housekeeping, run every <see cref="_sweepEvery"/> calls. (1) Removes EXPIRED
+    /// entries regardless of the entry cap — they would otherwise be pinned until the cap was hit. (2)
     /// Enforces the total-prefix budget: over budget, the OLDEST positive entries are dropped until
     /// under (a later caller re-fetches them — a duplicate idempotent GET, never a correctness
     /// loss, the same tradeoff <see cref="EvictIfAtCapacity"/> accepts).
@@ -282,7 +282,7 @@ internal sealed class UserSourceCache
         Volatile.Write(ref _callsSinceSweep, 0);
 
         var now = _timeProvider.GetUtcNow().UtcDateTime;
-        var toEvict = new HashSet<string>();   // #487: O(1) Contains for the budget loop below
+        var toEvict = new HashSet<string>();   // O(1) Contains for the budget loop below
         long total = 0;
         foreach (var (key, entry) in _cache)
         {
@@ -307,9 +307,9 @@ internal sealed class UserSourceCache
 
         foreach (var key in toEvict)
         {
-            // #450 review: a URL with active loaders keeps its gate (its loader writes the entry
+            // A URL with active loaders keeps its gate (its loader writes the entry
             // on its own reference) — removing the gate would mint a duplicate concurrent fetch.
-            // #478: same _gateSync atomicity as EvictIfAtCapacity's removal loop.
+            // Same _gateSync atomicity as EvictIfAtCapacity's removal loop.
             lock (_gateSync)
             {
                 if (_inflight.TryGetValue(key, out var active) && active > 0) continue;

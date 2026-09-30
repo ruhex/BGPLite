@@ -14,7 +14,7 @@ public enum CommunitySourceKind
     /// <summary>Per-peer custom AS-originated prefixes (static community <c>&lt;Asn&gt;:200</c>, overridable via config).</summary>
     CustomAsn,
     /// <summary>
-    /// Per-peer user-supplied URL prefix-list source (epic #143 / issue #147). The community is the
+    /// Per-peer user-supplied URL prefix-list source. The community is the
     /// source's explicit <c>Community</c> if set; otherwise it is auto-generated as
     /// <c>&lt;LocalAsn&gt;:(500 + FNV-1a(Name) % 100)</c> — a deterministic value in the 500–599 range so
     /// it survives restarts (receiving peers' filters stay stable). Sources sharing a <c>Name</c> share a
@@ -41,8 +41,7 @@ public sealed record CommunitySource(CommunitySourceKind Kind, string? ListName 
 /// <summary>
 /// Resolves the BGP community/communities to attach to prefixes that came from a given source.
 /// Returns an empty array when the source has no community (callers must treat empty as "untagged").
-/// Implementations: <see cref="ConfigCommunityResolver"/> (static config); a future DB-backed
-/// resolver for named user lists (Phase 2).
+/// Implementation: <see cref="ConfigCommunityResolver"/> (static config).
 /// </summary>
 public interface ICommunityResolver
 {

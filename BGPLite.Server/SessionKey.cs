@@ -13,7 +13,7 @@ namespace BGPLite.Server;
 /// <remarks>
 /// Keying only by the remote IP collapses both connections into one map slot and makes them
 /// clobber each other (the second accept silently closes the first), so the peers flap and can
-/// never stay Established — see issue #18. Note that per RFC 4271 §6.8 two genuinely distinct
+/// never stay Established. Note that per RFC 4271 §6.8 two genuinely distinct
 /// peers (different BGP Identifier) sharing a source IP are <em>not</em> a connection collision;
 /// the remote AS (RFC 4271 §4.2/§6.2) is a validation/policy field, not the transport identity,
 /// and stays validated separately against <c>PeerConfig.RemoteAsn</c>.

@@ -3,22 +3,11 @@ using System.Collections.Generic;
 namespace BGPLite.Protocol;
 
 /// <summary>
-/// BGP UPDATE path-attribute codec + inbound validators, extracted from <c>BgpSession</c> (#93).
-/// <para>
-/// The outbound side (<see cref="BuildUpdateAttributes"/> / <see cref="GetCachedUpdateAttributes"/> /
-/// <see cref="WithLargeCommunityAttribute"/>) builds the path-attribute list for an outbound UPDATE
-/// in RFC 4271 order (ORIGIN, AS_PATH, NEXT_HOP, COMMUNITY, AS4_PATH), with a per-send cache keyed
-/// by community set (#87). The inbound side (<see cref="ValidateMandatoryAttributes"/> /
-/// <see cref="MergeAsPathWithAs4Path"/> / <see cref="ValidateAggregatorReconstruction"/>) validates
-/// and reconstructs received attributes per RFC 6793. <see cref="GetMalformedFourOctetAsnCapabilityData"/>
-/// builds the malformed-capability TLV for an OPEN NOTIFICATION.
-/// </para>
-/// <para>
-/// All methods are pure — every input is a parameter, no instance state. They were previously
-/// <c>internal static</c> on <c>BgpSession</c> (reachable from tests via <c>InternalsVisibleTo</c>);
-/// moving them here as <c>public</c> removes that test-backdoor and places them in the Protocol
-/// layer alongside <see cref="AttributeHelper"/> and <see cref="BgpMessageWriter"/>.
-/// </para>
+/// BGP UPDATE path-attribute codec. The outbound side builds the path-attribute list for an
+/// outbound UPDATE in RFC 4271 order (ORIGIN, AS_PATH, NEXT_HOP, COMMUNITY, AS4_PATH) with a
+/// per-send cache keyed by community set; the inbound side validates and reconstructs received
+/// attributes per RFC 6793 / RFC 7606. All methods are pure — every input is a parameter, no
+/// instance state.
 /// </summary>
 public static class UpdateCodec
 {
@@ -99,7 +88,7 @@ public static class UpdateCodec
     /// Creates a per-send cache of built UPDATE path attributes, keyed by community set. The
     /// cache is scoped to a single send invocation: the ASN/nextHop inputs are constant for that
     /// whole send, so identical community sets yield byte-identical <see cref="PathAttribute"/>
-    /// lists that can be reused across the N 100-NLRI batches (#87).
+    /// lists that can be reused across the N 100-NLRI batches.
     /// </summary>
     public static Dictionary<IReadOnlyList<uint>, List<PathAttribute>> CreateUpdateAttributeCache() =>
         new(CommunitySetComparer.Instance);
@@ -142,7 +131,7 @@ public static class UpdateCodec
     /// <summary>
     /// Creates a per-send attribute cache for the IPv6 family (see
     /// <see cref="GetCachedV6UpdateAttributes"/>). Scoped to a single send invocation like the
-    /// IPv4 counterpart (#87).
+    /// IPv4 counterpart.
     /// </summary>
     public static Dictionary<IReadOnlyList<uint>, List<PathAttribute>> CreateV6UpdateAttributeCache() =>
         new(CommunitySetComparer.Instance);
@@ -248,7 +237,7 @@ public static class UpdateCodec
     /// </summary>
     public static void ValidateAggregatorReconstruction(uint? aggregatorAsn, uint? as4AggregatorAsn, bool aggregatorDiscarded = false, bool as4AggregatorDiscarded = false)
     {
-        // #306/#377 review: a discarded-malformed attribute must not penalize the pairing rules —
+        // A discarded-malformed attribute must not penalize the pairing rules —
         // the UPDATE carried it; it was dropped per RFC 7606 §7.7 (AGGREGATOR) / RFC 6793 §6
         // (AS4_AGGREGATOR), and what remains satisfies everything the check exists for.
         if (aggregatorAsn == BgpConstants.AsPath.AsTrans && as4AggregatorAsn is null && !as4AggregatorDiscarded)
@@ -259,13 +248,8 @@ public static class UpdateCodec
     }
 
     /// <summary>
-    /// Returns the malformed-capability TLV data for an OPEN NOTIFICATION when the received
-    /// 4-octet-ASN capability has a wrong length. Scans the OPEN's capabilities for the first
-    /// malformed FourOctetAsn entry and returns <c>[code, length, ...data]</c>; empty if none found.
-    /// </summary>
-    /// <summary>
     /// The parsed inbound attribute set of an announcing UPDATE — everything the routing layer
-    /// needs to build a route (#270). Produced by <see cref="ParseRouteAttributes"/>.
+    /// needs to build a route. Produced by <see cref="ParseRouteAttributes"/>.
     /// </summary>
     public sealed record RouteAttributes(
         uint[] AsPath,
@@ -282,8 +266,7 @@ public static class UpdateCodec
     /// reconstruction, and AGGREGATOR/AS4_AGGREGATOR consistency. On a 4-octet session
     /// (<paramref name="fourByteAsnSession"/>) AS4_PATH/AS4_AGGREGATOR are skipped per RFC 6793 §4.1.
     /// Throws <see cref="BgpNotificationException"/> carrying the RFC subcode (2/3/4/5/6/8/9/11) so the
-    /// caller can apply treat-as-withdraw (RFC 7606) — the exact pipeline previously inlined in
-    /// BgpSession.HandleUpdateAsync, moved verbatim (#270).
+    /// caller can apply treat-as-withdraw (RFC 7606).
     /// </summary>
     public static RouteAttributes ParseRouteAttributes(BgpUpdateMessage update, bool fourByteAsnSession, uint? localRouterId = null, bool mpReachV6Present = false)
     {
@@ -302,18 +285,17 @@ public static class UpdateCodec
             // (typeCode, reason) per RFC 7606 attribute-discard — surfaced for the session's log/metric.
             var discarded = new List<(byte TypeCode, string Reason)>();
 
-            // RFC 7606 §3 (revising RFC 4271 §6.3): "If any other attribute (whether recognized or
-            // unrecognized) appears more than once in an UPDATE message, then all the occurrences of
-            // the attribute other than the first one SHALL be discarded and the UPDATE message will
-            // continue to be processed." The switch below assigns unconditionally, so without this
-            // guard the LAST occurrence won — an UPDATE carrying two NEXT_HOPs installed the second
-            // one, so anything reading the first (a collector, a looking glass, an operator's packet
-            // capture) disagreed with what actually landed in the route table (#287).
+            // RFC 7606 §3 (revising RFC 4271 §6.3): duplicate occurrences of an attribute other
+            // than the first SHALL be discarded and the UPDATE continues to be processed. The
+            // switch below assigns unconditionally, so without this guard the LAST occurrence won —
+            // an UPDATE carrying two NEXT_HOPs installed the second one, so anything reading the
+            // first (a collector, a looking glass, an operator's packet capture) disagreed with
+            // what actually landed in the route table.
             //
             // The MP_REACH_NLRI/MP_UNREACH_NLRI half of that paragraph is handled UPSTREAM, in
             // BgpMessageReader.ParseUpdate: those attributes are extracted into typed fields
             // before this generic list is built, and a duplicate takes the RFC 7606 §3(g)
-            // NOTIFICATION + session reset there (#467). The first-wins guard below therefore
+            // NOTIFICATION + session reset there. The first-wins guard below therefore
             // never sees them.
             //
             // Clear() is not redundant despite `localsinit` zeroing stackalloc by default: adding
@@ -333,16 +315,15 @@ public static class UpdateCodec
                 // Order matters: the duplicate guard runs FIRST, so a discarded later occurrence is
                 // never shape-checked. RFC 7606 §3 says those occurrences are discarded, not
                 // "discarded but still validated" — checking them would reject an UPDATE over an
-                // attribute that has no effect on the result (#287 + #290).
+                // attribute that has no effect on the result.
                 //
-                // RFC 4271 §6.3 (#322): an attribute with the Optional bit clear that this codec
-                // does not recognize has unknown well-known semantics — it MUST be rejected with
+                // An attribute with the Optional bit clear that this codec does not recognize has
+                // unknown well-known semantics (RFC 4271 §6.3) — it MUST be rejected with
                 // Unrecognized Well-known Attribute (subcode 2), never silently ignored. Only
                 // unrecognized OPTIONAL attributes may be discarded (RFC 7606 §2), and those fall
                 // through untouched here. The throw routes through the caller's treat-as-withdraw,
                 // not a session reset. Known-but-unread attributes (LOCAL_PREF,
-                // ATOMIC_AGGREGATE; MED is optional) pass IsKnownAttribute and stay accepted —
-                // over-rejecting those was the #290 lesson.
+                // ATOMIC_AGGREGATE; MED is optional) pass IsKnownAttribute and stay accepted.
                 if (!attr.Optional && !AttributeHelper.IsKnownAttribute(attr.TypeCode))
                     throw new BgpNotificationException(
                         BgpConstants.Error.UpdateMessageError,
@@ -360,12 +341,10 @@ public static class UpdateCodec
                         originSeen = true;
                         break;
                     case BgpConstants.Attribute.AsPath:
-                        // #486 (D25): a zero-length AS_PATH is a legal ENCODING (RFC 4271 §5.1.2
+                        // (D25) A zero-length AS_PATH is a legal ENCODING (RFC 4271 §5.1.2
                         // lets an originator send an empty path toward INTERNAL peers) but never a
                         // valid eBGP path — BGPLite serves eBGP only, where the sender's own ASN
-                        // must be present. Rejected at the policy layer as Malformed AS_PATH
-                        // (treat-as-withdraw); the codec stays encoding-neutral so the writer's
-                        // empty-path roundtrip (#248 review) stands.
+                        // must be present. Rejected here as Malformed AS_PATH (treat-as-withdraw).
                         if (attr.Data.Length == 0)
                             throw new BgpNotificationException(
                                 BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.MalformedAsPath,
@@ -388,7 +367,7 @@ public static class UpdateCodec
                     case BgpConstants.Attribute.LargeCommunity:
                         largeCommunities = AttributeHelper.ReadLargeCommunities(attr);
                         break;
-                    // #306: AGGREGATOR/AS4_AGGREGATOR malformations — wrong length by session
+                    // AGGREGATOR/AS4_AGGREGATOR malformations — wrong length by session
                     // type, AS 0 (RFC 7607) — take ATTRIBUTE DISCARD, not treat-as-withdraw: drop
                     // the attribute, keep processing the UPDATE. Citations differ per attribute:
                     // AGGREGATOR per RFC 7606 §7.7; AS4_AGGREGATOR per RFC 6793 §6 ("the
@@ -412,7 +391,7 @@ public static class UpdateCodec
             // RFC 4271 §6.3/§6.8: a semantically incorrect NEXT_HOP MUST be rejected with subcode 8
             // (Invalid NEXT_HOP Attribute) — "a valid unicast host address", never multicast, never
             // the receiving speaker's own address. Routed through the caller's treat-as-withdraw
-            // path per RFC 7606 §7.3 (#292 item 1).
+            // path per RFC 7606 §7.3.
             if (nextHopSeen)
                 ValidateNextHopSemantics(nextHop, localRouterId);
             asPath = MergeAsPathWithAs4Path(asPath, as4Path);
@@ -425,7 +404,7 @@ public static class UpdateCodec
         }
         catch (BgpParseException ex)
         {
-            // #235: preserve the RFC 4271 §6.3 subcode the codec recorded (e.g. Malformed AS_PATH
+            // Preserve the RFC 4271 §6.3 subcode the codec recorded (e.g. Malformed AS_PATH
             // from ReadAsPath, Optional Attribute Error from AGGREGATOR/Large Communities) instead
             // of flattening it to Unspecific.
             throw new BgpNotificationException(BgpConstants.Error.UpdateMessageError, ex.SubErrorCode ?? BgpConstants.SubError.Unspecific, ex.Message);
@@ -440,7 +419,7 @@ public static class UpdateCodec
     /// loopback (127/8), multicast (224/4), reserved (240/4 — includes the broadcast address),
     /// and the local router-id when known. Throws <see cref="BgpNotificationException"/> so the
     /// caller applies treat-as-withdraw (RFC 7606 §7.3) — the route never reaches the table with
-    /// a next hop that could blackhole or loop traffic (#292 item 1).
+    /// a next hop that could blackhole or loop traffic.
     /// </summary>
     public static void ValidateNextHopSemantics(uint nextHop, uint? localRouterId)
     {
@@ -486,7 +465,7 @@ public static class UpdateCodec
             // (RFC 6793 §3). On a 4-octet session the switch below ignores them entirely
             // (`case ... when !fourByteAsnSession`), so validating their shape there would withdraw an
             // UPDATE's routes over an attribute this codec does not even read — the same over-rejection
-            // the type list above avoids by excluding MED/LOCAL_PREF/ATOMIC_AGGREGATE (#290 review).
+            // the type list above avoids by excluding MED/LOCAL_PREF/ATOMIC_AGGREGATE.
             BgpConstants.Attribute.As4Path when !fourByteAsnSession => (true, true, (int?)null),
             BgpConstants.Attribute.As4Aggregator when !fourByteAsnSession => (true, true, (int?)null),
             BgpConstants.Attribute.LargeCommunity => (true, true, (int?)null),
@@ -494,7 +473,7 @@ public static class UpdateCodec
         };
 
     /// <summary>
-    /// Validates a recognized attribute's flags and fixed length against its type code (#290).
+    /// Validates a recognized attribute's flags and fixed length against its type code.
     /// Throws <see cref="BgpNotificationException"/> with Attribute Flags Error (4) or Attribute
     /// Length Error (5) so the caller's treat-as-withdraw path applies (RFC 7606 §4).
     /// </summary>
@@ -510,7 +489,7 @@ public static class UpdateCodec
         // ONLY those two bits. The Partial bit is deliberately not checked: RFC 7606 narrows the
         // RFC 4271 §5 "MUST be 0 for well-known attributes" rule to Optional/Transitive, and
         // rejecting on Partial would drop routes that conformant implementations accept. Bit 0x08
-        // (reserved) is already rejected at the wire level by BgpMessageReader.ParseAttribute (#272).
+        // (reserved) is already rejected at the wire level by BgpMessageReader.ParseAttribute.
         if (attr.Optional != expected.Optional || attr.Transitive != expected.Transitive)
             throw new BgpNotificationException(
                 BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.AttributeFlagsError,
@@ -527,6 +506,11 @@ public static class UpdateCodec
                 $"Attribute type {attr.TypeCode} has length {attr.Data.Length}, which conflicts with its type code (expected {fixedLength})");
     }
 
+    /// <summary>
+    /// Returns the malformed-capability TLV data for an OPEN NOTIFICATION when the received
+    /// 4-octet-ASN capability has a wrong length. Scans the OPEN's capabilities for the first
+    /// malformed FourOctetAsn entry and returns <c>[code, length, ...data]</c>; empty if none found.
+    /// </summary>
     public static byte[] GetMalformedFourOctetAsnCapabilityData(BgpOpenMessage open)
     {
         foreach (var cap in open.Capabilities)

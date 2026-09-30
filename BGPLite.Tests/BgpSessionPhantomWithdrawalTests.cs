@@ -8,7 +8,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 namespace BGPLite.Tests;
 
 /// <summary>
-/// #430: the send mirror (<c>_advertisedPrefixes</c>) recorded a batch BEFORE its UPDATE was
+/// The send mirror (<c>_advertisedPrefixes</c>) recorded a batch BEFORE its UPDATE was
 /// serialized. A batch whose composed UPDATE exceeded the 4096-byte maximum (constructible from
 /// a peer-supplied route carrying ~1200 communities) threw out of the writer AFTER the mirror
 /// already claimed the routes — so the NEXT refresh sent WITHDRAWALS for prefixes that were never
@@ -69,15 +69,15 @@ public sealed class BgpSessionPhantomWithdrawalTests
         await session.RefreshRoutesAsync();
 
         // Inject the poison route and refresh: the composed UPDATE exceeds MaxMessageSize and is
-        // dropped before the wire (#457 pre-validation; pre-#457 the writer threw mid-send and
-        // RefreshCycleAsync contained the failure — same observable outcome, session stays up).
+        // dropped before the wire (the writer used to throw mid-send, with RefreshCycleAsync
+        // containing the failure — same observable outcome, session stays up).
         routeTable.AddOrUpdate(PoisonRoute());
         await session.RefreshRoutesAsync();
 
         var updatesBefore = CountUpdates(conn);
 
         // Healthy refresh #2: WithdrawAllAsync must withdraw ONLY what is actually on the wire —
-        // pre-#430 the mirror also held the POISON route (recorded before the failed send), so
+        // previously the mirror also held the POISON route (recorded before the failed send), so
         // this refresh put a PHANTOM withdrawal for 10.1.0.0/16 on the wire. The healthy /8's
         // withdraw+re-announce may legitimately appear again.
         await session.RefreshRoutesAsync();
@@ -121,7 +121,7 @@ public sealed class BgpSessionPhantomWithdrawalTests
     [Fact]
     public async Task OversizeGroupAtInitialSend_SessionStaysUp_HealthyRoutesAdvertised()
     {
-        // #457: the poison route present BEFORE establishment exercises the INITIAL-send path.
+        // The poison route present BEFORE establishment exercises the INITIAL-send path.
         // Pre-fix the composed overflow threw ArgumentOutOfRangeException out of the initial dump
         // into RunAsync's generic catch: best-effort Cease + teardown — the peer reconnected into
         // the same state with zero routes, every time. Post-fix the unsplittable group (attributes
@@ -135,8 +135,8 @@ public sealed class BgpSessionPhantomWithdrawalTests
         await Task.Delay(TimeSpan.FromMilliseconds(100)); // let the initial dump finish
 
         Assert.True(session.IsEstablished, "the oversize group must not tear down the initial send");
-        // CodeRabbit on the integration review: the dropped group must not inflate the advertised
-        // count — _advertisedCount is the wire truth (#212), so only the healthy /8 counts.
+        // The dropped group must not inflate the advertised
+        // count — _advertisedCount is the wire truth, so only the healthy /8 counts.
         Assert.Equal(1, session.AdvertisedPrefixCount);
         var frames = conn.Sent.Select(f => BgpMessageReader.ReadMessage(f)).ToList();
         Assert.DoesNotContain(frames, m => m is BgpNotificationMessage);

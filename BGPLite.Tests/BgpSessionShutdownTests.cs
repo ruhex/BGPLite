@@ -76,7 +76,7 @@ public class BgpSessionShutdownTests
     [Fact]
     public async Task NotifyCease_SubcodeIs4_AdministrativeReset_PerRfc4486()
     {
-        // #506: the subcode value itself, asserted as a LITERAL so a wrong constant cannot pass.
+        // The subcode value itself, asserted as a LITERAL so a wrong constant cannot pass.
         // RFC 4486 §3 table: 4 = "Administrative Reset"; 6 = "Other Configuration Change".
         // CeaseAdministrativeReset was 6, mislabeling every graceful reset/shutdown/delete.
         var (server, client) = ConnectedPair();
@@ -93,11 +93,11 @@ public class BgpSessionShutdownTests
         var msg = BgpMessageReader.ReadMessage(buf.AsSpan(0, len));
         var notif = Assert.IsType<BgpNotificationMessage>(msg);
         Assert.Equal(BgpConstants.Error.Cease, notif.ErrorCode);
-        Assert.Equal(4, notif.SubErrorCode);   // RED pre-fix: 6
+        Assert.Equal(4, notif.SubErrorCode);   // pre-fix: 6
     }
 
     /// <summary>
-    /// Regression #325: UpdateSessionStatus in the RunAsync finally is a best-effort DB write on a
+    /// UpdateSessionStatus in the RunAsync finally is a best-effort DB write on a
     /// fire-and-forget task (RunSessionAsync has no catch) — a transient store failure must not
     /// fault RunAsync, or the exception vanishes unobserved, PeerDisconnected() is skipped, and
     /// PeerCount (plus the peer's Status=active row) leaks forever.
@@ -142,7 +142,7 @@ public class BgpSessionShutdownTests
         Assert.Equal(peersBeforeTeardown - 1, metrics.PeerCount);
     }
 
-    /// <summary>Every member throws; UpdateSessionStatus simulates the transient DB failure from #325.</summary>
+    /// <summary>Every member throws; UpdateSessionStatus simulates the transient DB failure.</summary>
     private sealed class ThrowingUpdateStatusStore : IPeerStore
     {
         public Task<string> CreatePeerAsync(string ip, uint asn, string? description, CancellationToken ct = default) => throw new NotSupportedException();
@@ -432,7 +432,7 @@ public class BgpSessionShutdownTests
     }
 
     /// <summary>
-    /// #94 / RFC 7606: a single malformed inbound UPDATE (here: NLRI present but the mandatory ORIGIN
+    /// RFC 7606: a single malformed inbound UPDATE (here: NLRI present but the mandatory ORIGIN
     /// attribute is missing → MissingWellKnownAttribute) must NOT tear down the session. The read loop
     /// catches BgpNotificationException(UpdateMessageError), logs + counts it, and keeps going — a
     /// route-server should not lose a long-lived session over one bad/adversarial UPDATE. Stream-level
@@ -469,7 +469,7 @@ public class BgpSessionShutdownTests
         // Let the read loop receive and reject the bad UPDATE.
         await Task.Delay(TimeSpan.FromMilliseconds(500));
 
-        Assert.True(session.IsEstablished, "session must survive a single malformed UPDATE (#94)");
+        Assert.True(session.IsEstablished, "session must survive a single malformed UPDATE");
         Assert.True(metrics.UpdatesRejected >= 1, "the malformed UPDATE must be counted as rejected");
 
         // No NOTIFICATION on the wire — we keep the session instead of notifying/tearing down.
@@ -633,7 +633,7 @@ public class BgpSessionShutdownTests
     }
 
     /// <summary>
-    /// #115 (connect-to-OPEN timeout, Slowloris defense): a peer that opens the TCP connection but
+    /// Connect-to-OPEN timeout (Slowloris defense): a peer that opens the TCP connection but
     /// NEVER sends OPEN must be dropped within OpenTimeoutSeconds, not pinned until the OS TCP
     /// timeout (minutes). The negotiated hold timer only starts AFTER the handshake, so without this
     /// bound the session+task+FD would linger. Uses a short OpenTimeoutSeconds=1s and tolerates
@@ -680,7 +680,7 @@ public class BgpSessionShutdownTests
     }
 
     /// <summary>
-    /// #115 positive control: when the peer DOES send OPEN within OpenTimeoutSeconds, the handshake
+    /// Positive control: when the peer DOES send OPEN within OpenTimeoutSeconds, the handshake
     /// proceeds normally and the session reaches Established — the timeout must not fire on a fast,
     /// legitimate peer. Guards against an off-by-one that would drop healthy peers.
     /// </summary>
@@ -736,7 +736,7 @@ public class BgpSessionShutdownTests
     }
 
     /// <summary>
-    /// Regression for #161: NotifyCeaseAsync must honor a CancellationToken so the host's shutdown
+    /// NotifyCeaseAsync must honor a CancellationToken so the host's shutdown
     /// grace can bound how long a Cease send blocks. With an already-cancelled token the call must
     /// return promptly instead of blocking on the socket write — the ultimate signal to the peer is
     /// the socket close that follows, not the Cease bytes.
@@ -764,7 +764,7 @@ public class BgpSessionShutdownTests
     }
 
     /// <summary>
-    /// Regression for #160: RefreshRoutesAsync must honor a CancellationToken so an API caller
+    /// RefreshRoutesAsync must honor a CancellationToken so an API caller
     /// (RefreshPeerAsync) is not pinned indefinitely on _advertisedPrefixesLock when a prior send is
     /// stuck. With an already-cancelled token the call must return promptly (the WaitAsync unwinds
     /// with OperationCanceledException, caught and returned-from) instead of blocking on the lock.
@@ -792,7 +792,7 @@ public class BgpSessionShutdownTests
             $"RefreshRoutesAsync with a cancelled token took {sw.ElapsedMilliseconds}ms — token not honored");
     }
 
-    /// <summary>Captures log events so a test can assert what must never surface at ERROR (#482).</summary>
+    /// <summary>Captures log events so a test can assert what must never surface at ERROR.</summary>
     private sealed class RecordingLogger : ILogger<BgpSession>
     {
         public List<(LogLevel Level, string Message)> Events { get; } = [];
@@ -805,7 +805,7 @@ public class BgpSessionShutdownTests
     [Fact]
     public async Task ExternalDisposeDuringEstablished_TearsDownQuietly_NoErrorLog()
     {
-        // #482: an external Dispose (the API peer-deletion shape) racing the session task's
+        // An external Dispose (the API peer-deletion shape) racing the session task's
         // Task.WhenAny unwind could make CancelAsync throw ObjectDisposedException, which surfaced
         // as an ERROR-logged "Session error" on a routine teardown and skipped the loop drains.
         // The ODE window itself is scheduling-dependent (the WhenAny continuation may run inline

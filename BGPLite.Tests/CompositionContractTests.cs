@@ -12,7 +12,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 namespace BGPLite.Tests;
 
 /// <summary>
-/// #263: the send path's dependencies were nullable-optional the whole way down —
+/// The send path's dependencies were nullable-optional the whole way down —
 /// <c>BgpServer</c> → <c>BgpSession</c> → <c>RouteAssembler</c> — with each layer supplying a silent
 /// fallback for the missing one. Dropping a single DI registration therefore produced no error at
 /// all: peers kept their sessions and simply received the shared table's seeded routes instead of
@@ -27,7 +27,7 @@ namespace BGPLite.Tests;
 public class CompositionContractTests
 {
     /// <summary>
-    /// Every dependency #263 lists as "nullable-optional" must now be required — no default value
+    /// Every dependency listed as "nullable-optional" must now be required — no default value
     /// and not a nullable reference type — so an incomplete composition fails to compile, or fails
     /// at container build with the service named, instead of degrading at the first route send.
     /// </summary>
@@ -48,7 +48,7 @@ public class CompositionContractTests
     [InlineData(typeof(ManagementApi), "sessionManager")]
     // PrefixService.cs:14-15 — a null http provider made every per-peer user URL source resolve to
     // zero prefixes, and a null RIPEstat did the same for custom ASNs.
-    [InlineData(typeof(PrefixService), "ripeStatCache")] // #267 item 5: renamed when the per-ASN cache became a shared component
+    [InlineData(typeof(PrefixService), "ripeStatCache")] // renamed when the per-ASN cache became a shared component
     [InlineData(typeof(PrefixService), "httpProvider")]
     public void ProductionDependency_IsRequired(Type type, string parameterName)
     {
@@ -57,14 +57,14 @@ public class CompositionContractTests
 
         Assert.True(parameter is not null,
             $"{type.Name} has no constructor parameter '{parameterName}' — if it was renamed, update this list; " +
-            "if it was dropped, #263 needs re-checking rather than the test deleting.");
+            "if it was dropped deliberately, re-check this contract rather than deleting the test.");
         Assert.False(parameter!.HasDefaultValue,
-            $"{type.Name}.{parameterName} has a default value again — an omitted dependency is silent by construction (#263)");
+            $"{type.Name}.{parameterName} has a default value again — an omitted dependency is silent by construction");
         Assert.Equal(NullabilityState.NotNull, new NullabilityInfoContext().Create(parameter).WriteState);
     }
 
     /// <summary>
-    /// The other half of #263's acceptance: the accept loop does not build sessions itself, so it
+    /// The accept loop does not build sessions itself, so it
     /// no longer carries — or can silently drop — any of the session's dependencies.
     /// </summary>
     [Fact]
@@ -83,10 +83,10 @@ public class CompositionContractTests
         }
     }
 
-    // ---- the degraded assembler is explicit, and behaves as #289/#307 established ----
+    // ---- the degraded assembler is explicit, and its established behavior is pinned below ----
 
     /// <summary>
-    /// Tenant isolation, carried over from #307 into the type that now owns the behavior: the
+    /// Tenant isolation, carried into the type that now owns the behavior: the
     /// shared table also holds every NLRI peers announced inbound, and handing those to a different
     /// peer leaks one tenant's routes to another.
     /// </summary>
@@ -138,7 +138,7 @@ public class CompositionContractTests
 
     /// <summary>
     /// The session built by the factory asks the INJECTED assembler for its route set, with the
-    /// peer identity resolved from the OPEN. Before #263 the session constructed its own assembler
+    /// peer identity resolved from the OPEN. Previously the session constructed its own assembler
     /// from arguments threaded through BgpServer, so this wiring had no seam to assert on.
     /// </summary>
     [Fact]

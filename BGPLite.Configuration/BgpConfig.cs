@@ -13,8 +13,8 @@ public sealed class BgpConfig
     public string RouterId { get; init; } = "0.0.0.0";
 
     /// <summary>
-    /// Optional global IPv6 next hop advertised to MP-BGP IPv6/Unicast peers (#14 phase 4,
-    /// RFC 2545 §3: the MP_REACH next hop is the speaker's GLOBAL address — the IPv4 router-id
+    /// Optional global IPv6 next hop advertised to MP-BGP IPv6/Unicast peers (RFC 2545 §3:
+    /// the MP_REACH next hop is the speaker's GLOBAL address — the IPv4 router-id
     /// cannot serve the IPv6 address family). Unset = IPv6 routes are never advertised to any
     /// peer (suppressed with a warning per send); set = each MP-IPv6-negotiated session
     /// announces its IPv6 routes with this next hop.
@@ -43,7 +43,7 @@ public sealed class BgpConfig
 
     /// <summary>Sending-side Graceful Restart conveniences (RFC 4724): an End-of-RIB marker after
     /// the initial route dump, and a silent TCP close (no NOTIFICATION) on server shutdown. The GR
-    /// capability itself is NOT advertised (#318, D6): the receiving-speaker half of RFC 4724 §4.2
+    /// capability itself is NOT advertised (D6): the receiving-speaker half of RFC 4724 §4.2
     /// (retaining and stale-marking a restarting peer's routes) is not implemented, and advertising
     /// the &lt;AFI, SAFI, F&gt; tuple promised behavior the code does not have.</summary>
     [YamlMember(Alias = "GracefulRestart")]
@@ -51,18 +51,18 @@ public sealed class BgpConfig
 
     /// <summary>Restart Time intended for the GR capability's 12-bit field. Currently unused —
     /// the capability is not advertised while the receiving-speaker half of RFC 4724 is
-    /// unimplemented (#318, D6). Accepted for config compatibility.</summary>
+    /// unimplemented (D6). Accepted for config compatibility.</summary>
     [YamlMember(Alias = "RestartTime")]
     public int RestartTime { get; init; } = 120;
 
     /// <summary>Forwarding State (F) bit for IPv4/Unicast, intended for the GR capability.
     /// Currently unused — the capability is not advertised while the receiving-speaker half of
-    /// RFC 4724 is unimplemented (#318, D6). Accepted for config compatibility.</summary>
+    /// RFC 4724 is unimplemented (D6). Accepted for config compatibility.</summary>
     [YamlMember(Alias = "GracefulRestartForwardingState")]
     public bool GracefulRestartForwardingState { get; init; } = true;
 
     /// <summary>
-    /// Connect-to-OPEN timeout in seconds (#115, Slowloris defense). Bounds how long a freshly
+    /// Connect-to-OPEN timeout in seconds (Slowloris defense). Bounds how long a freshly
     /// accepted TCP connection may wait for the peer's OPEN before being dropped. The negotiated
     /// hold timer only starts AFTER the handshake, so without this bound a connection that opens
     /// TCP but never sends OPEN pins a BgpSession + task + socket FD until the OS TCP timeout
@@ -73,7 +73,7 @@ public sealed class BgpConfig
     public int OpenTimeoutSeconds { get; init; } = 30;
 
     /// <summary>
-    /// Per-source-IP accept throttle for the BGP listener (#115): the maximum number of inbound TCP
+    /// Per-source-IP accept throttle for the BGP listener: the maximum number of inbound TCP
     /// connects accepted from a single remote IP within any rolling 60s window. An IP exceeding the
     /// limit has its just-accepted socket closed immediately WITHOUT spawning a session — no
     /// FD/task/session pinned — defending one-IP accept floods. This deliberately does NOT cap the
@@ -85,10 +85,10 @@ public sealed class BgpConfig
     [YamlMember(Alias = "MaxAcceptsPerIpPerMinute")]
     public int MaxAcceptsPerIpPerMinute { get; init; } = 60;
 
-    /// <summary>#304: per-peer ceiling on prefixes installed from one session (distinct
+    /// <summary>Per-peer ceiling on prefixes installed from one session (distinct
     /// NLRI this session currently owns); exceeding it tears the session down with
     /// NOTIFICATION(Cease, MaxPrefixesExceeded) per RFC 4271 §6.7 / RFC 4486 §2.
-    /// #481: the shipped default is bounded (1,000,000 — above any legitimate provisioning
+    /// The default is bounded (1,000,000 — above any legitimate provisioning
     /// peer, far below memory exhaustion) so the RFC 4486 defense is on out of the box;
     /// 0 = unlimited remains available as an explicit opt-out (the convention of
     /// OpenTimeoutSeconds / MaxAcceptsPerIpPerMinute).</summary>
@@ -124,7 +124,7 @@ public sealed class BgpConfig
                 $"Invalid configuration: Bgp.HoldTime must be 0 (disabled) or at least 3 seconds (got {HoldTime}).");
 
         // RFC 4271 §4.2: Hold Time is a 2-octet field — a value above 65535 cannot be carried in
-        // an OPEN; the wire write silently truncated it before ((ushort)70000 -> 4464) (#265 item 2).
+        // an OPEN; the writer's ushort cast would silently truncate it ((ushort)70000 -> 4464).
         if (HoldTime > ushort.MaxValue)
             throw new InvalidOperationException(
                 $"Invalid configuration: Bgp.HoldTime must fit the 2-octet OPEN field (0..65535, got {HoldTime}).");
@@ -141,7 +141,7 @@ public sealed class BgpConfig
                     $"for HoldTime={HoldTime} (got {KeepAlive}).");
         }
 
-        // Listener hardening (#115): the connect-to-OPEN timeout and per-source-IP accept throttle
+        // Listener hardening: the connect-to-OPEN timeout and per-source-IP accept throttle
         // are non-negative integers; 0 disables each (legacy behavior). Reject negatives at startup
         // rather than letting them surprise the operator (negative → treated as disabled silently).
         if (OpenTimeoutSeconds < 0)
@@ -156,7 +156,7 @@ public sealed class BgpConfig
             throw new InvalidOperationException(
                 $"Invalid configuration: Bgp.MaxPrefixesPerPeer must be >= 0, 0 = unlimited (got {MaxPrefixesPerPeer}).");
 
-        // #14 phase 4: when an IPv6 next hop is configured it must be a GLOBAL IPv6 unicast
+        // When an IPv6 next hop is configured it must be a GLOBAL IPv6 unicast
         // address — RFC 2545 §3 requires the (first) MP_REACH next hop to be global, and the
         // 16-byte form we advertise has no room for interface semantics (a link-local address
         // is only meaningful on a shared link, which a route-server session is not required to

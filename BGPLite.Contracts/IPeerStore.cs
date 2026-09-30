@@ -1,7 +1,7 @@
 namespace BGPLite.Contracts;
 
 /// <summary>
-/// The persistence surface the BGP session layer consumes (issues #262, #230). Every member is
+/// The persistence surface the BGP session layer consumes. Every member is
 /// asynchronous — the store is invoked from session threads and the route-send path, and a sync
 /// EF call there blocks a thread-pool thread for the duration of any SQLite <c>busy_timeout</c>
 /// wait. The management API works with the concrete <c>PeerStore</c> (its surface is an API
@@ -15,7 +15,7 @@ public interface IPeerStore
     Task<PeerRoutingView?> LoadPeerRoutingViewAsync(string ip, uint asn, CancellationToken ct = default);
 
     /// <summary>
-    /// Resolves the peer's effective per-peer prefix ceiling (#391): the row's <c>MaxPrefix</c>
+    /// Resolves the peer's effective per-peer prefix ceiling: the row's <c>MaxPrefix</c>
     /// override, or <c>null</c> when the peer is unknown / has no override (the caller then uses
     /// the global <c>Bgp.MaxPrefixesPerPeer</c>). Read once per establish/refresh cycle by the
     /// session — never per UPDATE.
@@ -35,18 +35,18 @@ public class PeerInfo
 }
 
 /// <summary>
-/// A per-peer user-supplied URL prefix-list source (epic #143 / issue #147), projected from
+/// A per-peer user-supplied URL prefix-list source, projected from
 /// <c>PeerCustomSource</c>. Only <c>Active</c> sources appear here — paused sources never leave the DB.
 /// <c>Community</c> is the raw user-supplied <c>"ASN:VALUE"</c> override, or null for auto-generation.
 /// </summary>
 public sealed record CustomSourceView(string Name, string Url, string? Community);
 
 /// <summary>
-/// The slice of peer data the BGP send path consumes, loaded in one query for issue #84.
+/// The slice of peer data the BGP send path consumes, loaded in one query.
 /// Field shapes are identical to the standalone getters so the caller behavior is unchanged:
 /// <c>Subscriptions</c> = <c>GetSubscriptions</c>, <c>CustomPrefixes</c> = <c>"prefix/length"</c>
 /// strings like <c>GetCustomPrefixes</c>, <c>CustomAsns</c> = <c>GetCustomAsns</c>. <c>UserSources</c>
-/// (issue #147) holds only the peer's active URL sources, fetched and advertised per-peer.
+/// holds only the peer's active URL sources, fetched and advertised per-peer.
 /// </summary>
 public sealed record PeerRoutingView(
     string PeerId,

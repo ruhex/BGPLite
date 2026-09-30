@@ -5,7 +5,7 @@ using BGPLite.Configuration;
 namespace BGPLite.Tests;
 
 /// <summary>
-/// Tests for <see cref="ManagementApi.CreateRateLimiter"/> (#116): a per-IP token bucket that allows
+/// Tests for <see cref="ManagementApi.CreateRateLimiter"/>: a per-IP token bucket that allows
 /// up to the burst then denies (429), partitioned independently per client IP.
 /// </summary>
 public class ApiRateLimiterTests
@@ -37,16 +37,16 @@ public class ApiRateLimiterTests
     {
         await using var limiter = ManagementApi.CreateRateLimiter(Cfg(1, 1, 60));
         Assert.True(await TryAcquire(limiter, "198.51.100.1"));
-        Assert.True(await TryAcquire(limiter, "198.51.100.2")); // separate bucket — still allowed
-        Assert.False(await TryAcquire(limiter, "198.51.100.1")); // first IP's bucket exhausted
+        Assert.True(await TryAcquire(limiter, "198.51.100.2"));
+        Assert.False(await TryAcquire(limiter, "198.51.100.1"));
     }
 
     [Fact]
     public async Task IdlePartitions_AreEvicted_ByTheAmortizedSweep()
     {
-        // #423: PartitionedRateLimiter kept every IP ever seen (and its replenishment timer) for
-        // the process lifetime — with TrustXRealIp the key is client-controlled, so rotating the
-        // header minted fresh buckets without bound. Idle partitions must be evicted.
+        // PartitionedRateLimiter keeps every IP ever seen (and its replenishment timer) for the
+        // process lifetime — with TrustXRealIp the key is client-controlled, so rotating the
+        // header would mint fresh buckets without bound. Idle partitions must be evicted.
         var time = new Microsoft.Extensions.Time.Testing.FakeTimeProvider();
         await using var limiter = new ClientIpRateLimiter(
             Cfg(10, 10, 60), timeProvider: time, idleThreshold: TimeSpan.FromSeconds(30), sweepEvery: 1);

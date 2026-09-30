@@ -17,27 +17,27 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
     private readonly IRouteFilter _routeFilter;
     private readonly BgpMetrics _metrics;
     private readonly ILogger<BgpServer> _logger;
-    // #263: the accept loop needs none of the session's dependencies for itself — it only forwarded
+    // The accept loop needs none of the session's dependencies for itself — it only forwards
     // them, and every forwarded one was optional. The factory owns them and requires them.
     private readonly IBgpSessionFactory _sessionFactory;
     // Keyed by the accepted TCP connection (remote IP + remote source port), NOT by remote IP
     // alone: per RFC 4271 §8.2.1 there is one session per TCP connection, so several distinct peers
     // arriving from the same source IP (different ephemeral source ports) must coexist as separate
-    // entries. Keying by IP only made them clobber each other (issue #18).
+    // entries; keying by IP only made them clobber each other.
     private readonly ConcurrentDictionary<SessionKey, BgpSession> _sessions = new();
     private readonly CancellationTokenSource _cts = new();
-    // Per-source-IP accept throttle (#115): bounds inbound-connect floods from a single IP. Disabled
+    // Per-source-IP accept throttle: bounds inbound-connect floods from a single IP. Disabled
     // (always-allow) when Bgp.MaxAcceptsPerIpPerMinute <= 0.
     private readonly IpAcceptThrottle _acceptThrottle;
     private int _acceptingConnections = 1;
     private Socket? _listener;
-    // #36: per-peer TCP-MD5 (RFC 2385) shared keys, keyed by the peer's source IP (TCP keys the
+    // Per-peer TCP-MD5 (RFC 2385) shared keys, keyed by the peer's source IP (TCP keys the
     // connection by address, not by (IP, ASN) — peers sharing one source IP share the key).
     private readonly ConcurrentDictionary<IPAddress, byte[]> _md5Keys = new();
     private Task? _acceptTask;
     private PeriodicTimer? _statusTimer;
     private Task? _statusTask;
-    // #428: pause before retrying after a failed accept — see the catch in AcceptLoopAsync.
+    // Pause before retrying after a failed accept — see the catch in AcceptLoopAsync.
     private static readonly TimeSpan AcceptFailureBackoff = TimeSpan.FromMilliseconds(500);
 
     public BgpMetrics Metrics => _metrics;
@@ -62,11 +62,11 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
 
     public Task StartAsync(CancellationToken cancellationToken)
     {
-        // #14 phase 4: prefer the dual-mode IPv6 listener — it accepts both IPv6 peers and IPv4
-        // peers (the kernel surfaces the latter as IPv4-mapped addresses, normalized in
-        // AcceptLoopAsync). DualMode must be set before Bind. On hosts with IPv6 disabled we fall
-        // back to the pre-phase-4 IPv4 listener instead of refusing to start: serving IPv4-only
-        // beats not serving at all, and the capability difference is announced loudly.
+        // Prefer the dual-mode IPv6 listener — it accepts both IPv6 peers and IPv4 peers (the
+        // kernel surfaces the latter as IPv4-mapped addresses, normalized in AcceptLoopAsync).
+        // DualMode must be set before Bind. On hosts with IPv6 disabled we fall back to an IPv4
+        // listener instead of refusing to start: serving IPv4-only beats not serving at all, and
+        // the capability difference is announced loudly.
         var useDualMode = Socket.OSSupportsIPv6;
         if (useDualMode)
         {
@@ -82,7 +82,7 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
             _listener.Bind(new IPEndPoint(IPAddress.Any, BgpConstants.BgpPort));
             _logger.LogWarning("IPv6 is not available on this host — serving IPv4 peers only");
         }
-        // #344: after a restart every peer reconnects at once; backlog 16 dropped SYNs and pushed
+        // After a restart every peer reconnects at once; a backlog of 16 dropped SYNs and pushed
         // peers into their own retry backoff, stretching reconvergence for no benefit. A few
         // hundred pending accepts costs nothing on a route-server host.
         _listener.Listen(512);
@@ -114,7 +114,7 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
 
         // The host's shutdown token bounds how long each step blocks — a stuck peer (TCP receive
         // window full → WriteAsync blocks on the send buffer) must not pin StopAsync past the host's
-        // grace (#161). WaitAsync propagates the cancellation as OperationCanceledException; on
+        // grace. WaitAsync propagates the cancellation as OperationCanceledException; on
         // cancel we abandon the pending step and move on to force-disposing the sessions below.
         if (_acceptTask is not null)
         {
@@ -172,9 +172,9 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
     /// <inheritdoc cref="ISessionManager.SetPeerMd5Key" />
     public void SetPeerMd5Key(string peerIp, string? password)
     {
-        // #36: opt-in per peer — a password enables RFC 2385 enforcement for the peer's source
-        // IP; clearing it returns the peer to plain TCP. On unsupported platforms this is a
-        // logged no-op (fail-visible, D: TCP-MD5 is Linux/macOS-only), never a crash.
+        // Opt-in per peer — a password enables RFC 2385 enforcement for the peer's source IP;
+        // clearing it returns the peer to plain TCP. On unsupported platforms this is a logged
+        // no-op (fail-visible: TCP-MD5 is Linux/macOS-only), never a crash.
         if (!IPAddress.TryParse(peerIp, out var address))
         {
             _logger.LogWarning("TCP-MD5: ignoring unparseable peer IP '{PeerIp}'", peerIp);
@@ -251,29 +251,26 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
             {
                 var socket = await _listener!.AcceptAsync(cancellationToken);
                 var remoteEndpoint = (IPEndPoint)socket.RemoteEndPoint!;
-                // A dual-mode listener surfaces IPv4 peers as IPv4-mapped IPv6 addresses
-                // (::ffff:a.b.c.d). Normalize BEFORE anything keys on the address: the session
-                // key, the PeerStore string address, the accept throttle and the MD5 key table
-                // all key on the plain IPv4 form, so configured peer "10.0.0.1" matches the
-                // connection it configured. The RAW address stays the MD5 wire form — see
-                // Md5WireAddress for why it must NOT be normalized there (#14 phase 4).
+                // Normalize BEFORE anything keys on the address (session key, PeerStore, throttle
+                // and MD5 table all key on the plain IPv4 form); the raw address stays the MD5
+                // wire form — see Md5WireAddress for why it must NOT be normalized there.
                 var address = NormalizeAcceptedAddress(remoteEndpoint.Address);
                 // Session identity = the accepted TCP connection (remote IP + remote source port),
-                // so peers sharing a source IP but on different source ports get distinct slots and
-                // coexist (RFC 4271 §8.2.1; issue #18). peerAddress stays the IP-only form for the
-                // PeerStore, which is still keyed by IP.
+                // so peers sharing a source IP on different source ports get distinct slots and
+                // coexist (RFC 4271 §8.2.1). peerAddress stays the IP-only form for the PeerStore,
+                // which is still keyed by IP.
                 var key = new SessionKey(address, remoteEndpoint.Port);
                 var peerAddress = address.ToString();
 
-                // Per-source-IP accept throttle (#115): defend one-IP accept floods. If this IP has
-                // already exceeded MaxAcceptsPerIpPerMinute within the rolling 60s window, close the
-                // just-accepted socket immediately WITHOUT spawning a session — no FD/task/session
-                // pinned. The rejected attempt is logged and the loop continues (continue, not break:
-                // this is a per-IP limit, not a server-wide stop). Disabled when the limit is 0.
+                // Per-source-IP accept throttle: if this IP has already exceeded
+                // MaxAcceptsPerIpPerMinute within the rolling 60s window, close the just-accepted
+                // socket immediately WITHOUT spawning a session — no FD/task/session pinned. The
+                // loop continues rather than breaks: this is a per-IP limit, not a server-wide
+                // stop. Disabled when the limit is 0.
                 if (!_acceptThrottle.TryAccept(peerAddress))
                 {
                     _logger.LogWarning(
-                        "Accept throttle: closing connection from {Peer} (over {Limit} accepts/min, #115)",
+                        "Accept throttle: closing connection from {Peer} (over {Limit} accepts/min)",
                         peerAddress, _config.Bgp.MaxAcceptsPerIpPerMinute);
                     socket.Dispose();
                     continue;
@@ -281,11 +278,11 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
 
                 _logger.LogInformation("Incoming connection from {Peer} ({Key})", peerAddress, key);
 
-                // #96: the transport seam — SocketBgpConnection owns the socket (and the 60s
-                // SendTimeout backstop from #160), so BgpSession no longer touches Socket directly.
+                // The transport seam: SocketBgpConnection owns the socket and enforces the
+                // per-send budget, so BgpSession never touches the Socket directly.
                 var peerConfig = new PeerConfig { Address = peerAddress, Port = remoteEndpoint.Port };
 
-                // #36: the accepted socket inherits the listener's TCP-MD5 key on Linux; re-apply
+                // The accepted socket inherits the listener's TCP-MD5 key on Linux; re-apply
                 // for the known peer so enforcement does not depend on inheritance semantics.
                 // The lookup keys on the normalized address (the table is keyed by the configured
                 // form); ApplyMd5 re-maps to the socket's wire form itself.
@@ -293,10 +290,10 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
                     ApplyMd5(socket, remoteEndpoint.Address, md5Key);
 
                 var session = _sessionFactory.Create(new SocketBgpConnection(socket), peerConfig);
-                // #265 item 1: the session's finally-block consults this before flipping the
-                // peer row to inactive — "still the registered session for your slot?" A
-                // replacement (TryUpdate below) removes this session from the registry, so its
-                // slow unwind cannot clobber the replacement's Status=active.
+                // The session's finally-block consults this before flipping the peer row to
+                // inactive — "still the registered session for your slot?" A replacement
+                // (TryUpdate below) removes this session from the registry, so its slow unwind
+                // cannot clobber the replacement's Status=active.
                 session.StillRegisteredProbe = s => _sessions.Values.Any(v => ReferenceEquals(v, s));
 
                 if (Volatile.Read(ref _acceptingConnections) == 0)
@@ -306,12 +303,12 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
                 }
 
                 // Register under the connection key. Two distinct peers from the same source IP
-                // have distinct (IP, port) keys, so they coexist instead of replacing each other
-                // (issue #18). A key collision now only happens for a genuine duplicate of the SAME
-                // connection — e.g. the OS reusing a source port on reconnect while the old entry
-                // has not been cleaned up — which is exactly the "silently close the stale one and
-                // swap" case the CAS below handles. max-active is not enforced at accept here, so
-                // the simple swap is safe.
+                // have distinct (IP, port) keys, so they coexist instead of replacing each other.
+                // A key collision now only happens for a genuine duplicate of the SAME connection —
+                // e.g. the OS reusing a source port on reconnect while the old entry has not been
+                // cleaned up — which is exactly the "silently close the stale one and swap" case the
+                // CAS below handles. No max-active cap is enforced at accept, so the simple swap is
+                // safe.
                 //
                 // Replacement policy: the old session must actually stop, not just be told to Cease.
                 // MarkSilentClose latches SilentClose (so the old RunAsync finally emits no
@@ -319,9 +316,8 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
                 // promptly. No Cease is sent on replacement: a Cease to the old socket is noise
                 // (and, with GR enabled, would bypass GR). The peer sees a TCP close instead.
                 //
-                // Use TryUpdate (atomic CAS) so two concurrent accept threads for the same key
-                // cannot both pass TryGetValue and both install their session. If the CAS fails,
-                // another thread already swapped the entry — retry from the top.
+                // TryUpdate is an atomic CAS, so two concurrent accept threads for the same key
+                // cannot both install their session; a lost race retries from the top.
                 var sessionRegistered = _sessions.TryAdd(key, session);
                 if (!sessionRegistered)
                 {
@@ -329,7 +325,6 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
                     {
                         if (_sessions.TryGetValue(key, out var existing))
                         {
-                            // Atomic CAS: only swap if the registered value is still 'existing'.
                             if (_sessions.TryUpdate(key, session, existing))
                             {
                                 _logger.LogInformation("Replacing existing session for {Key}", key);
@@ -337,17 +332,14 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
                                 sessionRegistered = true;
                                 break;
                             }
-                            // CAS failed — another thread replaced it; loop and retry.
                         }
                         else
                         {
-                            // Existing was concurrently removed — try to add ours.
                             if (_sessions.TryAdd(key, session))
                             {
                                 sessionRegistered = true;
                                 break;
                             }
-                            // TryAdd failed — another thread re-added for this key; loop and retry.
                         }
                     }
 
@@ -367,10 +359,10 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
                 if (Volatile.Read(ref _acceptingConnections) == 0)
                     break;
                 _logger.LogError(ex, "Error accepting connection");
-                // #428: a persistent accept failure (fd exhaustion/EMFILE is the classic) used to
-                // spin this loop at full speed — log + immediate retry thousands of times a
-                // second, exactly when the host is already out of resources. Bound the retry
-                // rate; the shutdown token breaks the wait so shutdown latency is unaffected.
+                // A persistent accept failure (fd exhaustion/EMFILE is the classic) used to spin
+                // this loop at full speed — log + immediate retry thousands of times a second,
+                // exactly when the host is already out of resources. Bound the retry rate; the
+                // shutdown token breaks the wait so shutdown latency is unaffected.
                 try { await Task.Delay(AcceptFailureBackoff, cancellationToken); }
                 catch (OperationCanceledException) { break; }
             }
@@ -399,10 +391,9 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
 
     /// <summary>
     /// Atomically removes <paramref name="session"/> from <see cref="_sessions"/> only if it is
-    /// still the registered session for <paramref name="key"/>. Uses the explicit
-    /// <see cref="ICollection{T}"/>.Remove on ConcurrentDictionary, which is documented to remove
-    /// the pair only when both key and value match — a compare-and-remove that closes the race the
-    /// earlier TryGetValue+TryRemove had (a newer re-accepted session would otherwise be erased).
+    /// still the registered session for <paramref name="key"/> — compare-and-remove via the
+    /// explicit <see cref="ICollection{T}"/>.Remove, which removes the pair only when both key
+    /// and value match.
     /// </summary>
     private void RemoveSessionIfOwner(SessionKey key, BgpSession session)
     {
@@ -425,8 +416,8 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
 
     public async Task RefreshPeerAsync(string peerIp, uint asn)
     {
-        // #200: filter by BOTH IP and ASN so a refresh for one peer on a shared IP (NAT/VPN)
-        // does not refresh sibling sessions with a different ASN.
+        // Filter by BOTH IP and ASN so a refresh for one peer on a shared IP (NAT/VPN) does not
+        // refresh sibling sessions with a different ASN.
         if (!IPAddress.TryParse(peerIp, out var ip))
         {
             _logger.LogWarning("RefreshPeer: invalid IP {Ip}", peerIp);
@@ -459,7 +450,7 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
 
     public async Task TerminatePeerAsync(string peerIp, uint asn, CancellationToken ct = default)
     {
-        // Same (ip, asn) matching as RefreshPeerAsync (#200): a NAT/shared-IP sibling session with
+        // Same (ip, asn) matching as RefreshPeerAsync: a NAT/shared-IP sibling session with
         // a different ASN must survive a peer deletion.
         if (!IPAddress.TryParse(peerIp, out var ip))
         {
@@ -503,7 +494,7 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
     }
 
     /// <summary>
-    /// The #323 teardown core, split out so tests can drive real sessions without a live BgpServer
+    /// The teardown core, split out so tests can drive real sessions without a live BgpServer
     /// (sessions enter <see cref="_sessions"/> only through the accept loop, which binds port 179).
     /// Established sessions get exactly one Cease (Administrative Reset) — NotifyCeaseAsync
     /// CAS-latches the teardown reason, so the session's own finally-block cannot double-send —
@@ -530,7 +521,7 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
 
     /// <summary>
     /// Returns the actual advertised prefix count (post-aggregation, post-dedup) for the given
-    /// peer (Ip, Asn), or 0 if no session is established (#212).
+    /// peer (Ip, Asn), or 0 if no session is established.
     /// </summary>
     public int GetAdvertisedPrefixCount(string peerIp, uint asn)
     {
@@ -541,7 +532,7 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
             .FirstOrDefault();
     }
 
-    /// <summary>#214: Refresh ALL established sessions concurrently — used by the auto-refresh timer
+    /// <summary>Refreshes ALL established sessions concurrently — used by the auto-refresh timer
     /// and the onSourceChanged convergence callback. Sessions refresh in parallel so a single slow
     /// peer (TCP receive window full → WriteAsync blocks) can't stall the rest.</summary>
     public async Task RefreshAllEstablishedAsync()
@@ -572,8 +563,8 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
         Volatile.Write(ref _acceptingConnections, 0);
         _listener?.Close();
         _cts.Cancel();
-        _cts.Dispose();  // #105: dispose the CTS (StopAsync's graceful path doesn't reach here)
-        _statusTimer?.Dispose();  // #487: the abort path never runs StopAsync — don't leak the timer to GC
+        _cts.Dispose();  // StopAsync's graceful path doesn't reach here — dispose explicitly
+        _statusTimer?.Dispose();  // the abort path never runs StopAsync — don't leak the timer to GC
         foreach (var session in _sessions.Values)
             session.Dispose();
     }

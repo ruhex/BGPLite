@@ -4,7 +4,7 @@ using System.Net.Sockets;
 namespace BGPLite.Providers;
 
 /// <summary>
-/// SSRF defense for user-supplied prefix-list URLs (#144). Two layers:
+/// SSRF defense for user-supplied prefix-list URLs. Two layers:
 /// <list type="bullet">
 /// <item><see cref="CreateValidatedConnectionAsync"/> — wired into SocketsHttpHandler.ConnectCallback;
 /// resolves DNS ONCE and validates/connects the same IP (no TOCTOU race, no redirect bypass).</item>
@@ -31,14 +31,14 @@ public static class PrefixSourceUrlValidator
         IPNetwork.Parse("::/128"),              // IPv6 unspecified
         IPNetwork.Parse("fc00::/7"),            // IPv6 unique-local
         IPNetwork.Parse("fe80::/10"),           // IPv6 link-local
-        // IPv6 forms that EMBED a non-public IPv4 address (#158) — without these, an attacker
+        // IPv6 forms that EMBED a non-public IPv4 address — without these, an attacker
         // controlling DNS can return an IPv6 address whose embedded IPv4 reaches an internal host:
         IPNetwork.Parse("2002::/16"),           // 6to4 — last 32 bits encode an IPv4 (e.g. 2002:ac10:1:: → 172.16.0.1)
         IPNetwork.Parse("2001::/32"),           // Teredo — can embed private IPv4 in the last 32 bits
         IPNetwork.Parse("::ffff:0:0/96"),       // IPv4-mapped (also caught by IsIPv4MappedToIPv6, defense in depth)
         IPNetwork.Parse("::/96"),               // IPv4-compatible (deprecated ::a.b.c.d form)
-        IPNetwork.Parse("64:ff9b::/96"),        // NAT64 well-known — a DNS64 name can embed any IPv4 here (#321)
-        IPNetwork.Parse("64:ff9b:1::/48"),      // NAT64 local-use (RFC 8215) — same IPv4-embedding hazard as the well-known prefix (#419)
+        IPNetwork.Parse("64:ff9b::/96"),        // NAT64 well-known — a DNS64 name can embed any IPv4 here
+        IPNetwork.Parse("64:ff9b:1::/48"),      // NAT64 local-use (RFC 8215) — same IPv4-embedding hazard as the well-known prefix
     ];
 
     /// <summary>Per-address connect budget so one blackholed candidate can't consume the whole
@@ -55,7 +55,7 @@ public static class PrefixSourceUrlValidator
     }
 
     /// <summary>
-    /// True if the port is on the SSRF allowlist (#158). Shared by <see cref="CreateValidatedConnectionAsync"/>
+    /// True if the port is on the SSRF allowlist. Shared by <see cref="CreateValidatedConnectionAsync"/>
     /// (live fetch path) and <see cref="ValidateUrlAsync"/> (API-submission-time) so the check is
     /// enforced at both layers. A peer URL on a non-standard port (http://internal-host:9000/...)
     /// could otherwise reach internal services — the ConnectCallback validates the IP, but the port
@@ -67,7 +67,7 @@ public static class PrefixSourceUrlValidator
     /// SocketsHttpHandler.ConnectCallback: resolves DNS, validates ALL resolved IPs are public,
     /// then connects with a matching-family socket per address (IPv4 preferred) until one succeeds.
     /// No TOCTOU — every address is validated above and the connected IP is one of them.
-    /// Redirects are not followed (AllowAutoRedirect=false in Program.cs, #321); any connection a
+    /// Redirects are not followed (AllowAutoRedirect=false in Program.cs); any connection a
     /// redirect would have opened re-enters this callback anyway, so the gate holds per hop.
     /// </summary>
     public static async ValueTask<Stream> CreateValidatedConnectionAsync(
@@ -76,9 +76,8 @@ public static class PrefixSourceUrlValidator
         var host = context.DnsEndPoint.Host;
         var port = context.DnsEndPoint.Port;
 
-        // Port allowlist (#158): enforce at the live connect path too, not just in ValidateUrlAsync.
-        // Without this, a peer URL on a non-standard port (http://internal-host:9000/...) reaches
-        // internal services — the ConnectCallback validates the IP, but the port was attacker-controlled.
+        // Port allowlist: enforce at the live connect path too, not just in ValidateUrlAsync —
+        // see IsAllowedPort for why a non-standard port must not pass.
         if (!IsAllowedPort(port))
             throw new InvalidOperationException(
                 $"SSRF blocked: '{host}' uses non-standard port {port} (only 80/443 allowed).");
@@ -103,10 +102,10 @@ public static class PrefixSourceUrlValidator
                     $"SSRF blocked: '{host}' resolves to non-public address {addr}.");
         }
 
-        // Connect with a matching-family socket per address, IPv4-first, until one succeeds. A host
-        // whose first DNS record is IPv6 used to throw SocketException (AddressFamilyNotSupported)
-        // on the hardcoded IPv4 socket (#151); and many deployments (e.g. an IPv4-only server with no
-        // IPv6 on the interface) can only route IPv4 anyway. Now each validated address gets its own
+        // Connect with a matching-family socket per address, IPv4-first, until one succeeds: a
+        // fixed IPv4 socket would throw SocketException (AddressFamilyNotSupported) for a host
+        // whose first DNS record is IPv6, and many deployments (e.g. an IPv4-only server with no
+        // IPv6 on the interface) can only route IPv4 anyway. Each validated address gets its own
         // socket and we fall through to the next on failure.
         Exception? last = null;
         foreach (var addr in OrderForConnect(addresses))
@@ -151,7 +150,7 @@ public static class PrefixSourceUrlValidator
     /// <summary>
     /// Validates that a URL is well-formed, uses http/https, and resolves to a public IP.
     /// The actual fetch-time defense is <see cref="CreateValidatedConnectionAsync"/>; this method
-    /// is the save-time / API-submission-time defence-in-depth layer (#232): when a user submits a
+    /// is the save-time / API-submission-time defence-in-depth layer: when a user submits a
     /// prefix-source URL via the management API, validate before persisting so a bad URL is rejected
     /// with a clear 400 instead of being saved and failing forever at fetch time. The fetch-time
     /// <see cref="CreateValidatedConnectionAsync"/> MUST stay regardless — it is the authoritative
@@ -168,10 +167,10 @@ public static class PrefixSourceUrlValidator
         if (uri.Scheme is not ("http" or "https"))
             return (false, $"URL scheme must be http or https: '{url}'.");
 
-        // Port restriction (#158): a peer could otherwise fetch http://internal-host:9000/... and
+        // Port restriction: a peer could otherwise fetch http://internal-host:9000/... and
         // reach internal services on non-standard ports. Restrict to the scheme default ports (and
         // their explicit forms) — the ConnectCallback validates the IP, but the port was attacker-
-        // controlled. Allowlist 80/443 (+ explicit :80/:443) only. IsAllowedPort is shared with the
+        // controlled. IsAllowedPort is shared with the
         // live connect path (CreateValidatedConnectionAsync) so the check is enforced at both layers.
         var port = uri.Port == -1 ? (uri.Scheme == "https" ? 443 : 80) : uri.Port;
         if (!IsAllowedPort(port))

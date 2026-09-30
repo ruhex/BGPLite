@@ -1,6 +1,6 @@
 using System.Threading;
 
-// #230: shared observability component — consumed by both Server (sessions) and Api (status
+// Shared observability component — consumed by both Server (sessions) and Api (status
 // endpoints); dependency-free, so it lives in Contracts alongside the other shared types.
 namespace BGPLite.Contracts;
 

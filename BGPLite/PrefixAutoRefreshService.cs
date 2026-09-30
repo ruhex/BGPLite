@@ -8,7 +8,7 @@ using BGPLite.Contracts;
 namespace BGPLite;
 
 /// <summary>
-/// Background timer that periodically checks all prefix sources for changes (#214). Uses conditional
+/// Background timer that periodically checks all prefix sources for changes. Uses conditional
 /// requests (ETag / Last-Modified → 304 Not Modified) so unchanged sources cost ~1 KB per check.
 /// Only sources whose data actually changed trigger peer route refreshes — no unnecessary BGP churn.
 /// <para>
@@ -58,7 +58,7 @@ internal sealed class PrefixAutoRefreshService : IHostedService, IDisposable
         _logger = logger;
         _timeProvider = timeProvider ?? TimeProvider.System;
         _jitterRandom = jitterRandom ?? new Random();
-        _sourceNames = [.. (appConfig.PrefixSources ?? []).Select(s => s.Name)]; // #477: YAML null = no sources
+        _sourceNames = [.. (appConfig.PrefixSources ?? []).Select(s => s.Name)]; // YAML null = no sources
     }
 
     public Task StartAsync(CancellationToken cancellationToken)
@@ -69,7 +69,7 @@ internal sealed class PrefixAutoRefreshService : IHostedService, IDisposable
             return Task.CompletedTask;
         }
 
-        // Guard: Enabled must be true AND IntervalSeconds must be > 0 (CodeRabbit #215).
+        // Guard: Enabled must be true AND IntervalSeconds must be > 0.
         if (_config.IntervalSeconds <= 0)
         {
             _logger.LogWarning("Auto-refresh: Enabled=true but IntervalSeconds={Sec} — disabled", _config.IntervalSeconds);
@@ -97,7 +97,7 @@ internal sealed class PrefixAutoRefreshService : IHostedService, IDisposable
         // Wait for the loop BEFORE disposing the timer: the loop may be parked in
         // WaitForNextTickAsync on this very timer, and disposing it first faults that wait with
         // ObjectDisposedException — the generic "loop faulted" log noise on every affected
-        // shutdown (#321 item 7). Cancellation above unwinds the wait; a stopped loop leaves no
+        // shutdown. Cancellation above unwinds the wait; a stopped loop leaves no
         // waiter behind.
         if (_loopTask is not null)
         {
@@ -106,8 +106,8 @@ internal sealed class PrefixAutoRefreshService : IHostedService, IDisposable
             catch (Exception ex) { _logger.LogWarning(ex, "Auto-refresh loop faulted on shutdown"); }
             // The host token may have fired while the loop was still parked — give it a brief
             // token-less chance to observe _cts and exit before the timer goes away, or disposing
-            // the timer faults the parked wait with an unobserved ObjectDisposedException (#321
-            // review). It only fails to exit if cancellation itself is wedged.
+            // the timer faults the parked wait with an unobserved ObjectDisposedException. It only
+            // fails to exit if cancellation itself is wedged.
             try { await _loopTask.WaitAsync(TimeSpan.FromSeconds(5)); }
             catch { /* loop faulted or still parked — best effort before disposal */ }
         }

@@ -5,8 +5,8 @@ using Microsoft.EntityFrameworkCore;
 namespace BGPLite.Tests;
 
 /// <summary>
-/// Verifies the connection-level SQLite PRAGMAs applied by <see cref="SqlitePragmasInterceptor"/>
-/// (#95): WAL mode, a 5s busy_timeout, and synchronous=NORMAL. Uses a temp file because WAL does
+/// Verifies the connection-level SQLite PRAGMAs applied by <see cref="SqlitePragmasInterceptor"/>:
+/// WAL mode, a 5s busy_timeout, and synchronous=NORMAL. Uses a temp file because WAL does
 /// not apply to an in-memory database.
 /// </summary>
 public class SqlitePragmasInterceptorTests

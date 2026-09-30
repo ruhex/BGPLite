@@ -5,12 +5,12 @@ using Microsoft.EntityFrameworkCore;
 namespace BGPLite.Tests;
 
 /// <summary>
-/// #259: creating or updating a peer chained CreatePeer → SetSubscriptions → SetCustomPrefixes →
-/// SetCustomAsns, each opening its own DbContext and transaction. #226/#227 made each individual
-/// Set* atomic; the composition of them was not, so a failure part-way left a peer half-configured
+/// Creating or updating a peer chained CreatePeer → SetSubscriptions → SetCustomPrefixes →
+/// SetCustomAsns, each opening its own DbContext and transaction. Each individual Set* call is
+/// atomic, but the composition of them was not, so a failure part-way left a peer half-configured
 /// and the client saw a 500 over an already-committed peer row.
 /// <para>
-/// The reported trigger is a duplicate CIDR, which violates the (PeerId, Prefix, PrefixLength)
+/// A duplicate CIDR is the classic trigger: it violates the (PeerId, Prefix, PrefixLength)
 /// primary key. The same hazard exists on every child collection — subscriptions are keyed
 /// (PeerId, AsnListName) and custom ASNs (PeerId, Asn) — so a repeated list name or ASN throws
 /// just as readily. A user assembling a prefix set in the management UI can produce any of the
@@ -23,7 +23,7 @@ public class PeerStoreConfigurationAtomicityTests
     private const uint Asn = 64530;
 
     /// <summary>
-    /// The reported trigger: a repeated CIDR violates the <c>(PeerId, Prefix, PrefixLength)</c> key.
+    /// A repeated CIDR violates the <c>(PeerId, Prefix, PrefixLength)</c> key.
     /// Deduplicated rather than rejected — a set of prefixes means the same thing either way.
     /// </summary>
     [Fact]
@@ -45,7 +45,7 @@ public class PeerStoreConfigurationAtomicityTests
     }
 
     /// <summary>
-    /// The collections the issue does not mention. Subscriptions and custom ASNs carry the same
+    /// The other collections: subscriptions and custom ASNs carry the same
     /// composite keys, so a pasted-twice list name or ASN threw exactly as a repeated CIDR did.
     /// </summary>
     [Fact]
@@ -78,7 +78,7 @@ public class PeerStoreConfigurationAtomicityTests
             customPrefixes: [("10.0.0.0", 8)],
             customAsns: [64512])).Id;
 
-        // The failure #259 describes is a peer row committed with its child collections missing.
+        // The failure mode is a peer row committed with its child collections missing.
         // Assert the whole configuration is readable through the same view the send path uses.
         var view = await store.LoadPeerRoutingViewAsync(Ip, Asn);
         Assert.NotNull(view);
@@ -89,7 +89,7 @@ public class PeerStoreConfigurationAtomicityTests
     }
 
     /// <summary>
-    /// The property #259 is actually about: the whole save is ONE transaction, not four DbContexts
+    /// The essential property: the whole save is ONE transaction, not four DbContexts
     /// and three commits. Asserted by counting the transactions EF actually opens rather than by
     /// forcing a failure — no production test hook, and it fails the moment someone re-splits the
     /// composition into separate Set* calls.
@@ -154,7 +154,7 @@ public class PeerStoreConfigurationAtomicityTests
     }
 
     /// <summary>
-    /// #391: the per-peer MaxPrefix override persists through the create/update paths: create
+    /// The per-peer MaxPrefix override persists through the create/update paths: create
     /// writes it (NULL when omitted = inherit the global cap), update follows PATCH semantics
     /// (null = leave alone, explicit value including 0 = set), and the light session read
     /// (<c>GetPeerMaxPrefixAsync</c>) sees the effective value.
@@ -188,7 +188,7 @@ public class PeerStoreConfigurationAtomicityTests
     }
 
     /// <summary>
-    /// #36: the TCP-MD5 password persists through create (only when provided) and update
+    /// The TCP-MD5 password persists through create (only when provided) and update
     /// (null = leave alone, "" = clear back to plain TCP). It is read back only through the
     /// credentials query — the API exposes a boolean flag, never the value.
     /// </summary>

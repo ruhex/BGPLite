@@ -5,7 +5,7 @@ using System.Text;
 namespace BGPLite.Contracts;
 
 /// <summary>
-/// TCP MD5 Signature Option (RFC 2385) — per-peer socket option plumbing (#36). The kernel
+/// TCP MD5 Signature Option (RFC 2385) — per-peer socket option plumbing. The kernel
 /// verifies the MD5 signature on every segment of the connection: with a key attached to the
 /// listening socket for a peer's address, unsigned segments are dropped before they ever reach
 /// the application, so a peer without the password cannot complete the handshake.

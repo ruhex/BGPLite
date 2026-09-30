@@ -6,11 +6,11 @@ using Microsoft.Extensions.Logging.Abstractions;
 namespace BGPLite.Tests;
 
 /// <summary>
-/// #452: the RU/default projection (<c>PrefixService._ruCache</c>) is a second cache layer with
+/// The RU/default projection (<c>PrefixService._ruCache</c>) is a second cache layer with
 /// its own 1h TTL above the source-level cache. A committed content change to the DEFAULT source
 /// must be visible to the next route rebuild — including (and especially) on the auto-refresh
-/// path, where <see cref="IPrefixSourceService.RefreshAsync"/> is deliberately callback-free
-/// (#214): without an invalidation signal the fleet rebuild re-reads the stale fast path and
+/// path, where <see cref="IPrefixSourceService.RefreshAsync"/> is deliberately callback-free:
+/// without an invalidation signal the fleet rebuild re-reads the stale fast path and
 /// re-advertises the old RU set for up to the RU TTL.
 /// </summary>
 public sealed class PrefixServiceRuInvalidationTests
@@ -57,7 +57,7 @@ public sealed class PrefixServiceRuInvalidationTests
                 new RipeStatProvider(new ThrowingFactory(), NullLogger<RipeStatProvider>.Instance),
                 NullLogger<RipeStatPrefixCache>.Instance),
             sources,
-            null!, // HttpPrefixProvider is only on the per-peer user-source path (#263)
+            null!, // HttpPrefixProvider is only on the per-peer user-source path
             onSourceChanged: _ =>
             {
                 Interlocked.Increment(ref pushes);
@@ -77,7 +77,7 @@ public sealed class PrefixServiceRuInvalidationTests
         var (service, sources, provider, pushes) = Build();
 
         // 1. Warm the RU projection — cold load caches the initial content for the full RU TTL
-        //    (and legitimately fires the #416 convergence push once — record the baseline).
+        //    (and legitimately fires the convergence push once — record the baseline).
         var first = await service.GetRuPrefixesAsync();
         Assert.Single(first);
         Assert.Equal(InitialPrefix.Address, first[0].Prefix);
@@ -90,13 +90,13 @@ public sealed class PrefixServiceRuInvalidationTests
         Assert.True(await sources.RefreshAsync("ru"));
 
         // 3. The rebuild that the auto-refresh push triggers must advertise the NEW content —
-        //    pre-#452 this returned the stale projection until the RU TTL elapsed.
+        //    previously this returned the stale projection until the RU TTL elapsed.
         var rebuilt = await service.GetRuPrefixesAsync();
         Assert.Single(rebuilt);
         Assert.Equal(UpdatedPrefix.Address, rebuilt[0].Prefix);
         Assert.Equal(UpdatedPrefix.Length, rebuilt[0].Length);
 
-        // 4. The auto-refresh path stays callback-free (#214 — no double push): the only push so
+        // 4. The auto-refresh path stays callback-free (no double push): the only push so
         //    far is the warm-up's own; the invalidation signal must not turn RefreshAsync into
         //    a pusher.
         Assert.Equal(baselinePushes, pushes());
@@ -107,7 +107,7 @@ public sealed class PrefixServiceRuInvalidationTests
     {
         var (service, sources, provider, pushes) = Build();
 
-        // Warm the projection, then change the source. (The cold load fires its own #416 push —
+        // Warm the projection, then change the source. (The cold load fires its own push —
         // that is the baseline; the assertions below check for no ADDITIONAL push.)
         await service.GetRuPrefixesAsync();
         var baselinePushes = pushes();

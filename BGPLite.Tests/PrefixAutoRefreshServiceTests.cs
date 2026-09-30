@@ -10,7 +10,7 @@ using BGPLite.Protocol;
 namespace BGPLite.Tests;
 
 /// <summary>
-/// Tests for <see cref="PrefixAutoRefreshService"/> (#214): per-source poll interval and jitter.
+/// Tests for <see cref="PrefixAutoRefreshService"/>: per-source poll interval and jitter.
 /// Uses <see cref="FakeTimeProvider"/> to advance the clock instantly (no real-second waits) and a
 /// counting fake <see cref="IPrefixSourceService"/> to assert which sources were polled when.
 /// </summary>
@@ -25,7 +25,7 @@ public class PrefixAutoRefreshServiceTests
     {
 
         public event Action<string>? ContentCommitted;
-        // #511 review: the service loop writes while the test thread reads — concurrent access.
+        // The service loop writes while the test thread reads — concurrent access.
         public System.Collections.Concurrent.ConcurrentDictionary<string, int> RefreshCalls { get; } = new();
         public Dictionary<string, bool> Conditional { get; } = new();
         public bool ReportChanged { get; set; }
@@ -50,7 +50,7 @@ public class PrefixAutoRefreshServiceTests
     /// <summary>A no-op ISessionManager that records RefreshAllEstablishedAsync invocations.</summary>
     private sealed class RecordingSessionManager : ISessionManager
     {
-        // #511 review: incremented on the service loop, read on the test thread — atomic access.
+        // Incremented on the service loop, read on the test thread — atomic access.
         private int _refreshAllCalls;
         public int RefreshAllCalls => Volatile.Read(ref _refreshAllCalls);
         public Task RefreshPeerAsync(string peerIp, uint asn) => Task.CompletedTask;
@@ -75,7 +75,7 @@ public class PrefixAutoRefreshServiceTests
     }
 
     /// <summary>
-    /// #507: wait for an OBSERVABLE condition instead of a fixed real-time sleep. The old
+    /// Wait for an OBSERVABLE condition instead of a fixed real-time sleep. The old
     /// <c>Task.Delay(50)</c> after each clock advance raced the refresh loop's continuation —
     /// on a loaded runner 50 ms is not always enough for the loop to observe the tick, so the
     /// assertion counted 0 polls. Condition-polling with a generous deadline is deterministic.
@@ -92,7 +92,7 @@ public class PrefixAutoRefreshServiceTests
     }
 
     /// <summary>
-    /// #214: a source supporting conditional requests is polled at IntervalSeconds; a source without
+    /// A source supporting conditional requests is polled at IntervalSeconds; a source without
     /// ETag support (asn) is polled at the longer NoEtagIntervalSeconds. On a timer tick that falls
     /// between the two intervals, only the conditional source is re-polled.
     /// </summary>
@@ -130,7 +130,7 @@ public class PrefixAutoRefreshServiceTests
     }
 
     /// <summary>
-    /// #214: jitter applies a delay between source checks within a tick. With MaxJitterMs=100 and two
+    /// Jitter applies a delay between source checks within a tick. With MaxJitterMs=100 and two
     /// sources, the second source's RefreshAsync is NOT called until the clock has advanced past the
     /// jitter window. Verified by checking the call happens only AFTER advancing FakeTimeProvider.
     /// </summary>
@@ -143,7 +143,7 @@ public class PrefixAutoRefreshServiceTests
             Conditional = { ["a"] = true, ["b"] = true }
         };
         var sessions = new RecordingSessionManager();
-        // #511 review: the tick period is 600 s (not 60) so the advance-until-fired loop below has
+        // The tick period is 600 s (not 60) so the advance-until-fired loop below has
         // no tick-2 ceiling — it may step as long as scheduling pressure requires without a second
         // tick ever changing the counts.
         var config = ConfigWith(
@@ -164,7 +164,7 @@ public class PrefixAutoRefreshServiceTests
         Assert.Equal(1, svc.RefreshCalls.GetValueOrDefault("a"));
         Assert.Equal(0, svc.RefreshCalls.GetValueOrDefault("b"));
 
-        // Advance past the jitter window. #507: the delay for 'b' may not be SCHEDULED on the fake
+        // Advance past the jitter window. The delay for 'b' may not be SCHEDULED on the fake
         // clock yet when 'a' is observed — the loop thread can be preempted between polling 'a'
         // and registering the delay, and a batch of advances landing before the schedule point
         // would leave the delay in the future with nobody to release it (the CI flake shape).
@@ -186,7 +186,7 @@ public class PrefixAutoRefreshServiceTests
         await service.StopAsync(CancellationToken.None);
     }
 
-    /// <summary>#214: disabled by default — StartAsync is a no-op, no timer/loop is created.</summary>
+    /// <summary>Disabled by default — StartAsync is a no-op, no timer/loop is created.</summary>
     [Fact]
     public async Task DisabledByDefault_NoTimerCreated()
     {
@@ -208,7 +208,7 @@ public class PrefixAutoRefreshServiceTests
         await service.StopAsync(CancellationToken.None);
     }
 
-    /// <summary>#214: when a source reports changed, all established peers get a refresh push.</summary>
+    /// <summary>When a source reports changed, all established peers get a refresh push.</summary>
     [Fact]
     public async Task ChangedSource_TriggersPeerRefresh()
     {
@@ -232,7 +232,7 @@ public class PrefixAutoRefreshServiceTests
     }
 
     /// <summary>
-    /// #214 regression: multiple changed sources in one tick trigger a SINGLE peer refresh (aggregated
+    /// Regression: multiple changed sources in one tick trigger a SINGLE peer refresh (aggregated
     /// push), not one-per-source plus one. The convergence callback must NOT fire from the auto-refresh
     /// RefreshAsync path (that would double-push); only LoopAsync aggregates and pushes once.
     /// </summary>

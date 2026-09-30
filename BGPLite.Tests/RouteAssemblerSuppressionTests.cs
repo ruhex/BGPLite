@@ -9,9 +9,9 @@ using Microsoft.Extensions.Logging.Abstractions;
 namespace BGPLite.Tests;
 
 /// <summary>
-/// #220 "suppress more-specifics": a custom prefix is the operator's explicit override, so source
+/// "Suppress more-specifics": a custom prefix is the operator's explicit override, so source
 /// routes it covers (strictly more specific) are dropped from the outbound list; source prefixes
-/// NOT covered are sent normally, and an exact custom==source duplicate stays for the #209
+/// NOT covered are sent normally, and an exact custom==source duplicate stays for the
 /// community-union merge. Suppression runs in the assembler, before the per-community-set
 /// aggregator — so it covers every trigger (initial dump, ROUTE_REFRESH, API-triggered refresh),
 /// which all rebuild the list through <see cref="RouteAssembler.BuildOutboundRoutesAsync"/>.
@@ -77,7 +77,7 @@ public class RouteAssemblerSuppressionTests
     [Fact]
     public void ExactCustomEqualsSource_NotSuppressed_LeftToUnionMerge()
     {
-        // The exact match is handled by BgpSession.MergeDuplicatePrefixes (#209), which unions the
+        // The exact match is handled by BgpSession.MergeDuplicatePrefixes, which unions the
         // custom and source communities — suppressing it here would drop the source's tags.
         var customs = new List<(uint, byte)> { (Net("1.2.3.0"), 24) };
         var routes = new List<Route> { R("1.2.3.0", 24) };
@@ -90,7 +90,7 @@ public class RouteAssemblerSuppressionTests
     [Fact]
     public void NestedCustomPrefixes_DoNotSuppressEachOther()
     {
-        // CodeRabbit (integration review): both are CONFIGURED custom prefixes — the operator's
+        // Both are CONFIGURED custom prefixes — the operator's
         // deliberate /16 must survive its own broader /8. Only source routes are suppressed.
         var customs = new List<(uint, byte)> { (Net("10.0.0.0"), 8), (Net("10.1.0.0"), 16) };
         var routes = new List<Route>
@@ -121,7 +121,7 @@ public class RouteAssemblerSuppressionTests
     [Fact]
     public async Task BuildOutboundRoutes_CustomPrefix_SuppressesCoveredSourcePrefixes()
     {
-        // The issue's scenario: a custom 91.108.0.0/16 overrides a YouTube-like source whose /22s
+        // A custom 91.108.0.0/16 overrides a YouTube-like source whose /22s
         // (arriving here through the custom-ASN path) sit inside it.
         var config = new AppConfig { Bgp = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1" } };
         var assembler = new RouteAssembler(

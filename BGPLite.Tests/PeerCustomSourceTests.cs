@@ -6,7 +6,7 @@ using Microsoft.EntityFrameworkCore;
 namespace BGPLite.Tests;
 
 /// <summary>
-/// Tests for PeerCustomSource (#143-1 / #146): URL-based prefix-list sources per peer.
+/// Tests for PeerCustomSource: URL-based prefix-list sources per peer.
 /// Mirrors the PeerStoreKeyingTests pattern (real in-memory SQLite).
 /// </summary>
 public class PeerCustomSourceTests

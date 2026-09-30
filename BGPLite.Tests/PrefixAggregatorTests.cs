@@ -267,7 +267,7 @@ public class PrefixAggregatorTests
         Assert.Equal(0xC0A80000u, route.Prefix);
     }
 
-    // ---- #14 phase 3: IPv6 aggregation (family-aware, /0..128) ----
+    // ---- IPv6 aggregation (family-aware, /0..128) ----
 
     [Fact]
     public void Ipv6_NestedPrefixes_CollapseToWidest()
@@ -367,9 +367,9 @@ public class PrefixAggregatorTests
     {
         // Identical community sets, but IPv4 and IPv6 must never land in one summary
         // (ADR 0001 §6). The two IPv6 /32s are the same network after host-bit masking and
-        // legitimately collapse to one; the point is the family split: pre-phase-3 the IPv6
-        // routes fell into the 32-bit interval space and the whole set collapsed into
-        // 0.0.0.0/0 marked IPv4.
+        // legitimately collapse to one; the point is the family split: before IPv6 aggregation
+        // existed, the IPv6 routes fell into the 32-bit interval space and the whole set
+        // collapsed into 0.0.0.0/0 marked IPv4.
         var comm = new uint[] { 0x65 };
         var result = _aggregator.Aggregate([
             R(0xC0A80000, 24, comm),
@@ -386,7 +386,7 @@ public class PrefixAggregatorTests
         Assert.Equal([0x65u], v6.Communities);
     }
 
-    // ---- #305: normalization is memoized per backing-array instance ----
+    // ---- normalization is memoized per backing-array instance ----
 
     /// <summary>
     /// The memo keys by REFERENCE, so this is the case that would break if identity were mistaken

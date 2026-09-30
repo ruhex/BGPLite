@@ -5,12 +5,12 @@ namespace BGPLite.Tests;
 
 /// <summary>
 /// Direct unit tests for the pure <see cref="OpenNegotiator.Validate(BgpOpenMessage, uint?, uint, int)"/>
-/// extraction (#97). Every OPEN-validation branch is exercised without standing up a BgpSession
+/// extraction. Every OPEN-validation branch is exercised without standing up a BgpSession
 /// over a live socket — mirroring how the RFC-6793 tests exercise MergeAsPathWithAs4Path.
 /// <para>
 /// The <c>Negotiate</c> helper defaults <c>localHoldTime</c> to <c>180</c> (the <c>BgpConfig</c>
 /// default), so the legacy tests where the peer also proposes 180 keep their original semantics.
-/// The #224 hold-time-negotiation tests pass an explicit <c>localHoldTime</c> to exercise the
+/// The hold-time-negotiation tests pass an explicit <c>localHoldTime</c> to exercise the
 /// <c>min(local, peer)</c> rule.
 /// </para>
 /// </summary>
@@ -98,7 +98,7 @@ public class OpenNegotiatorTests
 
         Assert.Equal(BgpConstants.Error.OpenMessageError, ex.ErrorCode);
         Assert.Equal(BgpConstants.SubError.UnsupportedVersion, ex.SubErrorCode);
-        // RFC 4271 §6.2 (#317): the Data field carries a 2-octet version hint. BGPLite supports
+        // RFC 4271 §6.2: the Data field carries a 2-octet version hint. BGPLite supports
         // only v4, so a bid of 3 hits the "smallest locally-supported" branch → 4.
         Assert.Equal([(byte)0, (byte)4], ex.NotificationData);
     }
@@ -175,10 +175,10 @@ public class OpenNegotiatorTests
         Assert.Equal(BgpConstants.SubError.BadBgpIdentifier, ex.SubErrorCode);
     }
 
-    // ---- #224: hold time negotiation = min(local, peer) per RFC 4271 §6.2.2 ----
+    // ---- hold time negotiation = min(local, peer) per RFC 4271 §6.2.2 ----
 
     /// <summary>
-    /// #224: when the peer proposes a SMALLER hold time than local, the negotiated value is the
+    /// When the peer proposes a SMALLER hold time than local, the negotiated value is the
     /// peer's (min). Keepalive is derived from the negotiated value, not the peer's raw value —
     /// so a peer that proposes 30 against a local 180 yields negotiated=30, keepalive=max(30/3,1)=10.
     /// </summary>
@@ -192,7 +192,7 @@ public class OpenNegotiatorTests
     }
 
     /// <summary>
-    /// #224: when the peer proposes a LARGER hold time than local, the negotiated value is the
+    /// When the peer proposes a LARGER hold time than local, the negotiated value is the
     /// local (min). Guards against the previous behaviour of always taking the peer's value — a
     /// peer proposing 180 against a local 9 (the minimum useful hold time for fast dead-peer
     /// detection) must yield 9, not 180.
@@ -207,7 +207,7 @@ public class OpenNegotiatorTests
     }
 
     /// <summary>
-    /// #224: equal local and peer hold times negotiate to that value (boundary of the min rule).
+    /// Equal local and peer hold times negotiate to that value — the boundary of the min rule.
     /// </summary>
     [Fact]
     public void HoldTime_PeerEqualsLocal_NegotiatesToThatValue()
@@ -219,7 +219,7 @@ public class OpenNegotiatorTests
     }
 
     /// <summary>
-    /// #224: if the LOCAL side disables the timer (0), the negotiated hold time is 0 even when the
+    /// If the LOCAL side disables the timer (0), the negotiated hold time is 0 even when the
     /// peer proposes a positive value — the session runs without keepalive/hold timers. Matches the
     /// "either side disables" semantics (RFC 4271 §4.2) and the common implementation practice
     /// (Cisco/Juniper). Complements HoldTime_Zero_Accepted_WithZeroKeepAlive (peer=0 case).
@@ -239,7 +239,7 @@ public class OpenNegotiatorTests
     /// 'Bad Peer AS'." Both the declared My Autonomous System field and the effective ASN (the
     /// 4-octet capability value, which takes precedence per RFC 6793 §4.1) are checked. Because
     /// BGPLite auto-registers unknown peers, an AS-0 peer previously landed in the PeerStore as a
-    /// real peer (#300).
+    /// real peer.
     /// </summary>
     [Fact]
     public void Validate_MyAsZero_BadPeerAs()
@@ -256,7 +256,7 @@ public class OpenNegotiatorTests
     public void Validate_FourOctetCapabilityCarryingZero_BadPeerAs()
     {
         // Asn is deliberately NON-zero: with Asn = 0 the `open.Asn == 0` half short-circuits and
-        // this test would still pass if the capability-derived check were deleted (#300 review).
+        // this test would still pass if the capability-derived check were deleted.
         var open = new BgpOpenMessage
         {
             Version = 4,

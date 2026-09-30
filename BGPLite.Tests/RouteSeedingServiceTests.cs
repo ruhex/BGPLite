@@ -9,7 +9,7 @@ using Microsoft.Extensions.Time.Testing;
 namespace BGPLite.Tests;
 
 /// <summary>
-/// #251: route seeding must not block listener startup. StartAsync returns immediately even while
+/// route seeding must not block listener startup. StartAsync returns immediately even while
 /// the RIPEstat warm-up hangs; configured sources (the local nets.txt fallback) seed the table in
 /// the background; and sessions established meanwhile receive the full set via
 /// ISessionManager.RefreshAllEstablishedAsync once warm-up completes.
@@ -110,7 +110,7 @@ public class RouteSeedingServiceTests
     [Fact]
     public async Task BadSourceCommunity_DegradesToUntagged_DoesNotAbortSeeding()
     {
-        // #328/#327: an out-of-range community VALUE used to be silently masked; now that the codec
+        // An out-of-range community VALUE used to be silently masked; now that the codec
         // rejects it, seeding must degrade that ONE source to untagged instead of aborting the loop
         // (later sources unseeded, warm-up and the final established-session push skipped).
         var prefix = new HangingPrefixService();

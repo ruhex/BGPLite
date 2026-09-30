@@ -5,7 +5,7 @@ namespace BGPLite.Protocol;
 public static class PrefixCodec
 {
     /// <summary>
-    /// Encodes one NLRI prefix, family-aware (#15 phase 1): IPv4 → length byte (0..32) plus at
+    /// Encodes one NLRI prefix, family-aware: IPv4 → length byte (0..32) plus at
     /// most 4 data bytes; IPv6 → length byte (0..128) plus at most 16 data bytes (big-endian,
     /// host bits cleared by <see cref="IpPrefix"/>).
     /// </summary>
@@ -49,7 +49,7 @@ public static class PrefixCodec
 
     /// <summary>
     /// Decodes one IPv6 NLRI prefix from the head of <paramref name="buffer"/> (MP_REACH/MP_UNREACH
-    /// context, #15 phase 2 groundwork): a length byte 0..128 plus big-endian data bytes, masked to
+    /// context): a length byte 0..128 plus big-endian data bytes, masked to
     /// the network address. Same malformed-input contract as <see cref="Decode"/> —
     /// <see cref="BgpParseException"/> with Update Message Error / Invalid Network Field.
     /// </summary>
@@ -86,7 +86,7 @@ public static class PrefixCodec
     /// §6.3) on any malformed input — a prefix-length byte &gt; 32, or a buffer shorter than the
     /// declared prefix bytes — so the caller surfaces it through the treat-as-withdraw path instead
     /// of the previous <see cref="ArgumentOutOfRangeException"/> that escaped the read loop and
-    /// tore down the session (#222, RFC 4271 §6.3 / RFC 7606 §2).
+    /// tore down the session (RFC 4271 §6.3 / RFC 7606 §2).
     /// </summary>
     public static (IpPrefix prefix, int bytesConsumed) Decode(ReadOnlySpan<byte> buffer)
     {

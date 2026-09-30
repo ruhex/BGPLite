@@ -3,7 +3,7 @@ using BGPLite.Server;
 namespace BGPLite.Tests;
 
 /// <summary>
-/// Tests for <see cref="IpAcceptThrottle"/> (#115): the per-source-IP accept throttle for the BGP
+/// Tests for <see cref="IpAcceptThrottle"/>: the per-source-IP accept throttle for the BGP
 /// listener. Covers both the pure sliding-window decision (<see cref="IpAcceptThrottle.Decide"/>) and
 /// the stateful <see cref="IpAcceptThrottle.TryAccept"/> wrapper (thread-safety, per-IP isolation,
 /// disabled-mode, stale-entry pruning).
@@ -190,7 +190,7 @@ public class IpAcceptThrottleTests
     }
 
     /// <summary>
-    /// Regression for #133: a concurrent TryAccept that refreshes a Window must NOT have its entry
+    /// A concurrent TryAccept that refreshes a Window must NOT have its entry
     /// removed by a racing SweepStale. The coarse _dictLock makes the staleness-check + remove atomic
     /// against TryAccept's GetOrAdd + refresh. Under the prior per-Window lock, a sweep checking
     /// staleness under the Window lock, then TryRemove'ing outside any dictionary-level atomicity,
@@ -198,7 +198,7 @@ public class IpAcceptThrottleTests
     /// </summary>
     /// <remarks>
     /// Deterministic single-IP scenario: an IP fills its window to the limit, then a sweep races a
-    /// same-window accept. If the sweep orphaned the Window (the #133 bug), the next same-window
+    /// same-window accept. If the sweep orphaned the Window, the next same-window
     /// accept would be ADMITTED (fresh Window, count 0) instead of DENIED. The coarse lock makes the
     /// sweep observe the just-recorded accept and keep the Window, so the IP's limit is preserved.
     /// </remarks>

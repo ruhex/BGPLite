@@ -3,7 +3,7 @@ using BGPLite.Api;
 namespace BGPLite.Tests;
 
 /// <summary>
-/// #14 phase 5: peer-setup templates gain IPv6 address-family variants. Peers may be IPv6 hosts
+/// peer-setup templates gain IPv6 address-family variants. Peers may be IPv6 hosts
 /// (validated at the API boundary), and the peer side needs its own address-family blocks to
 /// exchange IPv6 routes with the server.
 /// </summary>
@@ -50,13 +50,13 @@ public class PeerSetupTemplateTests
         Assert.Contains(lines, l => l.Contains("remote.address=<SERVER_V6>/128"));
     }
 
-    // ---- NormalizePeerIp: peers may be IPv6 (#14 phase 5) ----
+    // ---- NormalizePeerIp: peers may be IPv6 ----
 
     [Fact]
     public void NormalizePeerIp_Ipv6_AcceptedAndCanonical()
     {
         Assert.Equal("2001:db8:cccc::20", ManagementApi.NormalizePeerIp("2001:db8:cccc:0:0:0:0:20"));
-        // #421: ::1 (loopback) is no longer accepted as a peer address — the compressed-form
+        // ::1 (loopback) is no longer accepted as a peer address — the compressed-form
         // canonicalization this test pins is covered by a non-special address instead.
         Assert.Equal("2001:db8:cccc::21", ManagementApi.NormalizePeerIp("2001:0db8:cccc:0000:0000:0000:0000:0021"));
     }

@@ -39,7 +39,7 @@ public class FilePrefixProviderTests
     [Fact]
     public async Task OversizedFileThrows()
     {
-        // #487: cap parity with the HTTP paths — a file over HttpPrefixProvider.MaxResponseBytes
+        // Cap parity with the HTTP paths — a file over HttpPrefixProvider.MaxResponseBytes
         // is never a legitimate prefix list and must not be read into memory whole.
         var path = Path.GetTempFileName();
         await using (var fs = new FileStream(path, FileMode.Create, FileAccess.Write))

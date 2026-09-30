@@ -17,11 +17,11 @@ public sealed class AppConfig
     public int ApiPort { get; init; } = 5001;
 
     /// <summary>
-    /// The IP address the management API binds to (#90). Default <c>null</c> → loopback
-    /// (<c>127.0.0.1</c>) — the API is reachable ONLY from the same host, so an operator who wants
-    /// to expose it MUST put an authenticated reverse proxy (Caddy/nginx with TLS + auth) in front
-    /// and set this to <c>"0.0.0.0"</c> (or a specific interface). This is secure-by-default: the
-    /// previous <c>http://+:port</c> bind exposed the unauthenticated control plane on every interface.
+    /// The IP address the management API binds to. Default <c>null</c> → loopback
+    /// (<c>127.0.0.1</c>): the API is unauthenticated and reachable ONLY from the same host, so an
+    /// operator who wants to expose it MUST put an authenticated reverse proxy (Caddy/nginx with
+    /// TLS + auth) in front and set this to <c>"0.0.0.0"</c> (or a specific interface) — a
+    /// wildcard <c>http://+:port</c> bind would expose the control plane on every interface.
     /// </summary>
     [YamlMember(Alias = "ApiListen")]
     public string? ApiListen { get; init; }
@@ -49,14 +49,14 @@ public sealed class AppConfig
     /// Trusted reverse-proxy CIDRs whose <c>X-Forwarded-For</c> / <c>X-Real-IP</c> headers are
     /// honored when resolving the management-API client IP (e.g. <c>["127.0.0.0/8", "10.0.0.0/8"]</c>).
     /// Empty (default) = never trust forwarding headers — the direct <c>RemoteEndPoint</c> is used,
-    /// and any client-supplied <c>X-Forwarded-For</c> is ignored (#91). When the API runs behind a
+    /// and any client-supplied <c>X-Forwarded-For</c> is ignored. When the API runs behind a
     /// reverse proxy, list the proxy's CIDR here so the real client IP is resolved.
     /// </summary>
     [YamlMember(Alias = "TrustedProxies")]
     public List<string> TrustedProxies { get; init; } = [];
 
     /// <summary>
-    /// Opt-in (#256): when <c>true</c>, a trusted proxy's <c>X-Real-IP</c> header is accepted as a
+    /// Opt-in: when <c>true</c>, a trusted proxy's <c>X-Real-IP</c> header is accepted as a
     /// client-IP source when no <c>X-Forwarded-For</c> hop resolves. Default <c>false</c> — unlike
     /// X-Forwarded-For, an X-Real-IP value cannot be verified against the trusted-hop chain, so a
     /// proxy that passes the header through instead of overwriting it (plain nginx without
@@ -67,13 +67,13 @@ public sealed class AppConfig
     [YamlMember(Alias = "TrustXRealIp")]
     public bool TrustXRealIp { get; init; }
 
-    /// <summary>Per-client-IP rate limiting for the management API (#116). Null = defaults applied.</summary>
+    /// <summary>Per-client-IP rate limiting for the management API. Null = defaults applied.</summary>
     [YamlMember(Alias = "ApiRateLimit")]
     public ApiRateLimitConfig? ApiRateLimit { get; init; }
 
     /// <summary>
-    /// Maximum request body size in bytes accepted by the management API on POST/PUT/PATCH routes
-    /// (#156). Bodies larger than this are rejected with <c>413 Payload Too Large</c> before
+    /// Maximum request body size in bytes accepted by the management API on POST/PUT/PATCH routes.
+    /// Bodies larger than this are rejected with <c>413 Payload Too Large</c> before
     /// deserialization, defending against memory-exhaustion DoS (<c>HttpListener</c> has no default
     /// body cap). 1 MiB comfortably fits any realistic peer-config payload (hundreds of CIDRs /
     /// ASNs); raise it only if an operator legitimately needs larger writes. Defaults to 1 MiB.
@@ -82,7 +82,7 @@ public sealed class AppConfig
     public long MaxRequestBodyBytes { get; init; } = 1024 * 1024;
 
     /// <summary>
-    /// Origins allowed to make cross-origin (CORS) requests to the management API (#99), e.g.
+    /// Origins allowed to make cross-origin (CORS) requests to the management API, e.g.
     /// <c>["https://operator.example.com", "https://bgp.example.net"]</c>. A request's
     /// <c>Origin</c> header is echoed back as <c>Access-Control-Allow-Origin</c> only when it
     /// exactly matches an entry here (case-insensitive); otherwise <c>no</c> CORS headers are
@@ -94,7 +94,7 @@ public sealed class AppConfig
     public List<string>? CorsAllowedOrigins { get; init; }
 
     /// <summary>
-    /// Periodic auto-refresh (#214): a background timer checks all prefix sources for changes using
+    /// Periodic auto-refresh: a background timer checks all prefix sources for changes using
     /// conditional requests (ETag/Last-Modified → 304). Only changed sources trigger peer refreshes.
     /// Null/absent (default) = disabled — sources are only refreshed on peer connect/ROUTE_REFRESH.
     /// </summary>
@@ -106,8 +106,8 @@ public sealed class AppConfig
     /// clear message on the first violation (fail-loud). Called from Program.cs right after the YAML
     /// is loaded and before the host is built, so invalid config (bad ASN, RouterId=0.0.0.0,
     /// HoldTime=2, out-of-range ApiPort, malformed peer address, ...) aborts startup instead of
-    /// failing later at runtime (#89). Intentional behavior change: previously-silent invalid
-    /// config now throws — the operator must fix their YAML.
+    /// failing later at runtime. Invalid config is never silently accepted — the operator must fix
+    /// their YAML.
     /// </summary>
     public void Validate()
     {
@@ -117,10 +117,11 @@ public sealed class AppConfig
             throw new InvalidOperationException(
                 $"Invalid configuration: ApiPort must be between 1 and 65535 (got {ApiPort}).");
 
-        // MaxRequestBodyBytes is a security boundary (#156 DoS cap); reject nonsensical values at
-        // startup so a bad YAML cannot break all mutating API requests (<= 0) or weaken the cap to
-        // nothing (impractically large). 1 KiB lower bound leaves room for a minimal peer payload;
-        // 64 MiB upper bound is far beyond any legitimate peer-config write.
+        // MaxRequestBodyBytes is a security boundary (memory-exhaustion DoS cap); reject
+        // nonsensical values at startup so a bad YAML cannot break all mutating API requests
+        // (<= 0) or weaken the cap to nothing (impractically large). 1 KiB lower bound leaves
+        // room for a minimal peer payload; 64 MiB upper bound is far beyond any legitimate
+        // peer-config write.
         if (MaxRequestBodyBytes is < 1024 or > 64 * 1024 * 1024)
             throw new InvalidOperationException(
                 $"Invalid configuration: MaxRequestBodyBytes must be between 1024 and 67108864 bytes " +
@@ -129,8 +130,8 @@ public sealed class AppConfig
         for (var i = 0; i < Peers.Count; i++)
         {
             var peer = Peers[i];
-            // #390: an omitted Address used to default to "0.0.0.0" and slip through — require a
-            // real unicast address and reject the all-zeros placeholder explicitly.
+            // An omitted Address must not slip through as the all-zeros placeholder — require a
+            // real unicast address and reject 0.0.0.0 explicitly.
             if (string.IsNullOrWhiteSpace(peer.Address))
                 throw new InvalidOperationException(
                     $"Invalid configuration: Peers[{i}].Address is required — a configured peer must know where it connects from.");
@@ -142,7 +143,7 @@ public sealed class AppConfig
                     $"Invalid configuration: Peers[{i}].Address must be a valid IPv4 address other than 0.0.0.0 " +
                     $"(got '{peer.Address}').");
             }
-            // #390: a configured peer without a remote ASN can never match an OPEN — fail loud
+            // A configured peer without a remote ASN can never match an OPEN — fail loud
             // instead of silently relying on auto-registration.
             if (peer.RemoteAsn is null)
                 throw new InvalidOperationException(
@@ -150,14 +151,13 @@ public sealed class AppConfig
                     "(omit the Peers entry entirely to rely on auto-registration).");
         }
 
-        // #327: prefix-source errors used to surface only at load time, where LoadAllAsync absorbs
-        // them into a Warning plus an empty prefix set — a config typo silently served zero prefixes
+        // Prefix-source errors otherwise surface only at load time, where LoadAllAsync absorbs
+        // them into a Warning plus an empty prefix set — a config typo silently serves zero prefixes
         // until restart. Fail loud at startup (and reject the file on hot reload) instead. The
-        // per-kind required fields mirror the providers' own load-time checks
-        // (FilePrefixProvider/HttpPrefixProvider/AsnPrefixProvider); the community rule is
-        // CommunityCodec's, single-sourced via the Protocol leaf. The ?? [] guards keep an explicit
-        // YAML null ("PrefixSources:") meaning "none" — every runtime consumer treats it that way,
-        // and Validate must reject with a message, never with an NRE.
+        // per-kind required fields mirror the providers' own load-time checks; the community rule
+        // is CommunityCodec's, single-sourced via the Protocol leaf. The ?? [] guards keep an
+        // explicit YAML null ("PrefixSources:") meaning "none" — every runtime consumer treats it
+        // that way, and Validate must reject with a message, never with an NRE.
         var prefixSources = PrefixSources ?? [];
         var sourceNames = new HashSet<string>(StringComparer.Ordinal);
         for (var i = 0; i < prefixSources.Count; i++)
@@ -218,7 +218,7 @@ public sealed class AppConfig
                 $"Invalid configuration: DefaultPrefixSource '{DefaultPrefixSource}' does not match any PrefixSources entry — unconfigured peers would silently get zero prefixes.");
 
         // Every community string in this file goes through the same rule so a typo cannot silently
-        // fall back at send time (ConfigCommunityResolver) — the runtime half landed with #335.
+        // fall back to the default/untagged value at send time (ConfigCommunityResolver only logs).
         ValidateCommunity(CustomPrefixCommunity, "CustomPrefixCommunity");
         ValidateCommunity(CustomAsnCommunity, "CustomAsnCommunity");
         var asnLists = RipeStat?.AsnLists ?? [];
@@ -231,8 +231,8 @@ public sealed class AppConfig
             ValidateCommunity(list.Community, $"RipeStat.AsnLists[{i}] ('{list.Name}'): Community");
         }
 
-        // #390: resilience/auto-refresh tunables were taken verbatim — a negative silently
-        // disabled retries or (worse) scheduled a zero-second timer storm. Fail loud.
+        // Resilience/auto-refresh tunables are applied verbatim: a negative value would silently
+        // disable retries or (worse) schedule a zero-second timer storm. Fail loud.
         if (RipeStat is { } ripe)
         {
             if (ripe.TimeoutSeconds < 0)
@@ -263,7 +263,7 @@ public sealed class AppConfig
     /// <summary>
     /// Fail-loud variant of the community format check: the runtime layers (ConfigCommunityResolver,
     /// RouteSeedingService) deliberately never throw and fall back to defaults/untagged, so config
-    /// validation is the only place a malformed community is actually rejected (#327).
+    /// validation is the only place a malformed community is actually rejected.
     /// </summary>
     private void ValidateCommunity(string? community, string field)
     {

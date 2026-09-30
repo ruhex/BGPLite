@@ -4,13 +4,13 @@ using Microsoft.Extensions.Logging;
 namespace BGPLite.Providers;
 
 /// <summary>Loads prefixes from a local CIDR file (Kind = <c>"file"</c>).
-/// Conditional reload (#214): when <paramref name="lastModified"/> matches the file's
+/// Conditional reload: when <paramref name="lastModified"/> matches the file's
 /// <c>LastWriteTimeUtc</c>, returns <see cref="SourceLoadResult.NotModified"/> = true (no re-parse).</summary>
 public sealed class FilePrefixProvider(ILogger<FilePrefixProvider> logger) : IPrefixSourceProvider
 {
     public string Kind => "file";
 
-    /// <summary>File mtime comparison is a zero-cost conditional check (#214).</summary>
+    /// <summary>File mtime comparison is a zero-cost conditional check.</summary>
     public bool SupportsConditionalRequests => true;
 
     public async Task<SourceLoadResult> LoadAsync(
@@ -30,7 +30,7 @@ public sealed class FilePrefixProvider(ILogger<FilePrefixProvider> logger) : IPr
         if (!File.Exists(fullPath))
             throw new FileNotFoundException($"Prefix file not found for source '{source.Name}': {fullPath}", fullPath);
 
-        // #214: conditional check — if the file hasn't been modified since the last load, skip re-parsing.
+        // Conditional check — if the file hasn't been modified since the last load, skip re-parsing.
         var fileMtime = new DateTimeOffset(File.GetLastWriteTimeUtc(fullPath), TimeSpan.Zero);
         if (lastModified is not null && fileMtime == lastModified)
         {
@@ -38,10 +38,10 @@ public sealed class FilePrefixProvider(ILogger<FilePrefixProvider> logger) : IPr
             return SourceLoadResult.NotModifiedResult(lastModified: fileMtime);
         }
 
-        // #321 item 5: async read with the caller's token — the sync ReadAllText held a threadpool
+        // Async read with the caller's token — a sync ReadAllText would hold a threadpool
         // thread under the per-source gate for the whole file. The metadata probes above stay
         // sync: they are single stat calls, not reads.
-        // #487 + #503 review: cap parity with the HTTP paths (HttpPrefixProvider.MaxResponseBytes),
+        // Cap held at parity with the HTTP paths (HttpPrefixProvider.MaxResponseBytes),
         // enforced WHILE reading — a length probe alone races a concurrent writer extending the
         // file between the stat and the read.
         string text;

@@ -19,11 +19,10 @@ public sealed class ConfigCommunityResolver : ICommunityResolver
 {
     private readonly AppConfig _config;
     private readonly ILogger<ConfigCommunityResolver>? _logger;
-    // #159: ConfigCommunityResolver is a DI singleton shared by every BgpSession. Resolve() →
+    // ConfigCommunityResolver is a DI singleton shared by every BgpSession: Resolve() →
     // ParseCached() runs on every SendAllRoutesAsync, so ≥2 concurrently-establishing peers race a
     // plain Dictionary on TryGetValue + indexer-set — torn bucket-chain reads can crash or corrupt.
-    // ConcurrentDictionary + GetOrAdd makes the cache thread-safe; the value factory is pure
-    // (CommunityCodec.Parse is deterministic), so a rare duplicate parse under contention is harmless.
+    // ConcurrentDictionary + GetOrAdd makes the cache thread-safe.
     private readonly ConcurrentDictionary<string, uint[]> _parsed = new();
     private static readonly uint[] Empty = [];
 
@@ -32,7 +31,7 @@ public sealed class ConfigCommunityResolver : ICommunityResolver
     private readonly uint[] _customAsnComms;
     // Local ASN, captured for UserSource auto-generation (<Asn>:5XX).
     private readonly uint _asn;
-    // #85: pre-built name→community lookups (replaces per-Resolve linear FirstOrDefault scans).
+    // Pre-built name→community lookups (replaces per-Resolve linear FirstOrDefault scans).
     private readonly Dictionary<string, string?> _asnListCommunities;
     private readonly Dictionary<string, string?> _prefixSourceCommunities;
 
@@ -49,7 +48,7 @@ public sealed class ConfigCommunityResolver : ICommunityResolver
         _asnListCommunities = (config.RipeStat?.AsnLists ?? [])
             .GroupBy(l => l.Name)
             .ToDictionary(g => g.Key, g => g.Last().Community);
-        // #477: "PrefixSources:" (YAML null) is a documented-valid "no sources" config — treat it
+        // "PrefixSources:" (YAML null) is a documented-valid "no sources" config — treat it
         // as empty instead of crashing DI resolution (same idiom as the AsnLists line above).
         _prefixSourceCommunities = (config.PrefixSources ?? [])
             .ToDictionary(s => s.Name, s => s.Community);
@@ -62,10 +61,11 @@ public sealed class ConfigCommunityResolver : ICommunityResolver
         CommunitySourceKind.PrefixSource => ParseOrDefault(FindPrefixSourceCommunity(source.ListName ?? _config.DefaultPrefixSource)),
         CommunitySourceKind.Custom => _customPrefixComms,
         CommunitySourceKind.CustomAsn => _customAsnComms,
-        // User-supplied URL source (#143/#147): explicit Community overrides; otherwise auto-gen from
-        // the reserved 500-599 range via a deterministic FNV-1a hash of the source name (stable across
-        // restarts). Reuses ResolveStaticCommunity so an invalid explicit value falls back to the
-        // auto-gen default and asn>0xFFFF yields Empty — identical semantics to Custom/CustomAsn.
+        // User-supplied URL source: explicit Community overrides; otherwise auto-generated from
+        // the reserved 500-599 range via a deterministic FNV-1a hash of the source name (stable
+        // across restarts). Reuses ResolveStaticCommunity so an invalid explicit value falls back
+        // to the auto-gen default and asn>0xFFFF yields Empty — identical semantics to
+        // Custom/CustomAsn.
         CommunitySourceKind.UserSource => ResolveStaticCommunity(
             source.Community, _asn, 500 + (int)(StableHash(source.ListName ?? "") % 100), "user-source community"),
         _ => Empty, // Default

@@ -6,10 +6,11 @@ using Microsoft.EntityFrameworkCore;
 namespace BGPLite.Tests;
 
 /// <summary>
-/// Regression coverage for #226 (SetCommunities/SetSubscriptions/SetCustomPrefixes/SetCustomAsns
-/// were non-atomic — delete-then-insert without a transaction, leaving an empty collection on a
-/// mid-mutation failure) and #227 (CreatePeer/UpsertPeer/UpdateSessionStatus used read-then-write,
-/// racing on the composite unique index and throwing DbUpdateException on a concurrent duplicate).
+/// Regression coverage for non-atomic Set* mutations (SetCommunities/SetSubscriptions/
+/// SetCustomPrefixes/SetCustomAsns were delete-then-insert without a transaction, leaving an
+/// empty collection on a mid-mutation failure) and for read-then-write upserts
+/// (CreatePeer/UpsertPeer/UpdateSessionStatus raced on the composite unique index and threw
+/// DbUpdateException on a concurrent duplicate).
 /// Uses a real in-memory SQLite DB so transactions and the unique constraint are actually exercised.
 /// </summary>
 public class PeerStoreAtomicityTests
@@ -36,10 +37,10 @@ public class PeerStoreAtomicityTests
 
     private static async Task<string> SeedPeer(PeerStore store) => await store.CreatePeerAsync(Ip, Asn, "test");
 
-    // ---- #226: Set* atomicity ----
+    // ---- Set* atomicity ----
 
     /// <summary>
-    /// #226: after SetCommunities replaces the set, exactly the new communities are present — the
+    /// After SetCommunities replaces the set, exactly the new communities are present — the
     /// delete+insert pair committed atomically, so there is never an empty-collection window.
     /// </summary>
     [Fact]
@@ -96,7 +97,7 @@ public class PeerStoreAtomicityTests
     }
 
     /// <summary>
-    /// #226: a second replace after the collection was emptied (replace-with-empty) must leave it
+    /// A second replace after the collection was emptied (replace-with-empty) must leave it
     /// empty, then a non-empty replace must populate it again — guards against a regression where
     /// the transaction is dropped and an empty-collection window corrupts the state.
     /// </summary>
@@ -116,7 +117,7 @@ public class PeerStoreAtomicityTests
     }
 
     /// <summary>
-    /// #226 fault-injection: if the INSERT half of the delete+insert fails (here: a duplicate
+    /// Fault injection: if the INSERT half of the delete+insert fails (here: a duplicate
     /// (PeerId, Prefix, PrefixLength) row that violates the composite PK at the SQLite level), the
     /// transaction MUST roll back — the previously-stored prefixes survive. Without the transaction
     /// wrapper the ExecuteDelete would have committed and the peer would be left with an EMPTY
@@ -155,10 +156,10 @@ public class PeerStoreAtomicityTests
         Assert.Equal(["10.0.0.0/24"], await store.GetCustomPrefixesAsync(peerId));
     }
 
-    // ---- #227: atomic upsert ----
+    // ---- atomic upsert ----
 
     /// <summary>
-    /// #227: two distinct (Ip, Asn) peers coexist (composite unique index not violated by the
+    /// Two distinct (Ip, Asn) peers coexist (composite unique index not violated by the
     /// upsert). Guards against the upsert accidentally keying on Ip only.
     /// </summary>
     [Fact]
@@ -175,7 +176,7 @@ public class PeerStoreAtomicityTests
     }
 
     /// <summary>
-    /// #227: UpsertPeer sets Status=active and stamps LastSessionAt, both on a fresh insert and on
+    /// UpsertPeer sets Status=active and stamps LastSessionAt, both on a fresh insert and on
     /// a second call (update path). Called from the BGP connect path — must never throw.
     /// </summary>
     [Fact]
@@ -208,7 +209,7 @@ public class PeerStoreAtomicityTests
     }
 
     /// <summary>
-    /// #227: UpdateSessionStatus(true/false) flips Status and stamps LastSessionAt only on
+    /// UpdateSessionStatus(true/false) flips Status and stamps LastSessionAt only on
     /// activation. A no-op when the peer does not exist (previously read-then-write would NRE on a
     /// concurrently-deleted peer; now the UPDATE matches 0 rows silently).
     /// </summary>
@@ -231,10 +232,10 @@ public class PeerStoreAtomicityTests
         await store.UpdateSessionStatusAsync("203.0.113.99", 99999, active: true);
     }
 
-    // ---- #228: single-roundtrip GetPeerDetail equivalence ----
+    // ---- single-roundtrip GetPeerDetail equivalence ----
 
     /// <summary>
-    /// #228: GetPeerDetail loads the peer and ALL child collections in one DbContext roundtrip and
+    /// GetPeerDetail loads the peer and ALL child collections in one DbContext roundtrip and
     /// returns field shapes identical to the standalone getters it replaces. Drives the equivalence
     /// directly: seed a peer with every collection populated, then assert GetPeerDetail's fields
     /// equal what the standalone GetSubscriptions/GetCustomPrefixes/GetCustomAsns/GetCustomSources/
@@ -293,7 +294,7 @@ public class PeerStoreAtomicityTests
     }
 
     /// <summary>
-    /// #228: GetPeerDetail returns null for a peer that does not exist (preserves the 404 contract
+    /// GetPeerDetail returns null for a peer that does not exist (preserves the 404 contract
     /// of HandleGetPeer / the null-fallback of BuildPeerDetail).
     /// </summary>
     [Fact]

@@ -54,7 +54,7 @@ public class BgpSessionRfc6793Tests
         // RFC 6793 §4.2.3: "If the number of AS numbers in the AS_PATH attribute is less than
         // the number of AS numbers in the AS4_PATH attribute, then the AS4_PATH attribute SHALL
         // be ignored, and the AS_PATH attribute SHALL be taken as the AS path information."
-        // Previously this threw and discarded the route (#245 review finding).
+        // Previously this threw and discarded the route.
         var merged = UpdateCodec.MergeAsPathWithAs4Path([65001u], [200000u, 300000u]);
 
         Assert.Equal([65001u], merged);
@@ -63,7 +63,7 @@ public class BgpSessionRfc6793Tests
     [Fact]
     public void ParseRouteAttributes_HappyPath_ParsesAndMerges()
     {
-        // #270: the inbound pipeline through the public protocol API — 2-byte session with
+        // The inbound pipeline through the public protocol API — 2-byte session with
         // AS4_PATH reconstruction, communities and large communities.
         var update = new BgpUpdateMessage
         {
@@ -88,7 +88,7 @@ public class BgpSessionRfc6793Tests
     }
 
     /// <summary>
-    /// #292 item 1: RFC 4271 §6.3/§6.8 — a semantically invalid NEXT_HOP MUST be rejected with
+    /// RFC 4271 §6.3/§6.8 — a semantically invalid NEXT_HOP MUST be rejected with
     /// subcode 8 (Invalid NEXT_HOP Attribute) and routed through treat-as-withdraw (RFC 7606
     /// §7.3). Previously every one of these was accepted into the route table.
     /// </summary>
@@ -123,7 +123,7 @@ public class BgpSessionRfc6793Tests
     }
 
     /// <summary>
-    /// #306 (RFC 7606 §7.7): a malformed AGGREGATOR takes ATTRIBUTE DISCARD — the attribute is
+    /// RFC 7606 §7.7: a malformed AGGREGATOR takes ATTRIBUTE DISCARD — the attribute is
     /// dropped and the UPDATE's routes stay. Pre-fix this was treat-as-withdraw (D3): a wrong
     /// length (5 bytes on a 2-octet session) withdrew routes a conformant implementation installs.
     /// </summary>
@@ -142,13 +142,13 @@ public class BgpSessionRfc6793Tests
             Nlri = [new IpPrefix(0x0A000000, 24)]
         };
 
-        var attrs = UpdateCodec.ParseRouteAttributes(update, fourByteAsnSession: true);   // RED pre-fix: threw 3/9
+        var attrs = UpdateCodec.ParseRouteAttributes(update, fourByteAsnSession: true);   // pre-fix: threw 3/9
 
         Assert.Equal(0x0A000001u, attrs.NextHop);                    // route data intact
         Assert.Equal([BgpConstants.Attribute.Aggregator], attrs.DiscardedAttributes); // ...with the attribute reported discarded
     }
 
-    /// <summary>RFC 7607 §2 (the half #300 deferred): AS 0 in AGGREGATOR is malformed → discarded, routes kept.</summary>
+    /// <summary>RFC 7607 §2: AS 0 in AGGREGATOR is malformed → discarded, routes kept.</summary>
     [Fact]
     public void ParseRouteAttributes_AsZeroAggregator_Discarded_RouteKept()
     {
@@ -171,7 +171,7 @@ public class BgpSessionRfc6793Tests
     }
 
     /// <summary>
-    /// #306 interplay: a discarded AGGREGATOR must not trip "Missing AGGREGATOR for AS4_AGGREGATOR"
+    /// Attribute-discard interplay: a discarded AGGREGATOR must not trip "Missing AGGREGATOR for AS4_AGGREGATOR"
     /// for an UPDATE that carried one — the consistency check tolerates the discard.
     /// </summary>
     [Fact]
@@ -191,14 +191,14 @@ public class BgpSessionRfc6793Tests
             Nlri = [new IpPrefix(0x0A000000, 24)]
         };
 
-        var attrs = UpdateCodec.ParseRouteAttributes(update, fourByteAsnSession: false);   // RED pre-fix: 3/9 pairing error
+        var attrs = UpdateCodec.ParseRouteAttributes(update, fourByteAsnSession: false);   // pre-fix: 3/9 pairing error
 
         Assert.Contains(BgpConstants.Attribute.Aggregator, attrs.DiscardedAttributes);
-        Assert.DoesNotContain(BgpConstants.Attribute.As4Aggregator, attrs.DiscardedAttributes);   // #377 review: the AS4 side is VALID — not silently discarded too
+        Assert.DoesNotContain(BgpConstants.Attribute.As4Aggregator, attrs.DiscardedAttributes);   // the AS4 side is VALID — not silently discarded too
     }
 
     /// <summary>
-    /// #377 review: a valid AGGREGATOR (AS_TRANS) + malformed AS4_AGGREGATOR must not trip the
+    /// A valid AGGREGATOR (AS_TRANS) + malformed AS4_AGGREGATOR must not trip the
     /// "Missing AS4_AGGREGATOR for AGGREGATOR AS_TRANS" pairing rule — the UPDATE CARRIED an
     /// AS4_AGGREGATOR and it was discarded per RFC 6793 §6; routes stay.
     /// </summary>
@@ -219,7 +219,7 @@ public class BgpSessionRfc6793Tests
             Nlri = [new IpPrefix(0x0A000000, 24)]
         };
 
-        var attrs = UpdateCodec.ParseRouteAttributes(update, fourByteAsnSession: false);   // RED pre-fix: 3/9 pairing error
+        var attrs = UpdateCodec.ParseRouteAttributes(update, fourByteAsnSession: false);   // pre-fix: 3/9 pairing error
 
         Assert.Contains(BgpConstants.Attribute.As4Aggregator, attrs.DiscardedAttributes);
         Assert.Equal(0x0A000001u, attrs.NextHop);
@@ -290,7 +290,7 @@ public class BgpSessionRfc6793Tests
     [Fact]
     public void ParseRouteAttributes_UnrecognizedWellKnownAttribute_ThrowsSubcode2()
     {
-        // RFC 4271 §6.3 / #322: an Optional=0 attribute of an unknown type code must be rejected
+        // RFC 4271 §6.3: an Optional=0 attribute of an unknown type code must be rejected
         // (subcode 2) — routes must not install with unknown well-known semantics attached.
         var update = new BgpUpdateMessage
         {
@@ -336,7 +336,7 @@ public class BgpSessionRfc6793Tests
     [Fact]
     public void ParseRouteAttributes_KnownButUnreadWellKnownAttributes_StillAccepted()
     {
-        // #290 guard for the #322 check: LOCAL_PREF (type 5) and ATOMIC_AGGREGATE (type 6) are
+        // Guard for the unknown-type check: LOCAL_PREF (type 5) and ATOMIC_AGGREGATE (type 6) are
         // well-known attributes this codec never reads — they must not start being rejected.
         var update = new BgpUpdateMessage
         {
@@ -413,7 +413,7 @@ public class BgpSessionRfc6793Tests
         Assert.Equal(BgpConstants.SubError.OptionalAttributeError, ex.SubErrorCode);
     }
 
-    // --- #154: wire-format codec for AGGREGATOR (type 7) and AS4_AGGREGATOR (type 18) ---
+    // --- wire-format codec for AGGREGATOR (type 7) and AS4_AGGREGATOR (type 18) ---
     // The prior code had the lengths inverted (AGGREGATOR accepted 8 bytes on a 4-byte session,
     // AS4_AGGREGATOR expected 4) — every legal value was rejected. These tests pin the RFC 6793 §3
     // wire format so the regression cannot slip back.
@@ -434,9 +434,8 @@ public class BgpSessionRfc6793Tests
     {
         // RFC 6793 §3: "The same applies to the AGGREGATOR attribute -- the same attribute is
         // used between NEW BGP speakers, except that the AS number carried in the attribute is
-        // encoded as a four-octet entity" — 8 octets total on a 4-octet-AS session. The #154
-        // code required 6 bytes unconditionally, rejecting every legal peer AGGREGATOR (#245
-        // review finding).
+        // encoded as a four-octet entity" — 8 octets total on a 4-octet-AS session. The code
+        // required 6 bytes unconditionally, rejecting every legal peer AGGREGATOR.
         var data = new byte[] { 0x00, 0x03, 0x0D, 0x40, 10, 0, 0, 1 }; // AS 200000, IP 10.0.0.1
         var attr = new PathAttribute { Flags = BgpConstants.Attribute.FlagTransitive, TypeCode = BgpConstants.Attribute.Aggregator, Data = data };
 
@@ -461,7 +460,7 @@ public class BgpSessionRfc6793Tests
     public void ReadAs4AggregatorAsn_EightByteForm_ReadsFourOctetAs()
     {
         // RFC 6793 §3: AS4_AGGREGATOR is 8 octets (4 AS + 4 IPv4). The prior code expected exactly
-        // 4 bytes (#31 regression), rejecting every well-formed AS4_AGGREGATOR.
+        // 4 bytes, rejecting every well-formed AS4_AGGREGATOR.
         var data = new byte[] { 0x00, 0x03, 0x0D, 0x40, 10, 0, 0, 1 }; // AS 200000, IP 10.0.0.1
         var attr = new PathAttribute { Flags = BgpConstants.Attribute.FlagTransitive, TypeCode = BgpConstants.Attribute.As4Aggregator, Data = data };
 
@@ -550,7 +549,7 @@ public class BgpSessionRfc6793Tests
     /// unrecognized) appears more than once in an UPDATE message, then all the occurrences of the
     /// attribute other than the first one SHALL be discarded and the UPDATE message will continue
     /// to be processed." The switch in ParseRouteAttributes assigned unconditionally, so the LAST
-    /// occurrence won (#287).
+    /// occurrence won.
     /// </summary>
     [Fact]
     public void ParseRouteAttributes_DuplicateNextHop_FirstOccurrenceWins()
@@ -616,7 +615,7 @@ public class BgpSessionRfc6793Tests
     /// <summary>
     /// A discarded duplicate must not be validated either — RFC 7606 §3 says the later occurrences
     /// are discarded, not "discarded but still checked". A valid first ORIGIN followed by an invalid
-    /// second one is accepted; before #287 the second was read and threw Invalid ORIGIN (subcode 6).
+    /// second one is accepted; previously the second was read and threw Invalid ORIGIN (subcode 6).
     /// </summary>
     [Fact]
     public void ParseRouteAttributes_DuplicateOrigin_SecondIsNotValidated()
@@ -672,7 +671,7 @@ public class BgpSessionRfc6793Tests
         Assert.Equal(BgpConstants.SubError.InvalidOriginAttribute, ex.SubErrorCode);
     }
 
-    // ---- #290: attribute flags vs type code, and fixed lengths ----
+    // ---- attribute flags vs type code, and fixed lengths ----
 
     /// <summary>
     /// Builds a minimal valid announcing UPDATE (ORIGIN + AS_PATH + NEXT_HOP) with
@@ -697,7 +696,7 @@ public class BgpSessionRfc6793Tests
     /// <summary>
     /// RFC 7606 §3: "If the value of either the Optional or Transitive bits in the Attribute Flags
     /// is in conflict with their specified values, then the attribute MUST be treated as malformed
-    /// and the 'treat-as-withdraw' approach used." Nothing checked this before #290.
+    /// and the 'treat-as-withdraw' approach used." Nothing checked this before.
     /// </summary>
     [Theory]
     [InlineData(BgpConstants.Attribute.Origin, (byte)0x80)]          // well-known marked Optional
@@ -754,7 +753,7 @@ public class BgpSessionRfc6793Tests
     /// ...and is NOT validated on a 4-octet session, where the parser ignores those attributes
     /// outright (`case ... when !fourByteAsnSession`). Validating an attribute the codec never
     /// reads would withdraw an UPDATE's routes over something that has no effect on the result —
-    /// the same over-rejection the shape table avoids for MED/LOCAL_PREF/ATOMIC_AGGREGATE (#290 review).
+    /// the same over-rejection the shape table avoids for MED/LOCAL_PREF/ATOMIC_AGGREGATE.
     /// </summary>
     [Theory]
     [InlineData(BgpConstants.Attribute.As4Path, (byte)0x40)]
@@ -828,7 +827,7 @@ public class BgpSessionRfc6793Tests
     /// An unrecognized OPTIONAL attribute is not shape-checked — RFC 7606 §3 leaves those to the
     /// optional/transitive propagation rules. Validating attributes the codec never reads would
     /// only create new ways to reject an UPDATE a conformant implementation accepts. The
-    /// well-known half of an unknown type code is different since #322: Optional=0 now rejects
+    /// well-known half of an unknown type code is different: Optional=0 rejects
     /// with subcode 2 (see <see cref="ParseRouteAttributes_UnrecognizedWellKnownAttribute_ThrowsSubcode2"/>).
     /// </summary>
     [Fact]
@@ -871,7 +870,7 @@ public class BgpSessionRfc6793Tests
     }
 
     /// <summary>
-    /// The interaction between the duplicate rule (#287) and shape validation (#290), which only
+    /// The interaction between the duplicate rule and shape validation, which only
     /// exists once both are in place: the guard runs FIRST, so a discarded later occurrence is never
     /// shape-checked. RFC 7606 §3 says those occurrences are discarded, not "discarded but still
     /// validated" — rejecting on the flags of an attribute that has no effect on the result would

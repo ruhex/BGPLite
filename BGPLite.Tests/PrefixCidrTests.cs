@@ -3,7 +3,7 @@ using BGPLite.Protocol;
 namespace BGPLite.Tests;
 
 /// <summary>
-/// Unit tests for the canonical <see cref="PrefixCidr"/> parser (#236) — the single policy point
+/// Unit tests for the canonical <see cref="PrefixCidr"/> parser — the single policy point
 /// shared by the file source (<c>PrefixListParser</c>), the management API (<c>ParseCustomPrefix</c>),
 /// and the BGP send path (<c>RouteAssembler</c>). Covers host-bit masking, the <c>/0</c> default-route
 /// rejection (route-leak defense), the length range, IPv4-only, and the <c>allowDefault</c> escape hatch.
@@ -25,7 +25,7 @@ public class PrefixCidrTests
     }
 
     /// <summary>
-    /// #236: host bits are masked to the network address. <c>10.0.0.5/24</c> normalizes to
+    /// Host bits are masked to the network address. <c>10.0.0.5/24</c> normalizes to
     /// <c>10.0.0.0/24</c> — the canonical form the route table, aggregator, and duplicate-NLRI merger
     /// key on. Without masking the same network submitted two ways is stored as two distinct keys.
     /// </summary>
@@ -43,7 +43,7 @@ public class PrefixCidrTests
     // ---- /0 default-route handling ----
 
     /// <summary>
-    /// #236: <c>/0</c> (the default route) is REJECTED by default — a route server must not originate
+    /// <c>/0</c> (the default route) is REJECTED by default — a route server must not originate
     /// a default from a user-supplied source (file / API / peer URL). This is the route-leak defense
     /// that the old API parser (<c>ParseCustomPrefix</c>) lacked.
     /// </summary>
@@ -152,7 +152,7 @@ public class PrefixCidrTests
         Assert.Equal(0u, prefix);
         Assert.Equal((byte)0, length);
     }
-    // ---- #14 phase 4: family-aware parse (IPv6) ----
+    // ---- family-aware parse (IPv6) ----
 
     [Fact]
     public void TryParse_Ipv6_AcceptsAndMasks()

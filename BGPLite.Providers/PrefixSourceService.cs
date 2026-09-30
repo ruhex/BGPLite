@@ -10,7 +10,7 @@ namespace BGPLite.Providers;
 /// keeping results in an in-memory TTL cache. Per-source failures fall back to a stale cached
 /// copy (if any) or a short-lived negative entry, never breaking startup. The source named by
 /// <see cref="AppConfig.DefaultPrefixSource"/> is exposed as the RU/default set.
-/// <para>#214: stores ETag/Last-Modified per source for conditional re-fetches (304 Not Modified).</para>
+/// <para>Stores ETag/Last-Modified per source for conditional re-fetches (304 Not Modified).</para>
 /// </summary>
 public sealed class PrefixSourceService : IPrefixSourceService
 {
@@ -20,21 +20,21 @@ public sealed class PrefixSourceService : IPrefixSourceService
     private readonly TimeSpan _cacheTtl;
     private readonly TimeSpan _negativeTtl;
     private readonly TimeProvider _timeProvider;
-    // #214 convergence: invoked whenever a load detects an actual content change, regardless of which
+    // Convergence: invoked whenever a load detects an actual content change, regardless of which
     // entry point triggered the load (connect-path GetAsync vs. auto-refresh RefreshAsync). Without this,
     // a connect-path load that silently updated the cache would mask the change from a subsequent
     // RefreshAsync (which would see already-new data and report unchanged) — leaving established peers
     // on stale routes. The callback is wired in Program.cs to ISessionManager.RefreshAllEstablishedAsync.
     private readonly Func<string, Task>? _onSourceChanged;
-    // #452: fired on EVERY committed content change (including RefreshAsync, which never fires
+    // Fired on EVERY committed content change (including RefreshAsync, which never fires
     // _onSourceChanged). The RU projection's cache-layer consumer (PrefixService) subscribes to
     // invalidate its projection so the next rebuild re-projects from the committed content.
     public event Action<string>? ContentCommitted;
-    // #85: pre-built name→source lookup (replaces per-call FirstOrDefault linear scan).
+    // Pre-built name→source lookup (replaces per-call FirstOrDefault linear scan).
     private readonly Dictionary<string, PrefixSourceConfig> _sourcesByName;
 
     // Name → (prefix list, cached at, is negative, ETag, LastModified). Negative entries use _negativeTtl.
-    // #214: ETag/LastModified enable conditional re-fetches (If-None-Match / If-Modified-Since → 304).
+    // ETag/LastModified enable conditional re-fetches (If-None-Match / If-Modified-Since → 304).
     private readonly ConcurrentDictionary<string, CacheEntry> _cache = new();
     // Name → gate serializing the cache-miss fetch path (prevents thundering-herd on cold/expired keys).
     private readonly ConcurrentDictionary<string, SemaphoreSlim> _locks = new();
@@ -48,7 +48,7 @@ public sealed class PrefixSourceService : IPrefixSourceService
         TimeProvider? timeProvider = null,
         Func<string, Task>? onSourceChanged = null)
     {
-        // #477: "PrefixSources:" (YAML null) is a documented-valid "no sources" config.
+        // "PrefixSources:" (YAML null) is a documented-valid "no sources" config.
         var duplicate = (config.PrefixSources ?? [])
             .GroupBy(s => s.Name)
             .FirstOrDefault(g => g.Count() > 1);
@@ -75,7 +75,7 @@ public sealed class PrefixSourceService : IPrefixSourceService
         }
 
         try { return (await LoadCachedAsync(source, ct)).Prefixes; }
-        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }  // #324: only CALLER cancellation — the #324 default fetch budget fires as a foreign-token OCE (live ct) and must stay a per-source failure below
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }  // only CALLER cancellation propagates — a foreign-token OCE (the fetch budget firing on a live ct) must stay a per-source failure below
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Failed to load prefix source '{Name}'.", name);
@@ -85,7 +85,7 @@ public sealed class PrefixSourceService : IPrefixSourceService
 
     /// <inheritdoc cref="IPrefixSourceService.LoadDefaultAsync" />
     /// <remarks>
-    /// Deliberately different from <see cref="GetAsync"/> in two ways (#416/#417): the
+    /// Deliberately different from <see cref="GetAsync"/> in two ways: the
     /// <c>onSourceChanged</c> callback is NOT fired (the caller owns the push, off its own locks),
     /// and failures PROPAGATE instead of collapsing to <c>[]</c> — the RU caller
     /// (<c>PrefixService.GetRuPrefixesAsync</c>) has stale-on-failure handling that a swallowed
@@ -105,7 +105,7 @@ public sealed class PrefixSourceService : IPrefixSourceService
 
         var (prefixes, changed) = await LoadCachedAsync(source, ct, triggerCallback: false);
 
-        // #417: an empty result served from a fresh NEGATIVE entry is failure backoff, not
+        // An empty result served from a fresh NEGATIVE entry is failure backoff, not
         // content. The negative entry is only ever written by the failure path above, so a
         // negative hit means "the last real load failed" — surface it as a failure so the RU
         // caller stale-serves (or throws) instead of positively caching an empty set for the full
@@ -127,7 +127,7 @@ public sealed class PrefixSourceService : IPrefixSourceService
         {
             IReadOnlyList<IpPrefix> prefixes;
             try { prefixes = (await LoadCachedAsync(source, ct)).Prefixes; }
-            catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }  // #324: only CALLER cancellation — the #324 default fetch budget fires as a foreign-token OCE (live ct) and must stay a per-source failure below
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }  // only CALLER cancellation propagates — a foreign-token OCE (the fetch budget firing on a live ct) must stay a per-source failure below
             catch (Exception ex)
             {
                 _logger.LogWarning(ex, "Failed to load prefix source '{Name}' ({Kind}).", source.Name, source.Kind);
@@ -145,7 +145,7 @@ public sealed class PrefixSourceService : IPrefixSourceService
     }
 
     /// <summary>
-    /// #214: Force-refresh a single source, bypassing the TTL. Returns whether the content actually
+    /// Force-refresh a single source, bypassing the TTL. Returns whether the content actually
     /// changed. Used by the auto-refresh timer, which polls each source on its own interval (jittered
     /// between sources) — so the timer owns timing AND the peer push (LoopAsync aggregates all changed
     /// sources into ONE RefreshAllEstablishedAsync call), this method owns only the atomic load+compare.
@@ -165,7 +165,7 @@ public sealed class PrefixSourceService : IPrefixSourceService
             var (_, changed) = await LoadCachedAsync(source, ct, forceRefresh: true, triggerCallback: false);
             return changed;
         }
-        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }  // #324: only CALLER cancellation — the #324 default fetch budget fires as a foreign-token OCE (live ct) and must stay a per-source failure below
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }  // only CALLER cancellation propagates — a foreign-token OCE (the fetch budget firing on a live ct) must stay a per-source failure below
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Auto-refresh: failed to reload source '{Name}'.", source.Name);
@@ -174,7 +174,7 @@ public sealed class PrefixSourceService : IPrefixSourceService
     }
 
     /// <summary>
-    /// #214: Whether the source supports conditional requests (ETag/Last-Modified). The auto-refresh
+    /// Whether the source supports conditional requests (ETag/Last-Modified). The auto-refresh
     /// timer uses this to pick the poll interval: conditional sources poll at <c>IntervalSeconds</c>
     /// (304s are cheap), non-conditional at the longer <c>NoEtagIntervalSeconds</c>.
     /// </summary>
@@ -188,7 +188,7 @@ public sealed class PrefixSourceService : IPrefixSourceService
 
     /// <summary>
     /// Loads <paramref name="source"/> through the cache, returning the prefix list plus whether the
-    /// content actually changed on this load (#214). <paramref name="forceRefresh"/> bypasses the TTL
+    /// content actually changed on this load. <paramref name="forceRefresh"/> bypasses the TTL
     /// (used by the auto-refresh timer). <c>Changed</c> is computed INSIDE the per-source gate —
     /// atomically with the cache write — so a concurrent <c>GetAsync</c> cannot insert a newer list
     /// between the before/after snapshots (the prior TOCTOU that masked real changes). When a change
@@ -210,7 +210,7 @@ public sealed class PrefixSourceService : IPrefixSourceService
             if (!forceRefresh && TryGetFresh(source.Name, out var rechecked))
                 return (rechecked, Changed: false);
 
-            // #214: read stale validators for conditional request.
+            // Read stale validators for the conditional request.
             string? etag = null;
             DateTimeOffset? lastModified = null;
             if (_cache.TryGetValue(source.Name, out var stale) && !stale.Negative)
@@ -225,7 +225,7 @@ public sealed class PrefixSourceService : IPrefixSourceService
                 var provider = _factory.Get(source.Kind);
                 result = await provider.LoadAsync(source, etag, lastModified, ct);
             }
-            catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }  // #324: only CALLER cancellation — the #324 default fetch budget fires as a foreign-token OCE (live ct) and must stay a per-source failure below
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }  // only CALLER cancellation propagates — a foreign-token OCE (the fetch budget firing on a live ct) must stay a per-source failure below
             catch
             {
                 if (_cache.TryGetValue(source.Name, out var staleCopy) && !staleCopy.Negative)
@@ -239,7 +239,7 @@ public sealed class PrefixSourceService : IPrefixSourceService
                 throw;
             }
 
-            // #214: 304 Not Modified — keep existing data, just refresh the timestamp + validators.
+            // 304 Not Modified — keep existing data, just refresh the timestamp + validators.
             if (result.NotModified)
             {
                 if (_cache.TryGetValue(source.Name, out var existing) && !existing.Negative)
@@ -264,8 +264,8 @@ public sealed class PrefixSourceService : IPrefixSourceService
             // be safe under the gate — only this task holds the gate, so `stale` is still authoritative).
             // Order-INDEPENDENT comparison: RIPEstat (and some HTTP sources) may return the same prefix
             // set in a different order between requests — a SequenceEqual there would report a phantom
-            // change and trigger an unnecessary BGP re-announcement (#214: "no unnecessary BGP churn",
-            // AsnPrefixProvider docs describe the design as content-based, not positional).
+            // change and trigger an unnecessary BGP re-announcement (the design is content-based,
+            // not positional; see SamePrefixes and AsnPrefixProvider).
             var previousList = (stale is not null && !stale.Negative) ? stale.List : null;
             changed = previousList is null || !SamePrefixes(previousList, result.Prefixes);
             _cache[source.Name] = new CacheEntry(result.Prefixes, now, false, result.ETag, result.LastModified);
@@ -276,12 +276,12 @@ public sealed class PrefixSourceService : IPrefixSourceService
             gate.Release();
         }
 
-        // #214 convergence: fire the change callback AFTER releasing the gate, so a connect-path load
+        // Convergence: fire the change callback AFTER releasing the gate, so a connect-path load
         // (GetAsync) that updates the cache also notifies established peers — not just the auto-refresh
         // path. Without this, established peers stay on stale routes until the source changes AGAIN.
         // Skipped from RefreshAsync (triggerCallback=false): the auto-refresh timer aggregates all
         // changed sources into ONE peer push in LoopAsync, so firing the callback here would double-push.
-        // #452: the ContentCommitted event fires on BOTH paths (it is the cache-invalidation signal,
+        // ContentCommitted fires on BOTH paths (it is the cache-invalidation signal,
         // not the push) — otherwise a RefreshAsync-committed change left the RU projection stale for
         // its full TTL. Fired before _onSourceChanged so the projection is already invalidated when
         // the push-triggered rebuilds start reading it.
@@ -301,7 +301,7 @@ public sealed class PrefixSourceService : IPrefixSourceService
     }
 
     /// <summary>
-    /// Order-independent prefix-list equality (#214): two lists represent the same route set if they
+    /// Order-independent prefix-list equality: two lists represent the same route set if they
     /// contain the same (Prefix, Length) tuples regardless of order. RIPEstat and some HTTP sources
     /// do not guarantee a stable ordering across requests — a positional SequenceEqual there would
     /// report a phantom change and trigger an unnecessary BGP re-announcement. Sorting both lists
@@ -337,7 +337,7 @@ public sealed class PrefixSourceService : IPrefixSourceService
         return false;
     }
 
-    /// <summary>#214: Cache entry with ETag/Last-Modified for conditional re-fetches.</summary>
+    /// <summary>Cache entry with ETag/Last-Modified for conditional re-fetches.</summary>
     private sealed record CacheEntry(
         IReadOnlyList<IpPrefix> List,
         DateTime CachedAt,

@@ -9,8 +9,8 @@ using BGPLite.Contracts;
 namespace BGPLite.Tests;
 
 /// <summary>
-/// Proof-of-concept deterministic tests for the <c>IBgpConnection</c> + <c>TimeProvider</c> seam
-/// (#96). These exercise the BGP session's hold-timer expiry path without a real loopback socket
+/// Proof-of-concept deterministic tests for the <c>IBgpConnection</c> + <c>TimeProvider</c> seam.
+/// These exercise the BGP session's hold-timer expiry path without a real loopback socket
 /// and without waiting on wall-clock time — the patterns the 14 socket-driven tests in
 /// <c>BgpSessionShutdownTests</c> cannot use.
 /// <para>
@@ -46,8 +46,8 @@ public class BgpSessionHoldTimerTests
         // EOF signal for IsPeerClosed: the channel writer completed and nothing is left in the
         // running read buffer — equivalent to the kernel having delivered the FIN.
         // _finReceived: a FIN has "arrived at the kernel" (IsPeerClosed reports true) WITHOUT the
-        // channel writer being completed. This lets a test reproduce the EOF↔cancel race (#217,
-        // dotnet/runtime #16025): the pending reader stays blocked until the token is cancelled,
+        // channel writer being completed. This lets a test reproduce the EOF↔cancel race
+        // (a dotnet/runtime issue): the pending reader stays blocked until the token is cancelled,
         // then throws OperationCanceledException — exactly the non-deterministic .NET timing where
         // cancel can win over an already-arrived FIN. Channel otherwise resolves completion
         // synchronously and this path can't be exercised.
@@ -89,7 +89,7 @@ public class BgpSessionHoldTimerTests
 
         public ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken cancellationToken)
         {
-            // #341 test seam: an optional write gate. When set, every WriteAsync signals entry and
+            // Test seam: an optional write gate. When set, every WriteAsync signals entry and
             // parks on the gate — a slow peer (TCP zero window) that accepts nothing, holding the
             // session's _sendLock from inside the blocked write.
             if (_writeGate is { } gate)
@@ -136,7 +136,7 @@ public class BgpSessionHoldTimerTests
         }
     }
 
-    /// <summary>A minimal <see cref="ILogger{TCategoryName}"/> that records entries for assertions (#216).</summary>
+    /// <summary>A minimal <see cref="ILogger{TCategoryName}"/> that records entries for assertions.</summary>
     private sealed class CapturingLogger<T> : ILogger<T>
     {
         // Retain the Exception? alongside level/message so Debug stack-trace logging is assertable.
@@ -255,8 +255,8 @@ public class BgpSessionHoldTimerTests
     }
 
     /// <summary>
-    /// #286: a peer that sends a well-formed OPEN and then goes silent must NOT pin the session.
-    /// OpenTimeoutSeconds (#115) bounds only the read that receives the OPEN; the KEEPALIVE read
+    /// a peer that sends a well-formed OPEN and then goes silent must NOT pin the session.
+    /// OpenTimeoutSeconds bounds only the read that receives the OPEN; the KEEPALIVE read
     /// that follows was unbounded, and the keepalive/hold loop does not start until
     /// RunEstablishedAsync — so the session sat in OpenConfirm forever, holding a socket FD and a
     /// task. RFC 4271 §8.2.2 runs the Hold Timer in OpenConfirm; on expiry it must send
@@ -323,7 +323,7 @@ public class BgpSessionHoldTimerTests
     }
 
     /// <summary>
-    /// #286, hold time 0: RFC 4271 §4.2 disables the Hold Timer at 0, but that is a rule for an
+    /// hold time 0: RFC 4271 §4.2 disables the Hold Timer at 0, but that is a rule for an
     /// ESTABLISHED session. A handshake that never completes must still be bounded, so OpenConfirm
     /// falls back to the §8.2.2 initial Hold Time (4 minutes) rather than waiting forever.
     /// </summary>
@@ -434,7 +434,7 @@ public class BgpSessionHoldTimerTests
     }
 
     /// <summary>
-    /// #216: a peer that closes the TCP connection before sending OPEN produces an explicit
+    /// a peer that closes the TCP connection before sending OPEN produces an explicit
     /// "closed the TCP connection before sending OPEN" Warning — NOT the generic "Session error"
     /// Error + stack trace. FakeBgpConnection.Complete() makes the read return EOF (throws
     /// IOException "Connection closed by peer"), exactly mirroring SocketBgpConnection.ReadExactAsync.
@@ -486,7 +486,7 @@ public class BgpSessionHoldTimerTests
     }
 
     /// <summary>
-    /// #216: a peer that closes the TCP connection mid-session (in Established) produces the explicit
+    /// a peer that closes the TCP connection mid-session (in Established) produces the explicit
     /// "closed the TCP connection during Established" Warning + a Debug stack-trace entry — NOT the
     /// generic "read loop faulted" Warning with a stack trace. Establishes the session via
     /// EstablishAsync, then Complete()s the connection to drive the read-loop EOF.
@@ -531,10 +531,10 @@ public class BgpSessionHoldTimerTests
     }
 
     /// <summary>
-    /// #217 regression: the EOF↔cancel race in Established. The peer closed the TCP connection
+    /// the EOF↔cancel race in Established. The peer closed the TCP connection
     /// (FIN delivered to the kernel), but .NET surfaced OperationCanceledException instead of
     /// IOException because the hold-timer-expiry cancellation raced ahead of the FIN completion
-    /// (dotnet/runtime #16025, non-deterministic in production). Without the transport probe,
+    /// (a dotnet/runtime issue, non-deterministic in production). Without the transport probe,
     /// read-loop's <c>catch (OperationCanceledException)</c> would swallow this without the
     /// explicit Established-phase diagnostic — the operator would see only "Hold timer expired",
     /// not "peer closed the TCP connection during Established".
@@ -598,7 +598,7 @@ public class BgpSessionHoldTimerTests
     }
 
     /// <summary>
-    /// #217 regression: HoldTime=0 (RFC 4271 §4.2/§6.5 — KEEPALIVE/Hold-Timer disabled) routes
+    /// HoldTime=0 (RFC 4271 §4.2/§6.5 — KEEPALIVE/Hold-Timer disabled) routes
     /// <c>ReadLoopAsync</c> directly through <c>RunEstablishedAsync</c> WITHOUT
     /// <c>AwaitLoopTaskAsync</c>. A re-thrown IOException would propagate to <c>RunAsync</c>'s
     /// <c>catch(IOException)</c> and log a SECOND, generic "in state Established" line — duplicating
@@ -644,7 +644,7 @@ public class BgpSessionHoldTimerTests
     }
 
     /// <summary>
-    /// #265 item 3: in Established only UPDATE/KEEPALIVE/NOTIFICATION/ROUTE_REFRESH are legal
+    /// in Established only UPDATE/KEEPALIVE/NOTIFICATION/ROUTE_REFRESH are legal
     /// inputs (RFC 4271 FSM) — an unexpected message type (e.g. a second OPEN) is an FSM error:
     /// NOTIFICATION 5/0, teardown, Idle. Previously the message was silently swallowed and the
     /// session limped on in an undefined state.
@@ -679,7 +679,7 @@ public class BgpSessionHoldTimerTests
         }));
 
         var completed = await Task.WhenAny(runTask, Task.Delay(TimeSpan.FromSeconds(5)));
-        Assert.Same(runTask, completed);   // RED pre-fix: the OPEN is swallowed, the session keeps running
+        Assert.Same(runTask, completed);   // pre-fix: the OPEN is swallowed, the session keeps running
 
         var notifs = conn.Sent.Skip(sentBefore)
             .Select(b => BgpMessageReader.ReadMessage(b.AsSpan()))
@@ -692,7 +692,7 @@ public class BgpSessionHoldTimerTests
     }
 
     /// <summary>
-    /// #377 review: the 75% warning threshold must not overflow — cap*3 in int arithmetic wraps
+    /// the 75% warning threshold must not overflow — cap*3 in int arithmetic wraps
     /// for large caps and can arm the warning at a wrong (even tiny) count.
     /// </summary>
     [Theory]
@@ -706,8 +706,8 @@ public class BgpSessionHoldTimerTests
         => Assert.Equal(expected, BgpSession.MaxPrefixWarningThreshold(cap));
 
     /// <summary>
-    /// #341: a blocked writer (a refresh send parked inside WriteAsync — the slow-peer holder of
-    /// the issue) holds <c>_sendLock</c>; the next keepalive tick queues on the semaphore with NO
+    /// a blocked writer (a refresh send parked inside WriteAsync — the slow-peer holder)
+    /// holds <c>_sendLock</c>; the next keepalive tick queues on the semaphore with NO
     /// token of its own; <c>Dispose</c> cancels <c>_cts</c> and then disposes the semaphore.
     /// <c>SemaphoreSlim.Dispose</c> never wakes queued waiters, so pre-fix the keepalive waiter —
     /// and with it <c>RunAsync</c> — hung forever. The lock WAIT must be bounded by the session's
@@ -749,7 +749,7 @@ public class BgpSessionHoldTimerTests
         var refreshTask = Task.Run(() => session.RefreshRoutesAsync());
         await conn.WriteEntered.WaitAsync(TimeSpan.FromSeconds(5));
 
-        // Keepalive ticks queue on _sendLock — the #341 waiter (no token of its own). Two
+        // Keepalive ticks queue on _sendLock — the parked waiter (no token of its own). Two
         // interval-steps with real-time pauses between them guarantee the tick fires (a single
         // Advance can land exactly on the timer's due instant) and the send attempt parks.
         for (var i = 0; i < 2; i++)
@@ -763,7 +763,7 @@ public class BgpSessionHoldTimerTests
         session.Dispose();
 
         var completed = await Task.WhenAny(runTask, Task.Delay(TimeSpan.FromSeconds(5)));
-        Assert.Same(runTask, completed); // RED pre-fix: the 5s timeout elapses instead
+        Assert.Same(runTask, completed); // pre-fix: the 5s timeout elapses instead
 
         // Cleanup: release the holder — its Release() on the disposed semaphore is swallowed by
         // SendMessageAsync's finally, and the refresh unwinds as a best-effort failure.

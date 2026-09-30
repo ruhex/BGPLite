@@ -10,7 +10,7 @@ public class ConfigurationTests
     [InlineData("---")]
     public void LoadFromText_EmptyDocument_ThrowsClearError(string yaml)
     {
-        // #321 item 6: YamlDotNet deserializes an empty/whitespace document to null — previously
+        // YamlDotNet deserializes an empty/whitespace document to null — previously
         // that surfaced as an opaque NRE at the first config use instead of a clear message.
         var ex = Assert.Throws<InvalidOperationException>(() => ConfigLoader.LoadFromText(yaml));
         Assert.Contains("empty", ex.Message);
@@ -19,7 +19,7 @@ public class ConfigurationTests
     [Fact]
     public void LoadFromText_UnknownKey_Throws()
     {
-        // #102: strict YAML — unknown/typo'd keys must fail-loud at deserialization (not silently
+        // Strict YAML — unknown/typo'd keys must fail-loud at deserialization (not silently
         // ignored). Operator gets a clear "(Lin: N): Property 'X' not found" pointing to the typo.
         var yaml = """
             Bgp:

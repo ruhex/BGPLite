@@ -5,7 +5,7 @@ namespace BGPLite.Routing;
 
 /// <summary>
 /// The shared route table. Each entry records which session installed it, so a withdrawal can be a
-/// compare-and-remove against the current owner rather than a delete by prefix (#289).
+/// compare-and-remove against the current owner rather than a delete by prefix.
 /// <para>
 /// This is a minimal stand-in for the per-peer Adj-RIBs-In of RFC 4271 §3.2, not a replacement for
 /// them: there is still one table and one entry per prefix, so a later announcement for a prefix
@@ -18,11 +18,12 @@ public sealed class RouteTable
 {
     private readonly ConcurrentDictionary<(UInt128 Prefix, byte Length, bool IsIpv4), Entry> _routes = new();
 
-    // #343: maintained count — every successful mutation adjusts it exactly once (1:1 with the
-    // dictionary transition), so Count is an O(1) Volatile.Read instead of ConcurrentDictionary.Count,
-    // which acquires ALL lock strips. That read ran twice per inbound UPDATE on the session read
-    // loops, racing every writer. Transiently approximate only within a concurrent-mutation window
-    // (adjust happens after the dictionary op); exact whenever no mutation is in flight.
+    // Maintained count — every successful mutation adjusts it exactly once (1:1 with the
+    // dictionary transition), so Count is an O(1) Volatile.Read instead of
+    // ConcurrentDictionary.Count, which acquires ALL lock strips. Count is read on the inbound
+    // UPDATE path (SetRouteCount), where that acquisition would race every writer. Approximate
+    // only within a concurrent-mutation window (the adjust happens after the dictionary op);
+    // exact when quiescent.
     private int _count;
 
     /// <summary>
@@ -32,7 +33,7 @@ public sealed class RouteTable
     /// </summary>
     private readonly record struct Entry(Route Route, object? Owner);
 
-    /// <summary>Current number of routes — O(1) via the maintained counter (#343). Transiently
+    /// <summary>Current number of routes — O(1) via the maintained counter. Transiently
     /// approximate under concurrent mutation; exact when quiescent.</summary>
     public int Count => Volatile.Read(ref _count);
 
@@ -46,18 +47,17 @@ public sealed class RouteTable
     /// </summary>
     public bool AddOrUpdate(Route route, object? owner)
     {
-        // #85: avoid ConcurrentDictionary.AddOrUpdate's closure allocations (two delegate lambdas
-        // per call). The try-pattern is allocation-free and equivalent: TryAdd for the new-key
-        // case, TryUpdate for the replace case.
-        // #346 (CodeRabbit review): a plain indexer for the replace case is NOT count-safe —
-        // TryAdd returning false does not guarantee the key still exists by the write; a
-        // concurrent remove in that window let the indexer re-insert the entry without
-        // incrementing _count, drifting it permanently (negative after enough removals). The CAS
-        // pair keeps the 1:1 transition invariant: TryAdd wins the new-key transition (+1);
-        // TryGetValue+TryUpdate wins a true replace (±0) — TryUpdate succeeds only against the
-        // value just read, so a key that vanished (or was replaced) in between loops back to
-        // TryAdd, which then increments. Entry's record-struct value equality is fine here:
-        // TryUpdate success merely proves the key was present, which is all ±0 needs.
+        // Avoid ConcurrentDictionary.AddOrUpdate's closure allocations (two delegate lambdas per
+        // call): the try-pattern is allocation-free and equivalent — TryAdd for a new key,
+        // TryUpdate for a replace. The replace case must NOT be a plain indexer: TryAdd returning
+        // false does not guarantee the key still exists by the write, so a concurrent remove in
+        // that window would re-insert the entry without incrementing _count and drift it
+        // permanently (negative after enough removals). The CAS pair keeps the 1:1
+        // dictionary-transition ↔ count invariant: TryAdd wins the new-key transition (+1);
+        // TryGetValue+TryUpdate wins a true replace (±0), and TryUpdate succeeds only against the
+        // value just read — a key that vanished (or was replaced) in between loops back to TryAdd,
+        // which then increments. Entry's record-struct value equality is fine here: TryUpdate
+        // success merely proves the key was present, which is all ±0 needs.
         var entry = new Entry(route, owner);
         while (true)
         {
@@ -69,8 +69,8 @@ public sealed class RouteTable
             if (_routes.TryGetValue(route.Key, out var existing) &&
                 _routes.TryUpdate(route.Key, entry, existing))
             {
-                // #377 review: ownership transferred — the PREVIOUS owner's session bookkeeping
-                // (e.g. the #304 per-peer prefix set) must learn it no longer holds this key,
+                // Ownership transferred — the PREVIOUS owner's session bookkeeping
+                // (e.g. its per-peer prefix set) must learn it no longer holds this key,
                 // or its count drifts upward on overlaps and can trip the cap it no longer owns.
                 // Raised AFTER the swap wins; a stale previous-owner read only means a late
                 // notification, which the remove-if-present handlers tolerate.
@@ -83,7 +83,7 @@ public sealed class RouteTable
 
     /// <summary>
     /// Fired (on the replacing caller's thread) after an <see cref="AddOrUpdate"/> swap takes a
-    /// key away from a previous owner (#377 review). Subscribers must tolerate invocation from
+    /// key away from a previous owner. Subscribers must tolerate invocation from
     /// any thread and duplicate/late notifications — treat it as "you MIGHT have lost this key".
     /// </summary>
     public event Action<object, (UInt128 Prefix, byte Length, bool IsIpv4)>? EntryOwnershipLost;
@@ -136,11 +136,11 @@ public sealed class RouteTable
     /// session-close counterpart to <see cref="RemoveOwnedBy"/>. RFC 4271 §8.2.2 has a speaker
     /// "delete all routes associated with this connection" on every transition out of Established,
     /// and without it a peer's announcements outlived its session forever: nothing else in the
-    /// server removes an entry, so a peer could reconnect and add another batch indefinitely (#313).
+    /// server removes an entry, so a peer could reconnect and add another batch indefinitely.
     /// <para>
     /// Each removal is the same atomic compare-and-remove <see cref="RemoveOwnedBy"/> performs, so
     /// an entry another peer has taken over between the scan and the delete stays put — the losing
-    /// session must not delete the winner's route, exactly as in #289. Enumerating a
+    /// session must not delete the winner's route. Enumerating a
     /// <see cref="ConcurrentDictionary{TKey,TValue}"/> while removing from it is safe and defined:
     /// the enumerator is a moment-in-time view, not a snapshot, and never throws for concurrent
     /// modification.
@@ -152,7 +152,7 @@ public sealed class RouteTable
     }
 
     /// <summary>
-    /// #467: family-scoped variant — removes every entry still owned by <paramref name="owner"/>
+    /// Family-scoped variant — removes every entry still owned by <paramref name="owner"/>
     /// in ONE address family and returns how many went (the RFC 7606 §3(j) "AFI/SAFI disable"
     /// withdrawal). Each removal is the same atomic compare-and-remove as the full scan, so an
     /// entry another peer has taken over between the scan and the delete stays put.
@@ -176,23 +176,18 @@ public sealed class RouteTable
         return removed;
     }
 
-    /// <summary>Removes every entry owned by <paramref name="owner"/> (session teardown) —
-    /// counts the removals for the maintained counter.</summary>
-    /// <inheritdoc/>
-
-
     public Route? Get(UInt128 prefix, byte length, bool isIpv4 = true) =>
         _routes.TryGetValue((prefix, length, isIpv4), out var entry) ? entry.Route : null;
 
     /// <summary>
-    /// Longest-prefix-match lookup (#14 phase 3): the stored route whose network most
+    /// Longest-prefix-match lookup: the stored route whose network most
     /// specifically contains <paramref name="address"/>, or null. Probes candidate prefix
     /// lengths from the family maximum down to /0 — at most 33 (IPv4) / 129 (IPv6) dictionary
     /// lookups — and is family-scoped: an IPv6 address never matches an IPv4 entry and vice
     /// versa (the family is part of the key). Read-only: it never installs or replaces anything,
     /// unlike <see cref="AddOrUpdate"/>. There is no per-packet consumer today (a route server
-    /// does not forward); this is the lookup the epic's routing layer requires for /0..128
-    /// coverage checks and policy decisions.
+    /// does not forward); it is the lookup needed for /0..128 coverage checks and policy
+    /// decisions.
     /// </summary>
     public Route? GetLongestPrefixMatch(UInt128 address, bool isIpv4 = true)
     {
@@ -207,7 +202,7 @@ public sealed class RouteTable
 
     public IReadOnlyList<Route> GetAll()
     {
-        // #346: clamp the capacity hint — a hint must never turn a hypothetical negative count
+        // Clamp the capacity hint — a hint must never turn a hypothetical negative count
         // into List<Route>(negative) throwing ArgumentOutOfRangeException on the API read path.
         var routes = new List<Route>(Math.Max(0, Count));
         foreach (var entry in _routes.Values)
@@ -230,7 +225,7 @@ public sealed class RouteTable
     /// This is the advertise-side counterpart to <see cref="RemoveOwnedBy"/>: the owner tag exists so
     /// a peer can neither remove what it does not own nor have what it injected handed to somebody
     /// else. Used by <c>RouteAssembler</c>'s shared-table fallback, which would otherwise re-advertise
-    /// one peer's inbound announcements to every other peer (#307).
+    /// one peer's inbound announcements to every other peer.
     /// </para>
     /// </summary>
     public IEnumerable<Route> EnumerateUnowned()
@@ -246,7 +241,7 @@ public sealed class RouteTable
     {
         // TryRemove loop rather than _routes.Clear(): each successful removal decrements the
         // maintained counter, keeping the 1:1 mutation↔transition invariant even when a writer
-        // adds concurrently with the clear (#343).
+        // adds concurrently with the clear.
         foreach (var key in _routes.Keys)
             if (_routes.TryRemove(key, out _))
                 Interlocked.Decrement(ref _count);

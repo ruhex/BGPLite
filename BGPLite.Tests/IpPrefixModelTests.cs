@@ -4,10 +4,10 @@ using BGPLite.Protocol;
 namespace BGPLite.Tests;
 
 /// <summary>
-/// #15 phase 1: the family-aware 128-bit address model. IPv4 lives in the low 32 bits
+/// The family-aware 128-bit address model. IPv4 lives in the low 32 bits
 /// (IsIpv4), IPv6 in the full UInt128; the constructor masks host bits; ToString renders
 /// RFC 5952 for IPv6; Afi.IPv6 = 2 and the 128-bit (de)serializers reject wrong-family
-/// conversion instead of truncating (resolves #13 at the model level).
+/// conversion instead of truncating.
 /// </summary>
 public class IpPrefixModelTests
 {
@@ -61,8 +61,7 @@ public class IpPrefixModelTests
     [Fact]
     public void WrongFamily_Conversion_Throws_NotTruncates()
     {
-        // #13 model-level fix: a 128-bit value that does not fit a 32-bit field must throw,
-        // never truncate.
+        // A 128-bit value that does not fit a 32-bit field must throw, never truncate.
         var wide = V6("2001:db8::1");
         var ex = Assert.Throws<InvalidOperationException>(() => BgpConstants.ToUint32OrThrow(wide, "NEXT_HOP"));
         Assert.Contains("wrong address family", ex.Message);

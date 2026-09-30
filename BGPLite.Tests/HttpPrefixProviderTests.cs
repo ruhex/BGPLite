@@ -53,7 +53,7 @@ public class HttpPrefixProviderTests
 
     /// <summary>Records the URL, Authorization, X-API-Key headers + the per-request state of every
     /// incoming request (thread-safe). Used to assert per-source headers land on the REQUEST message
-    /// and never mutate the shared client's DefaultRequestHeaders (#155).</summary>
+    /// and never mutate the shared client's DefaultRequestHeaders.</summary>
     private sealed class RecordingHandler : HttpMessageHandler
     {
         public ConcurrentQueue<HttpRequestMessage> Seen { get; } = new();
@@ -87,7 +87,7 @@ public class HttpPrefixProviderTests
     [Fact]
     public async Task LoadAsync_UsesTheClientNameFromTheCtor()
     {
-        // #425: the user-source instance must draw its HttpClient from the retry-only named
+        // The user-source instance must draw its HttpClient from the retry-only named
         // pipeline, never from the shared breaker pipeline the operator sources use.
         var factory = new StubFactory(new StubHandler());
         var provider = new HttpPrefixProvider(
@@ -125,7 +125,7 @@ public class HttpPrefixProviderTests
     [Fact]
     public async Task AppliesPerSourceTimeout_DoesNotMutateSharedClient()
     {
-        // #155: per-source timeout must NOT mutate http.Timeout (the named client is pooled). A slow
+        // Per-source timeout must NOT mutate http.Timeout (the named client is pooled). A slow
         // source that times out must do so via a linked CTS, leaving the client's Timeout untouched
         // for the next caller.
         var factory = new StubFactory(new StubHandler(HttpStatusCode.OK, "1.2.3.0/24\n"));
@@ -141,7 +141,7 @@ public class HttpPrefixProviderTests
     [Fact]
     public async Task AppliesPerSourceHeaders_OnRequestMessage()
     {
-        // #155: per-source headers must land on the REQUEST message, never on
+        // Per-source headers must land on the REQUEST message, never on
         // http.DefaultRequestHeaders (the named client is pooled — mutating it leaks credentials
         // across sources). RecordingHandler captures the actual request that reached the handler.
         var handler = new RecordingHandler();
@@ -163,7 +163,7 @@ public class HttpPrefixProviderTests
     [Fact]
     public async Task PerSourceHeaders_DoNotLeakOntoNextRequest()
     {
-        // #155 regression: source A's Authorization must NOT appear on source B's request when they
+        // Source A's Authorization must NOT appear on source B's request when they
         // reuse the same named client. The prior code mutated DefaultRequestHeaders, so source A's
         // credentials bled onto source B.
         var handler = new RecordingHandler();
@@ -230,10 +230,10 @@ public class HttpPrefixProviderTests
     }
 
     /// <summary>
-    /// #324: a source with NO configured Timeout still gets a budget — the default is armed, so a
+    /// A source with NO configured Timeout still gets a budget — the default is armed, so a
     /// server that answers headers and then never sends the body fails by T+default instead of
-    /// hanging the fetch (and seeding/auto-refresh behind it). The outer WaitAsync guard doubles
-    /// as the red guard: on default-less code the load never completes.
+    /// hanging the fetch (and seeding/auto-refresh behind it). The outer WaitAsync guard also
+    /// bounds the test: without the default the load never completes.
     /// </summary>
     private sealed class HeadersThenHangHandler : HttpMessageHandler
     {
@@ -314,10 +314,10 @@ public class HttpPrefixProviderTests
 
     [Theory]
     [InlineData(HttpStatusCode.Found)]             // 302 — the classic redirect
-    [InlineData(HttpStatusCode.MultipleChoices)]   // 300 — the boundary of the 3xx class (#321 review)
+    [InlineData(HttpStatusCode.MultipleChoices)]   // 300 — the boundary of the 3xx class
     public async Task Redirect_IsRejected_WithClearError(HttpStatusCode status)
     {
-        // #321: redirects are not followed (AllowAutoRedirect=false on the named client) — the
+        // Redirects are not followed (AllowAutoRedirect=false on the named client) — the
         // handler would re-send per-source headers except Authorization to the target host. The
         // provider must surface a 3xx as an operator-fixable error naming the actual behavior.
         var provider = Provider(new StubHandler(status, ""));

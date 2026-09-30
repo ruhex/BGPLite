@@ -3,18 +3,17 @@ using System.Collections.Concurrent;
 namespace BGPLite.Server;
 
 /// <summary>
-/// Per-source-IP accept throttle for the BGP listener (#115): bounds how many inbound TCP connects
-/// a single remote IP may open within a rolling 60s window. Defends one-IP accept floods without
+/// Per-source-IP accept throttle for the BGP listener: bounds how many inbound TCP connects a
+/// single remote IP may open within a rolling 60s window. Defends one-IP accept floods without
 /// capping the count of legitimate established sessions — a route server is designed to hold many
-/// peers (1 → 9999+), which is capacity/business logic, not a security control. The flood vector
+/// peers (1 → 9999+), which is capacity/business logic, not a security control; the flood vector
 /// here is connections from a single source, not the established-session count.
 /// <para>
 /// Thread-safe sliding-window counter: each distinct IP gets a bounded list of recent accept
-/// timestamps guarded by a per-IP lock; entries older than the window are pruned on every access.
-/// Stale entries (an IP idle longer than one window, with no recent timestamp) are evicted from the
-/// tracker on an amortized sweep so a distinct-IP flood cannot grow the tracker without bound. The
-/// list per IP is bounded by <c>limit+1</c>. The OS firewall (nftables) is the PRIMARY gate; this
-/// is a cheap in-app backstop.
+/// timestamps guarded by a dictionary-level lock; entries older than the window are pruned on
+/// every access, and idle IPs are evicted on an amortized sweep so a distinct-IP flood cannot
+/// grow the tracker without bound. The OS firewall (nftables) is the PRIMARY gate; this is a
+/// cheap in-app backstop.
 /// </para>
 /// </summary>
 internal sealed class IpAcceptThrottle
@@ -25,13 +24,11 @@ internal sealed class IpAcceptThrottle
     private readonly ConcurrentDictionary<string, Window> _byIp = new(StringComparer.Ordinal);
     private readonly Func<long> _nowTicks;
     private int _callsSinceSweep;
-    // Coarse throttle-level lock (#133): serializes the dictionary-mutation parts of TryAccept and
-    // SweepStale so a sweep cannot TryRemove a Window that a concurrent TryAccept just refreshed.
-    // The prior per-Window lock checked staleness under the Window lock but called _byIp.TryRemove
-    // OUTSIDE any dictionary-level atomicity — a racing TryAccept could GetOrAdd the same Window,
-    // record a fresh accept, and then have that entry removed by the sweep, orphaning the
-    // just-recorded accept and effectively resetting the IP's limit. The accept path tolerates
-    // serialization (it is the throttle itself — not a hot path).
+    // Coarse throttle-level lock: serializes the dictionary-mutation parts of TryAccept and
+    // SweepStale so a sweep cannot TryRemove a Window that a concurrent TryAccept just refreshed —
+    // a sweep racing a refresh could orphan the just-recorded accept and effectively reset the
+    // IP's limit. The accept path tolerates serialization (it is the throttle itself, not a hot
+    // path).
     private readonly object _dictLock = new();
 
     public IpAcceptThrottle(int maxPerMinute, Func<long>? nowTicks = null)
@@ -45,11 +42,9 @@ internal sealed class IpAcceptThrottle
     internal int TrackedCount => _byIp.Count;
 
     /// <summary>
-    /// Pure sliding-window decision: prune timestamps older than the window, then allow iff the
-    /// remaining count is below <paramref name="limit"/>. When allowed, the new <paramref name="nowTicks"/>
-    /// timestamp is appended. Extracted as a pure function so the windowing math is unit-testable
-    /// without threads, timers, or a clock. Returns the pruned (and possibly appended) timestamp
-    /// list so the caller can store it back atomically.
+    /// Pure sliding-window decision for one accept, extracted as a function so the windowing math
+    /// is unit-testable without threads, timers, or a clock. Returns the pruned (and possibly
+    /// appended) timestamp list so the caller can store it back atomically.
     /// </summary>
     /// <param name="timestamps">This IP's prior accept timestamps (any order; not mutated).</param>
     /// <param name="nowTicks">Current UTC ticks (passed in, not read from a clock, for determinism).</param>
@@ -91,7 +86,7 @@ internal sealed class IpAcceptThrottle
         var nowTicks = _nowTicks();
         bool allowed;
         // Hold _dictLock across GetOrAdd + Decide + store so SweepStale cannot remove this Window
-        // between the refresh and the store (#133). The Decide computation is cheap (small list),
+        // between the refresh and the store. The Decide computation is cheap (small list),
         // so the critical section is short.
         lock (_dictLock)
         {
@@ -114,10 +109,9 @@ internal sealed class IpAcceptThrottle
     internal void SweepStale(long nowTicks)
     {
         var cutoff = nowTicks - _windowTicks;
-        // Hold _dictLock across the whole sweep so TryAccept cannot refresh a Window we are about to
-        // remove. The snapshot enumeration is safe under lock (no concurrent writers); removing while
-        // iterating ConcurrentDictionary is supported, but the lock makes the staleness-check + remove
-        // atomic against a racing TryAccept (#133).
+        // Hold _dictLock across the whole sweep so a racing TryAccept cannot refresh a Window
+        // between the staleness check and the removal; removing while iterating a
+        // ConcurrentDictionary is supported, but that alone would not make check+remove atomic.
         lock (_dictLock)
         {
             foreach (var (ip, window) in _byIp)
@@ -136,7 +130,7 @@ internal sealed class IpAcceptThrottle
         return true;
     }
 
-    /// <summary>Per-IP mutable window state, guarded by locking the instance itself.</summary>
+    /// <summary>Per-IP mutable window state; all access is serialized by the throttle's dictionary lock.</summary>
     private sealed class Window
     {
         // List<> (not Queue<>): Decide prunes arbitrary old entries from the middle of the window,

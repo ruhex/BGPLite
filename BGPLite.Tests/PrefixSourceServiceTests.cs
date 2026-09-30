@@ -42,7 +42,7 @@ public class PrefixSourceServiceTests
     [Fact]
     public async Task PrefixSources_YamlNull_ConsumersTolerateTheDocumentedEmpty()
     {
-        // #477: "PrefixSources:" (YAML null) deserializes as a null list — Validate and
+        // "PrefixSources:" (YAML null) deserializes as a null list — Validate and
         // ConfigValidationTests bless it as "no sources", so the startup consumers must treat it
         // as empty instead of crashing with NRE/ANE (ConfigCommunityResolver previously threw
         // ArgumentNullException at DI resolution → startup failure on a documented-valid config).
@@ -94,7 +94,7 @@ public class PrefixSourceServiceTests
 
         var (prefixes, changed) = await svc.LoadDefaultAsync();
         Assert.Equal(2, prefixes.Count);
-        Assert.True(changed); // first-ever load counts as a content change (#214)
+        Assert.True(changed); // first-ever load counts as a content change
     }
 
     [Fact]
@@ -217,7 +217,7 @@ public class PrefixSourceServiceTests
     }
 
     /// <summary>
-    /// Returns a different prefix list on each call — used to exercise #214 change-detection in
+    /// Returns a different prefix list on each call — used to exercise change-detection in
     /// RefreshAsync (the first call populates the cache, subsequent calls return a new list that must
     /// be detected as "changed"). Yields before returning so the call is genuinely async (mirrors real
     /// HttpPrefixProvider/AsnPrefixProvider) — required for the TOCTOU test to actually exercise the
@@ -259,7 +259,7 @@ public class PrefixSourceServiceTests
         }
     }
 
-    /// <summary>#214: RefreshAsync reports true when the source content actually changed.</summary>
+    /// <summary>RefreshAsync reports true when the source content actually changed.</summary>
     [Fact]
     public async Task RefreshAsync_ReportsChanged_WhenContentDiffers()
     {
@@ -278,7 +278,7 @@ public class PrefixSourceServiceTests
         Assert.Equal(2, provider.Calls);
     }
 
-    /// <summary>#214: RefreshAsync reports false when the source content is identical (no change).</summary>
+    /// <summary>RefreshAsync reports false when the source content is identical (no change).</summary>
     [Fact]
     public async Task RefreshAsync_ReportsUnchanged_WhenContentIdentical()
     {
@@ -294,7 +294,7 @@ public class PrefixSourceServiceTests
         Assert.False(changed);
     }
 
-    /// <summary>#214: a 304 Not Modified response is reported as unchanged (data identical by definition).</summary>
+    /// <summary>A 304 Not Modified response is reported as unchanged (data identical by definition).</summary>
     [Fact]
     public async Task RefreshAsync_ReportsUnchanged_OnNotModified304()
     {
@@ -312,8 +312,8 @@ public class PrefixSourceServiceTests
     }
 
     /// <summary>
-    /// #332 (replaces the scheduling-dependent RefreshAsync_DetectsChange_DespiteConcurrentGetAsync):
-    /// the GetAsync-wins interleaving of the #214 TOCTOU scenario, forced deterministically instead
+    /// Replaces the scheduling-dependent RefreshAsync_DetectsChange_DespiteConcurrentGetAsync:
+    /// the GetAsync-wins interleaving of the TOCTOU scenario, forced deterministically instead
     /// of racing a cold thread pool. The correct outcome for THIS ordering is <c>changed=false</c>:
     /// GetAsync's load already detected the change INSIDE the per-source gate, updated the cache,
     /// and fired <c>onSourceChanged</c> — the change is consumed, and RefreshAsync's own in-gate
@@ -333,7 +333,7 @@ public class PrefixSourceServiceTests
             cacheTtl: TimeSpan.Zero, // TTL=0: GetAsync always refetches (the connect-path racer)
             onSourceChanged: name => { lock (gate) pushed.Add(name); return Task.CompletedTask; });
 
-        await svc.GetAsync("ru"); // prime: call 1 loads list1; first-ever load counts as changed (#251 push)
+        await svc.GetAsync("ru"); // prime: call 1 loads list1; first-ever load counts as changed, so it pushes once
 
         // The "GetAsync wins the gate" leg, sequential and deterministic: call 2 loads list2,
         // detects the change inside the gate, updates the cache, and pushes.
@@ -352,7 +352,7 @@ public class PrefixSourceServiceTests
         }
     }
 
-    /// <summary>#214: SourceSupportsConditional reflects the provider's SupportsConditionalRequests.</summary>
+    /// <summary>SourceSupportsConditional reflects the provider's SupportsConditionalRequests.</summary>
     [Fact]
     public void SourceSupportsConditional_ReflectsProvider()
     {
@@ -379,7 +379,7 @@ public class PrefixSourceServiceTests
     }
 
     /// <summary>
-    /// #214 order-independence: RIPEstat and some HTTP sources return the same prefix set in a different
+    /// Order-independence: RIPEstat and some HTTP sources return the same prefix set in a different
     /// order between requests. SequenceEqual there would report a phantom change and trigger an
     /// unnecessary BGP re-announcement. SamePrefixes must treat them as unchanged.
     /// </summary>

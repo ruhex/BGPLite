@@ -4,29 +4,27 @@ namespace BGPLite.Server;
 
 /// <summary>
 /// Production <see cref="IBgpConnection"/> over a connected <see cref="Socket"/> wrapped in a
-/// <see cref="NetworkStream"/> (owns the socket). Replaces the direct <c>_socket</c>/<c>_stream</c>
-/// fields that <see cref="BgpSession"/> previously held (#96).
+/// <see cref="NetworkStream"/> (owns the socket).
 /// <para>
-/// #160 claimed <see cref="Socket.SendTimeout"/> = 60s as a "kernel-level backstop" for stuck
-/// sends — but per the .NET documentation SendTimeout applies to SYNCHRONOUS Send calls only, so
-/// every async write was effectively unbounded (#252): a peer that stops reading (TCP zero window)
-/// pinned <c>WriteAsync</c> until the OS retransmission timeout (~15 min), holding the session's
-/// send lock and paralyzing the keepalive loop. <see cref="WriteAsync"/> now enforces the per-send
-/// budget itself with a linked CTS: when the budget fires the pending write is aborted and
-/// surfaced as <see cref="IOException"/> (dead connection), regardless of the caller's token.
+/// <see cref="Socket.SendTimeout"/> only bounds synchronous Send calls, so async writes were
+/// effectively unbounded: a peer that stops reading (TCP zero window) pinned
+/// <see cref="WriteAsync"/> until the OS retransmission timeout (~15 min), holding the session's
+/// send lock and paralyzing the keepalive loop. <see cref="WriteAsync"/> therefore enforces the
+/// per-send budget itself with a linked CTS: when the budget fires the pending write is aborted
+/// and surfaced as <see cref="IOException"/> (dead connection), regardless of the caller's token.
 /// </para>
 /// <para>
-/// #285: aborting a write does NOT roll it back. A cancelled socket write delivers whatever the
-/// kernel already accepted and abandons the rest, so the peer's parse position is left inside a
-/// truncated BGP frame. Every write after that point is consumed by the peer as payload of that
-/// frame — permanent stream desync. The connection therefore latches a fault on the first aborted
-/// write and fails every subsequent <see cref="WriteAsync"/> fast, so no send path can append a
-/// well-formed frame behind a truncated one.
+/// Aborting a write does NOT roll it back: a cancelled socket write delivers whatever the kernel
+/// already accepted and abandons the rest, leaving the peer's parse position inside a truncated
+/// BGP frame — every write after that point is consumed as payload of that frame, a permanent
+/// stream desync. The connection therefore latches a fault on the first aborted write and fails
+/// every subsequent <see cref="WriteAsync"/> fast, so no send path can append a well-formed frame
+/// behind a truncated one.
 /// </para>
 /// </summary>
 internal sealed class SocketBgpConnection : IBgpConnection
 {
-    /// <summary>Per-send budget: how long a single WriteAsync may block on a non-reading peer (#160/#252).</summary>
+    /// <summary>Per-send budget: how long a single WriteAsync may block on a non-reading peer.</summary>
     private const int DefaultSendTimeoutMs = 60_000;
 
     private readonly int _sendTimeoutMs;
@@ -35,7 +33,7 @@ internal sealed class SocketBgpConnection : IBgpConnection
     private readonly NetworkStream _stream;
     private int _disposed; // 0 = not disposed, 1 = disposed. Atomic CAS (matches BgpSession.Dispose).
     // 0 = the outbound stream is intact, 1 = a write was aborted and may have been partially
-    // delivered, so the frame boundary is lost and nothing more may be written (#285).
+    // delivered, so the frame boundary is lost and nothing more may be written.
     private int _sendFaulted;
 
     public SocketBgpConnection(Socket socket) : this(socket, DefaultSendTimeoutMs) { }
@@ -45,8 +43,7 @@ internal sealed class SocketBgpConnection : IBgpConnection
     {
         _socket = socket;
         _sendTimeoutMs = sendTimeoutMs;
-        // ownsSocket:true so disposing the stream transitively closes the socket — same ownership
-        // semantics as the prior `new NetworkStream(socket, ownsSocket: true)` in BgpSession.
+        // ownsSocket: true so disposing the stream transitively closes the socket.
         _stream = new NetworkStream(_socket, ownsSocket: true);
     }
 
@@ -64,15 +61,15 @@ internal sealed class SocketBgpConnection : IBgpConnection
 
     public async ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken cancellationToken)
     {
-        // #285: a previous write was aborted after the kernel had already accepted part of it, so
-        // the peer is mid-frame. Appending another frame does not recover the stream — the peer
+        // A previous write was aborted after the kernel had already accepted part of it, so the
+        // peer is mid-frame. Appending another frame does not recover the stream — the peer
         // reads it as the truncated frame's payload. Fail fast so every send path (refresh,
         // keepalive, the best-effort Cease in RunAsync's catch/finally) sees a dead connection
         // instead of quietly making the corruption worse.
         if (Volatile.Read(ref _sendFaulted) == 1)
             throw new IOException("Connection is unusable — a previous send was aborted mid-frame");
 
-        // #252: Socket.SendTimeout does not bound async writes — enforce the budget here so a
+        // Socket.SendTimeout does not bound async writes — enforce the budget here so a
         // non-reading peer can never pin the send lock for minutes. The linked CTS also honors the
         // caller's token; distinguishing "budget fired" from "caller cancelled" keeps the benign
         // cancellation contract of the send paths intact.
@@ -86,7 +83,7 @@ internal sealed class SocketBgpConnection : IBgpConnection
         {
             // Caller-initiated cancel — the send paths treat this as a normal cancelled send, so
             // the exception type is preserved. The stream is poisoned all the same: which token
-            // fired does not change that the socket write may have been partially delivered (#285).
+            // fired does not change that the socket write may have been partially delivered.
             Volatile.Write(ref _sendFaulted, 1);
             throw;
         }
@@ -120,7 +117,7 @@ internal sealed class SocketBgpConnection : IBgpConnection
             {
                 // Poll/Available surfaced a socket-level error, including a connection reset by the
                 // peer — treat as closed so the EOF↔cancel race handling reaches the explicit close
-                // path rather than masking the close as a pure cancellation (#217).
+                // path rather than masking the close as a pure cancellation.
                 return true;
             }
             catch (ObjectDisposedException)
@@ -133,13 +130,13 @@ internal sealed class SocketBgpConnection : IBgpConnection
 
     public void Dispose()
     {
-        // Atomic test-and-set (CodeRabbit #178): a volatile bool check-then-set races under
-        // concurrent Dispose() — two callers can both pass the check before either writes,
-        // double-disposing _stream/_socket. Interlocked.Exchange makes the first caller win and
-        // the rest no-op, matching BgpSession.Dispose's pattern.
+        // Atomic test-and-set: a volatile bool check-then-set races under concurrent Dispose() —
+        // two callers can both pass the check before either writes, double-disposing
+        // _stream/_socket. Interlocked.Exchange makes the first caller win and the rest no-op,
+        // matching BgpSession.Dispose's pattern.
         if (Interlocked.Exchange(ref _disposed, 1) == 1) return;
-        // Disposing the NetworkStream (ownsSocket:true) closes the socket transitively. The extra
-        // _socket.Dispose() is redundant-but-harmless (matches the prior BgpSession.Dispose pattern).
+        // Disposing the NetworkStream (ownsSocket: true) closes the socket transitively; the
+        // extra _socket.Dispose() is redundant but harmless.
         _stream.Dispose();
         _socket.Dispose();
     }

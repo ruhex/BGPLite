@@ -5,7 +5,7 @@ using BGPLite.Configuration;
 namespace BGPLite.Tests;
 
 /// <summary>
-/// Tests for <see cref="ManagementApi.CreateConcurrencyLimiter"/> (#119): a GLOBAL cap that allows up
+/// Tests for <see cref="ManagementApi.CreateConcurrencyLimiter"/>: a GLOBAL cap that allows up
 /// to PermitLimit in-flight requests then denies the next (503 path), releasing the slot on completion.
 /// </summary>
 public class ApiConcurrencyLimiterTests
@@ -42,10 +42,10 @@ public class ApiConcurrencyLimiterTests
         Assert.True(first.IsAcquired);
 
         using var blocked = await limiter.AcquireAsync();
-        Assert.False(blocked.IsAcquired); // the single slot is held
+        Assert.False(blocked.IsAcquired);
 
         first.Dispose(); // request completes → slot returned to the pool
         using var after = await limiter.AcquireAsync();
-        Assert.True(after.IsAcquired); // slot available again
+        Assert.True(after.IsAcquired);
     }
 }

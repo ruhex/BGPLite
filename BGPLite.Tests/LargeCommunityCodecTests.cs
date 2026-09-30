@@ -126,7 +126,7 @@ public class LargeCommunityCodecTests
     [Fact]
     public void WithLargeCommunityAttribute_DoesNotMutateSharedCacheBase()
     {
-        // Models the send path: the #87 cache hands out ONE base list for a regular-community
+        // Models the send path: the attribute cache hands out ONE base list for a regular-community
         // set, used by several batches that each carry a DIFFERENT large-community set. Each
         // batch must observe the un-augmented base, never the previous batch's appended attr.
         var cache = UpdateCodec.CreateUpdateAttributeCache();

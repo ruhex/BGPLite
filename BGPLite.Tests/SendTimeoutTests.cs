@@ -12,7 +12,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 namespace BGPLite.Tests;
 
 /// <summary>
-/// #252: the per-send budget in SocketBgpConnection. Socket.SendTimeout does not apply to async
+/// the per-send budget in SocketBgpConnection. Socket.SendTimeout does not apply to async
 /// writes, so a peer that stops reading (TCP zero window) previously pinned WriteAsync — and the
 /// session's send lock — until the OS retransmission timeout (minutes). A real socket pair where
 /// the receiving side never reads exercises the timeout end-to-end.
@@ -49,7 +49,7 @@ public class SendTimeoutTests
     [Fact]
     public async Task WriteAsync_AfterAbortedSend_FailsFastInsteadOfAppending()
     {
-        // #285: aborting a write does not roll it back — the kernel keeps whatever it already
+        // Aborting a write does not roll it back — the kernel keeps whatever it already
         // accepted, so the peer is left mid-frame. A later write would be read by the peer as that
         // truncated frame's payload, so the connection must refuse it instead.
         using var listener = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
@@ -104,7 +104,7 @@ public class SendTimeoutTests
     [Fact]
     public async Task RefreshRoutes_SendFailure_TearsDownTheSession()
     {
-        // #285: RefreshCycleAsync used to swallow the send IOException in its generic
+        // RefreshCycleAsync used to swallow the send IOException in its generic
         // catch (Exception) and leave the session Established. After a budget abort the peer sits
         // inside a truncated frame (see WriteAsync_AfterAbortedSend_FailsFastInsteadOfAppending),
         // so every later frame is read as that frame's payload — silent route corruption with both
@@ -155,7 +155,7 @@ public class SendTimeoutTests
             await Task.Delay(TimeSpan.FromMilliseconds(10));
 
         Assert.False(session.IsEstablished,
-            "a refresh whose send failed must tear the session down, not leave it Established (#285)");
+            "a refresh whose send failed must tear the session down, not leave it Established");
 
         try { await runTask.WaitAsync(TimeSpan.FromSeconds(10)); }
         catch (OperationCanceledException) { /* session torn down */ }

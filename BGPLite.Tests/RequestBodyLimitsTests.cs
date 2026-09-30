@@ -4,7 +4,7 @@ using BGPLite.Api;
 namespace BGPLite.Tests;
 
 /// <summary>
-/// Regression coverage for #156: the management-API request body is capped at
+/// Regression coverage: the management-API request body is capped at
 /// <c>AppConfig.MaxRequestBodyBytes</c> so a single client cannot stream gigabytes into the
 /// process (HttpListener has no default body cap). Tests the pure
 /// <see cref="ManagementApi.ReadBoundedBodyAsync"/> helper directly.
@@ -106,10 +106,10 @@ public class RequestBodyLimitsTests
     }
 
     /// <summary>
-    /// #257: a body that never arrives parks <c>ReadBoundedBodyAsync</c> forever — with the
+    /// A body that never arrives parks <c>ReadBoundedBodyAsync</c> forever — with the
     /// 64-slot in-flight cap, 64 such connections starve the whole API. Each read must be bounded
     /// by the deadline and surface as 408. The outer WaitAsync(3s) doubles as the red guard: on
-    /// pre-fix code the call never completes and the test fails on the guard timeout.
+    /// broken code the call never completes and the test fails on the guard timeout.
     /// </summary>
     [Fact]
     public async Task SlowDripBody_NeverCompletingRead_Returns408()
@@ -125,7 +125,7 @@ public class RequestBodyLimitsTests
         Assert.Equal(408, error!.StatusCode);
     }
 
-    /// <summary>#257: the deadline must not affect a body that arrives within it.</summary>
+    /// <summary>The deadline must not affect a body that arrives within it.</summary>
     [Fact]
     public async Task BodyWithinDeadline_StillRead()
     {
@@ -138,7 +138,7 @@ public class RequestBodyLimitsTests
     }
 
     /// <summary>
-    /// #358 review (hardens #257): a per-read deadline restarts on every byte — a client trickling
+    /// A per-read deadline would restart on every byte — a client trickling
     /// one byte per window retained its slot indefinitely. The deadline must be TOTAL for the
     /// body. This stream yields one byte every 100 ms forever; with a 500 ms total budget the read
     /// must 408 by ~T+0.5s, not keep pace forever. The outer 5s guard doubles as the red guard

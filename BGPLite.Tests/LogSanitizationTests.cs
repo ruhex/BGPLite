@@ -3,7 +3,7 @@ using BGPLite.Api;
 namespace BGPLite.Tests;
 
 /// <summary>
-/// Tests for <see cref="ManagementApi.SanitizeForLog"/> (#120): user-controlled strings logged
+/// Tests for <see cref="ManagementApi.SanitizeForLog"/>: user-controlled strings logged
 /// via structured logging are also stripped of control characters so they cannot forge log lines.
 /// </summary>
 public class LogSanitizationTests

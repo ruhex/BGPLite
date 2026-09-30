@@ -3,7 +3,7 @@ using YamlDotNet.Serialization;
 namespace BGPLite.Configuration;
 
 /// <summary>
-/// Periodic auto-refresh configuration (#214). When enabled, a background timer periodically
+/// Periodic auto-refresh configuration. When enabled, a background timer periodically
 /// checks all prefix sources for changes using conditional requests (ETag / Last-Modified → 304
 /// Not Modified when unchanged). Only sources whose data actually changed trigger peer route
 /// refreshes — no unnecessary BGP churn.

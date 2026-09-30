@@ -4,12 +4,12 @@ using BGPLite.Api;
 namespace BGPLite.Tests;
 
 /// <summary>
-/// #255: the management API accepted whatever a client sent as a peer address or AS number. The
+/// the management API accepted whatever a client sent as a peer address or AS number. The
 /// address went to the store verbatim, so any spelling other than the canonical dotted quad produced
 /// a peer that <c>BgpServer</c> — which keys sessions by <c>remoteEndpoint.Address.ToString()</c> —
 /// could never bind to: configured, visible in the UI, and silently never up.
 /// <para>
-/// The AS side gained urgency from #300: the BGP path now rejects an OPEN carrying AS 0 with Bad
+/// The AS side gained urgency: the BGP path rejects an OPEN carrying AS 0 with Bad
 /// Peer AS (RFC 7607), so a peer created with <c>asn: 0</c> was accepted by the API and then
 /// guaranteed never to establish. Validating at the API is what closes that asymmetry.
 /// </para>
@@ -36,9 +36,9 @@ public class PeerInputValidationTests
 
     /// <summary>
     /// Rejected outright: unparseable input, absent input (which reached the store as null and
-    /// surfaced as a 500 from a NOT NULL violation), and — #421 — addresses no BGP session can
-    /// ever originate from (unspecified / loopback / multicast / broadcast; parity with the YAML
-    /// path's #390 validation, which already rejects 0.0.0.0).
+    /// surfaced as a 500 from a NOT NULL violation), and addresses no BGP session can ever
+    /// originate from (unspecified / loopback / multicast / broadcast; parity with the YAML
+    /// path's validation, which already rejects 0.0.0.0).
     /// </summary>
     [Theory]
     [InlineData(null)]
@@ -48,15 +48,15 @@ public class PeerInputValidationTests
     [InlineData(" 1.2.3.4")]
     [InlineData("banana")]
     [InlineData("1.2.3.4.5")]
-    [InlineData("0.0.0.0")]              // #421: unspecified (the YAML path rejects it too, #390)
-    [InlineData("0.1.2.3")]              // #421: 0.0.0.0/8
-    [InlineData("127.0.0.1")]            // #421: loopback
-    [InlineData("224.0.0.1")]            // #421: multicast
-    [InlineData("255.255.255.255")]      // #421: broadcast
-    [InlineData("::")]                   // #421: IPv6 unspecified
-    [InlineData("::1")]                  // #421: IPv6 loopback
-    [InlineData("ff02::1")]              // #421: IPv6 multicast
-    [InlineData("::ffff:224.0.0.1")]     // #421: multicast hidden behind the mapped form
+    [InlineData("0.0.0.0")]              // unspecified (the YAML path rejects it too)
+    [InlineData("0.1.2.3")]              // 0.0.0.0/8
+    [InlineData("127.0.0.1")]            // loopback
+    [InlineData("224.0.0.1")]            // multicast
+    [InlineData("255.255.255.255")]      // broadcast
+    [InlineData("::")]                   // IPv6 unspecified
+    [InlineData("::1")]                  // IPv6 loopback
+    [InlineData("ff02::1")]              // IPv6 multicast
+    [InlineData("::ffff:224.0.0.1")]     // multicast hidden behind the mapped form
     public void NormalizePeerIp_RejectsUnusableInput(string? input)
     {
         Assert.Null(ManagementApi.NormalizePeerIp(input));
@@ -81,8 +81,8 @@ public class PeerInputValidationTests
     // ---- AS numbers ----
 
     /// <summary>
-    /// Exactly four values are unusable as a peer's AS: 0 (RFC 7607, and the OPEN path rejects it
-    /// since #300), AS_TRANS (RFC 6793 — a placeholder, never a real peer), and the two Last ASNs
+    /// Exactly four values are unusable as a peer's AS: 0 (RFC 7607, and the OPEN path rejects it),
+    /// AS_TRANS (RFC 6793 — a placeholder, never a real peer), and the two Last ASNs
     /// reserved by RFC 7300.
     /// </summary>
     [Theory]
@@ -97,7 +97,7 @@ public class PeerInputValidationTests
 
     /// <summary>
     /// The private ranges must stay usable — they are what a user of a route server peers with.
-    /// #255 proposed excluding "4200000000+", which is the RFC 6996 private 32-bit range; RFC 7300
+    /// Excluding "4200000000+" would have excluded the RFC 6996 private 32-bit range; RFC 7300
     /// reserves only the two endpoints, so that exclusion would have locked out real peers.
     /// </summary>
     [Theory]
@@ -127,7 +127,7 @@ public class PeerInputValidationTests
     }
 
     /// <summary>
-    /// #266 item 4: subscription names must resolve against the configured lists — an unknown
+    /// Subscription names must resolve against the configured lists — an unknown
     /// name was stored and silently served zero prefixes forever. Both config surfaces count as
     /// known: RipeStat.AsnLists and PrefixSources.
     /// </summary>

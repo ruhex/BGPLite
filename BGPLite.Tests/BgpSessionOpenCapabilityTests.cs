@@ -8,7 +8,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 namespace BGPLite.Tests;
 
 /// <summary>
-/// #318: the OPEN BGPLite sends must NOT carry the Graceful Restart capability (64). The
+/// The OPEN BGPLite sends must NOT carry the Graceful Restart capability (64). The
 /// receiving-speaker half of RFC 4724 §4.2 (retain + stale-mark a restarting peer's routes) is
 /// not implemented, so advertising the &lt;AFI, SAFI, F&gt; tuple promised behavior the code does
 /// not have (D6).
@@ -54,7 +54,7 @@ public class BgpSessionOpenCapabilityTests
             Assert.True(sent.Count > 0, "session must have sent its OPEN");
             var open = Assert.IsType<BgpOpenMessage>(BgpMessageReader.ReadMessage(sent[0]));
 
-            // RED pre-fix: the GR capability (code 64) rode along with the 4-octet-AS set.
+            // Pre-fix, the GR capability (code 64) rode along with the 4-octet-AS set.
             Assert.DoesNotContain(open.Capabilities, c => c.Code == BgpConstants.Capability.GracefulRestart);
             // The 4-octet ASN capability — advertised unconditionally — is untouched.
             Assert.Contains(open.Capabilities, c => c.Code == BgpConstants.Capability.FourOctetAsn);
@@ -68,7 +68,7 @@ public class BgpSessionOpenCapabilityTests
     }
 
     /// <summary>
-    /// #466 (D24, final state): the OPEN advertises MP IPv4/Unicast (code 1, AFI=1/SAFI=1)
+    /// D24: the OPEN advertises MP IPv4/Unicast (code 1, AFI=1/SAFI=1)
     /// UNCONDITIONALLY. The interim "never advertise" half-measure broke capability-strict
     /// peers — BIRD 2 with default capabilities answers "Required capability missing" and
     /// refuses the session — and the receiving half now EXISTS: MP_REACH/MP_UNREACH AFI=1

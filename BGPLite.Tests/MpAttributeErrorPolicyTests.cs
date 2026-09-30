@@ -8,7 +8,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 namespace BGPLite.Tests;
 
 /// <summary>
-/// #467: the MP_REACH_NLRI/MP_UNREACH_NLRI error policy. RFC 7606 leaves these attributes
+/// the MP_REACH_NLRI/MP_UNREACH_NLRI error policy. RFC 7606 leaves these attributes
 /// explicitly OUTSIDE the keep-alive revision, so the D17 discard-and-keep-alive treatment
 /// must not swallow them:
 /// <list type="bullet">
@@ -23,7 +23,7 @@ namespace BGPLite.Tests;
 /// <item>a non-global MP_REACH next hop (RFC 2545 §3) → that attribute's routes are excluded,
 /// route-level, session up.</item>
 /// </list>
-/// Driven through the <c>IBgpConnection</c> seam with scripted frames, like the #289 tests.
+/// Driven through the <c>IBgpConnection</c> seam with scripted frames.
 /// </summary>
 public class MpAttributeErrorPolicyTests
 {
@@ -68,7 +68,7 @@ public class MpAttributeErrorPolicyTests
     [Fact]
     public async Task PartialMpReachFlags_TearDownSession_WithNotification_3_4()
     {
-        // #472 review: the Partial bit is equally invalid on a non-transitive attribute — nothing
+        // The Partial bit is equally invalid on a non-transitive attribute — nothing
         // ever re-advertises it un-understood — and joins the RFC 4271 §6.3 baseline reset.
         var routeTable = new RouteTable();
         var (session, run, conn) = await EstablishAsync(routeTable);
@@ -83,7 +83,7 @@ public class MpAttributeErrorPolicyTests
     [Fact]
     public async Task UnsupportedMpFamily_DiscardsTheUpdateOnly_SessionAndFamilyStayUp()
     {
-        // #472 review: an AFI/SAFI tuple that was never negotiated (RFC 4760 §8) is not a parse
+        // An AFI/SAFI tuple that was never negotiated (RFC 4760 §8) is not a parse
         // failure of a SUPPORTED family — the whole UPDATE is discarded through the D17
         // keep-alive path and neither the session nor IPv6/Unicast is touched.
         var routeTable = new RouteTable();
@@ -110,7 +110,7 @@ public class MpAttributeErrorPolicyTests
         await TeardownAsync(session, run);
     }
 
-    // ---- #466: MP_REACH/MP_UNREACH AFI=1/SAFI=1 (IPv4/Unicast) ----
+    // ---- MP_REACH/MP_UNREACH AFI=1/SAFI=1 (IPv4/Unicast) ----
 
     /// <summary>MP_REACH_NLRI (AFI=1/SAFI=1) value: AFI(2) + SAFI(1) + NH-Len(4) + next hop +
     /// Reserved(1) + classic IPv4 NLRI (length byte + significant address bytes).</summary>
@@ -127,7 +127,7 @@ public class MpAttributeErrorPolicyTests
     [Fact]
     public async Task MpReachV4_Announcement_InstallsLikeClassicNlri()
     {
-        // #466 final state: an IPv4 announcement riding MP_REACH installs through the same
+        // An IPv4 announcement riding MP_REACH installs through the same
         // pipeline as the classic NLRI field — BIRD negotiates MP_IPV4 by default and may
         // carry IPv4 unicast this way.
         var routeTable = new RouteTable();
@@ -189,7 +189,7 @@ public class MpAttributeErrorPolicyTests
     [Fact]
     public async Task AfterFamilyDisable_ThePrefixCapBudgetIsReturned()
     {
-        // #472 review: RemoveAllOwnedBy does not raise EntryOwnershipLost (the session is
+        // RemoveAllOwnedBy does not raise EntryOwnershipLost (the session is
         // discarding its OWN keys), so DisablePeerMpV6 must drop the family's keys from the
         // per-peer prefix set itself — otherwise the cap count drifts and phantom IPv6 keys
         // consume the budget of real IPv4 announcements.
@@ -276,7 +276,7 @@ public class MpAttributeErrorPolicyTests
     [Fact]
     public async Task UnreadableMpTuple_ResetsSession_CannotBeScopedToAFamily()
     {
-        // #472 review: a value too short to even name its AFI/SAFI cannot be scoped to a
+        // A value too short to even name its AFI/SAFI cannot be scoped to a
         // family, so the RFC 7606 §3(j) fallback is the session reset (NOTIFICATION 3/1).
         var routeTable = new RouteTable();
         var (session, run, conn) = await EstablishAsync(routeTable);
@@ -290,7 +290,7 @@ public class MpAttributeErrorPolicyTests
     [Fact]
     public async Task TreatAsWithdraw_AppliesTheSameUpdatesMpUnreach()
     {
-        // #484 (RFC 7606 §2): an UPDATE is treated as withdrawn AS A WHOLE. The classic WITHDRAWN
+        // RFC 7606 §2: an UPDATE is treated as withdrawn AS A WHOLE. The classic WITHDRAWN
         // half is applied before the attribute parse and survives a parse failure; the
         // MP_UNREACH_NLRI half of the same message must not be lost to that failure — pre-fix it
         // was skipped (its block runs after the announcement block, which the failure unwinds),
@@ -331,7 +331,7 @@ public class MpAttributeErrorPolicyTests
     [Fact]
     public async Task MalformedMpReachV4_ResetsSession_ScopedFallback()
     {
-        // #472 review, IPv4 half: a supported IPv4/Unicast tuple whose value cannot be decoded
+        // The IPv4 half: a supported IPv4/Unicast tuple whose value cannot be decoded
         // cannot take the disable fallback coherently (the family rides BOTH the classic and
         // the MP carriage), so the §3(j) fallback is the session reset — with the notification
         // scoped Malformed Attribute List.
@@ -454,7 +454,7 @@ public class MpAttributeErrorPolicyTests
         return Frame(BgpMessageType.Update, [.. payload]);
     }
 
-    // ---- session lifecycle (the #289 test pattern) ----
+    // ---- session lifecycle ----
 
     private static async Task<(BgpSession Session, Task Run, ScriptedConnection Conn)> EstablishAsync(
         RouteTable routeTable, uint routerId = 0x0A000002, int? maxPrefixes = null)

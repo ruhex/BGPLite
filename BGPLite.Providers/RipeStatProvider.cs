@@ -12,7 +12,7 @@ public sealed class RipeStatProvider
     /// <summary>Named-client key registered with <c>IHttpClientFactory</c>.</summary>
     public const string ClientName = "ripestat";
 
-    /// <summary>Maximum response body size (10 MB) — same bound as HttpPrefixProvider (#144/#321).</summary>
+    /// <summary>Maximum response body size (10 MB) — same bound as HttpPrefixProvider.</summary>
     internal const int MaxResponseBytes = 10 * 1024 * 1024;
 
     private readonly IHttpClientFactory _httpFactory;
@@ -27,12 +27,12 @@ public sealed class RipeStatProvider
     }
 
     /// <summary>
-    /// Fetches the IPv4 AND IPv6 prefixes originated by <paramref name="asn"/> from RIPEstat
-    /// (#14 phase 4: the <c>v6.originating</c> section is parsed alongside <c>v4.originating</c>).
-    /// The named client's resilience handler (Program.cs, #104) retries transient HTTP failures
-    /// (429/5xx/timeouts/network errors) with exponential backoff + circuit breaker, so this method
-    /// performs a single attempt — a transient failure propagates only after the resilience pipeline
-    /// is exhausted. The ris-prefixes endpoint can take minutes for large origin ASes (e.g. AS3356).
+    /// Fetches the IPv4 AND IPv6 prefixes originated by <paramref name="asn"/> from RIPEstat.
+    /// The named client's resilience handler (registered in Program.cs) retries transient HTTP
+    /// failures (429/5xx/timeouts/network errors) with exponential backoff + circuit breaker, so
+    /// this method performs a single attempt — a transient failure propagates only after the
+    /// resilience pipeline is exhausted. The ris-prefixes endpoint can take minutes for large
+    /// origin ASes (e.g. AS3356).
     /// </summary>
     public async Task<IReadOnlyList<IpPrefix>> GetPrefixesAsync(uint asn, CancellationToken ct = default)
     {
@@ -41,18 +41,18 @@ public sealed class RipeStatProvider
         using var response = await http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, ct);
         response.EnsureSuccessStatusCode();
 
-        // #321 item 4: bound the body like every other fetch path (HttpPrefixProvider caps URL
-        // sources at 10 MB, #144) — ReadAsStringAsync would fully buffer whatever arrives before
+        // Bound the body like every other fetch path (HttpPrefixProvider caps URL sources at
+        // 10 MB) — ReadAsStringAsync would fully buffer whatever arrives before
         // parsing. Fast Content-Length check first, then a hard cap while streaming.
         if (response.Content.Headers.ContentLength is long declared && declared > MaxResponseBytes)
             throw new InvalidOperationException(
                 $"RIPEstat response for AS{asn} too large ({declared} bytes, max {MaxResponseBytes}).");
-        // #324 parity: the resilience pipeline clips at the response headers
+        // The resilience pipeline clips at the response headers
         // (ResponseHeadersRead), so the body loop needs its own deadline — a slow-dripping origin
         // must not hold the fetch open; size alone bounds memory, not time.
         using var bodyCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         // Math.Max mirrors the pipeline's clamp (Program.cs) — a configured 0/negative must mean
-        // "the minimum", not CancelAfter(0) silently cancelling every body read (#321 review).
+        // "the minimum", not CancelAfter(0) silently cancelling every body read.
         bodyCts.CancelAfter(TimeSpan.FromSeconds(Math.Max(10, _config.TimeoutSeconds)));
         await using var stream = await response.Content.ReadAsStreamAsync(bodyCts.Token);
         using var buffered = new MemoryStream();
@@ -93,11 +93,11 @@ public sealed class RipeStatProvider
         var result = new List<IpPrefix>(prefixes.GetArrayLength());
         foreach (var element in prefixes.EnumerateArray())
         {
-            // #319/#358-review: the canonical parser every other prefix input path uses (#236):
-            // host-bit masking, /0 rejection, per-family length range. RIS collectors return what
+            // The canonical parser every other prefix input path uses: host-bit masking,
+            // /0 rejection, per-family length range. RIS collectors return what
             // third parties ANNOUNCED — non-canonical NLRI ("10.0.0.1/8") must not reach the route
             // table under a corrupt key, and "0.0.0.0/0"/"::/0" must not become a default-route
-            // leak (#162 closed the same hole for URL sources). Skip + warn, like stored custom
+            // leak (URL-supplied lists run through the same parser). Skip + warn, like stored custom
             // prefixes; a null element, garbage string, or NON-STRING JSON element (GetString
             // throws InvalidOperationException on numbers/objects) is skipped without taking the
             // whole ASN fetch down with it.

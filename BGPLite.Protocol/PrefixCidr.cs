@@ -4,14 +4,14 @@ using System.Net.Sockets;
 namespace BGPLite.Protocol;
 
 /// <summary>
-/// The single canonical CIDR parser for the project (#236). Every input path — operator file
+/// The single canonical CIDR parser for the project. Every input path — operator file
 /// sources (<c>PrefixListParser</c>), the management API (<c>ParseCustomPrefix</c>), and the
 /// BGP send path's DB-load (<c>RouteAssembler</c>) — routes through one of the <see cref="TryParse"/>
 /// overloads so the validation and masking policy is defined in exactly one place. Three divergent
 /// parsers previously caused dedup/aggregation breakage (the same network submitted two ways was
 /// stored as two distinct keys) and a route-leak vector (the API accepted <c>/0</c>, the default route).
 /// <para>
-/// <b>Policy</b> (locked down here, recorded in #236):
+/// <b>Policy</b> (locked down here):
 /// <list type="bullet">
 /// <item><b>Host-bit masking is ALWAYS applied</b> — <c>10.0.0.5/24</c> normalizes to
 /// <c>10.0.0.0/24</c>. Without this the route table, the aggregator, and the duplicate-NLRI
@@ -21,7 +21,7 @@ namespace BGPLite.Protocol;
 /// <c>allowDefault: true</c> permits <c>/0</c> for the rare operator-config default-route case
 /// (kept for completeness; no caller currently uses it).</item>
 /// <item><b>Family</b>: the <see cref="TryParse(string?, out IpPrefix, bool)"/> overload accepts
-/// both families (#14 phase 4); the <see cref="TryParse(string?, out uint, out byte, bool)"/>
+/// both families; the <see cref="TryParse(string?, out uint, out byte, bool)"/>
 /// overload stays IPv4-only — the management API's custom-prefix path is still IPv4-scoped.</item>
 /// <item><b>Garbage is rejected, never thrown.</b> Returns <c>false</c> on any malformed input so
 /// callers can surface a clean 400 / skip the line, rather than propagating a <c>FormatException</c>.</item>

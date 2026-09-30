@@ -9,11 +9,11 @@ using BGPLite.Protocol;
 namespace BGPLite.Tests;
 
 /// <summary>
-/// #330 item 1: RouteAssembler's per-fetch catch-alls used to swallow OperationCanceledException,
+/// RouteAssembler's per-fetch catch-alls used to swallow OperationCanceledException,
 /// so a session teardown mid-build logged a burst of ERROR "Failed to fetch ..." lines for what is
 /// a normal shutdown. OCE must propagate — but ONLY caller-initiated cancellation: a per-source
 /// timeout surfaces as OCE too (HttpPrefixProvider's linked CTS with a LIVE caller token) and must
-/// stay a logged fetch failure, or one slow source tears down the whole session (#330 review).
+/// stay a logged fetch failure, or one slow source tears down the whole session.
 /// </summary>
 public sealed class RouteAssemblerCancellationTests
 {

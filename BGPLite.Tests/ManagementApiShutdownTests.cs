@@ -13,7 +13,7 @@ using BGPLite.Protocol;
 namespace BGPLite.Tests;
 
 /// <summary>
-/// #326: StopAsync must not hang behind in-flight handlers. Handlers observe a shutdown token on
+/// StopAsync must not hang behind in-flight handlers. Handlers observe a shutdown token on
 /// provider calls and the drain is bounded — the host stops services in reverse registration
 /// order, so an unbounded ManagementApi drain held back BgpServer.StopAsync's Cease teardown
 /// (in Docker the process was SIGKILLed after the 10 s grace: peers saw TCP RST, not Cease).
@@ -106,7 +106,7 @@ public sealed class ManagementApiShutdownTests : IDisposable
     [Fact]
     public async Task AsnListsGet_ExternalFetchBudget_BoundsColdRequests()
     {
-        // #424: a cold /api/asn-lists fetches RIPEstat per ASN (minutes-scale per ASN); N such GETs
+        // A cold /api/asn-lists fetches RIPEstat per ASN (minutes-scale per ASN); N such GETs
         // used to monopolize the global in-flight cap and starve every other route. The handler's
         // wall-clock budget (default 30s, shrunk here) bounds the request: the parked provider is
         // cancelled, the partial counts are served, status stays 200 — never a hang.
@@ -158,7 +158,7 @@ public sealed class ManagementApiShutdownTests : IDisposable
     [Fact]
     public async Task ExportPrefixesGet_ExternalFetchBudget_BoundsColdRequests()
     {
-        // #424: /api/peers/{id}/prefixes has the same cold-fetch shape (subscription ASN/RU pulls).
+        // /api/peers/{id}/prefixes has the same cold-fetch shape (subscription ASN/RU pulls).
         var store = new PeerStore(new StaticOptionsFactory(new DbContextOptionsBuilder<BgpDbContext>().UseSqlite(_connection).Options));
         var peerId = await store.CreatePeerAsync("203.0.113.42", 65002, null);
         await store.SetSubscriptionsAsync(peerId, ["ru"]);
@@ -238,8 +238,8 @@ public sealed class ManagementApiShutdownTests : IDisposable
     }
 
     /// <summary>
-    /// #258: completed handlers must leave the in-flight set — the #248 bookkeeping appended
-    /// every request's Task and never removed it, so the tracking grew monotonically with request
+    /// Completed handlers must leave the in-flight set — the bookkeeping appended every request's
+    /// Task and never removed it, so the tracking grew monotonically with request
     /// count (a slow memory leak plus an ever-growing drain snapshot). After a burst of requests
     /// the in-flight count must return to exactly zero.
     /// </summary>

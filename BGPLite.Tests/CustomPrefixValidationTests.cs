@@ -3,11 +3,11 @@ using BGPLite.Api;
 namespace BGPLite.Tests;
 
 /// <summary>
-/// Tests for <see cref="ManagementApi.ParseCustomPrefix"/> (#100 / #236): custom-prefix CIDRs
+/// Tests for <see cref="ManagementApi.ParseCustomPrefix"/>: custom-prefix CIDRs
 /// supplied via the management API are validated (IPv4 only, mask 1..32, host bits masked to the
 /// network address) before reaching the store. Previously the parser only checked for a '/' and ran
 /// <c>byte.Parse</c> on the tail, accepting garbage like <c>1.2.3.4/250</c> (length 250) or
-/// <c>0.0.0.0/0</c> (the default route — a route-leak vector, #236) or non-IP prefixes.
+/// <c>0.0.0.0/0</c> (the default route — a route-leak vector) or non-IP prefixes.
 /// </summary>
 public class CustomPrefixValidationTests
 {
@@ -25,7 +25,7 @@ public class CustomPrefixValidationTests
     }
 
     /// <summary>
-    /// #236: host bits are masked to the network address so <c>10.0.0.5/24</c> normalizes to
+    /// Host bits are masked to the network address so <c>10.0.0.5/24</c> normalizes to
     /// <c>10.0.0.0/24</c>. Without this the same network submitted two ways (API vs file source) is
     /// stored as two distinct keys and breaks dedup / aggregation.
     /// </summary>
@@ -55,7 +55,7 @@ public class CustomPrefixValidationTests
     [InlineData("1.2.3.4/24/extra")]     // more than one slash
     [InlineData("/24")]                  // empty prefix
     [InlineData("")]                     // empty input
-    [InlineData("0.0.0.0/0")]            // #236: default route rejected (route server must not originate a default)
+    [InlineData("0.0.0.0/0")]            // default route rejected (route server must not originate a default)
     public void Rejects_Invalid_CIDR(string cidr)
     {
         Assert.Null(ManagementApi.ParseCustomPrefix(cidr));

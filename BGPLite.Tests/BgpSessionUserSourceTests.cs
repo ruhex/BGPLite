@@ -9,7 +9,7 @@ using BGPLite.Contracts;
 namespace BGPLite.Tests;
 
 /// <summary>
-/// Unit coverage for the per-peer user-source send path added in #147 (epic #143). Exercises
+/// Unit coverage for the per-peer user-source send path. Exercises
 /// <see cref="RouteAssembler.AddUserSourceRoutesAsync"/> directly with fakes — no live BgpSession/socket —
 /// mirroring the static-helper convention used by the other BgpSession tests.
 /// </summary>
@@ -96,10 +96,10 @@ public class BgpSessionUserSourceTests
     [Fact]
     public async Task OperationCanceled_Propagates()
     {
-        // Regression for #114/#342: cancellation must NOT be swallowed by the per-source catch.
-        // Propagation is keyed on the CALLER's token: an OCE arriving while the caller's token is
-        // cancelled is teardown and must unwind. An OCE with a live token is a per-source timeout
-        // (#320's linked CTS) and stays a fetch failure — see TimeoutOCE_LiveToken_SkipsSource.
+        // Cancellation must NOT be swallowed by the per-source catch. Propagation is keyed on the
+        // CALLER's token: an OCE arriving while the caller's token is cancelled is teardown and must
+        // unwind. An OCE with a live token is a per-source timeout (the provider's linked CTS)
+        // and stays a fetch failure — see TimeoutOCE_LiveToken_SkipsSource.
         var svc = new StubPrefixService { Throw = new OperationCanceledException() };
         var routes = new List<Route>();
 
@@ -111,8 +111,8 @@ public class BgpSessionUserSourceTests
     [Fact]
     public async Task TimeoutOCE_LiveToken_SkipsSource()
     {
-        // Regression for #342: a per-source timeout surfaces as OCE with a LIVE caller token
-        // (#320 arms it via HttpPrefixProvider's linked CTS). It must be a fetch failure like
+        // A per-source timeout surfaces as OCE with a LIVE caller token
+        // (armed by HttpPrefixProvider's linked CTS). It must be a fetch failure like
         // any other — the source is skipped and the dump continues — not rethrown, or one slow
         // URL would abort the whole dump and tear down a freshly established session through
         // RunAsync's OCE handler.

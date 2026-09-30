@@ -138,7 +138,7 @@ public class PeerCommunityFilterTests
     [Fact]
     public void AcceptIncoming_AlwaysTrue()
     {
-        // #392: ingress is unfiltered by design — the community allowlist is an EGRESS policy
+        // Ingress is unfiltered by design — the community allowlist is an EGRESS policy
         // only (outgoing updates); pin it on the real filter.
         var filter = NewFilter((_, _, _) => Task.FromResult(new HashSet<uint> { 0x0000FF01 }));
 
@@ -150,7 +150,7 @@ public class PeerCommunityFilterTests
     [Fact]
     public async Task RouteWithoutCommunity_IsRejected_WhenAllowlistActive()
     {
-        // #389 (D20): a community-less route carries no consent tag — under an ACTIVE allowlist
+        // D20: a community-less route carries no consent tag — under an ACTIVE allowlist
         // it is denied, not unconditionally admitted. RED pre-fix: it passed the filter.
         var allowed = new HashSet<uint> { 0x0000FF01 };
         var filter = NewFilter((_, _, _) => Task.FromResult(allowed));
@@ -171,7 +171,7 @@ public class PeerCommunityFilterTests
     [Fact]
     public async Task Resolver_IsInvokedOncePerSend_NotPerRoute()
     {
-        // #79: the community allow-set (a database roundtrip in production) must be resolved
+        // The community allow-set (a database roundtrip in production) must be resolved
         // ONCE per send, then reused for every per-route AcceptOutgoing decision — not once per
         // advertised route (~20k queries per refresh before the fix).
         var invocations = 0;

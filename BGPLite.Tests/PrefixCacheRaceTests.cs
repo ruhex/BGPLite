@@ -6,7 +6,7 @@ using BGPLite.Protocol;
 namespace BGPLite.Tests;
 
 /// <summary>
-/// Regression coverage for #229: GetRuPrefixesAsync used plain non-volatile fields shared across
+/// Regression coverage: GetRuPrefixesAsync used plain non-volatile fields shared across
 /// concurrent sessions — torn reads (new reference with old timestamp) and thundering herd (N
 /// concurrent callers all fetched the default source on TTL expiry). The fix adds Volatile/Interlocked
 /// field access + a SemaphoreSlim gate + stale-on-failure, mirroring the per-ASN cache.
@@ -14,7 +14,7 @@ namespace BGPLite.Tests;
 public class PrefixCacheRaceTests
 {
     /// <summary>
-    /// #229: N concurrent callers on a cold cache must share a single default-source fetch
+    /// N concurrent callers on a cold cache must share a single default-source fetch
     /// (thundering-herd defense). Before the fix, all N callers missed the cache simultaneously and
     /// each invoked GetDefaultAsync — N duplicate loads of the ~11k-prefix list.
     /// </summary>
@@ -35,7 +35,7 @@ public class PrefixCacheRaceTests
     }
 
     /// <summary>
-    /// #229: after the TTL elapses, concurrent callers again share a single fetch (the gate
+    /// After the TTL elapses, concurrent callers again share a single fetch (the gate
     /// re-check inside the lock means a caller that arrived while the first was still fetching
     /// gets the freshly-cached result, not a second fetch).
     /// </summary>
@@ -60,7 +60,7 @@ public class PrefixCacheRaceTests
     }
 
     /// <summary>
-    /// #229 stale-on-failure parity with GetPrefixesAsync (#163): when the default-source fetch
+    /// Stale-on-failure parity with GetPrefixesAsync: when the default-source fetch
     /// throws AFTER a good copy was cached AND the TTL has elapsed, the cached (stale) copy is
     /// served instead of propagating the exception. Note: the production <c>PrefixSourceService.
     /// GetDefaultAsync</c> swallows non-OCE exceptions and returns <c>[]</c>, so this throw-path is
@@ -84,14 +84,14 @@ public class PrefixCacheRaceTests
         fakeTime.Advance(TimeSpan.FromMilliseconds(150));
         source.FailNext = true;
 
-        // The re-fetch fails, but the stale cached copy is served (NOT thrown) — #163 parity.
+        // The re-fetch fails, but the stale cached copy is served (NOT thrown) — stale-on-failure parity.
         var stale = await service.GetRuPrefixesAsync();
         Assert.Equal(first, stale);                  // same projection as the original good copy
         Assert.Equal(2, source.LoadCalls);        // the failed fetch DID happen (expired cache)
     }
 
     /// <summary>
-    /// #229: when the fetch fails AND there is no cached copy (first-ever call), the exception
+    /// When the fetch fails AND there is no cached copy (first-ever call), the exception
     /// propagates — there is nothing stale to serve. Matches GetPrefixesAsync's no-cache path. As
     /// above, the production source swallows failures; this drives the defence-in-depth branch via
     /// a fake source that throws.
@@ -106,7 +106,7 @@ public class PrefixCacheRaceTests
     }
 
     /// <summary>
-    /// #416: a changed default-source load must not deadlock when the convergence push re-enters
+    /// A changed default-source load must not deadlock when the convergence push re-enters
     /// the RU path. Pre-fix, <see cref="PrefixService.GetRuPrefixesAsync"/> held <c>_ruGate</c>
     /// across the default-source load and a changed load fired <c>onSourceChanged</c> INLINE on
     /// that stack; the push (<c>RefreshAllEstablishedAsync</c> in production — a second RU consumer
@@ -148,7 +148,7 @@ public class PrefixCacheRaceTests
     }
 
     /// <summary>
-    /// #416: the RU push fires exactly when the load reports a content change — not on the fresh
+    /// The RU push fires exactly when the load reports a content change — not on the fresh
     /// fast path, not on an unchanged reload. The name passed through is the configured default
     /// source name (empty string when none is configured).
     /// </summary>
@@ -188,7 +188,7 @@ public class PrefixCacheRaceTests
 
     private static PrefixService Service(CountingPrefixSource source, TimeSpan? cacheTtl = null, TimeProvider? timeProvider = null, Func<string, Task>? onSourceChanged = null) =>
         new(new AppConfig(),
-            // #263 made both required in production; neither is on the GetRuPrefixesAsync path this
+            // Both are required in production; neither is on the GetRuPrefixesAsync path this
             // fixture exercises, so the fake composition states that explicitly rather than relying
             // on a nullable parameter that production code could also leave unset.
             null!, // RipeStatPrefixCache — not on the GetRuPrefixesAsync path
@@ -201,8 +201,8 @@ public class PrefixCacheRaceTests
 
     /// <summary>
     /// Fake IPrefixSourceService that counts LoadDefaultAsync calls, can be made to fail, and can
-    /// report a content change. Only LoadDefaultAsync is exercised by GetRuPrefixesAsync (#416 —
-    /// the RU path no longer goes through GetDefaultAsync); the other members throw NotImplemented
+    /// report a content change. Only LoadDefaultAsync is exercised by GetRuPrefixesAsync (the
+    /// RU path no longer goes through GetDefaultAsync); the other members throw NotImplemented
     /// to catch accidental reliance.
     /// </summary>
     private sealed class CountingPrefixSource : IPrefixSourceService
@@ -212,7 +212,7 @@ public class PrefixCacheRaceTests
         private int _loadCalls;
         public int LoadCalls => Volatile.Read(ref _loadCalls);
         public bool FailNext { get; set; }
-        /// <summary>Whether the next completed load reports a content change (#416 push trigger).</summary>
+        /// <summary>Whether the next completed load reports a content change (the push trigger).</summary>
         public bool ChangedOnNextLoad { get; set; }
 
         public Task<IReadOnlyList<(PrefixSourceConfig Source, IReadOnlyList<IpPrefix> Prefixes)>> LoadAllAsync(CancellationToken ct = default) =>

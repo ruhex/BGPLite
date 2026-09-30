@@ -24,8 +24,8 @@ public static class CapabilityHelper
         return false;
     }
 
-    /// <summary>Detects the MP-BGP IPv6/Unicast capability (AFI=2/SAFI=1) in the peer's OPEN
-    /// (#15 phase 2): the peer can send IPv6 routes via MP_REACH_NLRI.</summary>
+    /// <summary>Detects the MP-BGP IPv6/Unicast capability (AFI=2/SAFI=1) in the peer's OPEN:
+    /// the peer can send IPv6 routes via MP_REACH_NLRI.</summary>
     public static bool SupportsMultiprotocolIpv6Unicast(BgpOpenMessage open)
     {
         foreach (var cap in open.Capabilities)

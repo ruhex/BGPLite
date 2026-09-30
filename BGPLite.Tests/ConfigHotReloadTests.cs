@@ -15,7 +15,7 @@ using BGPLite.Protocol;
 namespace BGPLite.Tests;
 
 /// <summary>
-/// Hot-reload coverage for the SOFT (non-session-disrupting) config fields (#136):
+/// Hot-reload coverage for the SOFT (non-session-disrupting) config fields:
 /// <list type="bullet">
 /// <item><see cref="ManagementApi.ApplyConfig"/> atomically swaps TrustedProxies / CORS / rate &amp;
 /// concurrency limiters (verified directly, without a FileSystemWatcher).</item>
@@ -59,7 +59,7 @@ public class ConfigHotReloadTests
             harness.Api.ResolveClientIpLive(IPAddress.Parse("127.0.0.1"), "198.51.100.5", null));
     }
 
-    // --- ManagementApi.ApplyConfig: X-Real-IP opt-in (#256) --------------------------------------
+    // --- ManagementApi.ApplyConfig: X-Real-IP opt-in --------------------------------------
 
     [Fact]
     public void ApplyConfig_Swaps_TrustXRealIp()
@@ -77,7 +77,7 @@ public class ConfigHotReloadTests
             harness.Api.ResolveClientIpLive(IPAddress.Parse("127.0.0.1"), null, "198.51.100.5"));
     }
 
-    // --- ManagementApi.ApplyConfig: body-size cap (#266 item 6) -----------------------------------
+    // --- ManagementApi.ApplyConfig: body-size cap -----------------------------------
 
     [Fact]
     public void ApplyConfig_Swaps_MaxRequestBodyBytes()
@@ -234,7 +234,7 @@ public class ConfigHotReloadTests
         var path = TempConfigPath();
         try
         {
-            // Valid YAML but invalid config: ApiPort 99999 is out of range → Validate() throws (#89).
+            // Valid YAML but invalid config: ApiPort 99999 is out of range → Validate() throws.
             File.WriteAllText(path, Yaml(apiPort: 99999));
             using var harness = NewApi(Config(trustedProxies: ["127.0.0.0/8"]));
             var logger = new CapturingLogger<ConfigReloader>();
@@ -340,7 +340,7 @@ public class ConfigHotReloadTests
             config,
             new BgpMetrics(),
             new CapturingLogger<ManagementApi>(),
-            // #263: these are required now. This fixture exercises only the hot-reload path
+            // These are required now. This fixture exercises only the hot-reload path
             // (trusted proxies / CORS / rate limits), so inert stubs are supplied rather than
             // omitted — the API can no longer be built in a half-wired state by accident.
             new InertPrefixService(),

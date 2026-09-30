@@ -1,7 +1,7 @@
 namespace BGPLite.Api;
 
 /// <summary>
-/// Full per-peer read model for the management API's GET endpoints (#228). Replaces the 5–6
+/// Full per-peer read model for the management API's GET endpoints. Replaces the 5–6
 /// separate <c>DbContext</c> roundtrips <c>BuildPeerDetail</c>/<c>HandleGetPeer</c> used to issue
 /// (one each for the peer row, subscriptions, custom prefixes, custom ASNs, communities, and — for
 /// <c>HandleGetPeer</c> — custom sources). Field shapes match the prior standalone getters so the

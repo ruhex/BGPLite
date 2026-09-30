@@ -4,10 +4,10 @@ using BGPLite.Providers;
 
 namespace BGPLite.Tests;
 
-// Regression guard for #88: BGPLite.Providers is a lower/data layer and must NOT depend upward on
-// BGPLite.Server. The IPrefixService contract was moved from BGPLite.Server to BGPLite.Configuration
-// so the concrete PrefixService (in Providers) implements it without referencing Server. These tests
-// fail if the Server ProjectReference is re-added to Providers or if the contract moves back to Server.
+// Regression guard: BGPLite.Providers is a lower/data layer and must NOT depend upward on
+// BGPLite.Server. The IPrefixService contract lives in a leaf layer, so the concrete
+// PrefixService (in Providers) implements it without referencing Server. These tests fail if the
+// Server ProjectReference is re-added to Providers or if the contract moves out of its leaf.
 public class LayeringTests
 {
     [Fact]
@@ -22,8 +22,8 @@ public class LayeringTests
     [Fact]
     public void PrefixService_implements_IPrefixService_from_contracts()
     {
-        // #230: the contract moved from Configuration (its #88 workaround home) to the dedicated
-        // BGPLite.Contracts layer.
+        // The contract was hoisted into the dedicated BGPLite.Contracts layer; the namespace
+        // assertion keeps it from sliding back into a layer that would force an upward edge.
         var contract = typeof(PrefixService)
             .GetInterfaces()
             .SingleOrDefault(i => i.Name == "IPrefixService");
@@ -35,9 +35,9 @@ public class LayeringTests
     [Fact]
     public void Dependency_graph_has_no_forbidden_edges()
     {
-        // #230: the layering rules as an executable matrix — Protocol and Contracts are leaves,
+        // The layering rules as an executable matrix — Protocol and Contracts are leaves,
         // Routing sits on them, Server on Routing, Api/Providers on Contracts — never upward.
-        // Any PR that re-adds one of these edges turns this test red.
+        // Re-adding any of these edges turns this test red.
         var assemblies = new Dictionary<string, System.Reflection.Assembly>
         {
             ["BGPLite.Protocol"] = typeof(BgpConstants).Assembly,
@@ -51,7 +51,7 @@ public class LayeringTests
 
         var forbidden = new[]
         {
-            ("BGPLite.Api", "BGPLite.Server"),       // #230 — the edge the Contracts extraction removed
+            ("BGPLite.Api", "BGPLite.Server"),       // the edge the Contracts extraction removed
             ("BGPLite.Routing", "BGPLite.Api"),
             ("BGPLite.Routing", "BGPLite.Server"),
             ("BGPLite.Routing", "BGPLite.Providers"),
@@ -86,10 +86,10 @@ public class LayeringTests
     [Fact]
     public void Protocol_assembly_is_a_pure_leaf()
     {
-        // #271: BGPLite.Protocol is being extracted into a standalone library. It must stay
-        // dependency-free: no BGPLite.* project references and no third-party packages — the
-        // compiler emits package references into the assembly reference list, so this catches
-        // both. Only BCL (System.* / netstandard / the shared framework) references are allowed.
+        // BGPLite.Protocol must stay dependency-free: no BGPLite.* project references and no
+        // third-party packages — the compiler emits package references into the assembly
+        // reference list, so this catches both. Only BCL (System.* / netstandard / the shared
+        // framework) references are allowed.
         var protocol = typeof(BgpConstants).Assembly;
         var referenced = protocol.GetReferencedAssemblies();
 
@@ -98,6 +98,6 @@ public class LayeringTests
             a.Name!.StartsWith("System", StringComparison.Ordinal)
                 || a.Name == "netstandard"
                 || a.Name == "Microsoft.NETCore.App",
-            $"BGPLite.Protocol must not reference '{a.Name}' — it is being extracted as a standalone library (#271)"));
+            $"BGPLite.Protocol must not reference '{a.Name}' — it is being extracted as a standalone library"));
     }
 }

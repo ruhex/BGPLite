@@ -19,30 +19,30 @@ public sealed class ManagementApi : IHostedService, IDisposable
 {
     private readonly PeerStore _store;
     private readonly RouteTable _routeTable;
-    // Hot-reloadable derived state (#136): these four fields are swapped atomically by ApplyConfig
+    // Hot-reloadable derived state: these four fields are swapped atomically by ApplyConfig
     // via Interlocked.Exchange while the listener keeps running. Reads on the request path capture
     // them into locals (Volatile.Read) so a reload mid-request cannot observe a half-swapped set.
     private AppConfig _config;
     private IReadOnlyList<IPNetwork> _trustedProxyNetworks;
     private ClientIpRateLimiter? _rateLimiter;
     private ConcurrencyLimiter? _concurrencyLimiter;
-    // #330: limiters swapped out by ApplyConfig, disposed in StopAsync/Dispose after in-flight
+    // Limiters swapped out by ApplyConfig, disposed in StopAsync/Dispose after in-flight
     // requests have drained — a retired TokenBucketRateLimiter with AutoReplenishment roots a
     // replenish Timer that GC never collects, so "let GC handle it" leaked one timer per reload.
     private readonly List<IDisposable> _retiredLimiters = [];
     private IReadOnlyList<string>? _corsAllowedOrigins;
-    // #256: X-Real-IP is attacker-controllable behind a proxy that passes the header through
+    // X-Real-IP is attacker-controllable behind a proxy that passes the header through
     // unmodified, so it is consulted only when the operator opts in via Api.TrustXRealIp.
     // 0/1 (not bool) so ApplyConfig can swap it with Interlocked.Exchange like the fields above.
     private int _trustXRealIp;
-    // #256: fires once when a trusted proxy yields no usable forwarding header — all its clients
+    // Fires once when a trusted proxy yields no usable forwarding header — all its clients
     // then share one identity (rate-limit bucket + /api/me data), which operators should see.
     private int _warnedProxyWithoutClientIp;
-    // #266 item 6: the body-size cap is read on every mutating request (ReadBodyAsync) — swapped
+    // The body-size cap is read on every mutating request (ReadBodyAsync) — swapped
     // atomically so a reload applies to subsequent requests instead of requiring a restart.
     private long _maxRequestBodyBytes;
     private readonly BgpMetrics _metrics;
-    // #263: required, not optional. Each of these was a silent feature switch: without
+    // Required, not optional. Each of these was a silent feature switch: without
     // _sessionManager a peer edited in the UI was persisted but never pushed to its live session,
     // and without _prefixService the prefix views reported zero instead of failing.
     private readonly IPrefixService _prefixService;
@@ -50,10 +50,10 @@ public sealed class ManagementApi : IHostedService, IDisposable
     private readonly ISessionManager _sessionManager;
     private readonly ILogger<ManagementApi> _logger;
     private readonly int _port;
-    private readonly string _listenAddress;  // #90: bind address — loopback by default
+    private readonly string _listenAddress;  // bind address — loopback by default
 
     /// <summary>
-    /// #238: default in-flight cap for accepted-but-not-yet-completed requests. The #119
+    /// Default in-flight cap for accepted-but-not-yet-completed requests. The global
     /// concurrency limiter is opt-in; without this bound a connection burst spawns unbounded
     /// fire-and-forget tasks, each potentially doing DB work or RIPEstat fetches. Backpressure
     /// is applied in the accept loop: at capacity it waits for a slot instead of spawning.
@@ -61,7 +61,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
     private const int DefaultInflightCap = 64;
     private readonly SemaphoreSlim _inflightCap = new(DefaultInflightCap);
     /// <summary>
-    /// #424: wall-clock budget for the GET endpoints that can trigger external fetches
+    /// Wall-clock budget for the GET endpoints that can trigger external fetches
     /// (<c>/api/asn-lists</c>, <c>/api/peers/&#123;id&#125;/prefixes</c>). A cold RIPEstat fetch is
     /// minutes-scale per ASN (180s timeout × retries), so N such GETs used to monopolize the
     /// global in-flight cap and starve every other route for minutes. On expiry the handlers serve
@@ -69,13 +69,13 @@ public sealed class ManagementApi : IHostedService, IDisposable
     /// </summary>
     internal TimeSpan ExternalFetchBudget { get; set; } = TimeSpan.FromSeconds(30);
 
-    // #487: bounds for peer-supplied custom sources — generous ceilings that only reject abuse
+    // Bounds for peer-supplied custom sources — generous ceilings that only reject abuse
     // (repeated POSTs growing the DB without limit; megabyte-scale names/URLs in logs and rows).
     internal const int MaxSourceNameLength = 200;
     internal const int MaxSourceUrlLength = 2048;
     internal const int MaxSourcesPerPeer = 64;
-    // #258: in-flight tracking is a COUNT plus an idle Task (completed whenever the count is 0),
-    // not a List<Task> — the #248 design appended every handler and never removed it, so each
+    // In-flight tracking is a COUNT plus an idle Task (completed whenever the count is 0),
+    // not a List<Task> — the earlier design appended every handler and never removed it, so each
     // completed request leaked its Task (and its exception, if faulted) for the process lifetime
     // and the drain snapshot grew without bound. StopAsync drains by awaiting the idle task.
     private readonly object _inflightSync = new();
@@ -83,12 +83,12 @@ public sealed class ManagementApi : IHostedService, IDisposable
     private TaskCompletionSource? _inflightActive;
     private Task _inflightIdle = Task.CompletedTask;
 
-    /// <summary>Currently in-flight request handlers (#258) — bounded by the cap, zero when idle.</summary>
+    /// <summary>Currently in-flight request handlers — bounded by the cap, zero when idle.</summary>
     internal int InflightRequestCount { get { lock (_inflightSync) return _inflightCount; } }
     private HttpListener? _listener;
     private Task? _listenTask;
     private readonly CancellationTokenSource _cts = new();
-    // #326: cancelled at the top of StopAsync so in-flight handlers stop provider work (RIPEstat
+    // Cancelled at the top of StopAsync so in-flight handlers stop provider work (RIPEstat
     // fetches) instead of pinning the drain — the host stops services in reverse registration
     // order, and BgpServer.StopAsync (the Cease + socket teardown) waits behind this drain.
     // Deliberately never disposed: handlers abandoned by the bounded drain may still hold its
@@ -114,14 +114,14 @@ public sealed class ManagementApi : IHostedService, IDisposable
         _sessionManager = sessionManager;
         _logger = logger;
         _port = config.ApiPort;
-        // #90: secure-by-default — bind to loopback unless the operator explicitly sets ApiListen.
+        // Secure-by-default — bind to loopback unless the operator explicitly sets ApiListen.
         // The previous "http://+:port" exposed the unauthenticated control plane on every interface.
         _listenAddress = string.IsNullOrWhiteSpace(config.ApiListen) ? "127.0.0.1" : config.ApiListen!;
         _trustedProxyNetworks = ParseTrustedProxies(config.TrustedProxies);
-        // Opt-in (#116): no rate limiting unless an ApiRateLimit section is configured, so the live
+        // Opt-in: no rate limiting unless an ApiRateLimit section is configured, so the live
         // service's behavior is unchanged until the operator enables it.
         _rateLimiter = config.ApiRateLimit is { Enabled: true } cfg ? CreateRateLimiter(cfg) : null;
-        // Opt-in (#119): no global concurrency cap unless MaxConcurrentRequests > 0, so the live
+        // Opt-in: no global concurrency cap unless MaxConcurrentRequests > 0, so the live
         // service's behavior is unchanged until the operator sets a limit. Independent of the per-IP
         // rate: a burst passing the per-client token check still cannot run more than this many at once.
         _concurrencyLimiter = config.ApiRateLimit is { Enabled: true, MaxConcurrentRequests: > 0 } limitCfg
@@ -132,7 +132,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
     }
 
     /// <summary>
-    /// Hot-reloads the SOFT (non-session-disrupting) part of the configuration (#136): the
+    /// Hot-reloads the SOFT (non-session-disrupting) part of the configuration: the
     /// trusted-proxy CIDR list (client-IP resolution), the CORS origin allowlist (<c>_corsAllowedOrigins</c>),
     /// and the API rate / concurrency limiters. Each derived field is rebuilt from
     /// <paramref name="newConfig"/> and swapped atomically with <see cref="Interlocked.Exchange"/> so
@@ -153,9 +153,9 @@ public sealed class ManagementApi : IHostedService, IDisposable
 
         // Swap every reloadable field atomically. A request that has already captured the old
         // references into locals finishes against them; the next request reads the new ones.
-        // NOTE (#321 item 8): _config itself is NOT swapped — request-path code that must observe
+        // NOTE: _config itself is NOT swapped — request-path code that must observe
         // reloads reads the derived fields swapped below; the remaining _config readers (RipeStat
-        // lists, CustomPrefixCommunity) are restart-required (#266 item 6 covered MaxRequestBodyBytes).
+        // lists, CustomPrefixCommunity) are restart-required (MaxRequestBodyBytes is swapped above).
         var oldRateLimiter = Interlocked.Exchange(ref _rateLimiter, rateLimiter);
         var oldConcurrencyLimiter = Interlocked.Exchange(ref _concurrencyLimiter, concurrencyLimiter);
         Interlocked.Exchange(ref _trustedProxyNetworks, trusted);
@@ -164,7 +164,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
         Interlocked.Exchange(ref _maxRequestBodyBytes, newConfig.MaxRequestBodyBytes);
 
         // Old limiters cannot be disposed here — a concurrent HandleAsync may still be mid-acquire
-        // on them (#137). Park them for StopAsync/Dispose, which run after the in-flight drain.
+        // on them. Park them for StopAsync/Dispose, which run after the in-flight drain.
         lock (_retiredLimiters)
         {
             if (oldRateLimiter is not null) _retiredLimiters.Add(oldRateLimiter);
@@ -182,7 +182,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
     }
 
     /// <summary>
-    /// Instance-level client-IP resolution that uses the CURRENT live trusted-proxy list (#136), for
+    /// Instance-level client-IP resolution that uses the CURRENT live trusted-proxy list, for
     /// tests that need to observe the effect of <see cref="ApplyConfig"/> without an HttpListener.
     /// Mirrors <see cref="GetClientIp"/>'s forwarding-header logic.
     /// </summary>
@@ -195,7 +195,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
             Volatile.Read(ref _trustXRealIp) != 0);
 
     /// <summary>
-    /// Resolves the CORS origin against the CURRENT live <c>_corsAllowedOrigins</c> (#136), for tests
+    /// Resolves the CORS origin against the CURRENT live <c>_corsAllowedOrigins</c>, for tests
     /// that need to observe the effect of reloading <c>CorsAllowedOrigins</c> without an HttpListener. Mirrors
     /// <see cref="AddCorsHeaders"/>'s resolution.
     /// </summary>
@@ -205,7 +205,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
     /// <summary>Whether a per-client rate limiter is currently active — exposed for hot-reload tests.</summary>
     internal bool IsRateLimitingEnabled => Volatile.Read(ref _rateLimiter) is not null;
 
-    /// <summary>Live body-size cap (<see cref="AppConfig.MaxRequestBodyBytes"/>) — exposed for hot-reload tests (#266 item 6).</summary>
+    /// <summary>Live body-size cap (<see cref="AppConfig.MaxRequestBodyBytes"/>) — exposed for hot-reload tests.</summary>
     internal long MaxRequestBodyBytesLive => Volatile.Read(ref _maxRequestBodyBytes);
 
     /// <summary>Whether a global concurrency limiter is currently active — exposed for hot-reload tests.</summary>
@@ -216,8 +216,8 @@ public sealed class ManagementApi : IHostedService, IDisposable
         _listener = new HttpListener();
         // HttpListener prefix normalization:
         // - "0.0.0.0" must be mapped to "+" — HttpListener on Linux does NOT accept 0.0.0.0
-        //   (throws HttpListenerException "The request is not supported"), only the "+" wildcard (#195).
-        // - IPv6 literals (e.g. "::1") must be bracketed: http://[::1]:5001/ (CodeRabbit #181).
+        //   (throws HttpListenerException "The request is not supported"), only the "+" wildcard.
+        // - IPv6 literals (e.g. "::1") must be bracketed: http://[::1]:5001/
         // - IPv4 ("127.0.0.1") and hostnames ("localhost") go through as-is.
         string host;
         if (_listenAddress is "0.0.0.0" or "::")
@@ -230,7 +230,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
         _listener.Start();
 
         _logger.LogInformation("Management API listening on http://{Address}:{Port}/", _listenAddress, _port);
-        // Warn if the operator explicitly exposed the API without a trusted-proxy gate (#90).
+        // Warn if the operator explicitly exposed the API without a trusted-proxy gate.
         // Both IPv4 and IPv6 loopback are recognized as secure.
         if (_listenAddress is not "127.0.0.1" and not "localhost" and not "::1")
         {
@@ -239,7 +239,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
                 "proxy (Caddy/nginx with TLS + auth) is in front, or the unauthenticated control plane " +
                 "is reachable from the network", _listenAddress);
         }
-        // #256: state the hard proxy requirement at startup — a trusted proxy that neither appends
+        // State the hard proxy requirement at startup — a trusted proxy that neither appends
         // X-Forwarded-For nor overwrites X-Real-IP lets clients forge their identity.
         if (_trustedProxyNetworks.Count > 0)
         {
@@ -250,14 +250,13 @@ public sealed class ManagementApi : IHostedService, IDisposable
         }
         _listenTask = ListenAsync(_cts.Token);
 
-        // #36: arm the listening socket with every peer's TCP-MD5 key. ManagementApi starts after
-        // BgpServer (registration order), so the listener already exists; the sub-second window
-        // before this runs is the only unprotected moment (documented in #36).
+        // Arm the listening socket with every peer's TCP-MD5 key. ManagementApi starts after
+        // BgpServer (registration order), so only the sub-second window before this loop is
+        // unprotected.
         var md5Bootstrapped = 0;
-        // TCP keys by source IP: if two peer rows share an IP with DIFFERENT keys, the last one
-        // would win non-deterministically — the shared resolver sorts for determinism and warns
-        // (values never logged). #418: the same resolver re-arms the key on delete/PATCH so the
-        // runtime behavior cannot drift from this bootstrap.
+        // TCP keys by source IP: a DIFFERENT key on a sibling row would otherwise win
+        // non-deterministically — the resolver picks one deterministically and warns (values never
+        // logged), and the same resolver re-arms on delete/PATCH so runtime cannot drift from here.
         foreach (var group in (await _store.GetPeerMd5CredentialsAsync(cancellationToken))
                      .GroupBy(c => c.Ip).OrderBy(g => g.Key, StringComparer.Ordinal))
         {
@@ -271,10 +270,10 @@ public sealed class ManagementApi : IHostedService, IDisposable
     }
 
     /// <summary>
-    /// Resolves the ONE TCP-MD5 key a source IP's surviving peer rows must share (#36 — TCP keys
+    /// Resolves the ONE TCP-MD5 key a source IP's surviving peer rows must share (TCP keys
     /// by address, not by (IP, ASN)). Deterministic ordinal pick among the rows, with the same
     /// warning the startup bootstrap emits when siblings declare DIFFERENT keys; null when no
-    /// surviving row carries a key (#418).
+    /// surviving row carries a key.
     /// </summary>
     private string? ResolveSharedIpKey(string ip, IReadOnlyList<(string Ip, string Md5Password)> rows)
     {
@@ -288,9 +287,9 @@ public sealed class ManagementApi : IHostedService, IDisposable
     }
 
     /// <summary>
-    /// Re-arms the per-IP TCP-MD5 key from the SURVIVING peer rows (#418): deleting a peer or
+    /// Re-arms the per-IP TCP-MD5 key from the SURVIVING peer rows: deleting a peer or
     /// clearing its password must fall back to a sibling's key on the same source IP, and setting
-    /// a new one must leave the whole-IP state consistent with the store. The pre-#418 behavior
+    /// a new one must leave the whole-IP state consistent with the store. The previous behavior
     /// armed/unarmed from the single edited row, silently disarming (or overriding) siblings.
     /// </summary>
     internal async Task RearmPeerIpMd5KeyAsync(string ip)
@@ -301,12 +300,10 @@ public sealed class ManagementApi : IHostedService, IDisposable
 
     public async Task StopAsync(CancellationToken cancellationToken)
     {
-        // #326: cancel in-flight handlers FIRST — they observe this token on provider calls, so a
-        // cold-cache RIPEstat fetch (per-attempt timeout 180 s × retries, /api/asn-lists sequential
-        // per ASN) unwinds immediately instead of pinning the drain. The host stops services in
-        // reverse registration order, so BgpServer.StopAsync (the Cease teardown) waits behind this
-        // method; an unbounded drain got the process SIGKILLed in Docker (default 10 s stop grace)
-        // — peers saw a TCP RST instead of the promised Cease.
+        // Cancel in-flight handlers FIRST: they observe this token on provider calls, so a cold-cache
+        // RIPEstat fetch unwinds instead of pinning the drain. Services stop in reverse registration
+        // order, so BgpServer's Cease teardown waits behind this method — an unbounded drain got the
+        // process SIGKILLed in Docker (10 s stop grace) and peers saw a TCP RST instead of a Cease.
         _shutdownCts.Cancel();
         _cts.Cancel();
         _listener?.Stop();
@@ -317,7 +314,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
 
         // Drain in-flight handlers, but bounded: 10 s after cancellation is enough for a response
         // write or an orderly OCE unwind, and short of the host's 30 s shutdown grace. The drain
-        // awaits the in-flight idle task (#258) — it completes when the last handler's finally
+        // awaits the in-flight idle task — it completes when the last handler's finally
         // runs, so no per-request bookkeeping outlives the request.
         Task idle;
         lock (_inflightSync) idle = _inflightIdle;
@@ -332,7 +329,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
     }
 
     /// <summary>
-    /// #330: dispose limiters retired by <see cref="ApplyConfig"/>. Safe after the in-flight drain
+    /// Dispose limiters retired by <see cref="ApplyConfig"/>. Safe after the in-flight drain
     /// in StopAsync; Dispose calls it as best-effort teardown — a request still mid-acquire on a
     /// retired limiter there (direct Dispose without StopAsync, embedded use) surfaces as an
     /// ObjectDisposedException in its fault log. Idempotent.
@@ -356,8 +353,8 @@ public sealed class ManagementApi : IHostedService, IDisposable
             {
                 ctx = await _listener!.GetContextAsync();
                 if (ct.IsCancellationRequested) break;
-                // #238: acquire an in-flight slot before spawning so the default posture is
-                // bounded even when the operator has not enabled the #119 concurrency limiter.
+                // Acquire an in-flight slot before spawning so the default posture is
+                // bounded even when the operator has not enabled the global concurrency limiter.
                 await _inflightCap.WaitAsync(ct);
                 // Register BEFORE spawning: the handler's finally decrements, and a handler that
                 // completes before this thread runs would otherwise drive the count negative.
@@ -384,7 +381,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
             {
                 // An accepted context that never reached its handler task (shutdown cancelled
                 // the permit acquisition, or the ct-check raced the accept) must not leak an
-                // open response (#248 review).
+                // open response.
                 try { ctx?.Response.Close(); } catch { /* best-effort on shutdown */ }
             }
         }
@@ -403,7 +400,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
         }
         catch (OperationCanceledException) when (_shutdownCts.IsCancellationRequested)
         {
-            // #326/#114: shutdown cancelled an in-flight provider fetch — a normal unwind, not a
+            // Shutdown cancelled an in-flight provider fetch — a normal unwind, not a
             // fault. The response is closed by the listener teardown; the drain observes this task.
         }
         catch (Exception ex)
@@ -412,14 +409,14 @@ public sealed class ManagementApi : IHostedService, IDisposable
         }
         finally
         {
-            // #330: fault paths that never reach WriteResponse (429/503 early returns, a throwing
+            // Fault paths that never reach WriteResponse (429/503 early returns, a throwing
             // WriteResponse, the shutdown unwind above) must not leave the response to the
             // finalizer — Close is idempotent after a successful write.
             try { ctx.Response.Close(); } catch { /* best-effort teardown */ }
             // Tolerate teardown racing the StopAsync drain (e.g. direct Dispose without StopAsync).
             try { _inflightCap.Release(); }
             catch (ObjectDisposedException) { /* cap already disposed */ }
-            // #258: a handler leaving the in-flight set completes the idle task when it was the
+            // A handler leaving the in-flight set completes the idle task when it was the
             // last one — that is what StopAsync's bounded drain awaits.
             lock (_inflightSync)
             {
@@ -438,7 +435,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
 
     private async Task HandleAsync(HttpListenerContext ctx)
     {
-        // Capture the current reloadable limiters into locals (#136): a hot reload can swap the
+        // Capture the current reloadable limiters into locals: a hot reload can swap the
         // fields mid-request, so each request observes a single consistent limiter instance rather
         // than checking one instance and acquiring against a newer/different one.
         var rateLimiter = Volatile.Read(ref _rateLimiter);
@@ -446,10 +443,10 @@ public sealed class ManagementApi : IHostedService, IDisposable
 
         AddCorsHeaders(ctx);
 
-        // #266 item 7: rate-limit FIRST — the OPTIONS short-circuit used to return before this
+        // Rate-limit FIRST — the OPTIONS short-circuit used to return before this
         // check, so an unlimited cheap-preflight flood was bounded only by the 64 in-flight
         // slots. Preflights now consume the client's bucket like any other request.
-        // Per-client-IP rate limit (#116) — 429 once the resolved client's token bucket is drained.
+        // Per-client-IP rate limit — 429 once the resolved client's token bucket is drained.
         if (rateLimiter is not null)
         {
             var clientIp = GetClientIp(ctx);
@@ -473,7 +470,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
         var method = ctx.Request.HttpMethod;
         var segments = path.Split('/', StringSplitOptions.RemoveEmptyEntries);
 
-        // Global concurrency cap (#119): hold the lease for the whole request so total in-flight work
+        // Global concurrency cap: hold the lease for the whole request so total in-flight work
         // (RIPEstat fetches / DB ops) is bounded regardless of source. QueueLimit = 0 means acquisition
         // is immediate — either granted or denied with 503 Server busy when at capacity.
         RateLimitLease? concurrencyLease = null;
@@ -500,7 +497,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
             // response. Raw exception text (EF Core / SQLite / JSON internals — table names,
             // constraint text, file paths) must NOT reach the client: it is reconnaissance surface
             // for an attacker and is misleading (JsonException surfacing as 500 instead of 400, a
-            // unique-constraint race as 500 instead of 409) — #157.
+            // unique-constraint race as 500 instead of 409).
             // Cancellation (client disconnect / shutdown) is NOT an error — let it propagate so the
             // host's cancellation handling unwinds cleanly instead of surfacing as a 500.
             _logger.LogError(ex, "API error {Method} {Path}: {Message}",
@@ -510,14 +507,14 @@ public sealed class ManagementApi : IHostedService, IDisposable
         }
         finally
         {
-            // Release the slot back to the global pool (#119) — also covers the success path so the
+            // Release the slot back to the global pool — also covers the success path so the
             // lease is held exactly for the request duration.
             concurrencyLease?.Dispose();
         }
     }
 
     /// <summary>
-    /// Maps an unhandled exception to a stable, non-revealing client response (#157):
+    /// Maps an unhandled exception to a stable, non-revealing client response:
     /// <list type="bullet">
     /// <item><c>JsonException</c> → 400 (malformed JSON body is the client's fault, not a server error).</item>
     /// <item>EF Core unique-constraint violation → 409 (peer already exists — a concurrent duplicate
@@ -532,12 +529,12 @@ public sealed class ManagementApi : IHostedService, IDisposable
         if (ex is JsonException)
             return ("Malformed JSON body", 400);
 
-        // EF Core constraint violation. #266 item 8 + #377 review + #431: classify by the SQLite
+        // EF Core constraint violation. Classify by the SQLite
         // EXTENDED code — 787 (SQLITE_CONSTRAINT_FOREIGNKEY) is the concurrent-DELETE case (the
         // resource is GONE, not duplicated), 2067 (SQLITE_CONSTRAINT_UNIQUE) is a genuine conflict,
         // and everything else — NOT NULL (1299), CHECK (275), other constraint classes, or a
         // non-SQLite DbUpdateException — is a server-side data/schema problem that must not be
-        // mislabeled "already exists" to the client (pre-#431 the whole remaining bucket was 409).
+        // mislabeled "already exists" to the client (previously the whole remaining bucket was 409).
         if (ex is Microsoft.EntityFrameworkCore.DbUpdateException)
         {
             if (ex.InnerException is Microsoft.Data.Sqlite.SqliteException sqlite)
@@ -582,7 +579,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
         if (segments.Length == 4 && segments[0] == "api" && segments[1] == "peers" && segments[3] == "prefixes" && method == "GET")
             return await HandleExportPrefixes(segments[2], ctx);
 
-        // /api/peers/{id}/sources — GET (list), POST (add) (#143)
+        // /api/peers/{id}/sources — GET (list), POST (add)
         if (segments.Length == 4 && segments[0] == "api" && segments[1] == "peers" && segments[3] == "sources")
         {
             if (method == "GET")
@@ -591,7 +588,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
                 return await HandleAddSource(segments[2], ctx);
         }
 
-        // /api/peers/{id}/sources/{sourceId} — DELETE / PATCH (#143)
+        // /api/peers/{id}/sources/{sourceId} — DELETE / PATCH
         if (segments.Length == 5 && segments[0] == "api" && segments[1] == "peers" && segments[3] == "sources")
         {
             if (method == "DELETE")
@@ -634,13 +631,13 @@ public sealed class ManagementApi : IHostedService, IDisposable
     #region Request body reader
 
     /// <summary>
-    /// Reads the request body with a hard size cap (#156): rejects bodies larger than
+    /// Reads the request body with a hard size cap: rejects bodies larger than
     /// <see cref="AppConfig.MaxRequestBodyBytes"/> with <c>413 Payload Too Large</c> BEFORE
     /// deserialization. <c>HttpListener</c> has no default body limit, so without this a single
     /// client could stream gigabytes into the process. The cap also covers chunked-transfer bodies
     /// (no Content-Length) via the read-loop's running byte count.
     /// <para>
-    /// #257: HttpListener also exposes no client-disconnect token, so a slow-drip body (a byte
+    /// HttpListener also exposes no client-disconnect token, so a slow-drip body (a byte
     /// every few seconds) otherwise parks the handler — and its in-flight slot — forever; 64 such
     /// connections starve the whole API. Each read is therefore bounded by
     /// <paramref name="readTimeout"/>; a breach surfaces as <c>408 Request Timeout</c>. The
@@ -660,16 +657,16 @@ public sealed class ManagementApi : IHostedService, IDisposable
         return await ReadBoundedBodyAsync(ctx.Request.InputStream, maxBytes, BodyReadTimeout);
     }
 
-    /// <summary>#257: per-read deadline for request bodies — the time dimension of the #156 size cap.</summary>
+    /// <summary>Per-read deadline for request bodies — the time dimension of the size cap.</summary>
     private static readonly TimeSpan BodyReadTimeout = TimeSpan.FromSeconds(30);
 
     /// <summary>
-    /// Pure body reader with a hard byte cap — extracted for unit testing (#156). Returns
+    /// Pure body reader with a hard byte cap — extracted for unit testing. Returns
     /// <c>(null, 413-error)</c> when the stream yields more than <paramref name="maxBytes"/> bytes,
-    /// <c>(null, 408-error)</c> when the body misses <paramref name="readTimeout"/> (#257) — an
+    /// <c>(null, 408-error)</c> when the body misses <paramref name="readTimeout"/> — an
     /// ABSOLUTE deadline for the whole body, not a per-read window: a per-read WaitAsync restarts
-    /// on every byte, and a client trickling one byte per window held its slot indefinitely
-    /// (#358 review). Otherwise the full body decoded as UTF-8. Covers sized and chunked bodies.
+    /// on every byte, and a client trickling one byte per window held its slot indefinitely.
+    /// Otherwise the full body decoded as UTF-8. Covers sized and chunked bodies.
     /// </summary>
     internal static async Task<(string? Body, ApiResponse? Error)> ReadBoundedBodyAsync(
         Stream input, long maxBytes, TimeSpan? readTimeout = null)
@@ -685,7 +682,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
             {
                 if (deadline is { } byThen)
                 {
-                    // #257/#358: no client-disconnect token exists on HttpListener streams — the
+                    // No client-disconnect token exists on HttpListener streams — the
                     // deadline is the only bound on a slow-drip body, and it is TOTAL: each read
                     // gets only the remaining budget, so trickling cannot reset the clock. The
                     // abandoned read parks on the socket with this call's buffer (bounded by the
@@ -734,7 +731,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
             setup = BuildCiscoSetup(bgp.Asn),
             bird = BuildBirdSetup(bgp.RouterId, bgp.Asn, bgp.HoldTime),
             mikrotik = BuildMikrotikSetup(bgp.RouterId, bgp.Asn, bgp.HoldTime),
-            // IPv6 address-family variants (#14 phase 5): the peer side needs them to exchange
+            // IPv6 address-family variants: the peer side needs them to exchange
             // IPv6 routes. <SERVER_V6> placeholders resolve to Bgp.NextHopIpv6 when configured.
             setup6 = BuildCiscoSetupV6(bgp.Asn),
             bird6 = BuildBirdSetupV6(bgp.NextHopIpv6, bgp.Asn, bgp.HoldTime),
@@ -743,7 +740,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
     }
 
     /// <summary>
-    /// Cisco IOS peering snippet. Pure (no instance state) so it is directly unit-testable (#218).
+    /// Cisco IOS peering snippet. Pure (no instance state) so it is directly unit-testable.
     /// </summary>
     internal static string[] BuildCiscoSetup(uint asn) =>
     [
@@ -761,7 +758,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
     ];
 
     /// <summary>
-    /// BIRD peering snippet. Pure so it is directly unit-testable (#218).
+    /// BIRD peering snippet. Pure so it is directly unit-testable.
     /// </summary>
     internal static string[] BuildBirdSetup(string routerId, uint asn, int holdTime) =>
     [
@@ -787,7 +784,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
     ];
 
     /// <summary>
-    /// MikroTik RouterOS v7 peering snippet. Pure so it is directly unit-testable (#218).
+    /// MikroTik RouterOS v7 peering snippet. Pure so it is directly unit-testable.
     /// <para>
     /// multihop=yes is mandatory for the common case where the client is NOT directly connected to
     /// the server (behind NAT / via upstream transit): with the default multihop=no, RouterOS v7
@@ -805,7 +802,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
     ];
 
     /// <summary>
-    /// Cisco IOS peering snippet for the IPv6 address family (#14 phase 5): mirrors
+    /// Cisco IOS peering snippet for the IPv6 address family: mirrors
     /// <see cref="BuildCiscoSetup"/> with <c>address-family ipv6 unicast</c>. Pure.
     /// </summary>
     internal static string[] BuildCiscoSetupV6(uint asn) =>
@@ -824,7 +821,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
     ];
 
     /// <summary>
-    /// BIRD peering snippet for the IPv6 address family (#14 phase 5): an <c>ipv6</c> channel
+    /// BIRD peering snippet for the IPv6 address family: an <c>ipv6</c> channel
     /// BGPLite announces through when <c>Bgp.NextHopIpv6</c> is configured. Pure.
     /// </summary>
     internal static string[] BuildBirdSetupV6(string? serverV6, uint asn, int holdTime) =>
@@ -845,7 +842,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
     ];
 
     /// <summary>
-    /// MikroTik RouterOS v7 peering snippet for the IPv6 address family (#14 phase 5): a second
+    /// MikroTik RouterOS v7 peering snippet for the IPv6 address family: a second
     /// connection with <c>afi=ip6</c>. Pure.
     /// </summary>
     internal static string[] BuildMikrotikSetupV6(string? serverV6, uint asn, int holdTime) =>
@@ -862,8 +859,8 @@ public sealed class ManagementApi : IHostedService, IDisposable
     {
         var clientIp = GetClientIp(ctx);
 
-        // #23: /api/me always returns a `peers` array. When several peers share one source IP
-        // (NAT/VPN), each is a distinct record (composite (Ip, Asn) key, #19).
+        // /api/me always returns a `peers` array. When several peers share one source IP
+        // (NAT/VPN), each is a distinct record (composite (Ip, Asn) key).
         //
         // - ?asn=64512 → resolve that specific peer via GetPeer(ip, asn). Malformed → 400.
         // - No ?asn= → return ALL peers at this IP.
@@ -891,12 +888,12 @@ public sealed class ManagementApi : IHostedService, IDisposable
     /// <summary>Builds the peer-detail anonymous object for /api/me. Returns null if the peer vanished.</summary>
     private async Task<object?> BuildPeerDetail(string peerId)
     {
-        // #228: single DbContext roundtrip via PeerStore.GetPeerDetail (was 5 separate DbContexts:
+        // Single DbContext roundtrip via PeerStore.GetPeerDetail (was 5 separate DbContexts:
         // GetDbPeerById + GetSubscriptions + GetCustomPrefixes + GetCustomAsns + GetCommunities).
         var peer = await _store.GetPeerDetailAsync(peerId);
         if (peer is null) return null;
 
-        // #212: actual advertised count from the live session (post-aggregation, post-dedup).
+        // Actual advertised count from the live session (post-aggregation, post-dedup).
         var advertisedCount = peer.Asn.HasValue
             ? _sessionManager.GetAdvertisedPrefixCount(peer.Ip, peer.Asn.Value)
             : 0;
@@ -917,7 +914,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
             customAsns = peer.CustomAsns,
             communities = peer.Communities.Select(c => CommunityCodec.Format((uint)c)),
             allRoutes = peer.Communities.Count == 0,
-            // #212: the actual number of prefixes on the wire (after aggregation + duplicate NLRI
+            // The actual number of prefixes on the wire (after aggregation + duplicate NLRI
             // merge). 0 = session not established or no routes sent yet.
             advertisedPrefixCount = advertisedCount
         };
@@ -929,7 +926,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
 
     /// <summary>
     /// <c>POST /api/peers</c> — creates a peer from the request body. Every field is validated and
-    /// the address canonicalized (#255) BEFORE the store is touched, so a rejected request leaves no
+    /// the address canonicalized BEFORE the store is touched, so a rejected request leaves no
     /// row behind and an accepted one is stored in the form <c>BgpServer</c> keys sessions by.
     /// </summary>
     private async Task<ApiResponse> HandleCreatePeer(HttpListenerContext ctx)
@@ -941,8 +938,8 @@ public sealed class ManagementApi : IHostedService, IDisposable
         if (data is null)
             return ApiResponse.Error("Invalid request body", 400);
 
-        // #255: validate everything BEFORE the store is touched. The peer row and its collections
-        // now commit together (#259), so a rejection here leaves nothing behind at all.
+        // Validate everything BEFORE the store is touched. The peer row and its collections
+        // commit together, so a rejection here leaves nothing behind at all.
         var normalizedIp = NormalizePeerIp(data.Ip);
         if (normalizedIp is null)
             return ApiResponse.Error($"Invalid peer IP: {SanitizeForLog(data.Ip ?? "(missing)")}", 400);
@@ -954,7 +951,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
         var asnLists = data.AsnLists ?? [];
         var customPrefixes = new List<(string Prefix, byte Length)>();
 
-        // #266 item 4: reject unknown subscription names at the boundary — a stored typo silently
+        // Reject unknown subscription names at the boundary — a stored typo silently
         // served zero prefixes from that list forever, with no signal on either side.
         var unknownLists = FindUnknownSubscriptionNames(asnLists, _config);
         if (unknownLists.Count > 0)
@@ -966,12 +963,12 @@ public sealed class ManagementApi : IHostedService, IDisposable
             SanitizeForLog(string.Join(",", asnLists)), SanitizeForLog(string.Join(",", data.CustomPrefixes ?? [])),
             SanitizeForLog(string.Join(",", data.CustomAsns ?? [])));
 
-        // #391: the per-peer prefix ceiling — an optional override of Bgp.MaxPrefixesPerPeer;
+        // The per-peer prefix ceiling — an optional override of Bgp.MaxPrefixesPerPeer;
         // 0 means "unlimited for this peer". Reject negatives at the boundary.
         if (data.MaxPrefix is < 0)
             return ApiResponse.Error("Invalid MaxPrefix: must be 0 (unlimited) or a positive prefix count.", 400);
 
-        // #36: optional per-peer TCP-MD5 (RFC 2385) — a password enables kernel-level signature
+        // Optional per-peer TCP-MD5 (RFC 2385) — a password enables kernel-level signature
         // enforcement for this peer's source IP. The password is never logged or echoed.
         if (!string.IsNullOrEmpty(data.Md5Password) && !TcpMd5.IsValidPassword(data.Md5Password))
             return ApiResponse.Error($"Invalid Md5Password: must be 1..{TcpMd5.PasswordMaxBytes} UTF-8 bytes (empty means plain TCP).", 400);
@@ -987,20 +984,20 @@ public sealed class ManagementApi : IHostedService, IDisposable
             }
         }
 
-        // #259: one transaction for the whole create. The previous CreatePeer + three Set* calls
+        // One transaction for the whole create. The previous CreatePeer + three Set* calls
         // each committed separately, so a duplicate CIDR — which violates the
         // (PeerId, Prefix, PrefixLength) key — returned 500 over an already-committed peer row and
         // left the user with a half-configured peer. Duplicates are now deduplicated inside the
         // store: a set of prefixes means the same thing whether a value appears once or twice.
-        // #267 item 6: the upsert returns (Id, Status, CreatedAt) from its RETURNING clause — no
+        // The upsert returns (Id, Status, CreatedAt) from its RETURNING clause — no
         // follow-up GetDbPeerById roundtrip for fields the caller already knows.
         var saved = await _store.SavePeerConfigurationAsync(
             normalizedIp, data.Asn, data.Description, asnLists, customPrefixes, data.CustomAsns ?? [], data.MaxPrefix,
             md5Password: string.IsNullOrEmpty(data.Md5Password) ? null : data.Md5Password);
         if (!string.IsNullOrEmpty(data.Md5Password))
         {
-            // #455: resolve through the SAME shared-IP re-arm the delete/PATCH/bootstrap paths use —
-            // TCP keys by address (#36), so arming the new row's key directly silently overrode a
+            // Resolve through the SAME shared-IP re-arm the delete/PATCH/bootstrap paths use —
+            // TCP keys by address, so arming the new row's key directly silently overrode a
             // sibling's key on the same IP (last-writer-wins, no disagreement warning).
             await RearmPeerIpMd5KeyAsync(normalizedIp);
         }
@@ -1028,7 +1025,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
 
     private async Task<ApiResponse> HandleGetPeer(string peerId)
     {
-        // #228: single DbContext roundtrip via PeerStore.GetPeerDetail (was 6 separate DbContexts).
+        // Single DbContext roundtrip via PeerStore.GetPeerDetail (was 6 separate DbContexts).
         var peer = await _store.GetPeerDetailAsync(peerId);
         if (peer is null)
             return ApiResponse.Error("Peer not found", 404);
@@ -1056,7 +1053,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
     /// <summary>
     /// <c>PATCH /api/peers/{id}</c> — updates the supplied fields of an existing peer; an omitted
     /// collection means "leave it alone", an empty one means "clear it". Validation runs before the
-    /// store is touched, matching <see cref="HandleCreatePeer"/> (#255).
+    /// store is touched, matching <see cref="HandleCreatePeer"/>.
     /// </summary>
     private async Task<ApiResponse> HandleUpdatePeer(string peerId, HttpListenerContext ctx)
     {
@@ -1072,7 +1069,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
             return ApiResponse.Error("Invalid request body", 400);
 
         // Validate ALL custom prefixes BEFORE any mutation so a bad prefix rejects the whole
-        // request with a 400 without partial mutation (#100). parsedPrefixes stays null when the
+        // request with a 400 without partial mutation. parsedPrefixes stays null when the
         // field is omitted so existing prefixes are preserved (partial-update semantics: omitting a
         // field must not wipe it — same as Description/Lists above and CustomAsns below).
         List<(string Prefix, byte Length)>? parsedPrefixes = null;
@@ -1091,15 +1088,15 @@ public sealed class ManagementApi : IHostedService, IDisposable
         _logger.LogInformation("UpdatePeer {Id}: CustomPrefixes={Count}, CustomAsns={AsnCount}",
             SanitizeForLog(peerId), parsedPrefixes?.Count ?? 0, data.CustomAsns?.Count ?? 0);
 
-        // #255: the address and the peer's own ASN are not updatable through this endpoint, so only
+        // The address and the peer's own ASN are not updatable through this endpoint, so only
         // the shared fields need checking — but they need it before anything is written.
         if (ValidatePeerFields(data.Description, data.CustomAsns) is { } updateError)
             return updateError;
 
-        // #259: one transaction for the whole update, same reasoning as the create path. A null
+        // One transaction for the whole update, same reasoning as the create path. A null
         // argument means "leave this alone" — the PATCH semantics this endpoint already had, now
         // expressed once in the store instead of as four conditional calls that each committed.
-        // #266 item 4: same boundary check on update — but only for names actually being SET
+        // Same boundary check on update — but only for names actually being SET
         // (a null Lists field means "leave the subscriptions alone" and has nothing to validate).
         if (data.Lists is not null)
         {
@@ -1110,18 +1107,18 @@ public sealed class ManagementApi : IHostedService, IDisposable
                     "See /api/asn-lists for the configured names.", 400);
         }
 
-        // #391: PATCH semantics — MaxPrefix omitted means "leave it alone"; an explicit value
+        // PATCH semantics — MaxPrefix omitted means "leave it alone"; an explicit value
         // (including 0 = unlimited for this peer) is set. Reject negatives at the boundary.
         if (data.MaxPrefix is < 0)
             return ApiResponse.Error("Invalid MaxPrefix: must be 0 (unlimited) or a positive prefix count.", 400);
 
-        // #36: Md5Password PATCH — omitted leaves it, "" clears (plain TCP), a value sets it.
+        // Md5Password PATCH — omitted leaves it, "" clears (plain TCP), a value sets it.
         if (data.Md5Password is not null && !TcpMd5.IsValidPassword(data.Md5Password) && data.Md5Password.Length > 0)
             return ApiResponse.Error($"Invalid Md5Password: must be 1..{TcpMd5.PasswordMaxBytes} UTF-8 bytes, or an empty string to disable.", 400);
 
         await _store.UpdatePeerConfigurationAsync(peerId, data.Description, data.Lists, parsedPrefixes, data.CustomAsns, data.MaxPrefix,
             md5Password: data.Md5Password);
-        // #487: a concurrent DELETE between the top-of-handler GET and this UPDATE left the
+        // A concurrent DELETE between the top-of-handler GET and this UPDATE left the
         // ExecuteUpdates touching 0 rows while the handler still logged "Updated peer", answered
         // 200 and fired a refresh — the follow-up GET then 404ed. Re-check the row and answer 404
         // directly (the write itself is harmless: transaction-scoped, 0 rows affected).
@@ -1130,7 +1127,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
             return ApiResponse.Error("Peer not found", 404);
         if (data.Md5Password is not null)
         {
-            // #418: re-arm from ALL surviving rows for this IP — clearing this peer's key must
+            // Re-arm from ALL surviving rows for this IP — clearing this peer's key must
             // fall back to a sibling's, not silently disarm the address for every peer on it.
             await RearmPeerIpMd5KeyAsync(surviving.Ip);
         }
@@ -1144,9 +1141,9 @@ public sealed class ManagementApi : IHostedService, IDisposable
 
     /// <summary>
     /// Fire-and-forget per-peer refresh after a config change. A NULL-Asn row (legacy Ip-only era)
-    /// cannot match any live session by (Ip, Asn) — no session ever has RemoteAsn 0 (#300) — so
-    /// the refresh is skipped with a warning instead of the confusing "no session for {Ip} AS0"
-    /// the old <c>asn ?? 0</c> produced (#422).
+    /// cannot match any live session by (Ip, Asn) — no session ever has RemoteAsn 0 (AS 0 OPENs are
+    /// rejected) — so the refresh is skipped with a warning instead of the confusing
+    /// "no session for {Ip} AS0" the old <c>asn ?? 0</c> produced.
     /// </summary>
     private void RequestPeerRefresh(string peerId, Peer peer)
     {
@@ -1168,7 +1165,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
         if (peer is null)
             return ApiResponse.Error("Peer not found", 404);
 
-        // #323: terminate the peer's live session(s) BEFORE the row is deleted. Terminating first
+        // Terminate the peer's live session(s) BEFORE the row is deleted. Terminating first
         // stops the advertisement immediately; RouteAssembler's unknown-peer branch refuses to
         // auto-register once the session token is cancelled (Dispose runs before the row goes
         // away), so a refresh that straddles the teardown cannot resurrect the deleted peer. The
@@ -1182,8 +1179,8 @@ public sealed class ManagementApi : IHostedService, IDisposable
         }
         else
         {
-            // #422: a NULL-Asn row (legacy Ip-only era) cannot be matched by (Ip, Asn) — no live
-            // session ever has RemoteAsn 0 (AS 0 OPENs are rejected, #300) — so the pre-#422
+            // A NULL-Asn row (legacy Ip-only era) cannot be matched by (Ip, Asn) — no live
+            // session ever has RemoteAsn 0 (AS 0 OPENs are rejected) — so the old
             // `asn ?? 0` teardown was a SILENT no-op and the session kept advertising a deleted
             // peer. Terminate by IP instead, and say so in the log.
             _logger.LogWarning(
@@ -1194,9 +1191,9 @@ public sealed class ManagementApi : IHostedService, IDisposable
 
         await _store.DeletePeerAsync(peerId);
 
-        // #36 + #418: re-arm the IP's TCP-MD5 key from the SURVIVING rows — deleting one sibling
-        // must not disarm TCP-MD5 for the other peers sharing the source IP (pre-#418 this was an
-        // unconditional SetPeerMd5Key(ip, null)). No key left on the IP resolves to null (disarm).
+        // Re-arm the IP's TCP-MD5 key from the SURVIVING rows — deleting one sibling
+        // must not disarm TCP-MD5 for the other peers sharing the source IP. No key left on the
+        // IP resolves to null (disarm).
         await RearmPeerIpMd5KeyAsync(peer.Ip);
         _logger.LogInformation("Deleted peer {Id} ({Ip})", SanitizeForLog(peerId), peer.Ip);
         return ApiResponse.Ok(new { id = peerId, deleted = true });
@@ -1204,7 +1201,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
 
     #endregion
 
-    #region /api/peers/{id}/sources (#143)
+    #region /api/peers/{id}/sources
 
     private async Task<ApiResponse> HandleGetSources(string peerId)
     {
@@ -1228,7 +1225,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
         if (data is null || string.IsNullOrWhiteSpace(data.Name) || string.IsNullOrWhiteSpace(data.Url))
             return ApiResponse.Error("Name and Url are required", 400);
 
-        // #487: bound the peer-supplied fields and the per-peer source count. The 1 MiB body cap
+        // Bound the peer-supplied fields and the per-peer source count. The 1 MiB body cap
         // bounds ONE request; nothing bounded repeated posts, and the DB rows outlive the request.
         // Generous limits: a longer name/URL is never legitimate, and a peer needs far fewer
         // sources than the user-source cache's 1024-URL entry cap.
@@ -1238,15 +1235,15 @@ public sealed class ManagementApi : IHostedService, IDisposable
         if ((await _store.GetCustomSourcesAsync(peerId)).Count >= MaxSourcesPerPeer)
             return ApiResponse.Error($"Peer already has the maximum of {MaxSourcesPerPeer} custom sources.", 400);
 
-        // #266 item 3: the community is peer-supplied and reaches the wire through
-        // CommunityCodec at send time — validate the SAME contract at the API boundary (#255
-        // posture). #328 made the codec reject out-of-range halves instead of masking them, so
-        // this check now catches what previously became a silently-wrong tag.
+        // The community is peer-supplied and reaches the wire through
+        // CommunityCodec at send time — validate the SAME contract at the API boundary (the same
+        // posture as every other peer-supplied field). The codec rejects out-of-range halves instead
+        // of masking them, so this check catches what previously became a silently-wrong tag.
         if (!IsValidCommunity(data.Community))
             return ApiResponse.Error(
                 $"Invalid community '{SanitizeForLog(data.Community)}': expected 'ASN:VALUE' with each part 0-65535.", 400);
 
-        // #232: full SSRF validation at save time (defence-in-depth on top of the fetch-time
+        // Full SSRF validation at save time (defence-in-depth on top of the fetch-time
         // ConnectCallback). Reject a URL that is malformed, uses a non-http(s) scheme, resolves to
         // a private/loopback/link-local address, or uses a non-80/443 port — before persisting it,
         // so the caller gets a clear 400 instead of a silently-saved source that fails forever at
@@ -1255,7 +1252,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
         //
         // The validator's raw error text (blocked-IP address, DNS exception message) is logged here
         // but NOT returned to the client — that would leak internal DNS/address details and bypass
-        // the non-revealing-error policy (#157). The client sees a stable generic message; the
+        // the non-revealing-error policy. The client sees a stable generic message; the
         // operator sees the cause in the server log.
         //
         // The DNS resolution step is bounded by a 5s timeout so a hanging resolver cannot pin the
@@ -1266,23 +1263,23 @@ public sealed class ManagementApi : IHostedService, IDisposable
         bool isValid;
         try
         {
-            // #503 review: the validator's reason string embeds the URL and DNS internals —
+            // The validator's reason string embeds the URL and DNS internals —
             // discarded; the log names the source and the response carries a fixed classification.
             (isValid, _) = await PrefixSourceUrlValidator.ValidateUrlAsync(data.Url, ct: validationCts.Token);
         }
         catch (OperationCanceledException) when (validationCts.IsCancellationRequested)
         {
-            // DNS-resolution timeout (5s). #479 (#149): source URLs may carry query-string tokens —
+            // DNS-resolution timeout (5s). Source URLs may carry query-string tokens —
             // the log names the source, never the URL.
             _logger.LogWarning("Save-time URL validation timed out for source '{Name}'", SanitizeForLog(data.Name));
             return ApiResponse.Error("URL validation timed out (DNS resolution took too long)", 400);
         }
         if (!isValid)
         {
-            // #479 (#149): neither the URL nor the validator's message (which embeds it) belongs in
-            // the log. #503 review (CWE-209): the validator's message ALSO embeds resolved
-            // addresses and raw DNS exception text — classify for the response instead of echoing
-            // server-side resolution internals back to the caller.
+            // Neither the URL nor the validator's message (which embeds it) belongs in
+            // the log. The validator's message ALSO embeds resolved
+            // addresses and raw DNS exception text (CWE-209) — classify for the response instead of
+            // echoing server-side resolution internals back to the caller.
             _logger.LogWarning("Save-time URL validation rejected source '{Name}' for peer {PeerId}",
                 SanitizeForLog(data.Name), SanitizeForLog(peerId));
             return ApiResponse.Error(
@@ -1292,10 +1289,10 @@ public sealed class ManagementApi : IHostedService, IDisposable
         var source = await _store.AddCustomSourceAsync(peerId, data.Name, data.Url, data.Community);
 
         // Trigger refresh so the peer receives the new source's prefixes immediately —
-        // same pattern as CreatePeer/UpdatePeer. Pass ASN so shared-IP peers aren't refreshed (#200).
+        // same pattern as CreatePeer/UpdatePeer. Pass ASN so shared-IP peers aren't refreshed.
         RequestPeerRefresh(peerId, peer);
 
-        // #479 (#149): log the source Name, not the URL (query-string tokens are secrets).
+        // Log the source Name, not the URL (query-string tokens are secrets).
         _logger.LogInformation("Added source '{Name}' to peer {PeerId}",
             SanitizeForLog(data.Name), SanitizeForLog(peerId));
         return ApiResponse.Ok(new { id = source.Id, name = source.Name, url = source.Url, community = source.Community, active = source.Active });
@@ -1310,7 +1307,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
         if (!await _store.DeleteCustomSourceAsync(peerId, sourceId))
             return ApiResponse.Error($"Source '{sourceId}' not found", 404);
 
-        // Trigger refresh so the source's prefixes are withdrawn immediately (#200: ASN-scoped).
+        // Trigger refresh so the source's prefixes are withdrawn immediately (ASN-scoped refresh).
         RequestPeerRefresh(peerId, peer);
 
         _logger.LogInformation("Deleted source {SourceId} from peer {PeerId}", SanitizeForLog(sourceId), SanitizeForLog(peerId));
@@ -1333,7 +1330,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
         if (!await _store.SetSourceActiveAsync(peerId, sourceId, data.Active.Value))
             return ApiResponse.Error($"Source '{sourceId}' not found", 404);
 
-        // Trigger refresh so toggling active/inactive takes effect immediately (#200: ASN-scoped).
+        // Trigger refresh so toggling active/inactive takes effect immediately (ASN-scoped refresh).
         RequestPeerRefresh(peerId, peer);
 
         _logger.LogInformation("Source {SourceId} active={Active}", SanitizeForLog(sourceId), data.Active.Value);
@@ -1350,7 +1347,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
         if (peer is null)
             return ApiResponse.Error("Peer not found", 404);
 
-        // #424: same wall-clock budget as /api/asn-lists — cold subscription fetches are
+        // Same wall-clock budget as /api/asn-lists — cold subscription fetches are
         // minutes-scale and must not pin the request (and its in-flight slot) indefinitely.
         using var budget = CancellationTokenSource.CreateLinkedTokenSource(_shutdownCts.Token);
         budget.CancelAfter(ExternalFetchBudget);
@@ -1397,7 +1394,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
                 foreach (var p in fetched)
                     prefixes.Add(new IpPrefix(p.Prefix, p.Length, p.IsIpv4).ToString());
             }
-            catch (OperationCanceledException) when (_shutdownCts.IsCancellationRequested) { throw; }  // #114/#337/#424: only SHUTDOWN propagates — budget expiry degrades to the partial list
+            catch (OperationCanceledException) when (_shutdownCts.IsCancellationRequested) { throw; }  // only SHUTDOWN propagates — fetch-budget expiry degrades to the partial list
             catch (Exception ex) { _logger.LogWarning(ex, "CollectPeerPrefixes: ASN fetch failed"); }
         }
 
@@ -1410,7 +1407,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
                 foreach (var p in ruPrefixes)
                     prefixes.Add(new IpPrefix(p.Prefix, p.Length, p.IsIpv4).ToString());
             }
-            catch (OperationCanceledException) when (_shutdownCts.IsCancellationRequested) { throw; }  // #114/#337/#424: see above
+            catch (OperationCanceledException) when (_shutdownCts.IsCancellationRequested) { throw; }  // only SHUTDOWN propagates — see above
             catch (Exception ex) { _logger.LogWarning(ex, "CollectPeerPrefixes: RU prefix fetch failed"); }
         }
 
@@ -1427,7 +1424,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
 
     private async Task<ApiResponse> HandleGetAsnListsAsync()
     {
-        // #424: bound the whole handler — see ExternalFetchBudget. Shutdown still propagates;
+        // Bound the whole handler — see ExternalFetchBudget. Shutdown still propagates;
         // budget expiry degrades to the partial counts collected so far (each later fetch fails
         // fast against the cancelled token) instead of pinning the request for minutes.
         using var budget = CancellationTokenSource.CreateLinkedTokenSource(_shutdownCts.Token);
@@ -1444,14 +1441,14 @@ public sealed class ManagementApi : IHostedService, IDisposable
                 foreach (var asn in l.Asns)
                 {
                     try { prefixCount += await _prefixService.GetPrefixCountAsync(asn, ct); }
-                    catch (OperationCanceledException) when (_shutdownCts.IsCancellationRequested) { throw; }  // #114/#337/#424: only SHUTDOWN propagates — the #424 fetch budget fires as OCE on a live shutdown token and degrades below
+                    catch (OperationCanceledException) when (_shutdownCts.IsCancellationRequested) { throw; }  // only SHUTDOWN propagates — a fetch-budget cancellation fires as OCE on a live shutdown token and degrades below
                     catch (Exception ex) { _logger.LogWarning(ex, "Failed to get prefix count for AS{Asn}", asn); }
                 }
             }
             else if (l.Country is not null)
             {
                 try { prefixCount = (await _prefixService.GetRuPrefixesAsync(ct)).Count; }
-                catch (OperationCanceledException) when (_shutdownCts.IsCancellationRequested) { throw; }  // #114/#337/#424: see above
+                catch (OperationCanceledException) when (_shutdownCts.IsCancellationRequested) { throw; }  // see above
                 catch (Exception ex) { _logger.LogWarning(ex, "Failed to get RU prefix count"); }
             }
 
@@ -1469,7 +1466,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
 
         // Append configured PrefixSources (file/http) alongside the legacy RipeStat ASN-lists,
         // reusing the same response shape. "Kind" is intentionally not exposed.
-        // #480: the budget token firing mid-LoadAllAsync surfaces as a foreign-token OCE (live
+        // The budget token firing mid-LoadAllAsync surfaces as a foreign-token OCE (live
         // shutdown token) — without this catch it escaped the handler and closed the connection
         // without a body, discarding the partial result assembled above. Degrade like the
         // per-source loops above; the tail warning below reports the budget expiry (both paths).
@@ -1538,7 +1535,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
 
     #region GET /api/routes
 
-    // #330: the peer-owned rows are live, but the unowned seed rows are a STARTUP snapshot —
+    // The peer-owned rows are live, but the unowned seed rows are a STARTUP snapshot —
     // auto-refresh pushes updated source content to peers per-session; the seed rows themselves
     // are only rebuilt on restart. Operators reading this endpoint should treat seed counts
     // accordingly.
@@ -1568,9 +1565,9 @@ public sealed class ManagementApi : IHostedService, IDisposable
 
         if (countOnly)
         {
-            // #454: same wall-clock budget as /api/asn-lists (#424) — a cold RIPEstat fetch is
+            // Same wall-clock budget as /api/asn-lists — a cold RIPEstat fetch is
             // minutes-scale and must not pin the request (and its in-flight slot) for the full
-            // timeout×retries chain. Unlike the two endpoints #424 covered, a count cannot
+            // timeout×retries chain. Unlike those endpoints, a count cannot
             // degrade to a partial list, so budget expiry answers a stable 503; shutdown still
             // propagates.
             using var budget = CancellationTokenSource.CreateLinkedTokenSource(_shutdownCts.Token);
@@ -1589,7 +1586,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
-                // #157: log the real detail server-side; return a generic message so RIPEstat /
+                // Log the real detail server-side; return a generic message so RIPEstat /
                 // provider internals do not reach the client. Cancellation (client disconnect /
                 // shutdown) is NOT an error — let it propagate instead of surfacing as a 500.
                 _logger.LogWarning(ex, "GetAsnPrefixes failed for AS{Asn}", asn);
@@ -1624,12 +1621,12 @@ public sealed class ManagementApi : IHostedService, IDisposable
 
     /// <summary>
     /// Parses a single user-supplied custom prefix CIDR ("<prefix>/<length>") into a validated
-    /// (prefix, mask length) tuple, delegating to the canonical <see cref="PrefixCidr"/> parser
-    /// (#236). Host bits are masked to the network address (so <c>10.0.0.5/24</c> normalizes to
+    /// (prefix, mask length) tuple, delegating to the canonical <see cref="PrefixCidr"/> parser.
+    /// Host bits are masked to the network address (so <c>10.0.0.5/24</c> normalizes to
     /// <c>10.0.0.0/24</c> and dedups against the same network submitted via a file source); <c>/0</c>
     /// (the default route) is rejected — a route server must not originate a default from the API.
     /// Returns null on any failure so callers can reject the whole request with a 400 before touching
-    /// the store (no partial mutation). Extracted as a pure helper for unit tests (#100).
+    /// the store (no partial mutation). Extracted as a pure helper for unit tests.
     /// </summary>
     internal static (string Prefix, byte Length)? ParseCustomPrefix(string? cidr)
     {
@@ -1642,8 +1639,8 @@ public sealed class ManagementApi : IHostedService, IDisposable
     }
 
     /// <summary>
-    /// Validates a peer address and returns it in canonical dotted-quad form, or <c>null</c> if it is
-    /// not a usable IPv4 address (#255).
+    /// Validates a peer address and returns it in canonical dotted-quad form, or <c>null</c> if it
+    /// is not a usable peer address. Both families are accepted — a peer may be an IPv6 host.
     /// <para>
     /// Canonicalizing is the point, not a nicety. <c>BgpServer</c> keys an accepted session by
     /// <c>remoteEndpoint.Address.ToString()</c>, so a peer row storing any other spelling of the same
@@ -1654,10 +1651,9 @@ public sealed class ManagementApi : IHostedService, IDisposable
     /// <c>ToString()</c> collapses all of them onto the form the BGP path will look for.
     /// </para>
     /// <para>
-    /// Both families are accepted (#14 phase 5): a peer may be an IPv6 host. Addresses no BGP
-    /// session can ever originate from — unspecified, loopback, multicast, and the IPv4 broadcast
-    /// address — are rejected (#421), the API-side parity of the YAML path's fail-loud validation
-    /// (#390): such rows can never match a session, and a multicast row would even arm a kernel
+    /// Addresses no BGP session can ever originate from — unspecified, loopback, multicast, and the
+    /// IPv4 broadcast address — are rejected, the API-side parity of the YAML path's fail-loud
+    /// validation: such rows can never match a session, and a multicast row would even arm a kernel
     /// TCP-MD5 entry.
     /// </para>
     /// </summary>
@@ -1695,10 +1691,10 @@ public sealed class ManagementApi : IHostedService, IDisposable
     }
 
     /// <summary>
-    /// Whether an AS number may be configured for a peer (#255). Rejects exactly four values:
+    /// Whether an AS number may be configured for a peer. Rejects exactly four values:
     /// <list type="bullet">
     /// <item><c>0</c> — RFC 7607 §2 requires an OPEN carrying peer AS 0 to be rejected with Bad Peer
-    /// AS, which BGPLite now does (#300). Accepting it here produces a peer that is stored, shown in
+    /// AS, which BGPLite does. Accepting it here produces a peer that is stored, shown in
     /// the UI, and can never establish a session.</item>
     /// <item><c>23456</c> — AS_TRANS is the RFC 6793 placeholder a 4-octet speaker puts in My AS; its
     /// real AS arrives in the capability, so no peer ever *is* AS_TRANS.</item>
@@ -1706,8 +1702,8 @@ public sealed class ManagementApi : IHostedService, IDisposable
     /// </list>
     /// <para>
     /// The private ranges are deliberately NOT rejected. 64512–65534 (RFC 6996) and 4200000000–
-    /// 4294967294 are exactly what a user of a route server peers with; #255 suggested excluding
-    /// "4200000000+", which is the private 32-bit range and would lock out real peers. RFC 7300
+    /// 4294967294 are exactly what a user of a route server peers with; excluding "4200000000+"
+    /// would lock out real peers — that is the private 32-bit range. RFC 7300
     /// reserves only the two endpoints above.
     /// </para>
     /// </summary>
@@ -1720,7 +1716,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
     /// <summary>
     /// Validates the peer fields shared by create and update, returning the error response to send or
     /// <c>null</c> when everything checks out. Runs BEFORE anything is persisted, so a rejected
-    /// request leaves no trace (#255, and #259 for why "before" matters).
+    /// request leaves no trace.
     /// </summary>
     private static ApiResponse? ValidatePeerFields(string? description, IReadOnlyList<uint>? customAsns)
     {
@@ -1742,7 +1738,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
     }
 
     /// <summary>
-    /// #266 item 4: subscription names must match something actually configured — an unknown
+    /// Subscription names must match something actually configured — an unknown
     /// name (typo, removed list) was stored and silently served zero prefixes forever. Returns
     /// the unknown names, or an empty list when every name resolves against the configured
     /// <c>RipeStat.AsnLists</c> or <c>PrefixSources</c>.
@@ -1753,15 +1749,15 @@ public sealed class ManagementApi : IHostedService, IDisposable
         if (config.RipeStat?.AsnLists is { } lists)
             foreach (var l in lists)
                 known.Add(l.Name);
-        foreach (var source in config.PrefixSources ?? []) // #477: YAML null = no sources
+        foreach (var source in config.PrefixSources ?? []) // YAML null = no sources
             known.Add(source.Name);
         return names.Where(n => !known.Contains(n)).Distinct(StringComparer.Ordinal).ToList();
     }
 
     /// <summary>
-    /// Whether a peer-supplied community string satisfies the wire contract (#266 item 3): a
+    /// Whether a peer-supplied community string satisfies the wire contract: a
     /// well-formed <c>ASN:VALUE</c> with both halves 0-65535 (RFC 1997 encoding; the same rule
-    /// <see cref="CommunityCodec.Parse"/> enforces — #328). Null/whitespace means "no community"
+    /// <see cref="CommunityCodec.Parse"/> enforces). Null/whitespace means "no community"
     /// and is valid.
     /// </summary>
     internal static bool IsValidCommunity(string? community)
@@ -1785,7 +1781,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
     }
 
     /// <summary>
-    /// #256: a trusted proxy whose request carries no usable <c>X-Forwarded-For</c> hop (and no
+    /// A trusted proxy whose request carries no usable <c>X-Forwarded-For</c> hop (and no
     /// opted-in <c>X-Real-IP</c>) collapses all its traffic into one client identity — the proxy
     /// address: every client behind it shares a rate-limit bucket and <c>/api/me</c> data. Logs a
     /// warning once so a misconfigured proxy is visible without spamming every request.
@@ -1806,11 +1802,11 @@ public sealed class ManagementApi : IHostedService, IDisposable
     }
 
     /// <summary>
-    /// Builds the per-client-IP token-bucket rate limiter for the management API (#116). Each distinct
+    /// Builds the per-client-IP token-bucket rate limiter for the management API. Each distinct
     /// resolved client IP (see <see cref="GetClientIp"/>) gets its own token bucket; a request is
     /// rejected with 429 once the resolved client's token bucket is drained. Tunable via <see cref="ApiRateLimitConfig"/>; the
     /// limiter is only created when the operator opts in (ApiRateLimit section present + Enabled).
-    /// Extracted as a pure factory for unit tests. #423: the registry evicts idle IP partitions —
+    /// Extracted as a pure factory for unit tests. The registry evicts idle IP partitions —
     /// <see cref="PartitionedRateLimiter"/> kept every IP ever seen (and its replenishment timer)
     /// for the process lifetime.
     /// </summary>
@@ -1820,7 +1816,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
     }
 
     /// <summary>
-    /// Builds the GLOBAL concurrency limiter for the management API (#119). A single non-partitioned
+    /// Builds the GLOBAL concurrency limiter for the management API. A single non-partitioned
     /// <see cref="ConcurrencyLimiter"/> with <see cref="ConcurrencyLimiterOptions.PermitLimit"/> =
     /// <see cref="ApiRateLimitConfig.MaxConcurrentRequests"/> and
     /// <see cref="ConcurrencyLimiterOptions.QueueLimit"/> = 0, so at most PermitLimit requests run at
@@ -1841,10 +1837,10 @@ public sealed class ManagementApi : IHostedService, IDisposable
     /// <summary>
     /// Resolves the real client IP from the connection's remote endpoint and forwarding headers.
     /// Forwarding headers are honored ONLY when the immediate peer (<paramref name="remote"/>) is a
-    /// configured trusted proxy (#91) — a direct client cannot inject <c>X-Forwarded-For</c> /
+    /// configured trusted proxy — a direct client cannot inject <c>X-Forwarded-For</c> /
     /// <c>X-Real-IP</c>. <c>X-Forwarded-For</c> is walked right-to-left and the first hop that is not
     /// itself a trusted proxy is returned, defeating injection through the proxy. <c>X-Real-IP</c> is
-    /// consulted only when <paramref name="trustXRealIp"/> is set (#256) — unlike XFF its value cannot
+    /// consulted only when <paramref name="trustXRealIp"/> is set — unlike XFF its value cannot
     /// be verified against the trusted-hop chain. Extracted as a pure function so the security logic
     /// is unit-testable without an HttpListener.
     /// </summary>
@@ -1880,12 +1876,10 @@ public sealed class ManagementApi : IHostedService, IDisposable
             }
         }
 
-        // Single-hop proxies commonly set X-Real-IP instead of (or alongside) X-Forwarded-For. Unlike
-        // XFF, the value cannot be verified against the trusted-hop chain — a proxy that passes the
-        // header through instead of overwriting it turns it into an attacker-controlled input (#256),
-        // so it is consulted only when the operator opts in via Api.TrustXRealIp. Validate + normalize
-        // so a malformed header can't surface garbage (e.g. newlines for log forging) — fall back to
-        // the proxy address if it isn't a parseable IP.
+        // X-Real-IP is consulted only on operator opt-in: unlike XFF it cannot be verified against
+        // the trusted-hop chain — a proxy that passes it through instead of overwriting it makes it
+        // attacker-controlled. Validate + normalize (no garbage, e.g. newlines for log forging);
+        // fall back to the proxy address if it isn't a parseable IP.
         if (trustXRealIp && !string.IsNullOrWhiteSpace(xRealIp) && IPAddress.TryParse(xRealIp.Trim(), out var realAddr))
             return Normalize(realAddr).ToString();
 
@@ -1920,7 +1914,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
     private async Task WriteResponse(HttpListenerContext ctx, ApiResponse response)
     {
         ctx.Response.StatusCode = response.StatusCode;
-        // #266 item 1: a handler may pin a content type (the txt prefix export sets text/plain);
+        // A handler may pin a content type (the txt prefix export sets text/plain);
         // defaulting unconditionally made every such response double-serialized — JSON content
         // type, JSON-quoted body with escaped newlines. Only JSON responses get the serializer.
         if (string.IsNullOrEmpty(ctx.Response.ContentType))
@@ -1932,7 +1926,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
         }
         else
         {
-            // Pass the cached JsonSerializerOptions (#105 aot/perf) — without it, Serialize falls back to
+            // Pass the cached JsonSerializerOptions — without it, Serialize falls back to
             // default per-call options (reflection + no caching), a perf regression on every response.
             var json = JsonSerializer.Serialize(response.Body, _jsonOpts);
             await ctx.Response.OutputStream.WriteAsync(Encoding.UTF8.GetBytes(json));
@@ -1941,7 +1935,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
     }
 
     /// <summary>
-    /// Resolves the CORS <c>Access-Control-Allow-Origin</c> value for a request (#99). Returns the
+    /// Resolves the CORS <c>Access-Control-Allow-Origin</c> value for a request. Returns the
     /// request's own <paramref name="requestOrigin"/> when it is non-empty AND exactly matches an
     /// entry in <paramref name="allowed"/> (case-insensitive) — never <c>"*"</c> and never a
     /// non-allowlisted origin, so an untrusted client cannot trick the API into reflecting an
@@ -1963,11 +1957,11 @@ public sealed class ManagementApi : IHostedService, IDisposable
 
     private void AddCorsHeaders(HttpListenerContext ctx)
     {
-        // #99: gate CORS on an explicit origin allowlist. ResolveCorsOrigin returns the request's
+        // Gate CORS on an explicit origin allowlist. ResolveCorsOrigin returns the request's
         // own Origin only when allowlisted, else null. Null => emit NO Access-Control-Allow-Origin
         // (CORS disabled — secure default); matched => reflect the origin with Vary: Origin so caches
         // key by origin. Allow-Methods/Allow-Headers are emitted only alongside a real ACAO.
-        // The allowlist is read off the live _config (#136) so a hot reload of CorsAllowedOrigins
+        // The allowlist is read off the live field so a hot reload of CorsAllowedOrigins
         // takes effect on the next request without a restart.
         var origin = ResolveCorsOrigin(ctx.Request.Headers["Origin"], Volatile.Read(ref _corsAllowedOrigins));
         if (origin is null) return;
@@ -1986,7 +1980,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
         if (_disposed) return;
         _disposed = true;
 
-        // #337 review: direct Dispose (embedded use, tests) skips StopAsync — cancel the shutdown
+        // Direct Dispose (embedded use, tests) skips StopAsync — cancel the shutdown
         // token here too so in-flight provider work observes shutdown. Still never disposed:
         // abandoned handlers may hold its token (a disposed source's Token getter throws ODE).
         _shutdownCts.Cancel();
@@ -1994,7 +1988,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
         _cts.Dispose();
         DisposeRetiredLimiters();
         // At shutdown no requests are in-flight, so disposing the current limiters is safe
-        // (unlike ApplyConfig mid-flight, where old ones are parked for later disposal — #137/#330).
+        // (unlike ApplyConfig mid-flight, where old ones are parked for later disposal).
         Volatile.Read(ref _rateLimiter)?.Dispose();
         Volatile.Read(ref _concurrencyLimiter)?.Dispose();
         _inflightCap.Dispose();

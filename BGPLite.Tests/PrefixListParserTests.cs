@@ -33,7 +33,7 @@ public class PrefixListParserTests
     [Fact]
     public void AcceptsIpv6()
     {
-        // #14 phase 4 flipped the old "SkipsIpv6" behavior: IPv6 entries are family-tagged
+        // IPv6 entries used to be skipped; they are family-tagged
         // prefixes now, parsed by the same canonical policy (masking, /0 rejection, 1..128).
         var result = PrefixListParser.Parse("2001:DB8:0:0:0:0:0:1/48\n1.2.3.0/24");
         Assert.Equal(2, result.Count);
@@ -75,13 +75,13 @@ public class PrefixListParserTests
         Assert.Equal(2, result.Count);
     }
 
-    // --- #162: length validation + host-bit masking regression coverage ---
+    // --- length validation + host-bit masking regression coverage ---
 
     [Fact]
     public void RejectsDefaultRoute_Length0()
     {
         // A route server must not originate a default — a stray 0.0.0.0/0 in a peer-supplied
-        // URL list would otherwise advertise the entire IPv4 space (#147, #162).
+        // URL list would otherwise advertise the entire IPv4 space.
         Assert.Empty(PrefixListParser.Parse("0.0.0.0/0"));
     }
 
@@ -136,7 +136,7 @@ public class PrefixListParserTests
     public void SkipsUtf8Bom_FirstLine()
     {
         // A UTF-8 BOM (\uFEFF) is not stripped by string.Trim() — without explicit handling the
-        // first line of a BOM-prefixed list is silently dropped (#162).
+        // first line of a BOM-prefixed list is silently dropped.
         var bom = "\uFEFF1.2.3.0/24";
         var result = PrefixListParser.Parse(bom);
         var single = Assert.Single(result);

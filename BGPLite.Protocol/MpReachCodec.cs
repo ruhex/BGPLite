@@ -4,7 +4,7 @@ using System.Net;
 namespace BGPLite.Protocol;
 
 /// <summary>
-/// Wire codec for the MP-BGP IPv6/Unicast attributes (RFC 4760, #15 phase 2):
+/// Wire codec for the MP-BGP IPv6/Unicast attributes (RFC 4760):
 /// <list type="bullet">
 /// <item><c>MP_REACH_NLRI</c> (type 14): AFI(2) + SAFI(1) + NH-Len(1) + Next Hop + Reserved(1) + NLRI.</item>
 /// <item><c>MP_UNREACH_NLRI</c> (type 15): AFI(2) + SAFI(1) + Withdrawn NLRI.</item>
@@ -24,14 +24,14 @@ public static class MpReachCodec
 
     public readonly record struct MpReachV6(UInt128 NextHop, IReadOnlyList<IpPrefix> Prefixes);
 
-    /// <summary>MP_REACH/MP_UNREACH AFI=1/SAFI=1 (IPv4/Unicast) decode result (#466): the 4-octet
+    /// <summary>MP_REACH/MP_UNREACH AFI=1/SAFI=1 (IPv4/Unicast) decode result: the 4-octet
     /// next hop plus the prefix list — semantically the classic IPv4 NLRI path.</summary>
     public readonly record struct MpReachV4(uint NextHop, IReadOnlyList<IpPrefix> Prefixes);
 
     public const ushort AfiIpv4 = (ushort)BgpConstants.Afi.IPv4;
 
     /// <summary>
-    /// Decodes an MP_REACH_NLRI (type 14) VALUE for IPv4/Unicast (#466): AFI(2) + SAFI(1) +
+    /// Decodes an MP_REACH_NLRI (type 14) VALUE for IPv4/Unicast: AFI(2) + SAFI(1) +
     /// NH-Len(1) + a 4-octet next hop + Reserved(1) + classic IPv4 NLRI. A next-hop length other
     /// than 4 is a parse error (RFC 4760 §5 defines no other form for this family).
     /// </summary>
@@ -74,7 +74,7 @@ public static class MpReachCodec
         return new MpReachV4(nextHop, prefixes);
     }
 
-    /// <summary>Decodes an MP_UNREACH_NLRI (type 15) VALUE for IPv4/Unicast (#466):
+    /// <summary>Decodes an MP_UNREACH_NLRI (type 15) VALUE for IPv4/Unicast:
     /// AFI(2) + SAFI(1) + the withdrawn classic IPv4 NLRI.</summary>
     public static IReadOnlyList<IpPrefix> DecodeMpUnreachV4(ReadOnlySpan<byte> value)
     {
@@ -102,7 +102,7 @@ public static class MpReachCodec
     }
 
     /// <summary>
-    /// #467 (RFC 2545 §3): the MP_REACH next hop must be a GLOBAL IPv6 address. Rejects the
+    /// RFC 2545 §3: the MP_REACH next hop must be a GLOBAL IPv6 address. Rejects the
     /// unspecified address (::), loopback (::1), multicast (ff00::/8) and link-local
     /// (fe80::/10) — a lone link-local is only meaningful on a shared subnet and rides as the
     /// SECOND half of the RFC 2545 32-byte form, which the decoder never adopts. IPv4-mapped

@@ -3,8 +3,8 @@ using YamlDotNet.Serialization;
 namespace BGPLite.Configuration;
 
 /// <summary>
-/// Per-client-IP token-bucket rate limiting for the management API (#116), plus an opt-in GLOBAL
-/// concurrency cap on in-flight requests (#119). The per-IP limits are generous by default so normal
+/// Per-client-IP token-bucket rate limiting for the management API, plus an opt-in GLOBAL
+/// concurrency cap on in-flight requests. The per-IP limits are generous by default so normal
 /// management-API usage never trips them; they exist to protect the process from request floods.
 /// The concurrency cap bounds total resource use regardless of source (defense in depth with the
 /// per-IP rate, which only bounds flood speed per client). Set <see cref="Enabled"/> = false to disable.
@@ -28,7 +28,7 @@ public sealed class ApiRateLimitConfig
     public int PeriodSeconds { get; init; } = 60;
 
     /// <summary>
-    /// GLOBAL cap on concurrently in-flight management-API requests (#119). Default <c>0</c> = no
+    /// GLOBAL cap on concurrently in-flight management-API requests. Default <c>0</c> = no
     /// concurrency cap (live behavior unchanged — opt-in, consistent with the per-IP rate). When
     /// greater than zero and <see cref="Enabled"/> is true, at most this many requests run at once
     /// across ALL clients; the next is rejected with 503 until an in-flight request completes. Bounds

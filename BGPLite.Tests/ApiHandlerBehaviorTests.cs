@@ -16,10 +16,10 @@ using BGPLite.Protocol;
 namespace BGPLite.Tests;
 
 /// <summary>
-/// #266 handler-level behavior that needs a real listener: the txt prefix export must not be
-/// double-serialized (item 1), the CORS preflight must advertise PATCH (item 2), OPTIONS
-/// preflights consume the client's rate bucket instead of bypassing it (item 7), and a reloaded
-/// MaxRequestBodyBytes applies to subsequent requests without a restart (item 6).
+/// Handler-level behavior that needs a real listener: the txt prefix export must not be
+/// double-serialized, the CORS preflight must advertise PATCH, OPTIONS
+/// preflights consume the client's rate bucket instead of bypassing it, and a reloaded
+/// MaxRequestBodyBytes applies to subsequent requests without a restart.
 /// </summary>
 public sealed class ApiHandlerBehaviorTests : IDisposable
 {
@@ -93,7 +93,7 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
 
         Assert.True(response.IsSuccessStatusCode);
         Assert.Equal("text/plain", response.Content.Headers.ContentType?.MediaType);
-        Assert.Equal("10.0.0.0/8", body.TrimEnd());   // RED pre-fix: "\"10.0.0.0/8\\n\"" with application/json
+        Assert.Equal("10.0.0.0/8", body.TrimEnd());   // pre-fix: "\"10.0.0.0/8\\n\"" with application/json
     }
 
     [Fact]
@@ -112,7 +112,7 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
         preflight.Headers.Add("Origin", "http://example.com");
         using var first = await _client.SendAsync(preflight);
         Assert.Equal(HttpStatusCode.NoContent, first.StatusCode);
-        Assert.Contains("PATCH", first.Headers.GetValues("Access-Control-Allow-Methods").First()); // RED pre-fix: no PATCH
+        Assert.Contains("PATCH", first.Headers.GetValues("Access-Control-Allow-Methods").First()); // pre-fix: no PATCH
 
         var second = new HttpRequestMessage(HttpMethod.Options, $"http://127.0.0.1:{_port}/api/peers");
         second.Headers.Add("Origin", "http://example.com");
@@ -122,7 +122,7 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
         var third = new HttpRequestMessage(HttpMethod.Options, $"http://127.0.0.1:{_port}/api/peers");
         third.Headers.Add("Origin", "http://example.com");
         using var limited = await _client.SendAsync(third);
-        Assert.Equal(HttpStatusCode.TooManyRequests, limited.StatusCode);   // RED pre-fix: 204 forever
+        Assert.Equal(HttpStatusCode.TooManyRequests, limited.StatusCode);   // pre-fix: 204 forever
     }
 
     [Fact]
@@ -151,7 +151,7 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
 
         using var tooLarge = await _client.PostAsync($"http://127.0.0.1:{_port}/api/peers",
             new StringContent(body, Encoding.UTF8, "application/json"));
-        // RED pre-fix: ReadBodyAsync kept reading the startup _config, so the same POST returned 200.
+        // Pre-fix, ReadBodyAsync kept reading the startup _config, so the same POST returned 200.
         Assert.Equal(HttpStatusCode.RequestEntityTooLarge, tooLarge.StatusCode);
     }
 
@@ -255,7 +255,7 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
     [Fact]
     public async Task CreatePeer_SecondKeyOnSharedIp_ArmsTheDeterministicResolverKey()
     {
-        // #455: pre-fix the create path armed the NEW row's key directly (last-writer-wins across
+        // Pre-fix the create path armed the NEW row's key directly (last-writer-wins across
         // the shared source IP, no disagreement warning) while delete/PATCH/bootstrap resolved
         // through RearmPeerIpMd5KeyAsync/ResolveSharedIpKey. Create goes through the same resolver:
         // with "key-a" already keyed on the IP, creating a sibling with "key-b" must arm the
@@ -324,7 +324,7 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
         public Task RefreshAllEstablishedAsync() => Task.CompletedTask;
     }
 
-    /// <summary>Records SetPeerMd5Key calls so a test can assert WHAT was armed (#455).</summary>
+    /// <summary>Records SetPeerMd5Key calls so a test can assert WHAT was armed.</summary>
     private sealed class RecordingSessions : ISessionManager
     {
         public List<(string Ip, string? Password)> Md5Keys { get; } = [];
@@ -337,7 +337,7 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
         public Task RefreshAllEstablishedAsync() => Task.CompletedTask;
     }
 
-    /// <summary>Captures formatted log messages so a test can assert what must NEVER be logged (#479).</summary>
+    /// <summary>Captures formatted log messages so a test can assert what must NEVER be logged.</summary>
     private sealed class RecordingLogger : ILogger<ManagementApi>
     {
         public List<string> Messages { get; } = [];
@@ -350,7 +350,7 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
     [Fact]
     public async Task AddSource_RejectedUrl_IsNeverLogged()
     {
-        // #479 (#149): peer-source URLs may carry query-string tokens — the log events around
+        // Peer-source URLs may carry query-string tokens — the log events around
         // save-time validation must name the source, never the URL. The loopback host is blocked
         // by the SSRF validator without any network access, so the rejected path fires offline.
         var store = new PeerStore(new StaticOptionsFactory(new DbContextOptionsBuilder<BgpDbContext>().UseSqlite(_connection).Options));
@@ -368,7 +368,7 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
     }
 
     /// <summary>LoadAllAsync throws a foreign-token OCE — the deterministic stand-in for the
-    /// #424 external-fetch budget firing mid-load (live shutdown token, cancelled budget token).</summary>
+    /// external-fetch budget firing mid-load (live shutdown token, cancelled budget token).</summary>
     private sealed class BudgetExhaustedSources : IPrefixSourceService
     {
         public event Action<string>? ContentCommitted;
@@ -384,7 +384,7 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
     [Fact]
     public async Task AddSource_FieldLimits_And_PerPeerCap_AreEnforced()
     {
-        // #487: repeated POSTs bounded — name/URL length ceilings and a per-peer source-count cap
+        // Repeated POSTs bounded — name/URL length ceilings and a per-peer source-count cap
         // (the 1 MiB body cap bounds ONE request; the DB rows outlive it).
         var store = new PeerStore(new StaticOptionsFactory(new DbContextOptionsBuilder<BgpDbContext>().UseSqlite(_connection).Options));
         var id = (await store.SavePeerConfigurationAsync("198.51.100.8", 65091, null, [], [], [])).Id;
@@ -412,7 +412,7 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
     [Fact]
     public async Task AsnLists_BudgetExpiryMidSources_ServesPartialJson()
     {
-        // #480: the budget token firing during LoadAllAsync must degrade to the partial response
+        // The budget token firing during LoadAllAsync must degrade to the partial response
         // (the ASN-list entries collected above), not escape the handler and abort the connection
         // without a body.
         _port = await StartAsync(
@@ -427,7 +427,7 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
         using var response = await _client.GetAsync($"http://127.0.0.1:{_port}/api/asn-lists");
         var body = await response.Content.ReadAsStringAsync();
 
-        Assert.True(response.IsSuccessStatusCode, $"expected a partial response, got {(int)response.StatusCode}");   // RED pre-fix: the connection was aborted (HttpRequestException)
+        Assert.True(response.IsSuccessStatusCode, $"expected a partial response, got {(int)response.StatusCode}");   // pre-fix: the connection was aborted (HttpRequestException)
         Assert.Contains("\"ru\"", body);   // the ASN-list half of the response survived
     }
 }

@@ -11,11 +11,11 @@ using BGPLite.Contracts;
 namespace BGPLite.Tests;
 
 /// <summary>
-/// Regression tests for #222 (malformed path attribute / NLRI tore down the session via
-/// ArgumentOutOfRangeException that escaped the read loop) and #223 (BgpParseException was
-/// mapped to MessageHeaderError regardless of which body — OPEN/UPDATE — failed to parse).
+/// Regression tests for a malformed path attribute / NLRI that tore down the session via
+/// ArgumentOutOfRangeException that escaped the read loop, and for BgpParseException being
+/// mapped to MessageHeaderError regardless of which body — OPEN/UPDATE — failed to parse.
 /// These tests build malformed message frames at the byte level (so they hit the codec, not
-/// the post-parse attribute validators already covered by #94) and assert the session stays
+/// the post-parse attribute validators already covered elsewhere) and assert the session stays
 /// Established and the NOTIFICATION carries the RFC-correct error code.
 /// </summary>
 public class MalformedUpdateResilienceTests
@@ -23,7 +23,7 @@ public class MalformedUpdateResilienceTests
     [Fact]
     public void ParseAttribute_TruncatedHeaderValue_ThrowsBgpParseException_NotAOORE()
     {
-        // #222: a path attribute declaring more bytes than the buffer holds previously threw
+        // a path attribute declaring more bytes than the buffer holds previously threw
         // ArgumentOutOfRangeException out of Span.Slice, escaping ReadLoopAsync and tearing down
         // the session. Now it must surface as BgpParseException so treat-as-withdraw applies.
         // One attribute header: flags=0, type=ORIGIN(1), length byte=5 — but only 1 data byte
@@ -38,7 +38,7 @@ public class MalformedUpdateResilienceTests
     [Fact]
     public void ParseAttribute_ExtendedLengthFlag_TooFewHeaderBytes_ThrowsBgpParseException()
     {
-        // #222: Extended-Length flag set (0x10) but only the 2 fixed header bytes present — the
+        // Extended-Length flag set (0x10) but only the 2 fixed header bytes present — the
         // 2-byte length read would index past the buffer. Must be BgpParseException, not AOORE.
         var attrBytes = new byte[] { 0x10, 0x02 };
 
@@ -52,7 +52,7 @@ public class MalformedUpdateResilienceTests
     [InlineData(0x18)] // ExtendedLength | reserved
     public void ParseAttribute_ReservedFlagBitSet_RejectedWithAttributeFlagsError(byte flags)
     {
-        // RFC 4271 §4.3: bit 0x08 is reserved and MUST be zero (#272, epic #6).
+        // RFC 4271 §4.3: bit 0x08 is reserved and MUST be zero.
         var attrBytes = new byte[] { flags, 0x01, 0x01, 0x00 };
 
         var ex = Assert.Throws<BgpParseException>(() => BgpMessageReader.ReadMessage(BuildUpdateFrame([.. attrBytes])));
@@ -63,7 +63,7 @@ public class MalformedUpdateResilienceTests
     [Fact]
     public void ParseUpdate_WithdrawnLengthExceedsPayload_ThrowsBgpParseException()
     {
-        // #222: withdrawn-routes length field larger than the UPDATE payload — stream-level
+        // withdrawn-routes length field larger than the UPDATE payload — stream-level
         // corruption that previously threw AOORE out of the Slice in the withdrawn-routes loop.
         // Build the UPDATE payload directly (not via BuildUpdateFrame, which wraps bytes as attrs):
         // withdrawn_len=0xFFFF, attrs_len=0 — the declared 65535 withdrawn bytes overshoot the
@@ -75,7 +75,7 @@ public class MalformedUpdateResilienceTests
 
         var ex = Assert.Throws<BgpParseException>(() => BgpMessageReader.ReadMessage(frame));
         // RFC 4271 §6.3: an oversized Withdrawn Routes Length (or Total Attribute Length) MUST
-        // carry subcode 1 (Malformed Attribute List) — #245 review finding.
+        // carry subcode 1 (Malformed Attribute List).
         Assert.Equal(BgpConstants.Error.UpdateMessageError, ex.ErrorCode);
         Assert.Equal(BgpConstants.SubError.MalformedAttributeList, ex.SubErrorCode);
     }
@@ -93,10 +93,10 @@ public class MalformedUpdateResilienceTests
     [InlineData(new byte[] { 0x00, 0x01, 0x00, 0x00 }, BgpConstants.SubError.MalformedAttributeList)]
     public void ParseUpdate_WithdrawnSectionOverrun_ThrowsBgpParseException_NotAOORE(byte[] payload, byte expectedSubError)
     {
-        // #284: the withdrawn-routes loop decoded against the payload end instead of the declared
+        // the withdrawn-routes loop decoded against the payload end instead of the declared
         // end of its own section, and nothing bounds-checked the Total Path Attribute Length read.
         // Both escaped as ArgumentOutOfRangeException — not a BgpParseException, so ReadLoopAsync's
-        // treat-as-withdraw filter never caught them and the session was torn down (cf. #222).
+        // treat-as-withdraw filter never caught them and the session was torn down.
         var ex = Assert.Throws<BgpParseException>(
             () => BgpMessageReader.ReadMessage(BuildMessage(BgpMessageType.Update, payload)));
         Assert.Equal(BgpConstants.Error.UpdateMessageError, ex.ErrorCode);
@@ -123,9 +123,9 @@ public class MalformedUpdateResilienceTests
     [Fact]
     public async Task WithdrawnSectionOverrun_OnWire_KeepsSessionEstablished()
     {
-        // #284 end-to-end: the smallest frame that used to kill an Established session — a 23-byte
+        // End-to-end: the smallest frame that used to kill an Established session — a 23-byte
         // UPDATE, the RFC minimum. It must now take the treat-as-withdraw path like any other
-        // malformed-body UPDATE (#222) and leave the session up.
+        // malformed-body UPDATE and leave the session up.
         var (server, client) = ConnectedPair();
         using var clientSock = client;
         var bgpConfig = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1", HoldTime = 0, KeepAlive = 0 };
@@ -150,7 +150,7 @@ public class MalformedUpdateResilienceTests
         for (var i = 0; i < 20 && metrics.UpdatesRejected == 0; i++)
             await Task.Delay(TimeSpan.FromMilliseconds(50));
 
-        Assert.True(session.IsEstablished, "session must survive a truncated withdrawn-routes section (#284)");
+        Assert.True(session.IsEstablished, "session must survive a truncated withdrawn-routes section");
         Assert.True(metrics.UpdatesRejected >= 1, "the malformed UPDATE must be counted as rejected");
 
         var sent = await DrainAsync(client, TimeSpan.FromSeconds(2));
@@ -163,7 +163,7 @@ public class MalformedUpdateResilienceTests
     [Fact]
     public async Task MalformedOpen_InEstablished_IsFsmError_SessionResets()
     {
-        // #427 (RFC 4271 §8.2.2): an OPEN received in Established is an FSM error REGARDLESS of
+        // RFC 4271 §8.2.2: an OPEN received in Established is an FSM error REGARDLESS of
         // body validity — Established accepts only UPDATE/KEEPALIVE/NOTIFICATION/ROUTE_REFRESH
         // and a conformant speaker never parses the body. Pre-fix the body-error filter applied
         // the UPDATE treatment (D17): the session stayed up with a warning and no NOTIFICATION.
@@ -203,7 +203,7 @@ public class MalformedUpdateResilienceTests
     [Fact]
     public async Task WellFormedOpen_InEstablished_IsFsmError_Too()
     {
-        // Control for #427: both OPEN classes in Established — well-formed and malformed — take
+        // Control: both OPEN classes in Established — well-formed and malformed — take
         // the same FSM-error teardown; only the parse-failure path changed.
         var (server, client) = ConnectedPair();
         using var clientSock = client;
@@ -243,7 +243,7 @@ public class MalformedUpdateResilienceTests
     [Fact]
     public async Task DuplicateNextHop_OnWire_InstallsTheFirstOccurrence()
     {
-        // #287 / RFC 7606 §3: a duplicated attribute is not an error — all occurrences after the
+        // RFC 7606 §3: a duplicated attribute is not an error — all occurrences after the
         // first are discarded and the UPDATE is still processed. Before the fix the switch in
         // ParseRouteAttributes assigned unconditionally, so the SECOND next hop landed in the route
         // table while anything reading the first (collector, looking glass, packet capture) saw the
@@ -294,7 +294,7 @@ public class MalformedUpdateResilienceTests
     [Fact]
     public async Task TreatAsWithdraw_RemovesTheNlriFromTheRouteTable()
     {
-        // #288 / RFC 7606 §2: "the UPDATE message containing the path attribute in question MUST be
+        // RFC 7606 §2: "the UPDATE message containing the path attribute in question MUST be
         // treated as though all contained routes had been withdrawn ... thus causing them to be
         // removed from the Adj-RIB-In." Only the "treat" half was implemented: the UPDATE was
         // discarded and the session kept, but its NLRI stayed installed carrying the attributes of
@@ -355,7 +355,7 @@ public class MalformedUpdateResilienceTests
     [Fact]
     public async Task UnknownWellKnownAttribute_TreatedAsWithdraw_KeepsSessionAlive()
     {
-        // #322 / RFC 4271 §6.3: an UPDATE carrying an unrecognized WELL-KNOWN attribute (Optional
+        // RFC 4271 §6.3: an UPDATE carrying an unrecognized WELL-KNOWN attribute (Optional
         // bit clear, unknown type code) must be rejected with subcode 2 and handled by
         // treat-as-withdraw: the UPDATE's NLRI leaves the table, the session survives, no
         // NOTIFICATION. Previously the attribute was silently ignored and the route installed.
@@ -417,9 +417,8 @@ public class MalformedUpdateResilienceTests
     /// <summary>
     /// Writes the whole frame. <see cref="Socket.Send(byte[], SocketFlags)"/> may accept fewer bytes
     /// than requested, which would deliver a truncated UPDATE and fail the test somewhere other than
-    /// the behaviour under test (#288 review). Loopback frames of this size never actually short-write,
-    /// but a test that can fail for a reason unrelated to its subject is worth two lines to prevent —
-    /// #302 is what that costs when it happens.
+    /// the behaviour under test. Loopback frames of this size never actually short-write,
+    /// but a test that can fail for a reason unrelated to its subject is worth two lines to prevent.
     /// </summary>
     private static void SendAll(Socket socket, byte[] frame)
     {
@@ -440,7 +439,7 @@ public class MalformedUpdateResilienceTests
     [Fact]
     public void ParseUpdate_AttributeValueCrossingAttrsEnd_Rejected()
     {
-        // #245 review finding: an attribute TLV whose declared value length reaches past the
+        // An attribute TLV whose declared value length reaches past the
         // declared end of the attribute section must be rejected — previously the parser sliced
         // to the payload end, silently consuming NLRI bytes as attribute data.
         // Layout: withdrawn_len=0, attrs_len=4, attr TLV [flags=0, type=ORIGIN(1), len=5] with
@@ -462,7 +461,7 @@ public class MalformedUpdateResilienceTests
     [Fact]
     public void ParseUpdate_AttrsLengthExceedsPayload_ThrowsMalformedAttributeList()
     {
-        // #235: a declared path-attributes length that runs past the payload is a malformed
+        // A declared path-attributes length that runs past the payload is a malformed
         // attribute list (RFC 4271 §6.3 subcode 1), not Unspecific.
         var payload = new byte[4];
         BinaryPrimitives.WriteUInt16BigEndian(payload, 0); // withdrawn length = 0
@@ -477,7 +476,7 @@ public class MalformedUpdateResilienceTests
     [Fact]
     public void ParseOpen_TooShort_PropagatesOpenMessageErrorCode()
     {
-        // #223: an OPEN body too short to even read the fixed fields must report Open Message
+        // An OPEN body too short to even read the fixed fields must report Open Message
         // Error (2), not MessageHeaderError (1).
         var payload = new byte[5]; // OPEN fixed part is 10 bytes
         var frame = BuildMessage(BgpMessageType.Open, payload);
@@ -489,7 +488,7 @@ public class MalformedUpdateResilienceTests
     [Fact]
     public void ParseOpen_UnsupportedVersion_PropagatesOpenMessageErrorSubcode1()
     {
-        // #223: version != 4 → Open Message Error, subcode 1 (Unsupported Version).
+        // version != 4 → Open Message Error, subcode 1 (Unsupported Version).
         var payload = new byte[10];
         payload[0] = 5; // version = 5
         var frame = BuildMessage(BgpMessageType.Open, payload);
@@ -502,7 +501,7 @@ public class MalformedUpdateResilienceTests
     [Fact]
     public async Task MalformedUpdate_OnWire_KeepsSessionEstablished()
     {
-        // End-to-end regression for #222: a malformed UPDATE frame sent on a live socket must
+        // End-to-end: a malformed UPDATE frame sent on a live socket must
         // NOT tear the session down. The read loop catches BgpParseException (treat-as-withdraw)
         // and continues; no NOTIFICATION is emitted.
         var (server, client) = ConnectedPair();
@@ -530,7 +529,7 @@ public class MalformedUpdateResilienceTests
         for (var i = 0; i < 20 && metrics.UpdatesRejected == 0; i++)
             await Task.Delay(TimeSpan.FromMilliseconds(50));
 
-        Assert.True(session.IsEstablished, "session must survive a malformed-attribute UPDATE (#222)");
+        Assert.True(session.IsEstablished, "session must survive a malformed-attribute UPDATE");
         Assert.True(metrics.UpdatesRejected >= 1, "the malformed UPDATE must be counted as rejected");
 
         // No NOTIFICATION on the wire — we keep the session (RFC 7606: no notify on treat-as-withdraw).
@@ -595,7 +594,7 @@ public class MalformedUpdateResilienceTests
         var notif = sent.OfType<BgpNotificationMessage>().SingleOrDefault();
         Assert.NotNull(notif);
         Assert.Equal(BgpConstants.Error.MessageHeaderError, notif!.ErrorCode);
-        // #300: RFC 4271 §6.1 also mandates the subcode and the Data field — "the Error Subcode
+        // RFC 4271 §6.1 also mandates the subcode and the Data field — "the Error Subcode
         // MUST be set to Bad Message Length ... The Data field MUST contain the erroneous Length
         // field." Previously this emitted 1/0 with no Data, giving the peer's operator nothing.
         Assert.Equal(BgpConstants.SubError.BadMessageLength, notif.SubErrorCode);

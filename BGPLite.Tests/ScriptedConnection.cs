@@ -6,9 +6,9 @@ namespace BGPLite.Tests;
 
 /// <summary>
 /// Scripts inbound frames and discards outbound bytes; reads block until a frame arrives. Driving a
-/// <see cref="BgpSession"/> through the <c>IBgpConnection</c> seam (#96) instead of loopback sockets
-/// makes frame delivery deterministic and sidesteps the timing flakiness #302 documents. Shared by
-/// the fixtures that need a session established without a real socket.
+/// <see cref="BgpSession"/> through the <c>IBgpConnection</c> seam instead of loopback sockets
+/// makes frame delivery deterministic and sidesteps the timing flakiness socket-driven fixtures
+/// suffer. Shared by the fixtures that need a session established without a real socket.
 /// </summary>
 internal sealed class ScriptedConnection : IBgpConnection
 {

@@ -9,7 +9,7 @@ public static class AttributeHelper
     /// Reads the ORIGIN attribute value. RFC 4271 §5.1.2 defines exactly three origins —
     /// IGP (0), EGP (1), INCOMPLETE (2) — any other value is a malformed UPDATE and is
     /// rejected with Update Message Error / Invalid ORIGIN Attribute (§6.3 subcode 6) so
-    /// the session's treat-as-withdraw path applies instead of silently accepting garbage (#233).
+    /// the session's treat-as-withdraw path applies instead of silently accepting garbage.
     /// </summary>
     public static BgpOrigin ReadOrigin(PathAttribute attr)
     {
@@ -48,7 +48,7 @@ public static class AttributeHelper
     public static PathAttribute WriteAs4Path(uint[] ases)
     {
         // Write-side symmetry with ReadAs4Path: AS_TRANS is the 2-octet placeholder and must not
-        // be written into the 4-octet-encoded attribute the reader rejects (#248 review).
+        // be written into the 4-octet-encoded attribute the reader rejects.
         if (ases.Contains(BgpConstants.AsPath.AsTrans))
             throw new ArgumentOutOfRangeException(nameof(ases), $"AS4_PATH must not carry AS_TRANS ({BgpConstants.AsPath.AsTrans}).");
 
@@ -66,8 +66,7 @@ public static class AttributeHelper
 
         // AS_TRANS (23456) is the 2-octet placeholder for a non-mappable 4-octet AS (RFC 6793 §3)
         // and is meaningless inside AS4_PATH, which is 4-octet-encoded by definition. Defensive
-        // check from the #238 audit (RFC 6793 contains no explicit prohibition — the audit's
-        // "§F.4" citation does not exist in the RFC text).
+        // check: RFC 6793 contains no explicit prohibition of AS_TRANS in AS4_PATH.
         foreach (var asn in ases)
         {
             if (asn == BgpConstants.AsPath.AsTrans)
@@ -89,8 +88,6 @@ public static class AttributeHelper
     /// speakers, and a two-octet AS (6 octets total) when an OLD speaker is involved; the
     /// <paramref name="fourByteAsn"/> flag selects the negotiated form. The 4-octet-AS-on-OLD-session
     /// form lives in the separate AS4_AGGREGATOR attribute (type 18, see <see cref="ReadAs4AggregatorAsn"/>).
-    /// The #154 fix made this unconditionally 6 octets, rejecting every legal AGGREGATOR from a
-    /// 4-octet peer — corrected per the RFC text in the #245 review.
     /// </summary>
     public static uint ReadAggregatorAsn(PathAttribute attr, bool fourByteAsn = false)
     {
@@ -105,7 +102,7 @@ public static class AttributeHelper
 
         // RFC 7607 §2: "an UPDATE with AS 0 in the AGGREGATOR ... MUST be considered as malformed
         // and be handled by the procedures specified in [RFC7606]" — for AGGREGATOR that remedy
-        // is attribute discard (#306; was deliberately deferred from #300 until discard existed).
+        // is attribute discard.
         if (asn == 0)
             throw new BgpParseException("Invalid AGGREGATOR attribute: AS 0 is reserved (RFC 7607)",
                 BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.OptionalAttributeError);
@@ -117,8 +114,7 @@ public static class AttributeHelper
     /// Reads the aggregator ASN from an AS4_AGGREGATOR attribute (type 18). Per RFC 6793 §3 it is
     /// 8 octets: a 4-octet AS followed by a 4-octet IPv4 address. Only the leading AS is returned;
     /// the trailing aggregator IP is not currently consumed (it does not influence AS_PATH
-    /// reconstruction). The prior code expected exactly 4 bytes (#31 regression), rejecting every
-    /// well-formed AS4_AGGREGATOR.
+    /// reconstruction).
     /// </summary>
     public static uint ReadAs4AggregatorAsn(PathAttribute attr)
     {
@@ -129,7 +125,7 @@ public static class AttributeHelper
         var asn = BinaryPrimitives.ReadUInt32BigEndian(attr.Data);
 
         // RFC 7607 §2 — AS 0 in AS4_AGGREGATOR is malformed, handled per RFC 6793 §6:
-        // attribute discard (#306; RFC 7606 §7.8 is COMMUNITY).
+        // attribute discard (RFC 7606 §7.8 is COMMUNITY).
         if (asn == 0)
             throw new BgpParseException("Invalid AS4_AGGREGATOR attribute: AS 0 is reserved (RFC 7607)",
                 BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.OptionalAttributeError);
@@ -181,7 +177,7 @@ public static class AttributeHelper
     public static uint[] ReadCommunities(PathAttribute attr)
     {
         // RFC 1997 §3: each community is exactly 4 octets — a non-multiple-of-4 payload would
-        // silently drop tail bytes otherwise (#272; mirrors the % 12 rule of ReadLargeCommunities).
+        // silently drop tail bytes otherwise (mirrors the % 12 rule of ReadLargeCommunities).
         if (attr.Data.Length % 4 != 0)
             throw new BgpParseException($"COMMUNITY attribute length must be a multiple of 4, got {attr.Data.Length}",
                 BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.OptionalAttributeError);
@@ -291,7 +287,7 @@ public static class AttributeHelper
                     BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.MalformedAsPath);
 
             // RFC 4271 §4.3: a path segment value contains "one or more AS numbers" — a
-            // zero-length segment is malformed (#238).
+            // zero-length segment is malformed.
             if (segmentLength == 0)
                 throw new BgpParseException(
                     $"Invalid {attributeName} segment length 0 (a segment carries one or more AS numbers)",
@@ -315,7 +311,7 @@ public static class AttributeHelper
                 // ... MUST be considered as malformed and be handled by the procedures specified in
                 // [RFC7606]" — i.e. treat-as-withdraw via Malformed AS_PATH, the remedy RFC 7606 §7.2
                 // prescribes for a malformed AS_PATH. The same applies to AS4_PATH through this
-                // shared reader (#300). AS 0 is reserved and must never appear in a path.
+                // shared reader. AS 0 is reserved and must never appear in a path.
                 if (asn == 0)
                     throw new BgpParseException($"Invalid {attributeName}: AS 0 is reserved (RFC 7607)",
                         BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.MalformedAsPath);
@@ -341,7 +337,7 @@ public static class AttributeHelper
             throw new ArgumentOutOfRangeException(nameof(ases), $"{attributeName} segment length cannot exceed 255 ASNs.");
 
         // An empty path is encoded as a zero-length attribute — NOT a zero-length segment, which
-        // RFC 4271 §4.3 forbids ("one or more AS numbers") and ReadPathData rejects (#248 review).
+        // RFC 4271 §4.3 forbids ("one or more AS numbers") and ReadPathData rejects.
         if (ases.Length == 0)
             return [];
 

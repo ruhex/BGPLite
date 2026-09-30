@@ -12,8 +12,8 @@ using Microsoft.Extensions.Logging.Abstractions;
 namespace BGPLite.Tests;
 
 /// <summary>
-/// #254: RefreshRoutesAsync must (a) treat a default CancellationToken as the session token —
-/// default(CancellationToken) is CancellationToken.None, NOT _cts.Token as the old comment claimed —
+/// RefreshRoutesAsync must (a) treat a default CancellationToken as the session token —
+/// default(CancellationToken) is CancellationToken.None, NOT _cts.Token —
 /// so token-less callers (management API, onSourceChanged) get their refresh cancelled at teardown;
 /// and (b) coalesce stacked refresh triggers into one in-flight cycle plus at most one pending lap,
 /// instead of N sequential full withdraw+re-announce dumps.
@@ -24,7 +24,7 @@ public class RefreshDebounceTests
     {
         public volatile bool Armed;
         public int LoadCalls;
-        // #262: the contract is async now, so the gate awaits instead of parking a pool thread.
+        // The contract is async, so the gate awaits instead of parking a pool thread.
         public readonly TaskCompletionSource Release = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
         public Task<string> CreatePeerAsync(string ip, uint asn, string? description, CancellationToken ct = default) => Task.FromResult("peer");
@@ -130,7 +130,7 @@ public class RefreshDebounceTests
             new BgpMetrics(),
             new NopLogger<BgpSession>(),
             peerStore: store,
-            // #263: the assembler is injected now, so the test supplies the same store it asserts on.
+            // The assembler is injected, so the test supplies the same store it asserts on.
             routeAssembler: new RouteAssembler(
                 new EmptyPrefixService(), store, NullCommunityResolver.Instance,
                 AllowAllFilter.Instance, new AppConfig(), cfg,
@@ -147,7 +147,7 @@ public class RefreshDebounceTests
         using var serverSock = server;
         using var sessionH = session;
 
-        // #507: EstablishAsync waits for the Established STATE, not for the initial dump to
+        // EstablishAsync waits for the Established STATE, not for the initial dump to
         // finish — and the dump (RouteAssembler → LoadPeerRoutingViewAsync) can still be in
         // flight here. Under runner load its Load then lands INSIDE the armed gate below,
         // masquerading as the refresh cycle's load: the "4 callers returned" condition was
@@ -170,10 +170,10 @@ public class RefreshDebounceTests
             // (locks free, loopback writes complete synchronously), so calling it here would
             // self-deadlock inside the gate before anyone could release it.
             //
-            // #302: LongRunning rather than Task.Run. The caller that wins the CAS parks its thread
+            // LongRunning rather than Task.Run. The caller that wins the CAS parks its thread
             // inside the gated Load, and the thread pool then grows by roughly one thread per 500 ms
             // — so on a contended 2-core CI runner the remaining callers did not all reach the CAS
-            // within the old 500 ms wall-clock wait. Each straggler arrived after the gate had been
+            // within the 500 ms wall-clock wait. Each straggler arrived after the gate had been
             // released and _refreshRunning reset, won its own CAS, and ran a FULL cycle: the observed
             // failures were 3 and 4 loads against an expected 1-2. A dedicated thread per caller
             // removes the dependency on pool growth entirely.
@@ -222,7 +222,7 @@ public class RefreshDebounceTests
     /// Polls until <paramref name="condition"/> holds, failing with what was actually observed once
     /// the deadline passes. A generous deadline is safe here precisely because it is never waited
     /// out on a healthy run — unlike a fixed delay, which is waited out every time and is still too
-    /// short on the one run that matters (#302).
+    /// short on the one run that matters.
     /// </summary>
     private static async Task WaitForAsync(Func<bool> condition, Func<string> observed,
         int timeoutMilliseconds = 30_000)
@@ -247,7 +247,7 @@ public class RefreshDebounceTests
         var baseline = Volatile.Read(ref store.LoadCalls);
         session.Dispose(); // cancels the session _cts
 
-        // Token-less call: with the #254 normalization this observes the cancelled session token
+        // Token-less call: this observes the cancelled session token
         // and no-ops instead of running a full cycle against a disposed session.
         await session.RefreshRoutesAsync().WaitAsync(TimeSpan.FromSeconds(5));
         Assert.Equal(baseline, Volatile.Read(ref store.LoadCalls));

@@ -11,7 +11,7 @@ public interface IRouteFilter
     /// allow-set, which may require a database roundtrip). The returned set is passed to
     /// <see cref="AcceptOutgoing"/> for every route in that send, so the resolution happens once
     /// per peer per refresh rather than once per advertised route. An empty set means "no
-    /// community restriction" (all routes pass). Asynchronous since #262 — the DB read behind it
+    /// community restriction" (all routes pass). Asynchronous — the DB read behind it
     /// must not block a session thread.
     /// </summary>
     Task<IReadOnlySet<uint>> ResolveOutgoingAllowSetAsync(PeerConfig peer, CancellationToken ct = default);

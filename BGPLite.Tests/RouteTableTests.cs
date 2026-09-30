@@ -66,7 +66,7 @@ public class RouteTableTests
         Assert.Equal(0, table.Count);
     }
 
-    // ---- #313: bulk removal by owner (session close) ----
+    // ---- bulk removal by owner (session close) ----
 
     /// <summary>Scoped by owner: one session's entries go, nobody else's does.</summary>
     [Fact]
@@ -88,7 +88,7 @@ public class RouteTableTests
     }
 
     /// <summary>
-    /// The compare-and-remove rule from #289 in bulk form: <c>AddOrUpdate</c> transfers ownership, so
+    /// The compare-and-remove rule in bulk form: <c>AddOrUpdate</c> transfers ownership, so
     /// a prefix the former owner announced but a later announcement replaced belongs to the new owner
     /// and must survive the former owner's close.
     /// </summary>
@@ -121,7 +121,7 @@ public class RouteTableTests
         Assert.Throws<ArgumentNullException>(() => new RouteTable().RemoveAllOwnedBy(null!));
 
     /// <summary>
-    /// #343: Count is a maintained counter, not ConcurrentDictionary.Count. Every mutation path
+    /// Count is a maintained counter, not ConcurrentDictionary.Count. Every mutation path
     /// must adjust it exactly once — a drift on ANY path desynchronizes the metric and /api/routes
     /// totals forever (there is no re-sync once quiescent).
     /// </summary>
@@ -152,7 +152,7 @@ public class RouteTableTests
         Assert.Equal(0, table.Count);
     }
 
-    /// <summary>#343: Clear must reset the maintained count (and keep accepting traffic after).</summary>
+    /// <summary>Clear must reset the maintained count (and keep accepting traffic after).</summary>
     [Fact]
     public void Clear_ResetsMaintainedCount()
     {
@@ -169,7 +169,7 @@ public class RouteTableTests
     }
 
     /// <summary>
-    /// #343: under concurrent mixed mutations the counter must converge to the dictionary's actual
+    /// Under concurrent mixed mutations the counter must converge to the dictionary's actual
     /// contents once drained — the 1:1 mutation↔transition invariant. Keys are worker-private, so
     /// the expected survivors are deterministic: each worker keeps its odd-index keys (added, then
     /// replaced ±0) and loses its even-index ones (added, then removed).
@@ -200,7 +200,7 @@ public class RouteTableTests
     }
 
     /// <summary>
-    /// #346 (CodeRabbit): TryAdd returning false does NOT guarantee the key still exists at the
+    /// TryAdd returning false does NOT guarantee the key still exists at the
     /// replacement write — a concurrent remove in that window used to re-insert the entry via the
     /// plain indexer without incrementing the maintained count, drifting it permanently (negative
     /// after enough removals). Writers and removers hammering the SAME small key set hit that
@@ -236,7 +236,7 @@ public class RouteTableTests
         Assert.Equal(actual, table.Count); // counter == dictionary truth (no drift, never negative)
     }
 
-    // ---- #14 phase 3: longest-prefix-match lookup ----
+    // ---- longest-prefix-match lookup ----
 
     [Fact]
     public void GetLongestPrefixMatch_MostSpecificPrefixWins()

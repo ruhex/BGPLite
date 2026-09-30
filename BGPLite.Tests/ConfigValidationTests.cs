@@ -20,7 +20,7 @@ public class ConfigValidationTests
             MaxPrefixesPerPeer = maxPrefixesPerPeer
         };
 
-    // --- #390: resilience/auto-refresh tunables fail loud --------------------------------------
+    // --- resilience/auto-refresh tunables fail loud --------------------------------------
 
     [Theory]
     [InlineData("TimeoutSeconds", -1)]
@@ -71,7 +71,7 @@ public class ConfigValidationTests
         act();
     }
 
-    // ---- PrefixSources (#327: fail loud at startup instead of a silent empty source at load) ----
+    // ---- PrefixSources (fail loud at startup instead of a silent empty source at load) ----
 
     [Fact]
     public void Validate_AcceptsValidPrefixSources()
@@ -157,7 +157,8 @@ public class ConfigValidationTests
     [Fact]
     public void Validate_BadSourceCommunity_Throws()
     {
-        // "65000:70000" is exactly the case #328 made a FormatException (VALUE masked before).
+        // "65000:70000" is the case the codec used to mask silently (VALUE half) — now it must
+        // surface as a FormatException.
         var config = Config(sources:
         [
             new PrefixSourceConfig { Name = "ext", Kind = "http", Url = "https://example.net/l.txt", Community = "65000:70000" },
@@ -252,7 +253,7 @@ public class ConfigValidationTests
     {
         // "PrefixSources:" / "AsnLists:" with no value deserialize as null collections — every
         // runtime consumer treats them as "none", and Validate must reject config with a message,
-        // never with a NullReferenceException (#327 review).
+        // never with a NullReferenceException.
         var config = ConfigLoader.LoadFromText(
             "Bgp:\n  Asn: 65001\n  RouterId: 10.0.0.1\nPrefixSources:\nRipeStat:\n  AsnLists:\n");
 
@@ -262,8 +263,7 @@ public class ConfigValidationTests
     [Fact]
     public void Validate_NullSourceElement_ThrowsWithIndex()
     {
-        // An empty YAML list item ("- ") deserializes as a null element — message, not NRE
-        // (CodeRabbit review of #336).
+        // An empty YAML list item ("- ") deserializes as a null element — message, not NRE.
         var config = Config(sources: [null!]);
 
         var ex = Assert.Throws<InvalidOperationException>(config.Validate);
@@ -327,7 +327,7 @@ public class ConfigValidationTests
     }
 
     /// <summary>
-    /// #265 item 2: Hold Time is a 2-octet OPEN field — a value above 65535 cannot be carried on
+    /// Hold Time is a 2-octet OPEN field — a value above 65535 cannot be carried on
     /// the wire, and the write path used to truncate it silently ((ushort)70000 -> 4464).
     /// </summary>
     [Theory]
@@ -342,11 +342,11 @@ public class ConfigValidationTests
         Assert.Contains("65535", ex.Message);
     }
 
-    /// <summary>#304: the per-peer prefix cap validates like the other 0=unlimited knobs.</summary>
+    /// <summary>The per-peer prefix cap validates like the other 0=unlimited knobs.</summary>
     [Fact]
     public void ShippedMaxPrefixesPerPeerDefault_IsBounded()
     {
-        // #481: the RFC 4486 defense must be on out of the box — the shipped default is a
+        // The RFC 4486 defense must be on out of the box — the shipped default is a
         // generous bound (1M prefixes, above any legitimate provisioning peer, far below memory
         // exhaustion), not unlimited; 0 remains available as an explicit opt-out.
         Assert.Equal(1_000_000, new BgpConfig().MaxPrefixesPerPeer);
@@ -403,7 +403,7 @@ public class ConfigValidationTests
         Assert.Contains("MaxRequestBodyBytes", ex.Message);
     }
 
-    // --- #90: ApiListen — secure-by-default loopback bind ---
+    // --- ApiListen — secure-by-default loopback bind ---
 
     [Fact]
     public void ApiListen_DefaultsToNull_Loopback()
@@ -436,7 +436,7 @@ public class ConfigValidationTests
     }
 
     [Theory]
-    [InlineData("0.0.0.0")]   // #390: the all-zeros placeholder is never a valid peer address
+    [InlineData("0.0.0.0")]   // the all-zeros placeholder is never a valid peer address
     [InlineData("not-an-ip")]
     [InlineData("::1")]
     public void Validate_RejectsBadPeerAddress(string address)
@@ -450,7 +450,7 @@ public class ConfigValidationTests
     [Fact]
     public void Validate_RequiresPeerAddress()
     {
-        // #390: PeerConfig.Address now defaults to "" so an omitted Address trips validation
+        // PeerConfig.Address now defaults to "" so an omitted Address trips validation
         // instead of silently configuring the all-zeros placeholder.
         var config = Config(peers: [new PeerConfig { RemoteAsn = 65002 }]);
 
@@ -461,7 +461,7 @@ public class ConfigValidationTests
     [Fact]
     public void Validate_RequiresPeerRemoteAsn()
     {
-        // #390: a configured peer without a remote ASN can never match an OPEN — fail loud.
+        // A configured peer without a remote ASN can never match an OPEN — fail loud.
         var config = Config(peers: [new PeerConfig { Address = "10.0.0.2" }]);
 
         var ex = Assert.Throws<InvalidOperationException>(() => config.Validate());

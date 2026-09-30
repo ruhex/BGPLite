@@ -9,7 +9,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 namespace BGPLite.Tests;
 
 /// <summary>
-/// #289: a withdrawal must remove the route received FROM THAT PEER (RFC 4271 §3.2/§9), not
+/// A withdrawal must remove the route received FROM THAT PEER (RFC 4271 §3.2/§9), not
 /// whatever happens to sit at the prefix. BGPLite keeps one shared <see cref="RouteTable"/> rather
 /// than per-peer Adj-RIBs-In, so <c>BgpSession</c> tracks what it installed and gates removals on
 /// it. Without that, any peer that completed a handshake could delete prefixes seeded at startup by
@@ -17,9 +17,9 @@ namespace BGPLite.Tests;
 /// withdrawn — verified on <c>main</c> before the fix: a peer that announced nothing emptied a
 /// two-route table.
 /// <para>
-/// Driven through the <c>IBgpConnection</c> seam (#96) rather than loopback sockets: the assertions
+/// Driven through the <c>IBgpConnection</c> seam rather than loopback sockets: the assertions
 /// are about route-table state, so scripting frames deterministically is both faster and immune to
-/// the timing flakiness that #302 documents.
+/// the timing flakiness of real sockets.
 /// </para>
 /// </summary>
 public class BgpSessionRouteOwnershipTests
@@ -111,7 +111,7 @@ public class BgpSessionRouteOwnershipTests
     [Fact]
     public async Task TreatAsWithdraw_OnlyRemovesRoutesThisPeerInstalled()
     {
-        // The interaction with #288: treat-as-withdraw removes the UPDATE's NLRI, but it is still a
+        // Treat-as-withdraw removes the UPDATE's NLRI, but it is still a
         // withdrawal and obeys the same ownership rule. Otherwise a malformed UPDATE becomes a way
         // to delete any prefix — strictly worse than the plain withdrawal this fix closes.
         var routeTable = Seeded((TenSlashEight, 8));
@@ -166,9 +166,9 @@ public class BgpSessionRouteOwnershipTests
     [Fact]
     public async Task SharedTableFallback_DoesNotAdvertiseRoutesInjectedByAnotherPeer()
     {
-        // #307: with no peer store injected, RouteAssembler falls back to the shared table — which
+        // With no peer store injected, RouteAssembler falls back to the shared table — which
         // also holds every NLRI any peer announced inbound. Advertising those would hand one peer's
-        // injected routes to every other peer. The owner tag from #289 is what separates the startup
+        // injected routes to every other peer. The owner tag is what separates the startup
         // seed (unowned) from peer-injected entries (owned by the installing session).
         var routeTable = Seeded((TestNetSlash24, 24));   // the "startup seed"
         var (injector, injectorRun, injectorConn) = await EstablishAsync(routeTable, routerId: 0x0A000002);
@@ -282,13 +282,13 @@ public class BgpSessionRouteOwnershipTests
         return Frame(BgpMessageType.Update, [.. payload]);
     }
 
-    // ---- #313: a session's routes go when the session goes ----
+    // ---- a session's routes go when the session goes ----
 
     /// <summary>
     /// RFC 4271 §8.2.2: every transition out of Established "deletes all routes associated with this
-    /// connection". #313: nothing did. A peer's announcements outlived its session, and since no
+    /// connection". Previously nothing did. A peer's announcements outlived its session, and since no
     /// other path in the server removes an entry, a peer could disconnect, reconnect and add another
-    /// batch without limit — which is also why a per-session max-prefix cap (#304) could not have
+    /// batch without limit — which is also why a per-session max-prefix cap could not have
     /// contained it on its own.
     /// </summary>
     [Fact]
@@ -331,7 +331,7 @@ public class BgpSessionRouteOwnershipTests
     }
 
     /// <summary>
-    /// The mirror of #307's isolation property at teardown: the flush is scoped by owner, so the
+    /// The mirror of the shared-table isolation property at teardown: the flush is scoped by owner, so the
     /// startup seed (written unowned by <c>RouteSeedingService</c>) survives a peer disconnecting.
     /// A flush by prefix rather than by owner would empty the table every time any peer left.
     /// </summary>
@@ -357,7 +357,7 @@ public class BgpSessionRouteOwnershipTests
     }
 
     /// <summary>
-    /// The compare-and-remove rule from #289 applies to the bulk flush too: a route this session
+    /// The compare-and-remove ownership rule applies to the bulk flush too: a route this session
     /// announced but another peer has since replaced belongs to the replacement, and this session
     /// closing must not take it with it.
     /// </summary>
@@ -447,7 +447,7 @@ public class BgpSessionRouteOwnershipTests
         }
 
         // Asserted unconditionally: without it a negative test passes when the frame was never
-        // delivered at all, which is exactly the failure mode it is supposed to rule out (#289 review).
+        // delivered at all, which is exactly the failure mode it is supposed to rule out.
         Assert.True(conn.Drained, "the scripted frame was never consumed by the read loop");
         if (until is not null)
             Assert.True(reached, "the expected route-table state was not reached in time");
@@ -464,7 +464,7 @@ public class BgpSessionRouteOwnershipTests
 
     /// <summary>Rejects every inbound route, so nothing this peer announces reaches the table.</summary>
     /// <summary>
-    /// #292 item 6: RFC 4271 §9.1.2 — a route whose AS_PATH contains the local system's ASN is
+    /// RFC 4271 §9.1.2 — a route whose AS_PATH contains the local system's ASN is
     /// excluded from selection (loop detection). It must not be installed (and the session must
     /// survive — route-level exclusion, not a protocol error), while an otherwise identical route
     /// without the local ASN installs normally.
@@ -485,7 +485,7 @@ public class BgpSessionRouteOwnershipTests
         conn.EnqueueFrame(BuildAnnounce(loopingAttributes, 8, [0x0A]));
         await SettleAsync(conn); // frameless settle: the assertion is that NOTHING happened
 
-        Assert.Equal(0, routeTable.Count);                      // RED pre-fix: the looping route installed
+        Assert.Equal(0, routeTable.Count);                      // pre-fix: the looping route installed
         Assert.True(session.IsEstablished, "a looping route is excluded, not a session error");
 
         // The same NLRI without the local ASN installs normally — proves exclusion, not rejection.
@@ -497,7 +497,7 @@ public class BgpSessionRouteOwnershipTests
     }
 
     /// <summary>
-    /// #265 item 1: a REPLACED session's slow finally must not flip the peer row back to
+    /// a REPLACED session's slow finally must not flip the peer row back to
     /// inactive after the replacement wrote active. Two guards: the SilentClose teardown reason
     /// (replacement / GR-aware shutdown) skips the write, and the registration probe answers
     /// false once the session is no longer the registered one. A genuine teardown still writes.
@@ -505,7 +505,7 @@ public class BgpSessionRouteOwnershipTests
     private sealed class RecordingPeerStore : IPeerStore
     {
         public List<(string Ip, uint Asn, bool Active)> StatusWrites = [];
-        /// <summary>#391: the per-peer MaxPrefix override returned by GetPeerMaxPrefixAsync
+        /// <summary>the per-peer MaxPrefix override returned by GetPeerMaxPrefixAsync
         /// (null = no row / no override — the session falls back to the global cap).</summary>
         public int? MaxPrefixOverride;
         public Task<string> CreatePeerAsync(string ip, uint asn, string? description, CancellationToken ct = default) => Task.FromResult("id");
@@ -566,7 +566,7 @@ public class BgpSessionRouteOwnershipTests
     }
 
     /// <summary>
-    /// #366 review (TOCTOU in the #265 item 1 guard): a replacement can land in the registry in
+    /// TOCTOU in the replacement guard: a replacement can land in the registry in
     /// the window between the probe and the inactive write. A probe that flips true→false across
     /// those two calls models exactly that; the finally must REPAIR the row back to active — the
     /// final write must be active, not the stale inactive.
@@ -608,7 +608,7 @@ public class BgpSessionRouteOwnershipTests
     [Fact]
     public async Task GenuineTeardown_StillWritesInactive()
     {
-        // Registered + non-silent teardown: the write must still happen (no regression of #325).
+        // Registered + non-silent teardown: the write must still happen.
         var (session, run, store) = await EstablishWithStoreAsync(new RouteTable());
 
         // A peer NOTIFICATION tears down with RemoteNotification — not SilentClose, probe true.
@@ -621,12 +621,12 @@ public class BgpSessionRouteOwnershipTests
     }
 
     /// <summary>
-    /// #304: exceeding Bgp.MaxPrefixesPerPeer tears the session down with NOTIFICATION
+    /// exceeding Bgp.MaxPrefixesPerPeer tears the session down with NOTIFICATION
     /// (Cease, MaxPrefixesExceeded) per RFC 4271 §6.7 / RFC 4486 §2, and the finally flushes
     /// the peer's owned routes (RFC 4271 §8.2.2) — the table does not keep the attacker's rows.
     /// </summary>
     /// <summary>
-    /// #377 review: a session's per-peer prefix set must stay aligned with route-table OWNERSHIP —
+    /// a session's per-peer prefix set must stay aligned with route-table OWNERSHIP —
     /// when session B takes over a key session A installed, A stops counting it; otherwise A's
     /// cap count drifts upward on overlaps and trips a reset for prefixes it no longer owns.
     /// </summary>
@@ -664,7 +664,7 @@ public class BgpSessionRouteOwnershipTests
         aConn.EnqueueFrame(AnnounceFrame(8, 0x0A));
         await SettleAsync(aConn, () => routeTable.Count == 1);
 
-        // B takes the SAME prefix over — A no longer owns it. #377 review: await the
+        // B takes the SAME prefix over — A no longer owns it. Await the
         // ownership-loss callback deterministically instead of a fixed delay.
         var aLostOwnership = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         void OnLost(object owner, (UInt128 Prefix, byte Length, bool IsIpv4) key)
@@ -688,7 +688,7 @@ public class BgpSessionRouteOwnershipTests
         aConn.EnqueueFrame(AnnounceFrame(24, 0xC0, 0x00, 0x02));
         await SettleAsync(aConn, () => routeTable.Count == 2);
 
-        Assert.True(a.IsEstablished, "the taken-over prefix must not count against A's cap");   // RED pre-fix
+        Assert.True(a.IsEstablished, "the taken-over prefix must not count against A's cap");   // pre-fix
         Assert.Equal(2, routeTable.Count);
 
         await TeardownAsync(a, aRun);
@@ -731,7 +731,7 @@ public class BgpSessionRouteOwnershipTests
 
         conn.EnqueueFrame(AnnounceFrame(16, 0xC0, 0x01));   // 3rd distinct prefix — over
         var completed = await Task.WhenAny(run, Task.Delay(TimeSpan.FromSeconds(5)));
-        Assert.Same(run, completed);                        // RED pre-fix: session keeps running
+        Assert.Same(run, completed);                        // pre-fix: session keeps running
         Assert.False(session.IsEstablished);
 
         var notif = conn.Sent
@@ -744,7 +744,7 @@ public class BgpSessionRouteOwnershipTests
     }
 
     /// <summary>
-    /// #505: the SAME cap-reset as <see cref="ExceedingMaxPrefixes_SendsCeaseMaxPrefixes_AndFlushesOwned"/>
+    /// the SAME cap-reset as <see cref="ExceedingMaxPrefixes_SendsCeaseMaxPrefixes_AndFlushesOwned"/>
     /// but on a HoldTime &gt; 0 session — the read loop runs behind <c>Task.WhenAny</c>, and
     /// <c>AwaitLoopTaskAsync</c>'s generic catch swallowed the cap's BgpNotificationException
     /// (it only rethrew BgpParseException), so RunAsync's finally sent a bare Cease 6/0 and the
@@ -785,16 +785,16 @@ public class BgpSessionRouteOwnershipTests
             .Where(n => n.ErrorCode == BgpConstants.Error.Cease)
             .ToList();
         var maxPrefixes = Assert.Single(ceases);                    // exactly one Cease on the wire
-        Assert.Equal(BgpConstants.SubError.CeaseMaxPrefixes, maxPrefixes.SubErrorCode);   // RED pre-fix: 0 (Unspecific)
+        Assert.Equal(BgpConstants.SubError.CeaseMaxPrefixes, maxPrefixes.SubErrorCode);   // pre-fix: 0 (Unspecific)
         Assert.Equal(0, routeTable.Count);                          // flush still happens
     }
 
-    /// <summary>#391: waits for the route table to reach the expected size. Generous timeout:
+    /// <summary>waits for the route table to reach the expected size. Generous timeout:
     /// a cold-JIT first run can take longer than SettleAsync's 2 s window to get from
     /// Established through the establish dump to a started read loop.</summary>
     private static async Task WaitForRouteCountAsync(RouteTable routeTable, int expected)
     {
-        // #392 review: bound the wait so a real cap regression fails with the actual count
+        // Bound the wait so a real cap regression fails with the actual count
         // instead of hanging the test forever.
         var deadline = TimeSpan.FromSeconds(15);
         while (routeTable.Count < expected)
@@ -806,7 +806,7 @@ public class BgpSessionRouteOwnershipTests
         }
     }
 
-    /// <summary>#391: establishes a session whose peer store returns a per-peer MaxPrefix
+    /// <summary>establishes a session whose peer store returns a per-peer MaxPrefix
     /// override on top of a global cap. Exercises the effective-cap resolution in
     /// SendAllRoutesAsync (override ?? global) on the establish path.</summary>
     private static async Task<(BgpSession Session, Task Run, ScriptedConnection Conn, RouteTable Table, RecordingPeerStore Store)>
@@ -840,7 +840,7 @@ public class BgpSessionRouteOwnershipTests
     public async Task PerPeerMaxPrefixOverride_Wins_OverLooserGlobalCap()
     {
         // Global cap 10, peer override 1: the SECOND distinct prefix trips Cease/MaxPrefixes.
-        // RED pre-fix: the effective cap was always the global one, so both prefixes were accepted.
+        // pre-fix: the effective cap was always the global one, so both prefixes were accepted.
         var (session, run, conn, routeTable, _) = await EstablishWithMaxPrefixOverrideAsync(globalCap: 10, overrideCap: 1);
 
         conn.EnqueueFrame(AnnounceFrame(8, 0x0A));
@@ -862,7 +862,7 @@ public class BgpSessionRouteOwnershipTests
     public async Task PerPeerMaxPrefixOverride_Zero_IsUnlimited_ForThisPeer()
     {
         // Global cap 2, peer override 0 ("unlimited for this peer"): three prefixes all install.
-        // RED pre-fix: the global cap was applied, so the third prefix tore the session down.
+        // pre-fix: the global cap was applied, so the third prefix tore the session down.
         var (session, run, conn, routeTable, _) = await EstablishWithMaxPrefixOverrideAsync(globalCap: 2, overrideCap: 0);
 
         for (var i = 0; i < 3; i++)
@@ -923,7 +923,7 @@ public class BgpSessionRouteOwnershipTests
         await TeardownAsync(session, run);
     }
 
-    // ---- #407: MP_REACH/MP_UNREACH-only UPDATEs (RFC 4760 §5/§7) ----
+    // ---- MP_REACH/MP_UNREACH-only UPDATEs (RFC 4760 §5/§7) ----
 
     /// <summary>2001:db8:ffff::/48 — the announced IPv6 prefix, full 128-bit form.</summary>
     private static readonly UInt128 V6TestPrefix =

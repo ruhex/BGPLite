@@ -9,7 +9,7 @@ using Microsoft.Extensions.Logging;
 namespace BGPLite;
 
 /// <summary>
-/// #251: seeds the route table from the configured prefix sources and warms the RIPEstat cache as a
+/// Seeds the route table from the configured prefix sources and warms the RIPEstat cache as a
 /// BACKGROUND task, so the BGP listener (:179) and the management API start immediately. Previously
 /// both waited on the top-level <c>await WarmUpAsync()</c> — a hanging RIPEstat fetch (firewall DROP
 /// × N ASNs × 3 attempts × 180 s) could delay every listener for hours.
@@ -17,8 +17,8 @@ namespace BGPLite;
 /// Seeding order inside the background task: sources first — the local nets.txt fallback seeds in
 /// milliseconds even under a total RIPE blackout — then the per-ASN cache warm-up. When seeding
 /// completes, any session established in the meantime receives the full set as an unsolicited
-/// UPDATE via <see cref="ISessionManager.RefreshAllEstablishedAsync"/> (the #214 push mechanism),
-/// so an early peer first gets the local fallback and then the complete table.
+/// UPDATE via <see cref="ISessionManager.RefreshAllEstablishedAsync"/>, so an early peer first gets
+/// the local fallback and then the complete table.
 /// </para>
 /// <para>
 /// Registered BEFORE the BGP server hosted service: hosted services start in registration order,
@@ -42,7 +42,7 @@ internal sealed class RouteSeedingService(
 
     public Task StartAsync(CancellationToken cancellationToken)
     {
-        // Never block listener startup on network I/O — the whole point of #251.
+        // Never block listener startup on network I/O — the whole point of background seeding.
         _seedTask = Task.Run(() => SeedAsync(_cts.Token), CancellationToken.None);
         return Task.CompletedTask;
     }
@@ -66,7 +66,7 @@ internal sealed class RouteSeedingService(
                 // Never throw during seeding (the ConfigCommunityResolver contract): a malformed
                 // community degrades THIS source to untagged instead of aborting the loop — the
                 // outer catch-all would otherwise skip every later source, WarmUpAsync, and the
-                // final push. #328 made out-of-range communities throw instead of silently masking.
+                // final push. Out-of-range communities throw rather than being silently masked.
                 var communities = Array.Empty<uint>();
                 if (!string.IsNullOrEmpty(source.Community))
                 {
@@ -80,7 +80,7 @@ internal sealed class RouteSeedingService(
 
                 foreach (var p in prefixes)
                 {
-                    // #14 phase 4: sources yield family-tagged prefixes; seeding is family-blind —
+                    // Sources yield family-tagged prefixes; seeding is family-blind —
                     // the route table keys carry IsIpv4, so both families seed side by side.
                     routeTable.AddOrUpdate(new Route
                     {
@@ -104,7 +104,7 @@ internal sealed class RouteSeedingService(
             await prefixService.WarmUpAsync(ct);
             logger.LogInformation("Prefix cache warm — {RouteCount} routes on the wire", routeTable.Count);
 
-            // Sessions established while seeding ran get the full set now (#214 push).
+            // Sessions established while seeding ran get the full set now.
             await sessionManager.RefreshAllEstablishedAsync();
         }
         catch (OperationCanceledException)

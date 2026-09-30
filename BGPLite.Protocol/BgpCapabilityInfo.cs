@@ -25,7 +25,7 @@ public sealed class BgpCapabilityInfo
         Data = [(byte)(BgpConstants.Afi.IPv4 >> 8), (byte)BgpConstants.Afi.IPv4, 0x00, BgpConstants.Safi.Unicast]
     };
 
-    /// <summary>MP-BGP IPv6/Unicast capability (RFC 4760 §8, code 1): AFI=2/SAFI=1 (#15 phase 2).
+    /// <summary>MP-BGP IPv6/Unicast capability (RFC 4760 §8, code 1): AFI=2/SAFI=1.
     /// Signals that this speaker can receive IPv6 routes via MP_REACH_NLRI.</summary>
     public static BgpCapabilityInfo MultiprotocolIpv6Unicast() => new()
     {
@@ -35,7 +35,7 @@ public sealed class BgpCapabilityInfo
 
     /// <summary>
     /// Graceful Restart capability (RFC 4724, code 64) with per-family tuples for IPv4/Unicast
-    /// AND IPv6/Unicast (#14 phase 5). Value layout: byte 0 = Restart Flags (bit 7 = R) |
+    /// AND IPv6/Unicast. Value layout: byte 0 = Restart Flags (bit 7 = R) |
     /// high 4 bits of Restart Time, byte 1 = low 8 bits of Restart Time, then per-AF
     /// [AFI(2), SAFI(1), AF Flags(bit 7 = F)].
     /// </summary>

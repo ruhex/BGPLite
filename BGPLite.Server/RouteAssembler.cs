@@ -8,19 +8,13 @@ using BGPLite.Contracts;
 namespace BGPLite.Server;
 
 /// <summary>
-/// Pure outbound route-assembly policy, extracted from <c>BgpSession</c> (#93 Phase 2). Resolves
+/// Pure outbound route-assembly policy, extracted from <c>BgpSession</c>. Resolves
 /// "which prefixes does this peer get" — the RU-default vs subscription vs custom-prefix vs
 /// custom-AS vs user-source decision tree — and returns the filtered <see cref="Route"/> set.
 /// Does NOT send anything on the wire: the caller (BgpSession) does the aggregate + batch + send.
 /// <para>
-/// Absorbs the decision tree (<c>SendAllRoutesAsync</c>), <see cref="MakeRoute"/>,
-/// <see cref="AddUserSourceRoutesAsync"/>, and <see cref="GroupByCommunitySet"/> — the policy +
-/// route-shaping helpers that were <c>internal static</c> on BgpSession. The send/withdraw mirror
-/// (<c>_advertisedPrefixes</c>) and the codec glue (<c>SendRoutesAsync</c>) stay in BgpSession.
-/// </para>
-/// <para>
-/// #263: the peer store, prefix service and <c>AppConfig</c> are required. They used to be nullable
-/// and a null in any of them silently switched every peer over to the shared route table, so a
+/// The peer store, prefix service and <c>AppConfig</c> are required. They used to be nullable and
+/// a null in any of them silently switched every peer over to the shared route table, so a
 /// dropped DI registration read as "why is this peer not getting its prefixes" rather than as a
 /// startup error. That degraded mode is now <see cref="SharedTableRouteAssembler"/> — a type a
 /// caller has to pick — and this one cannot be constructed without the configuration it needs.
@@ -71,7 +65,7 @@ public sealed class RouteAssembler : IRouteAssembler
             var customAsns = peer.CustomAsns;
 
             // Unconfigured peer — send RU defaults. A peer whose only configuration is active
-            // user URL sources (#147) is NOT unconfigured — it must not fall through to RU.
+            // user URL sources is NOT unconfigured — it must not fall through to RU.
             if (subscriptionIds.Count == 0 && customPrefixes.Count == 0 && customAsns.Count == 0
                 && peer.UserSources.Count == 0)
             {
@@ -84,7 +78,7 @@ public sealed class RouteAssembler : IRouteAssembler
                     _logger.LogInformation("Sent {Count} RU prefixes to unconfigured peer {Peer}",
                         ruPrefixes.Count, peerLabel);
                 }
-                catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }  // #114/#330: only CALLER cancellation — a per-source timeout OCE (HttpPrefixProvider's linked CTS, live ct) must stay a fetch failure below
+                catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }  // only CALLER cancellation — a per-source timeout OCE (HttpPrefixProvider's linked CTS, live ct) must stay a fetch failure below
                 catch (Exception ex)
                 {
                     _logger.LogError(ex, "Failed to fetch RU prefixes for {Peer}", peerLabel);
@@ -95,10 +89,10 @@ public sealed class RouteAssembler : IRouteAssembler
 
             _logger.LogInformation("Peer {Peer} subscriptions: [{Subs}]", peerLabel, string.Join(", ", subscriptionIds));
 
-            // #488 (D26): fetch outcome counters — the RU fallback below is suppressed only on a
-            // TOTAL failure (every attempted fetch failed). A mixed build (one source failed,
-            // another resolved — even to an empty list) is not total: the fallback keeps the
-            // documented "configured peer resolved 0 prefixes" behavior.
+            // Fetch outcome counters — the RU fallback below is suppressed only on a TOTAL
+            // failure (every attempted fetch failed). A mixed build (one source failed, another
+            // resolved — even to an empty list) is not total: the fallback keeps the documented
+            // "configured peer resolved 0 prefixes" behavior.
             var fetchAttempts = 0;
             var fetchFailures = 0;
 
@@ -124,15 +118,15 @@ public sealed class RouteAssembler : IRouteAssembler
                             new CommunitySource(CommunitySourceKind.AsnList, list.Name));
                         var prefixes = await _prefixService.GetPrefixesForAsns(list.Asns, ct);
                         foreach (var p in prefixes)
-                            // #85: AsPath is overwritten by the local ASN in the outbound codec
+                            // AsPath is overwritten by the local ASN in the outbound codec
                             // (BuildUpdateAttributes), so the per-prefix asn value is never used
                             // on the wire — pass null instead of allocating [asn] per prefix.
                             routes.Add(MakeRoute(p.Prefix, p.Length, p.IsIpv4, nextHop, null, comms));
                     }
-                    catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }  // #114/#330
+                    catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
                     catch (Exception ex)
                     {
-                        fetchFailures++;   // #488
+                        fetchFailures++;
                         _logger.LogError(ex, "Failed to fetch prefixes for {Peer} (list '{List}')", peerLabel, list.Name);
                     }
                 }
@@ -154,24 +148,24 @@ public sealed class RouteAssembler : IRouteAssembler
                         routes.Add(MakeRoute(p.Prefix, p.Length, p.IsIpv4, nextHop, null, comms));
                     _logger.LogInformation("Fetched {Count} RU prefixes for {Peer}", ruPrefixes.Count, peerLabel);
                 }
-                catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }  // #114/#330
+                catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
                 catch (Exception ex)
                 {
-                    fetchFailures++;   // #488
+                    fetchFailures++;
                     _logger.LogError(ex, "Failed to fetch RU prefixes for {Peer}", peerLabel);
                 }
             }
 
             // Prefix-source subscriptions: subscribed names that match a configured PrefixSource.
             var resolvedAsRipe = subscribedLists.Select(l => l.Name).ToHashSet();
-            var prefixSources = _appConfig.PrefixSources ?? []; // #477: YAML null = no sources
+            var prefixSources = _appConfig.PrefixSources ?? []; // YAML null = no sources
             var sourceNames = subscriptionIds
                 .Where(n => !resolvedAsRipe.Contains(n) && prefixSources.Any(s => s.Name == n))
                 .ToList();
 
-            // #488: a subscription matching no AsnLists entry and no PrefixSource is a config
-            // typo — invisible until now (silently ignored on every build). Name it so the row
-            // can be fixed.
+            // A subscription matching no AsnLists entry and no PrefixSource is a config typo that
+            // used to be invisible (silently ignored on every build) — name it so the row can be
+            // fixed.
             foreach (var unknown in subscriptionIds.Where(n =>
                          !resolvedAsRipe.Contains(n) && !prefixSources.Any(s => s.Name == n)))
                 _logger.LogWarning(
@@ -190,10 +184,10 @@ public sealed class RouteAssembler : IRouteAssembler
                     _logger.LogInformation("Fetched {Count} prefixes from source '{Source}' for {Peer}",
                         srcPrefixes.Count, name, peerLabel);
                 }
-                catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }  // #114/#330
+                catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
                 catch (Exception ex)
                 {
-                    fetchFailures++;   // #488
+                    fetchFailures++;
                     _logger.LogError(ex, "Failed to fetch source '{Source}' for {Peer}", name, peerLabel);
                 }
             }
@@ -201,11 +195,11 @@ public sealed class RouteAssembler : IRouteAssembler
             _logger.LogInformation("Peer {Peer} has {SubRoutes} subscription routes + {CustomCount} custom prefixes",
                 peerLabel, routes.Count, customPrefixes.Count);
 
-            // Custom prefixes carry the static "custom prefix" community (<Asn>:100).
-            // #236: parse via the canonical PrefixCidr parser — host-bit masking + range check +
-            // IPv4-only, shared with the API and file sources. Custom prefixes are validated at
-            // write time (ParseCustomPrefix), but a corrupt row or a write path that bypassed the
-            // API must not throw a FormatException out of the BGP send path — skip + log instead.
+            // Custom prefixes carry the static "custom prefix" community (<Asn>:100). Parse via
+            // the canonical PrefixCidr parser — host-bit masking + range check + IPv4-only, shared
+            // with the API and file sources. Custom prefixes are validated at write time
+            // (ParseCustomPrefix), but a corrupt row or a write path that bypassed the API must
+            // not throw a FormatException out of the BGP send path — skip + log instead.
             var customPrefixComms = _communityResolver.Resolve(new CommunitySource(CommunitySourceKind.Custom));
             var customRanges = new List<(uint Network, byte Length)>();
             foreach (var cidr in customPrefixes)
@@ -232,15 +226,15 @@ public sealed class RouteAssembler : IRouteAssembler
                     _logger.LogInformation("Peer {Peer} custom AS: {Asns} -> {Count} prefixes",
                         peerLabel, string.Join(",", customAsns), asnPrefixes.Count);
                 }
-                catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }  // #114/#330
+                catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
                 catch (Exception ex)
                 {
-                    fetchFailures++;   // #488
+                    fetchFailures++;
                     _logger.LogError(ex, "Failed to fetch custom AS prefixes for {Peer}", peerLabel);
                 }
             }
 
-            // Per-peer user URL sources (#143/#147): each Active source fetched + community-stamped.
+            // Per-peer user URL sources: each Active source fetched + community-stamped.
             foreach (var source in peer.UserSources)
             {
                 fetchAttempts++;
@@ -249,8 +243,8 @@ public sealed class RouteAssembler : IRouteAssembler
                     fetchFailures++;
             }
 
-            // #220 "suppress more-specifics": a custom prefix is an explicit operator override, so
-            // any other route it covers is dropped before aggregation — the operator's broader
+            // Suppress more-specifics: a custom prefix is an explicit operator override, so any
+            // other route it covers is dropped before aggregation — the operator's broader
             // prefix wins over the source lists.
             if (customRanges.Count > 0)
             {
@@ -264,8 +258,8 @@ public sealed class RouteAssembler : IRouteAssembler
 
             _logger.LogInformation("Sending {Count} total routes to {Peer}", routes.Count, peerLabel);
 
-            // Configured peer resolved 0 prefixes — fall back to RU. #488 (D26): suppressed only
-            // on a TOTAL failure — every attempted fetch failed (RIPEstat outage / network
+            // Configured peer resolved 0 prefixes — fall back to RU. D26: suppressed only on a
+            // TOTAL failure — every attempted fetch failed (RIPEstat outage / network
             // partition). Substituting the full RU dump then would advertise hundreds of thousands
             // of prefixes the peer never asked for — fail CLOSED: the peer keeps an empty set and
             // the per-source errors above carry the cause. A MIXED build (some failed, some
@@ -285,7 +279,7 @@ public sealed class RouteAssembler : IRouteAssembler
                     foreach (var p in ruPrefixes)
                         routes.Add(MakeRoute(p.Prefix, p.Length, p.IsIpv4, nextHop, null, defaultComms));
                 }
-                catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }  // #114/#330
+                catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
                 catch (Exception ex)
                 {
                     _logger.LogError(ex, "Failed to fetch RU fallback for {Peer}", peerLabel);
@@ -297,7 +291,7 @@ public sealed class RouteAssembler : IRouteAssembler
         else
         {
             // A cancelled token here means the session is being torn down (Dispose cancels its
-            // token before a peer deletion removes the row, #323) — a refresh or initial dump that
+            // token before a peer deletion removes the row) — a refresh or initial dump that
             // straddles the Dispose must not auto-register the just-deleted peer back into the
             // store. Shutdown (StopAsync) cancels the same token, so the gate covers it too.
             if (ct.IsCancellationRequested)
@@ -306,7 +300,6 @@ public sealed class RouteAssembler : IRouteAssembler
                 return await FilterAndReturnAsync(routes, filterPeerConfig, ct);
             }
 
-            // Unknown peer — auto-register and send default RU list.
             _logger.LogInformation("Unknown peer {Ip}, auto-registering with RU defaults", peerLabel);
             await _peerStore.CreatePeerAsync(peerIp, remoteAsn, null, ct);
 
@@ -318,7 +311,7 @@ public sealed class RouteAssembler : IRouteAssembler
                 _logger.LogInformation("Fetched {Count} RU prefixes for unknown peer {Peer}",
                     ruPrefixes.Count, peerLabel);
             }
-            catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }  // #114/#330
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Failed to fetch RU prefixes for {Peer}", peerLabel);
@@ -331,19 +324,19 @@ public sealed class RouteAssembler : IRouteAssembler
     /// <summary>Applies the per-peer outgoing community filter and returns the filtered list.</summary>
     private async Task<List<Route>> FilterAndReturnAsync(List<Route> routes, PeerConfig filterPeerConfig, CancellationToken ct)
     {
-        // Resolve the community allow-set ONCE for the whole send — not once per route (#79).
+        // Resolve the community allow-set ONCE for the whole send — not once per route.
         var allowSet = await _routeFilter.ResolveOutgoingAllowSetAsync(filterPeerConfig, ct);
         return routes.Where(r => _routeFilter.AcceptOutgoing(r, filterPeerConfig, allowSet)).ToList();
     }
 
     /// <summary>
-    /// #220 "suppress more-specifics": a custom prefix is an explicit operator override, so any
-    /// SOURCE route covered by one is dropped from the outbound list, regardless of its source or
-    /// community set. Two things survive: an exact custom==source duplicate (its communities get
-    /// unioned by <c>BgpSession.MergeDuplicatePrefixes</c>, #209) and every CONFIGURED CUSTOM
-    /// prefix itself — nested customs (e.g. /8 + a deliberate /16) must not suppress each other
-    /// (CodeRabbit on the integration review). Runs on the flat per-peer list BEFORE the
-    /// per-community-set aggregator sees it. Extracted as a pure function for unit tests.
+    /// Suppress more-specifics: any SOURCE route covered by a configured custom prefix is dropped
+    /// from the outbound list, regardless of its source or community set — a custom prefix is an
+    /// explicit operator override. Two things survive: an exact custom==source duplicate (its
+    /// communities get unioned by <c>BgpSession.MergeDuplicatePrefixes</c>) and every CONFIGURED
+    /// CUSTOM prefix itself — nested customs (e.g. /8 + a deliberate /16) must not suppress each
+    /// other. Runs on the flat per-peer list BEFORE the per-community-set aggregator sees it.
+    /// Extracted as a pure function for unit tests.
     /// </summary>
     internal static List<Route> SuppressCoveredByCustomPrefixes(
         List<Route> routes, List<(uint Network, byte Length)> customRanges)
@@ -353,12 +346,12 @@ public sealed class RouteAssembler : IRouteAssembler
 
         static UInt128 Mask(byte length) => length == 0 ? 0u : (UInt128)(0xFFFFFFFFu << (32 - length));
 
-        // #429: precompute the coverage index ONCE (exact-match set + length → custom networks)
-        // instead of scanning the custom list per route — O(routes + customs) instead of the
-        // O(routes × customs) mask+compare the per-route Where paid (11k routes × 1k customs ≈
-        // 11M compares per peer per refresh, multiplied by fleet size on a RefreshAllEstablished).
-        // #450 review: the per-length network sets are HASH sets (per-route Contains is O(1)),
-        // and the mask is stored once per length (identical for every network of that length).
+        // Precompute the coverage index ONCE (exact-match set + length → custom networks) instead
+        // of a mask+compare scan of the custom list per route — O(routes + customs) instead of
+        // O(routes × customs) (11k routes × 1k customs ≈ 11M compares per peer per refresh,
+        // multiplied by fleet size on a RefreshAllEstablished). The per-length network sets are
+        // HASH sets (per-route Contains is O(1)), and the mask is stored once per length
+        // (identical for every network of that length).
         var exact = new HashSet<(uint Network, byte Length)>(customRanges);
         var networksByLength = new Dictionary<byte, (UInt128 Mask, HashSet<UInt128> Networks)>(customRanges.Count);
         foreach (var cr in customRanges)
@@ -393,7 +386,7 @@ public sealed class RouteAssembler : IRouteAssembler
     /// Builds a <see cref="Route"/> from its components. Static so it can be called from
     /// <see cref="AddUserSourceRoutesAsync"/> and unit-tested directly. IPv4 addresses occupy
     /// the low 32 bits of <paramref name="prefix"/> (the implicit uint→UInt128 widening);
-    /// <paramref name="isIpv4"/> carries the family (#14 phase 4).
+    /// <paramref name="isIpv4"/> carries the family.
     /// </summary>
     internal static Route MakeRoute(
         UInt128 prefix, byte length, bool isIpv4, uint nextHop, uint[]? asPath, uint[] communities,
@@ -411,13 +404,13 @@ public sealed class RouteAssembler : IRouteAssembler
     /// <summary>
     /// Fetches one per-peer user URL source and appends its routes (stamped with the UserSource
     /// community) to <paramref name="routes"/>. Static so all dependencies are parameters —
-    /// unit-testable without a RouteAssembler instance. Catches all exceptions except an OCE
-    /// raised by the CALLER's cancellation (#114/#342): a per-source timeout OCE (a live token,
-    /// e.g. #320's linked CTS in HttpPrefixProvider) is a fetch failure like any other, so one
-    /// slow URL skips its source instead of aborting the whole dump.
+    /// unit-testable without a RouteAssembler instance. Rethrows only an OCE raised by the
+    /// CALLER's cancellation: a per-source timeout OCE (a live token, e.g. a linked CTS inside
+    /// HttpPrefixProvider) is a fetch failure like any other, so one slow URL skips its source
+    /// instead of aborting the whole dump.
     /// </summary>
     /// <returns><c>true</c> when the source loaded (even to an empty list); <c>false</c> when the
-    /// fetch failed — the #488 fail-closed fallback gate consumes the failure signal.</returns>
+    /// fetch failed — the fail-closed fallback gate consumes the failure signal.</returns>
     internal static async Task<bool> AddUserSourceRoutesAsync(
         List<Route> routes, CustomSourceView source, uint nextHop,
         IPrefixService prefixService, ICommunityResolver communityResolver,
@@ -433,7 +426,7 @@ public sealed class RouteAssembler : IRouteAssembler
             logger.LogInformation("User-source '{Name}': {Count} prefixes for {Peer}", source.Name, prefixes.Count, peerLabel);
             return true;
         }
-        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }  // #114/#342: only CALLER cancellation — a per-source timeout OCE (#320's linked CTS, live ct) must stay a fetch failure below
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }  // only CALLER cancellation — a per-source timeout OCE (the linked CTS inside HttpPrefixProvider, on the live token) must stay a fetch failure below
         catch (Exception ex)
         {
             logger.LogWarning(ex, "User-source '{Name}' failed for {Peer}; skipped", source.Name, peerLabel);

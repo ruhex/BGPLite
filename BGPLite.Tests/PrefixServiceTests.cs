@@ -11,7 +11,7 @@ using Xunit;
 namespace BGPLite.Tests;
 
 /// <summary>Regression coverage for <see cref="PrefixService.GetPrefixesForAsns"/> — the
-/// parallelized fan-out over ASNs (#83). Asserts that all ASNs resolve in input order and that a
+/// parallelized fan-out over ASNs. Asserts that all ASNs resolve in input order and that a
 /// single failing ASN is skipped without dropping the others or throwing.</summary>
 public class PrefixServiceTests
 {
@@ -32,7 +32,7 @@ public class PrefixServiceTests
         public PerAsnHandler(params uint[] failures) => _failures = [.. failures];
 
         /// <summary>Marks an ASN as failing from now on (simulates a RIPEstat outage that starts
-        /// after the ASN was already cached — used for stale-on-failure coverage, #163).</summary>
+        /// after the ASN was already cached — used for stale-on-failure coverage).</summary>
         public void AddFailure(uint asn) => _failures.Add(asn);
 
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
@@ -74,7 +74,7 @@ public class PrefixServiceTests
 
     private static PrefixService Service(PerAsnHandler handler, TimeSpan? cacheTtl = null, TimeSpan? negativeTtl = null, int? maxCacheEntries = null, int retryAttempts = 2, ILogger<PrefixService>? logger = null) =>
         new(new AppConfig(),
-            // #267 item 5: per-ASN TTL/negative-TTL/eviction knobs moved into the shared cache.
+            // Per-ASN TTL/negative-TTL/eviction knobs live in the shared cache.
             new RipeStatPrefixCache(
                 new RipeStatProvider(new StubFactory(handler),
                     NullLogger<RipeStatProvider>.Instance,
@@ -83,7 +83,7 @@ public class PrefixServiceTests
                 negativeTtl: negativeTtl,
                 maxCacheEntries: maxCacheEntries),
             null!, // IPrefixSourceService is not on the GetPrefixesForAsns path
-            null!, // HttpPrefixProvider is only on the per-peer user-source path (#263)
+            null!, // HttpPrefixProvider is only on the per-peer user-source path
             logger: logger);
 
     /// <summary>The single prefix uint that <see cref="PerAsnHandler"/> yields for a given ASN,
@@ -130,7 +130,7 @@ public class PrefixServiceTests
     [Fact]
     public async Task OversizedRipeStatResponse_IsRejectedFromHeaders()
     {
-        // #321 item 4: the RIPEstat body is bounded like every other fetch path — a huge declared
+        // The RIPEstat body is bounded like every other fetch path — a huge declared
         // ContentLength is rejected from the response headers, before any buffering.
         var provider = new RipeStatProvider(
             new StubFactory(new OversizedHandler()), NullLogger<RipeStatProvider>.Instance);
@@ -143,7 +143,7 @@ public class PrefixServiceTests
     [Fact]
     public async Task OversizedChunkedRipeStatResponse_IsRejectedDuringStream()
     {
-        // #321 item 4: a server that LIES in its headers (no ContentLength) is caught by the
+        // A server that LIES in its headers (no ContentLength) is caught by the
         // streaming cap — the only bound a malicious origin cannot dodge.
         var provider = new RipeStatProvider(
             new StubFactory(new EndlessBodyHandler()), NullLogger<RipeStatProvider>.Instance);
@@ -195,7 +195,7 @@ public class PrefixServiceTests
     [Fact]
     public async Task GetPrefixesForAsns_FailedAsn_LogsWarning()
     {
-        // #330: a transient RIPEstat failure for one ASN must not be silent — its prefixes vanish
+        // A transient RIPEstat failure for one ASN must not be silent — its prefixes vanish
         // from this cycle's advertisement and the operator has to tell "no prefixes" from
         // "fetch failed". Previously the bare catch returned [] without any log line.
         var handler = new PerAsnHandler(200);
@@ -226,11 +226,11 @@ public class PrefixServiceTests
     }
 
     /// <summary>
-    /// Regression for #225: when the cancellation token is cancelled, GetPrefixesForAsns must
+    /// When the cancellation token is cancelled, GetPrefixesForAsns must
     /// throw OperationCanceledException (or a TaskCanceledException subclass — the OCE family)
     /// instead of returning a partial list (cancelled ASNs were silently dropped to [] by
     /// ResolveAsnAsync's bare catch). The cancellation contract — OCE always propagates, never
-    /// swallowed (#114) — must hold here as it does everywhere else. ThrowsAnyAsync accepts the
+    /// swallowed — must hold here as it does everywhere else. ThrowsAnyAsync accepts the
     /// TaskCanceledException subclass that the gate.WaitAsync(ct) surfaces when the token is
     /// already cancelled.
     /// </summary>
@@ -258,7 +258,7 @@ public class PrefixServiceTests
         Assert.Equal(1, handler.Calls); // cache served the second lookup
     }
 
-    // --- #163: stale-on-failure — a transient RIPEstat outage after TTL must not drop routes ---
+    // --- stale-on-failure — a transient RIPEstat outage after TTL must not drop routes ---
 
     [Fact]
     public async Task GetPrefixesAsync_AfterTtl_ServesStaleOnFailure()
@@ -305,7 +305,7 @@ public class PrefixServiceTests
     [Fact]
     public async Task GetPrefixesAsync_OperationCanceled_Propagates_NotNegativeCached()
     {
-        // Cancellation must propagate and must NOT be recorded as a negative entry (#114 contract).
+        // Cancellation must propagate and must NOT be recorded as a negative entry.
         using var cts = new CancellationTokenSource();
         cts.Cancel();
         var service = Service(new PerAsnHandler());
@@ -319,7 +319,7 @@ public class PrefixServiceTests
         Assert.Single(ok);
     }
 
-    // --- #164: per-ASN fetch serialization — no thundering herd on a cold/expired key ---
+    // --- per-ASN fetch serialization — no thundering herd on a cold/expired key ---
 
     [Fact]
     public async Task GetPrefixesAsync_ConcurrentColdCalls_SingleFetch()
@@ -357,7 +357,7 @@ public class PrefixServiceTests
         Assert.Equal(2, handler.Calls); // one warm + one shared refetch
     }
 
-    // --- #165: bounded cache — entries are evicted at capacity, not grown without limit ---
+    // --- bounded cache — entries are evicted at capacity, not grown without limit ---
 
     [Fact]
     public async Task GetPrefixesAsync_EvictsAtCapacity_StaysBounded()
@@ -384,7 +384,7 @@ public class PrefixServiceTests
     public async Task GetPrefixesAsync_Eviction_DropsCorrespondingLock()
     {
         // When an entry is evicted by the sweep, its _locks entry must also be removed so the
-        // SemaphoreSlim set does not grow without bound (#165 — locks were the second growth axis).
+        // SemaphoreSlim set does not grow without bound (locks were the second growth axis).
         var handler = new PerAsnHandler();
         // cap=1: every new ASN beyond the first triggers an eviction of the previous one.
         var service = Service(handler, maxCacheEntries: 1);
@@ -399,10 +399,10 @@ public class PrefixServiceTests
     }
 
     /// <summary>
-    /// #267 item 3: the capacity sweep must not evict an ASN's entry + gate while a fetch for it is
+    /// The capacity sweep must not evict an ASN's entry + gate while a fetch for it is
     /// in flight. Pre-fix, the sweep dropped the gate a fetcher held, so a concurrent caller minted
     /// a SECOND semaphore via GetOrAdd and issued a duplicate concurrent RIPEstat fetch for the same
-    /// ASN — breaking the #164 invariant (one wire fetch per ASN at a time).
+    /// ASN — breaking the one-wire-fetch-per-ASN invariant.
     /// </summary>
     [Fact]
     public async Task Eviction_DoesNot_DuplicateFetch_While_Entry_InFlight()
@@ -447,7 +447,7 @@ public class PrefixServiceTests
     }
 
     /// <summary>
-    /// CodeRabbit (integration review of #267): the in-flight marker was a presence flag removed
+    /// The in-flight marker was a presence flag removed
     /// by the FIRST caller's exit while a second caller was still queued on the same gate — the
     /// sweep then dropped the held gate and a third caller minted a second semaphore (duplicate
     /// fetch). The marker is an active-caller COUNT now; this pins that with a queued second
@@ -514,7 +514,7 @@ public class PrefixServiceTests
     }
 
     /// <summary>Like <see cref="PerAsnHandler"/> but able to block a specific ASN's response until
-    /// released — models a slow RIPEstat fetch holding the per-ASN gate (#267 item 3).</summary>
+    /// released — models a slow RIPEstat fetch holding the per-ASN gate.</summary>
     private sealed class BlockingPerAsnHandler : HttpMessageHandler
     {
         private readonly object _sync = new();
@@ -570,7 +570,7 @@ public class PrefixServiceTests
     }
 
     /// <summary>
-    /// #320: user sources get a fetch budget end-to-end. A server that answers headers instantly
+    /// User sources get a fetch budget end-to-end. A server that answers headers instantly
     /// and then never sends the body used to hang the fetch (and the per-URL gate, and the whole
     /// route dump) forever. With the budget armed, the fetch fails within it and the negative
     /// cache throttles the retry — one HTTP attempt total.
@@ -638,7 +638,7 @@ public class PrefixServiceTests
     [Fact]
     public async Task GetUserSourcePrefixesAsync_FetchesThroughTheUserSourceProvider()
     {
-        // #425: the peer-supplied URL path must fetch through the user-source provider (the
+        // The peer-supplied URL path must fetch through the user-source provider (the
         // retry-only pipeline), never through the operator provider whose breaker it could open.
         var operatorProvider = new StubHttpSourceProvider();
         var userSource = new StubHttpSourceProvider();
@@ -668,7 +668,7 @@ public class PrefixServiceTests
         }
     }
 
-    /// <summary>Any touch of the operator pipeline fails the test loudly (#425).</summary>
+    /// <summary>Any touch of the operator pipeline fails the test loudly.</summary>
     private sealed class ThrowingOperatorFactory : IHttpClientFactory
     {
         public HttpClient CreateClient(string name) => throw new NotSupportedException(
@@ -676,7 +676,7 @@ public class PrefixServiceTests
     }
 
     /// <summary>
-    /// #324: a config source that hangs must not wedge sequential seeding — LoadAllAsync awaits
+    /// A config source that hangs must not wedge sequential seeding — LoadAllAsync awaits
     /// sources one by one, so before the default budget one dripping source stalled every later
     /// source, WarmUp, and the final peer push until restart. With the provider-level budget the
     /// hung source fails on its own deadline and the GOOD source still loads. The outer WaitAsync
