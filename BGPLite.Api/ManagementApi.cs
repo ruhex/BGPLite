@@ -1486,10 +1486,6 @@ public sealed class ManagementApi : IHostedService, IDisposable
 
     #endregion
 
-    #region /api/peers/{id}/communities
-
-    #endregion
-
     #region GET /api/asn-lists
 
     private async Task<ApiResponse> HandleGetAsnListsAsync()
