@@ -264,9 +264,16 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
     {
         while (!cancellationToken.IsCancellationRequested)
         {
+            // Hoisted out of the try so the finally below can always see the accepted socket.
+            // Until the session takes ownership, EVERY exit from this block (throw, cancellation,
+            // break, continue) must dispose the FD — the generic catch cannot dispose what it
+            // cannot see, and an orphaned accept socket waits for the finalizer. This is the
+            // loop whose entire purpose is bounding FD use under accept pressure.
+            Socket? socket = null;
+            var sessionOwnsSocket = false;
             try
             {
-                var socket = await _listener!.AcceptAsync(cancellationToken);
+                socket = await _listener!.AcceptAsync(cancellationToken);
                 AcceptWindowProbe?.Invoke(socket);
                 var remoteEndpoint = (IPEndPoint)socket.RemoteEndPoint!;
                 // Normalize BEFORE anything keys on the address (session key, PeerStore, throttle
@@ -290,7 +297,8 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
                     _logger.LogWarning(
                         "Accept throttle: closing connection from {Peer} (over {Limit} accepts/min)",
                         peerAddress, _config.Bgp.MaxAcceptsPerIpPerMinute);
-                    socket.Dispose();
+                    // No owner: the finally at the end of this block disposes the socket
+                    // before the loop moves on.
                     continue;
                 }
 
@@ -308,6 +316,11 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
                     ApplyMd5(socket, remoteEndpoint.Address, md5Key);
 
                 var session = _sessionFactory.Create(new SocketBgpConnection(socket), peerConfig);
+                // Ownership transfers HERE: from this point the socket's disposal path is
+                // session.Dispose() (shutdown, the pre-registration checks below and
+                // RunSessionAsync's finally all go through it), so the accept-window finally
+                // must not touch the socket again.
+                sessionOwnsSocket = true;
                 // The session's finally-block consults this before flipping the peer row to
                 // inactive — "still the registered session for your slot?" A replacement
                 // (TryUpdate below) removes this session from the registry, so its slow unwind
@@ -383,6 +396,15 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
                 // shutdown token breaks the wait so shutdown latency is unaffected.
                 try { await Task.Delay(AcceptFailureBackoff, cancellationToken); }
                 catch (OperationCanceledException) { break; }
+            }
+            finally
+            {
+                // The accept-window safety net: any throw (or break/continue) between AcceptAsync
+                // and the ownership transfer above lands here, so the FD is released instead of
+                // waiting for the finalizer. Socket.Dispose is idempotent, but the flag keeps a
+                // session-owned socket on its own disposal path.
+                if (socket is not null && !sessionOwnsSocket)
+                    socket.Dispose();
             }
         }
     }
