@@ -74,7 +74,14 @@ public static class BgpConstants
         // RFC 4486 §3 assigns 4 to "Administrative Reset" (6 is "Other Configuration
         // Change") — the constant was 6, mislabeling every graceful reset on the wire.
         public const byte CeaseAdministrativeReset = 4;
-        public const byte CeaseConnectionRejected = 7;
+        // §3 assigns 5 to "Connection Rejected"; 7 is "Connection Collision Resolution".
+        // This constant read 7 while being named "Connection Rejected" — unused, so nothing
+        // reached the wire, but the first implementer to send it would have labeled a rejected
+        // connection as a collision. Both names are now present so neither is a trap.
+        public const byte CeaseConnectionRejected = 5;
+        public const byte CeaseOtherConfigurationChange = 6;
+        public const byte CeaseConnectionCollisionResolution = 7;
+        public const byte CeaseOutOfResources = 8;
     }
 
     public static class Attribute

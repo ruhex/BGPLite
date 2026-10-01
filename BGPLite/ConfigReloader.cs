@@ -11,8 +11,11 @@ namespace BGPLite;
 /// (debounced — editors fire several events per save, and a partial write would be read mid-flight)
 /// it reloads + validates the YAML and tells <see cref="ManagementApi.ApplyConfig"/> to swap the
 /// reloadable derived state (TrustedProxies / CORS / rate &amp; concurrency limiters). Fields baked
-/// into established sessions (Bgp.Asn/RouterId/HoldTime, Peers, ApiPort, PrefixSources, RipeStat,
+/// into established sessions (Bgp.Asn/RouterId/HoldTime, ApiPort, PrefixSources, RipeStat,
 /// communities) are NOT applied and require a restart — the reloader only updates the soft fields.
+/// ("Peers" is absent deliberately: AppConfig.Validate now REJECTS a non-empty Peers list, so a
+/// reload carrying one fails validation above and never reaches ApplyConfig. It was never a
+/// restart-required field — no code path ever read it.)
 ///
 /// Resilience: a bad edit (malformed YAML, a config that fails Validate()) is caught and logged, and
 /// the previous config stays in effect — the service is never crashed by a bad edit. This matches the
@@ -148,12 +151,12 @@ public sealed class ConfigReloader : IHostedService, IDisposable
             _managementApi.ApplyConfig(newConfig);
 
             // Soft fields (TrustedProxies / CORS / rate & concurrency limits) are now live. Everything
-            // else (Bgp.*, Peers, ApiPort, PrefixSources, RipeStat, communities) is baked into the
+            // else (Bgp.*, ApiPort, PrefixSources, RipeStat, communities) is baked into the
             // running sessions / listener and needs a restart — state that explicitly so the operator
             // is not surprised that editing e.g. HoldTime did nothing.
             _logger.LogInformation(
                 "Config reloaded from '{Path}' (soft fields applied). " +
-                "BGP/Peers/ApiPort/PrefixSources/communities changes require a restart.",
+                "BGP/ApiPort/PrefixSources/communities changes require a restart.",
                 _configPath);
         }
         catch (Exception ex)

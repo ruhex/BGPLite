@@ -88,9 +88,17 @@ public sealed class AppConfig
     /// <c>["https://operator.example.com", "https://bgp.example.net"]</c>. A request's
     /// <c>Origin</c> header is echoed back as <c>Access-Control-Allow-Origin</c> only when it
     /// exactly matches an entry here (case-insensitive); otherwise <c>no</c> CORS headers are
-    /// emitted and the browser blocks the cross-origin request. Null/empty (default) = CORS fully
-    /// disabled (secure default, consistent with <see cref="TrustedProxies"/> opt-in) — the
-    /// previous blanket <c>"*"</c> was a drive-by CSRF hole on the unauthenticated mutating routes.
+    /// emitted, so the browser withholds the <em>response body</em> from a cross-origin caller.
+    /// Null/empty (default) = CORS fully disabled (secure default, consistent with
+    /// <see cref="TrustedProxies"/> opt-in) — the previous blanket <c>"*"</c> leaked every
+    /// response to any origin.
+    /// <para>
+    /// This is a RESPONSE-READ control, not CSRF protection. It does not stop a cross-origin
+    /// request from being SENT or APPLIED: for a CORS-"simple" request (no preflight) the browser
+    /// blocks only the response, after the state change has already happened. CSRF is handled
+    /// separately — mutating routes require <c>Content-Type: application/json</c>, which forces a
+    /// preflight gated by this allowlist, and refuse <c>Sec-Fetch-Site: cross-site</c>.
+    /// </para>
     /// </summary>
     [YamlMember(Alias = "CorsAllowedOrigins")]
     public List<string>? CorsAllowedOrigins { get; init; }
@@ -136,34 +144,27 @@ public sealed class AppConfig
                 $"Invalid configuration: MaxRequestBodyBytes must be between 1024 and 67108864 bytes " +
                 $"(got {MaxRequestBodyBytes}).");
 
-        // An explicit YAML null ("Peers:") deserializes to a null collection — same contract as
-        // PrefixSources: it means "none" (auto-registration only), never an NRE at Peers.Count.
-        var peers = Peers ?? [];
-        for (var i = 0; i < peers.Count; i++)
-        {
-            var peer = peers[i];
-            // An omitted Address must not slip through as the all-zeros placeholder — require a
-            // real unicast address and reject 0.0.0.0 explicitly.
-            if (string.IsNullOrWhiteSpace(peer.Address))
-                throw new InvalidOperationException(
-                    $"Invalid configuration: Peers[{i}].Address is required — a configured peer must know where it connects from.");
-            if (!IPAddress.TryParse(peer.Address, out var address)
-                || address.AddressFamily != AddressFamily.InterNetwork
-                || IPAddress.Any.Equals(address))
-            {
-                throw new InvalidOperationException(
-                    $"Invalid configuration: Peers[{i}].Address must be a valid IPv4 address other than 0.0.0.0 " +
-                    $"(got '{peer.Address}').");
-            }
-            // A configured peer without a remote ASN can never match an OPEN — fail loud
-            // instead of silently relying on auto-registration.
-            if (peer.RemoteAsn is null)
-                throw new InvalidOperationException(
-                    $"Invalid configuration: Peers[{i}].RemoteAsn is required for a configured peer " +
-                    "(omit the Peers entry entirely to rely on auto-registration).");
-            // Same AS 0 rule as every other configured ASN, via the single validation point.
-            AsnValidation.RequirePositive(peer.RemoteAsn.Value, $"Peers[{i}].RemoteAsn");
-        }
+        // "Peers:" is NOT a supported way to declare peers. It binds, it is listed in
+        // README.md and appsettings.Example.yml, and this method used to validate every element
+        // of it — but no production code path ever read the property, so an operator who declared
+        // peers in YAML got a green validation, a clean startup, and no peers in the database
+        // until each one connected and was auto-registered (D11). `git log -S 'config.Peers'`
+        // shows it was never wired up, not that it was removed.
+        //
+        // Rejecting it is the honest outcome and matches the config rule ("fail loud at startup —
+        // never a runtime catch-and-continue"): a key that validates but does nothing is the exact
+        // failure this repo forbids. It is NOT an allow-list either — per D11 any peer completing
+        // an OPEN is upserted regardless of this list — so silently ignoring it left operators
+        // believing they had restricted who could peer in.
+        //
+        // An explicit YAML null ("Peers:") keeps meaning "none" and stays valid.
+        if (Peers is { Count: > 0 })
+            throw new InvalidOperationException(
+                "Invalid configuration: the 'Peers:' list is no longer applied and cannot be used to " +
+                "declare peers — it has never been read by any code path, and it is not an allow-list " +
+                $"(any peer that completes an OPEN is registered automatically, see D11). Found {Peers.Count} " +
+                "entry/entries. Remove the 'Peers:' block and register peers through the management API " +
+                "instead: POST http://127.0.0.1:5001/api/peers with {\"ip\":\"...\",\"asn\":N}.");
 
         // Prefix-source errors otherwise surface only at load time, where LoadAllAsync absorbs
         // them into a Warning plus an empty prefix set — a config typo silently serves zero prefixes

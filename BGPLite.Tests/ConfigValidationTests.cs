@@ -349,15 +349,47 @@ public class ConfigValidationTests
     }
 
     [Fact]
-    public void Validate_PeerRemoteAsnZero_Throws()
+    public void Validate_NonEmptyPeersList_Throws_WithMigrationHint()
     {
-        // A configured peer with RemoteAsn 0 can never match an OPEN (RFC 7607 rejects AS 0
-        // there), so the row would be dead weight from startup — same rule as Bgp.Asn.
-        var config = Config(peers: [new PeerConfig { Address = "10.0.0.2", RemoteAsn = 0 }]);
+        // The 'Peers:' YAML key binds and is documented but was NEVER read by any production code
+        // path, so declaring peers there produced a green validation, a clean startup, and no
+        // peers in the database. It is also not an allow-list (per D11 any peer completing an OPEN
+        // is registered), so silently ignoring it left operators believing they had restricted
+        // who could peer in. Rejecting it is the honest outcome; the message must say what to do.
+        var config = Config(peers: [new PeerConfig { Address = "10.0.0.2", RemoteAsn = 65002 }]);
 
         var ex = Assert.Throws<InvalidOperationException>(config.Validate);
-        Assert.Contains("Peers[0].RemoteAsn", ex.Message);
-        Assert.Contains("positive AS number", ex.Message);
+
+        Assert.Contains("'Peers:' list is no longer applied", ex.Message);
+        Assert.Contains("not an allow-list", ex.Message);
+        Assert.Contains("management API", ex.Message);   // actionable, not just a rejection
+    }
+
+    [Fact]
+    public void Validate_PeersCountIsReported_InTheRejection()
+    {
+        var config = Config(peers:
+        [
+            new PeerConfig { Address = "10.0.0.2", RemoteAsn = 65002 },
+            new PeerConfig { Address = "10.0.0.3", RemoteAsn = 65003 }
+        ]);
+
+        var ex = Assert.Throws<InvalidOperationException>(config.Validate);
+
+        Assert.Contains("Found 2 entry", ex.Message);
+    }
+
+    [Fact]
+    public void Validate_EmptyOrNullPeersList_StaysValid()
+    {
+        // An explicit YAML null ("Peers:") keeps meaning "none" and must not trip validation —
+        // every runtime consumer already treats a null/empty list as "no declared peers".
+        foreach (var peers in new List<PeerConfig>?[] { null, [] })
+        {
+            var config = Config(peers: peers);
+            var act = () => config.Validate();
+            act();
+        }
     }
 
     [Fact]
@@ -533,49 +565,6 @@ public class ConfigValidationTests
         // The default (1 MiB) must pass validation — guards against an accidentally-too-tight range.
         var config = new AppConfig { Bgp = Bgp() };
         config.Validate();
-    }
-
-    [Theory]
-    [InlineData("0.0.0.0")]   // the all-zeros placeholder is never a valid peer address
-    [InlineData("not-an-ip")]
-    [InlineData("::1")]
-    public void Validate_RejectsBadPeerAddress(string address)
-    {
-        var config = Config(peers: [new PeerConfig { Address = address }]);
-
-        var ex = Assert.Throws<InvalidOperationException>(() => config.Validate());
-        Assert.Contains("Peers[0].Address", ex.Message);
-    }
-
-    [Fact]
-    public void Validate_RequiresPeerAddress()
-    {
-        // PeerConfig.Address now defaults to "" so an omitted Address trips validation
-        // instead of silently configuring the all-zeros placeholder.
-        var config = Config(peers: [new PeerConfig { RemoteAsn = 65002 }]);
-
-        var ex = Assert.Throws<InvalidOperationException>(() => config.Validate());
-        Assert.Contains("Peers[0].Address is required", ex.Message);
-    }
-
-    [Fact]
-    public void Validate_RequiresPeerRemoteAsn()
-    {
-        // A configured peer without a remote ASN can never match an OPEN — fail loud.
-        var config = Config(peers: [new PeerConfig { Address = "10.0.0.2" }]);
-
-        var ex = Assert.Throws<InvalidOperationException>(() => config.Validate());
-        Assert.Contains("Peers[0].RemoteAsn is required", ex.Message);
-    }
-
-    [Fact]
-    public void Validate_AcceptsValidPeerAddress()
-    {
-        var config = Config(peers: [new PeerConfig { Address = "10.0.0.2", RemoteAsn = 65002 }]);
-
-        var act = () => config.Validate();
-
-        act();
     }
 
     [Fact]

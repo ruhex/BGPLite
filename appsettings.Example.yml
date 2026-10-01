@@ -14,10 +14,11 @@ Bgp:
   # MaxPrefixesPerPeer: 1000000            # per-peer prefix ceiling (default 1M; exceeding it resets the
                                            # session per RFC 4486; 0 = unlimited opt-out)
 
-Peers:
-  - Address: 10.0.0.1
-    RemoteAsn: 65001
-    Description: "example-peer"
+# Peers are NOT declared here and this is NOT an allow-list: any peer that completes an OPEN
+# is registered automatically and gets the default prefix set (D11). Register them over the API:
+#   curl -X POST http://127.0.0.1:5001/api/peers -H 'Content-Type: application/json' \
+#        -d '{"ip":"10.0.0.1","asn":65001,"lists":["ru"]}'
+# A non-empty "Peers:" list is REJECTED at startup — it has never been read by any code path.
 
 # RIPEstat (stat.ripe.net) used to resolve ASNs → prefixes via the ris-prefixes endpoint.
 # That endpoint is slow for large origin ASes (AS3356/Lumen takes ~2 minutes), so the HTTP
@@ -110,10 +111,15 @@ DefaultPrefixSource: ru
 
 # Management API — CORS origin allowlist (#99). A request's Origin header is reflected back as
 # Access-Control-Allow-Origin ONLY when it matches an entry here (case-insensitive); otherwise no
-# CORS headers are emitted and the browser blocks the cross-origin request. The previous blanket
-# "Access-Control-Allow-Origin: *" on every response was a drive-by CSRF hole on the unauthenticated
-# mutating routes. Empty/absent = CORS fully disabled (secure default — consistent with
+# CORS headers are emitted and the browser withholds the RESPONSE BODY from the cross-origin caller.
+# The previous blanket "Access-Control-Allow-Origin: *" on every response leaked every response to
+# any origin. Empty/absent = CORS fully disabled (secure default — consistent with
 # TrustedProxies opt-in). List the operator/frontend origins to enable cross-origin browser access.
+#
+# NOTE: this allowlist is a response-READ control, not CSRF protection — it does not stop a
+# cross-origin request from being sent or applied. CSRF is handled separately: mutating routes
+# require Content-Type: application/json (forcing a preflight gated by this list) and refuse
+# Sec-Fetch-Site: cross-site.
 # CorsAllowedOrigins:
 #   - "https://operator.example.com"
 #   - "https://bgp.example.net"

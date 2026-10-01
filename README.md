@@ -110,10 +110,11 @@ Bgp:
   KeepAlive: 60
   HoldTime: 180
 
-Peers:
-  - Address: 10.0.0.2
-    RemoteAsn: 65001
-    Description: "example-peer"
+# Peers are NOT configured here. There is no peer allow-list: any peer that completes an
+# OPEN is registered automatically and gets the default prefix set (see D11 in
+# docs/DESIGN_DECISIONS.md). Manage peers over the API instead:
+#   curl -X POST http://127.0.0.1:5001/api/peers -H 'Content-Type: application/json' \
+#        -d '{"ip":"10.0.0.2","asn":65001,"lists":["ru"]}'
 
 RipeStat:                      # ASN → prefixes via stat.ripe.net (cached, retried)
   TimeoutSeconds: 180
