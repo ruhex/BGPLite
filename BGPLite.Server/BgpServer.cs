@@ -43,6 +43,17 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
     public BgpMetrics Metrics => _metrics;
     public RouteTable Routes => _routeTable;
 
+    /// <summary>Test seam: the port <see cref="StartAsync"/> binds. Production stays on
+    /// <c>BgpConstants.BgpPort</c>; tests bind an ephemeral high port (179 needs root and would
+    /// collide with a real daemon).</summary>
+    internal int ListenPort { get; set; } = BgpConstants.BgpPort;
+
+    /// <summary>Test seam: invoked on the freshly accepted socket inside the accept window —
+    /// between <c>AcceptAsync</c> returning and ownership transferring to the session — so tests
+    /// can force a throw exactly where the socket-must-never-leak invariant lives. Null (never
+    /// invoked) in production.</summary>
+    internal Action<Socket>? AcceptWindowProbe { get; set; }
+
     public BgpServer(
         AppConfig config,
         RouteTable routeTable,
@@ -73,13 +84,13 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
             _listener = new Socket(AddressFamily.InterNetworkV6, SocketType.Stream, ProtocolType.Tcp);
             _listener.DualMode = true;
             _listener.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
-            _listener.Bind(new IPEndPoint(IPAddress.IPv6Any, BgpConstants.BgpPort));
+            _listener.Bind(new IPEndPoint(IPAddress.IPv6Any, ListenPort));
         }
         else
         {
             _listener = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
             _listener.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
-            _listener.Bind(new IPEndPoint(IPAddress.Any, BgpConstants.BgpPort));
+            _listener.Bind(new IPEndPoint(IPAddress.Any, ListenPort));
             _logger.LogWarning("IPv6 is not available on this host — serving IPv4 peers only");
         }
         // After a restart every peer reconnects at once; a backlog of 16 dropped SYNs and pushed
@@ -87,7 +98,7 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
         // hundred pending accepts costs nothing on a route-server host.
         _listener.Listen(512);
 
-        _logger.LogInformation("BGP server listening on {Address}:{Port}", useDualMode ? "[::]" : "0.0.0.0", BgpConstants.BgpPort);
+        _logger.LogInformation("BGP server listening on {Address}:{Port}", useDualMode ? "[::]" : "0.0.0.0", ListenPort);
         _logger.LogInformation("Local ASN={Asn}, RouterId={RouterId}", _config.Bgp.Asn, _config.Bgp.RouterId);
 
         _acceptTask = AcceptLoopAsync(_cts.Token);
@@ -256,6 +267,7 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
             try
             {
                 var socket = await _listener!.AcceptAsync(cancellationToken);
+                AcceptWindowProbe?.Invoke(socket);
                 var remoteEndpoint = (IPEndPoint)socket.RemoteEndPoint!;
                 // Normalize BEFORE anything keys on the address (session key, PeerStore, throttle
                 // and MD5 table all key on the plain IPv4 form); the raw address stays the MD5
