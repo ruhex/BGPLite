@@ -502,7 +502,9 @@ public sealed class ManagementApi : IHostedService, IDisposable
         if (ctx.Request.HttpMethod is "POST" or "PUT" or "PATCH" or "DELETE"
             && string.Equals(ctx.Request.Headers["Sec-Fetch-Site"], "cross-site", StringComparison.OrdinalIgnoreCase))
         {
-            _logger.LogWarning("Refused cross-site {Method} request", ctx.Request.HttpMethod);
+            // Sanitized like every other user-supplied value that reaches a log line here
+            // (cs/log-forging): the method is attacker-controlled even if the real verb set is small.
+            _logger.LogWarning("Refused cross-site {Method} request", SanitizeForLog(ctx.Request.HttpMethod));
             await WriteResponse(ctx, ApiResponse.Error("Cross-site requests are not accepted.", 403));
             return;
         }
