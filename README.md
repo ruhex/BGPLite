@@ -149,17 +149,30 @@ DefaultPrefixSource: ru        # served to unconfigured/auto-registered peers
 
 Listens on `ApiPort` (default **5001**, loopback by default).
 
+Peers are addressed by the opaque `id` returned on create (a peer is keyed by IP **and**
+remote ASN, so two peers behind one source IP are distinct rows).
+
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `GET`  | `/api/my-ip` | Returns the caller's IP |
+| `GET`  | `/api/server` | Server identity and effective settings |
+| `GET`  | `/api/me` | Returns the caller's IP |
 | `POST` | `/api/peers` | Register a peer |
-| `GET`  | `/api/peers` | List all peers |
+| `GET`  | `/api/peers/{id}` | Peer detail (own path only) |
+| `PUT`  | `/api/peers/{id}` | Replace peer configuration |
+| `DELETE` | `/api/peers/{id}` | Delete the peer and tear down its session |
+| `GET`  | `/api/peers/{id}/prefixes` | Prefixes advertised to the peer (`?format=txt` for a plain list) |
+| `GET`  | `/api/peers/{id}/sources` | List the peer's own URL prefix sources |
+| `POST` | `/api/peers/{id}/sources` | Add a URL prefix source |
+| `DELETE` | `/api/peers/{id}/sources/{sourceId}` | Remove a source |
+| `PATCH` | `/api/peers/{id}/sources/{sourceId}` | Pause / resume / edit a source |
 | `GET`  | `/api/asn-lists` | Available AS-lists with prefix counts |
-| `GET`  | `/api/as/{asn}/prefixes/count` | Prefix count for an ASN |
+| `GET`  | `/api/community-scheme` | The community naming scheme in use |
 | `GET`  | `/api/sessions` | Active BGP session count |
-| `GET`  | `/api/routes/count` | Route counts by community |
-| `GET` / `PUT` / `DELETE` | `/api/peer/{ip}/communities` | Get / set / clear community filter |
-| `PUT`  | `/api/peer/{ip}/description` | Set peer description |
+| `GET`  | `/api/routes` | Route counts by community |
+| `GET`  | `/api/as/{asn}/prefixes` | Prefixes for an ASN (`?count=true` for a count only) |
+
+All mutating routes require `Content-Type: application/json` (which also forces the CORS
+preflight that keeps cross-origin callers out) and refuse `Sec-Fetch-Site: cross-site`.
 
 ```bash
 curl -X POST http://localhost:5001/api/peers -H 'Content-Type: application/json' -d '{

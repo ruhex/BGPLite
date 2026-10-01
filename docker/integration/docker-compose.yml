@@ -28,6 +28,10 @@ services:
     environment:
       # Debug logs for the session pipeline — this stand exists to diagnose it.
       - Logging__LogLevel__BGPLite=Debug
+    # Outlast the host's 30 s shutdown budget plus the 10 s ManagementApi drain, so BIRD sees a
+    # clean session teardown instead of a killed process. See docker-compose.yml for the full
+    # ordering argument.
+    stop_grace_period: 45s
 
   bird:
     build:
