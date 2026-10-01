@@ -1,14 +1,19 @@
 using System.Net;
 using System.Net.Sockets;
+using BGPLite.Configuration;
 using BGPLite.Contracts;
+using BGPLite.Routing;
 using BGPLite.Server;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace BGPLite.Tests;
 
 /// <summary>
 /// The dual-mode listener surfaces IPv4 peers as IPv4-mapped IPv6 addresses —
 /// these cover the address-form conversions that keep session identity, the PeerStore lookup
-/// and TCP-MD5 keys working across both transport families.
+/// and TCP-MD5 keys working across both transport families. Also hosts the accept-window
+/// socket-ownership invariant: an accepted socket ends up either owned by a session or
+/// disposed, never orphaned to the finalizer.
 /// </summary>
 public class BgpServerAcceptTests
 {
@@ -142,5 +147,103 @@ public class BgpServerAcceptTests
 
         goodClient.Dispose();
         accepted.Dispose();
+    }
+
+    /// <summary>
+    /// The accept-window ownership invariant: a socket returned by <c>AcceptAsync</c> ends up
+    /// EITHER owned by a session OR disposed — never orphaned until the finalizer. A throw
+    /// between <c>AcceptAsync</c> and the ownership transfer (the <c>getpeername</c> fallback on
+    /// an RST-before-accept connection is the measured trigger; any exception in the window has
+    /// the same structure) used to escape the generic catch, which cannot see a socket declared
+    /// inside the try. The captured reference also delays finalization, so the leak is directly
+    /// observable: the probe's socket must become unusable (<see cref="ObjectDisposedException"/>),
+    /// not stay writable for the whole polling window.
+    /// </summary>
+    [Fact]
+    public async Task AcceptWindow_ThrowBeforeOwnershipTransfer_DisposesTheAcceptedSocket()
+    {
+        var server = new BgpServer(
+            new AppConfig { Bgp = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1" } },
+            new RouteTable(),
+            AllowAllFilter.Instance,
+            new BgpMetrics(),
+            new NeverReachedSessionFactory(),
+            NullLogger<BgpServer>.Instance);
+
+        var accepted = new TaskCompletionSource<Socket>(TaskCreationOptions.RunContinuationsAsynchronously);
+        server.AcceptWindowProbe = socket =>
+        {
+            accepted.TrySetResult(socket);
+            server.AcceptWindowProbe = null; // fire once — the window under test is the first accept
+            throw new InvalidOperationException("simulated failure inside the accept window");
+        };
+
+        // FreeTcpPort has an inherent TOCTOU window — retry on a fresh port if something races
+        // us (same idiom as ManagementApiShutdownTests).
+        for (var attempt = 0; ; attempt++)
+        {
+            try
+            {
+                server.ListenPort = FreeTcpPort();
+                await server.StartAsync(CancellationToken.None);
+                break;
+            }
+            catch (SocketException) when (attempt < 2) { }
+        }
+
+        try
+        {
+            // One connection only: the probe consumes it inside the window, so the session
+            // factory is never reached and no second accept happens during the test.
+            using var client = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
+            client.Connect(new IPEndPoint(IPAddress.Loopback, server.ListenPort));
+
+            var socket = await accepted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+            // Pre-fix the socket stayed open — the generic catch never saw it, and the reference
+            // held here delays the finalizer past any reasonable polling window. Post-fix the
+            // loop's finally disposes it once the catch (including its backoff delay) completes.
+            var disposed = false;
+            var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(5);
+            while (DateTime.UtcNow < deadline && !disposed)
+            {
+                try
+                {
+                    socket.Send([1]); // succeeds while the FD is still alive
+                }
+                catch (ObjectDisposedException)
+                {
+                    disposed = true;
+                }
+                catch (SocketException)
+                {
+                    // RST/broken pipe from the far end — not a disposal, keep polling.
+                }
+                if (!disposed) await Task.Delay(25);
+            }
+
+            Assert.True(disposed, "the accepted socket leaked: a throw inside the accept window never disposed it");
+        }
+        finally
+        {
+            await server.StopAsync(CancellationToken.None);
+        }
+    }
+
+    private static int FreeTcpPort()
+    {
+        var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        listener.Stop();
+        return port;
+    }
+
+    /// <summary>The probe throws before ownership transfer, so the accept loop must never reach
+    /// session creation in this test.</summary>
+    private sealed class NeverReachedSessionFactory : IBgpSessionFactory
+    {
+        public BgpSession Create(IBgpConnection connection, PeerConfig peerConfig)
+            => throw new InvalidOperationException("session factory must not be reached in this test");
     }
 }

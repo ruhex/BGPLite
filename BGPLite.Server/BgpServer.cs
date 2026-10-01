@@ -43,6 +43,17 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
     public BgpMetrics Metrics => _metrics;
     public RouteTable Routes => _routeTable;
 
+    /// <summary>Test seam: the port <see cref="StartAsync"/> binds. Production stays on
+    /// <c>BgpConstants.BgpPort</c>; tests bind an ephemeral high port (179 needs root and would
+    /// collide with a real daemon).</summary>
+    internal int ListenPort { get; set; } = BgpConstants.BgpPort;
+
+    /// <summary>Test seam: invoked on the freshly accepted socket inside the accept window —
+    /// between <c>AcceptAsync</c> returning and ownership transferring to the session — so tests
+    /// can force a throw exactly where the socket-must-never-leak invariant lives. Null (never
+    /// invoked) in production.</summary>
+    internal Action<Socket>? AcceptWindowProbe { get; set; }
+
     public BgpServer(
         AppConfig config,
         RouteTable routeTable,
@@ -73,13 +84,13 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
             _listener = new Socket(AddressFamily.InterNetworkV6, SocketType.Stream, ProtocolType.Tcp);
             _listener.DualMode = true;
             _listener.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
-            _listener.Bind(new IPEndPoint(IPAddress.IPv6Any, BgpConstants.BgpPort));
+            _listener.Bind(new IPEndPoint(IPAddress.IPv6Any, ListenPort));
         }
         else
         {
             _listener = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
             _listener.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
-            _listener.Bind(new IPEndPoint(IPAddress.Any, BgpConstants.BgpPort));
+            _listener.Bind(new IPEndPoint(IPAddress.Any, ListenPort));
             _logger.LogWarning("IPv6 is not available on this host — serving IPv4 peers only");
         }
         // After a restart every peer reconnects at once; a backlog of 16 dropped SYNs and pushed
@@ -87,7 +98,7 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
         // hundred pending accepts costs nothing on a route-server host.
         _listener.Listen(512);
 
-        _logger.LogInformation("BGP server listening on {Address}:{Port}", useDualMode ? "[::]" : "0.0.0.0", BgpConstants.BgpPort);
+        _logger.LogInformation("BGP server listening on {Address}:{Port}", useDualMode ? "[::]" : "0.0.0.0", ListenPort);
         _logger.LogInformation("Local ASN={Asn}, RouterId={RouterId}", _config.Bgp.Asn, _config.Bgp.RouterId);
 
         _acceptTask = AcceptLoopAsync(_cts.Token);
@@ -253,9 +264,17 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
     {
         while (!cancellationToken.IsCancellationRequested)
         {
+            // Hoisted out of the try so the finally below can always see the accepted socket.
+            // Until the session takes ownership, EVERY exit from this block (throw, cancellation,
+            // break, continue) must dispose the FD — the generic catch cannot dispose what it
+            // cannot see, and an orphaned accept socket waits for the finalizer. This is the
+            // loop whose entire purpose is bounding FD use under accept pressure.
+            Socket? socket = null;
+            var sessionOwnsSocket = false;
             try
             {
-                var socket = await _listener!.AcceptAsync(cancellationToken);
+                socket = await _listener!.AcceptAsync(cancellationToken);
+                AcceptWindowProbe?.Invoke(socket);
                 var remoteEndpoint = (IPEndPoint)socket.RemoteEndPoint!;
                 // Normalize BEFORE anything keys on the address (session key, PeerStore, throttle
                 // and MD5 table all key on the plain IPv4 form); the raw address stays the MD5
@@ -278,7 +297,8 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
                     _logger.LogWarning(
                         "Accept throttle: closing connection from {Peer} (over {Limit} accepts/min)",
                         peerAddress, _config.Bgp.MaxAcceptsPerIpPerMinute);
-                    socket.Dispose();
+                    // No owner: the finally at the end of this block disposes the socket
+                    // before the loop moves on.
                     continue;
                 }
 
@@ -296,6 +316,11 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
                     ApplyMd5(socket, remoteEndpoint.Address, md5Key);
 
                 var session = _sessionFactory.Create(new SocketBgpConnection(socket), peerConfig);
+                // Ownership transfers HERE: from this point the socket's disposal path is
+                // session.Dispose() (shutdown, the pre-registration checks below and
+                // RunSessionAsync's finally all go through it), so the accept-window finally
+                // must not touch the socket again.
+                sessionOwnsSocket = true;
                 // The session's finally-block consults this before flipping the peer row to
                 // inactive — "still the registered session for your slot?" A replacement
                 // (TryUpdate below) removes this session from the registry, so its slow unwind
@@ -371,6 +396,15 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
                 // shutdown token breaks the wait so shutdown latency is unaffected.
                 try { await Task.Delay(AcceptFailureBackoff, cancellationToken); }
                 catch (OperationCanceledException) { break; }
+            }
+            finally
+            {
+                // The accept-window safety net: any throw (or break/continue) between AcceptAsync
+                // and the ownership transfer above lands here, so the FD is released instead of
+                // waiting for the finalizer. Socket.Dispose is idempotent, but the flag keeps a
+                // session-owned socket on its own disposal path.
+                if (socket is not null && !sessionOwnsSocket)
+                    socket.Dispose();
             }
         }
     }
