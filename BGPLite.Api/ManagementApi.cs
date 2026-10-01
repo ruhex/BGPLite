@@ -670,12 +670,50 @@ public sealed class ManagementApi : IHostedService, IDisposable
     {
         var maxBytes = Volatile.Read(ref _maxRequestBodyBytes);
 
+        // CSRF: the body is deserialized regardless of its declared media type, so a
+        // CORS-"simple" request can mutate state cross-origin. Per the Fetch standard,
+        // Content-Type values application/x-www-form-urlencoded, multipart/form-data and
+        // text/plain are safelisted — a cross-origin POST carrying one of them is sent with NO
+        // preflight, and the absence of Access-Control-Allow-Origin on the response does not undo
+        // the state change that already happened. Requiring application/json makes every mutating
+        // request preflighted, which the browser blocks unless the origin is allowlisted — the same
+        // allowlist that already gates response reads, and AddCorsHeaders runs before the OPTIONS
+        // short-circuit, so a legitimately configured cross-origin UI keeps working.
+        // This is the POST gap specifically: PUT/PATCH/DELETE are non-simple methods and are
+        // already preflighted by the browser.
+        if (!IsJsonContentType(ctx.Request.ContentType))
+            return (null, ApiResponse.Error(
+                "Mutating requests require Content-Type: application/json.", 415));
+
+        // Defence in depth for anything that reaches the API without a preflight: Sec-Fetch-Site is
+        // set by the browser itself and needs no allowlist, so a cross-site request is refused
+        // even if a future client skips preflighting. Same-origin requests send "same-origin" and
+        // are unaffected; non-browser clients send nothing.
+        if (string.Equals(ctx.Request.Headers["Sec-Fetch-Site"], "cross-site", StringComparison.OrdinalIgnoreCase))
+            return (null, ApiResponse.Error("Cross-site requests are not accepted.", 403));
+
         // Fast path: Content-Length present and already over the cap → reject without reading.
         if (ctx.Request.ContentLength64 > maxBytes)
             return (null, ApiResponse.Error(
                 $"Request body too large ({ctx.Request.ContentLength64} bytes, max {maxBytes}).", 413));
 
         return await ReadBoundedBodyAsync(ctx.Request.InputStream, maxBytes, BodyReadTimeout);
+    }
+
+    /// <summary>
+    /// True for a JSON media type: <c>application/json</c> or any <c>+json</c> structured suffix.
+    /// Parameters (<c>; charset=utf-8</c>) and casing are ignored.
+    /// </summary>
+    internal static bool IsJsonContentType(string? contentType)
+    {
+        if (string.IsNullOrWhiteSpace(contentType))
+            return false;
+
+        var semicolon = contentType.IndexOf(';');
+        var mediaType = (semicolon >= 0 ? contentType[..semicolon] : contentType).Trim();
+
+        return mediaType.Equals("application/json", StringComparison.OrdinalIgnoreCase)
+               || mediaType.EndsWith("+json", StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>Per-read deadline for request bodies — the time dimension of the size cap.</summary>
