@@ -122,6 +122,19 @@ public sealed class PrefixService : IPrefixService
     /// (warm traffic is cache-flat). Keeps cold-start fan-out from tripping RIPEstat rate limits.</summary>
     private const int MaxDegreeOfParallelism = 8;
 
+    /// <summary>
+    /// Resolves every ASN in <paramref name="asns"/> concurrently (bounded), preserving input
+    /// order and multiplicity.
+    /// <para>
+    /// A PARTIAL failure is tolerated: each ASN carries its own try/catch, a failed ASN is logged
+    /// and skipped, and the surviving ASNs are returned. When EVERY attempted ASN failed the
+    /// aggregate failure is THROWN instead of degrading to an empty list — an empty result must
+    /// not be indistinguishable from "these ASNs have no prefixes", because the outbound route
+    /// build suppresses the RU fallback only on a total source failure (see
+    /// <c>RouteAssembler</c>). Swallowing the total failure made that gate unreachable, so a peer
+    /// whose whole ASN subscription was unreachable fell back to the full RU table.
+    /// </para>
+    /// </summary>
     public async Task<List<(UInt128 Prefix, byte Length, bool IsIpv4, uint Asn)>> GetPrefixesForAsns(IEnumerable<uint> asns, CancellationToken ct = default)
     {
         // Materialize once: we enumerate for fan-out and again for ordered assembly.
@@ -133,7 +146,7 @@ public sealed class PrefixService : IPrefixService
         // per-ASN cache and double-fetch; output multiplicity is preserved below.
         // Each ASN keeps its own try/catch so one failure (incl. cancellation) can't drop the others.
         using var gate = new SemaphoreSlim(MaxDegreeOfParallelism, MaxDegreeOfParallelism);
-        var resolvedByAsn = new Dictionary<uint, Task<IReadOnlyList<(UInt128 Prefix, byte Length, bool IsIpv4)>>>();
+        var resolvedByAsn = new Dictionary<uint, Task<AsnResolution>>();
         foreach (var asn in asnList.Distinct())
             resolvedByAsn[asn] = ResolveAsnAsync(asn, gate, ct);
 
@@ -143,21 +156,56 @@ public sealed class PrefixService : IPrefixService
         // prior sequential output, including for duplicate ASNs. Await each completed task (rather
         // than .Result) so a faulted task surfaces its real exception, not an AggregateException,
         // and never blocks the threadpool thread.
+        //
+        // Cancellation is the ONLY thing that faults these tasks: ResolveAsnAsync reports every
+        // non-cancellation failure as AsnResolution.Ok == false, so Task.WhenAll cannot turn a
+        // per-ASN outage into a faulted aggregate. Foreign-token OCEs (a per-ASN Polly timeout on
+        // a linked CTS) are classified by ResolveAsnAsync as ordinary failures, not cancellation.
         var result = new List<(UInt128 Prefix, byte Length, bool IsIpv4, uint Asn)>();
+        var failedAsns = new List<uint>();
         foreach (var asn in asnList)
-            foreach (var p in await resolvedByAsn[asn])
+        {
+            var resolved = await resolvedByAsn[asn];
+            if (!resolved.Ok)
+            {
+                // Already logged per-ASN by ResolveAsnAsync. A repeated ASN in the input list is
+                // the same task, so de-duplicate before reporting.
+                if (!failedAsns.Contains(asn))
+                    failedAsns.Add(asn);
+                continue;
+            }
+
+            foreach (var p in resolved.Prefixes)
                 result.Add((p.Prefix, p.Length, p.IsIpv4, asn));
+        }
+
+        // Total failure across the whole request: surface it. Returning an empty list here would be
+        // read by the caller as "resolved, but these ASNs announce nothing" — which is exactly what
+        // let a dead subscription fall through to the RU fallback.
+        if (failedAsns.Count > 0 && failedAsns.Count == resolvedByAsn.Count)
+            throw new InvalidOperationException(
+                $"All {failedAsns.Count} requested ASN(s) failed to resolve ({string.Join(", ", failedAsns.Select(a => "AS" + a))}).");
+
         return result;
     }
 
-    private async Task<IReadOnlyList<(UInt128 Prefix, byte Length, bool IsIpv4)>> ResolveAsnAsync(uint asn, SemaphoreSlim gate, CancellationToken ct)
+    /// <summary>
+    /// Per-ASN resolution outcome. Non-cancellation failures are reported as a value rather than an
+    /// exception so one dead ASN cannot fault the fan-out aggregate; only caller cancellation
+    /// escapes as an exception.
+    /// </summary>
+    private readonly record struct AsnResolution(
+        bool Ok,
+        IReadOnlyList<(UInt128 Prefix, byte Length, bool IsIpv4)> Prefixes);
+
+    private async Task<AsnResolution> ResolveAsnAsync(uint asn, SemaphoreSlim gate, CancellationToken ct)
     {
         try
         {
             await gate.WaitAsync(ct);
             try
             {
-                return await GetPrefixesAsync(asn, ct);
+                return new AsnResolution(true, await GetPrefixesAsync(asn, ct));
             }
             finally
             {
@@ -184,8 +232,12 @@ public sealed class PrefixService : IPrefixService
             // Skip the failed ASN (a transient RIPEstat error) and continue with the others — but
             // not silently: its prefixes vanish from this cycle's advertisement, and the operator
             // must be able to tell "ASN no longer has prefixes" from "fetch failed".
+            //
+            // Reported as a value, not an exception: GetPrefixesForAsns decides per ASN-list whether
+            // the request was a TOTAL failure, and a faulted task would take the fan-out aggregate
+            // (and the surviving ASNs' results) down with it.
             _logger?.LogWarning(ex, "AS{Asn}: RIPEstat resolve failed — advertising no prefixes for this ASN this cycle", asn);
-            return [];
+            return new AsnResolution(false, []);
         }
     }
 
