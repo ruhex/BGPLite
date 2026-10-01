@@ -66,6 +66,21 @@ public sealed class PrefixSourceService : IPrefixSourceService
         _sourcesByName = (config.PrefixSources ?? []).ToDictionary(s => s.Name);
     }
 
+    /// <inheritdoc cref="IPrefixSourceService.GetAsync" />
+    /// <remarks>
+    /// Failures PROPAGATE — deliberately identical to <see cref="LoadDefaultAsync"/> and unlike
+    /// the old "empty list if failed" behavior. An empty list is a legitimate result (the operator
+    /// emptied the source) and must stay distinguishable from "the fetch failed": the outbound
+    /// route build counts one attempt per source and suppresses the RU fallback only when EVERY
+    /// attempt failed, so a swallowed failure here made that gate unreachable and a peer whose
+    /// only source was down received the whole RU table it never subscribed to.
+    /// <para>
+    /// A fresh NEGATIVE entry is failure backoff rather than content (the negative entry is only
+    /// ever written by the failure path inside <see cref="LoadCachedAsync"/>, and a repeat call
+    /// inside the negative TTL returns it as a fresh empty list without throwing) — so it throws
+    /// too, exactly as <see cref="LoadDefaultAsync"/> does.
+    /// </para>
+    /// </remarks>
     public async Task<IReadOnlyList<IpPrefix>> GetAsync(string name, CancellationToken ct = default)
     {
         if (!_sourcesByName.TryGetValue(name, out var source))
@@ -74,13 +89,16 @@ public sealed class PrefixSourceService : IPrefixSourceService
             return [];
         }
 
-        try { return (await LoadCachedAsync(source, ct)).Prefixes; }
-        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }  // only CALLER cancellation propagates — a foreign-token OCE (the fetch budget firing on a live ct) must stay a per-source failure below
-        catch (Exception ex)
+        var prefixes = (await LoadCachedAsync(source, ct)).Prefixes;
+
+        if (prefixes.Count == 0 && _cache.TryGetValue(name, out var entry) &&
+            entry.Negative && _timeProvider.GetUtcNow().UtcDateTime - entry.CachedAt < _negativeTtl)
         {
-            _logger.LogWarning(ex, "Failed to load prefix source '{Name}'.", name);
-            return [];
+            throw new InvalidOperationException(
+                $"Prefix source '{name}' is in failure backoff — the last load failed within the last {_negativeTtl.TotalSeconds:0}s.");
         }
+
+        return prefixes;
     }
 
     /// <inheritdoc cref="IPrefixSourceService.LoadDefaultAsync" />
