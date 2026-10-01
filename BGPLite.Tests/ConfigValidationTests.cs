@@ -687,4 +687,214 @@ public class ConfigValidationTests
         ((IList)list).Add(null!);
         return root;
     }
+
+    // ---------------- ApiRateLimit / TrustedProxies / CorsAllowedOrigins (#536) ----------------
+    // These three sections had no semantic validation: the runtime clamped them silently, so a
+    // typo produced different behaviour with a clean startup. Worst case — a negative
+    // PeriodSeconds clamped to 1 s turns 120 tokens/60 s into 120 requests/SECOND, disabling the
+    // flood protection the section exists to configure.
+
+    [Theory]
+    [InlineData(-5, 120, 60, 0, "TokenLimit")]
+    [InlineData(120, 0, 60, 0, "TokensPerPeriod")]
+    [InlineData(120, 120, 0, 0, "PeriodSeconds")]
+    [InlineData(120, 120, 60, -1, "MaxConcurrentRequests")]
+    public void Validate_RejectsOutOfRangeApiRateLimit(int tokenLimit, int perPeriod, int period, int maxConcurrent, string expectedField)
+    {
+        var config = new AppConfig
+        {
+            Bgp = Bgp(),
+            ApiRateLimit = new ApiRateLimitConfig
+            {
+                Enabled = true,
+                TokenLimit = tokenLimit,
+                TokensPerPeriod = perPeriod,
+                PeriodSeconds = period,
+                MaxConcurrentRequests = maxConcurrent
+            }
+        };
+
+        var ex = Assert.Throws<InvalidOperationException>(config.Validate);
+        Assert.Contains("ApiRateLimit." + expectedField, ex.Message);
+    }
+
+    [Fact]
+    public void Validate_ApiRateLimitDisabled_StillValidates()
+    {
+        // Enabled = false is a valid configuration; the RANGES are still wrong, and a bad range
+        // that only bites when the operator later flips Enabled = true is exactly the trap.
+        var config = new AppConfig
+        {
+            Bgp = Bgp(),
+            ApiRateLimit = new ApiRateLimitConfig { Enabled = false, PeriodSeconds = -30 }
+        };
+
+        var ex = Assert.Throws<InvalidOperationException>(config.Validate);
+        Assert.Contains("ApiRateLimit.PeriodSeconds", ex.Message);
+    }
+
+    [Fact]
+    public void Validate_AcceptsValidApiRateLimitIncludingZeroConcurrencyCap()
+    {
+        // MaxConcurrentRequests = 0 is the documented "no cap" value and must stay valid.
+        var config = new AppConfig
+        {
+            Bgp = Bgp(),
+            ApiRateLimit = new ApiRateLimitConfig
+            {
+                Enabled = true,
+                TokenLimit = 120,
+                TokensPerPeriod = 120,
+                PeriodSeconds = 60,
+                MaxConcurrentRequests = 0
+            }
+        };
+
+        var act = () => config.Validate();
+        act();
+    }
+
+    [Fact]
+    public void Validate_AcceptsNoApiRateLimitSection()
+    {
+        // The section is optional (absent = opt-out). A null section must not trip validation.
+        var config = new AppConfig { Bgp = Bgp(), ApiRateLimit = null };
+        var act = () => config.Validate();
+        act();
+    }
+
+    [Theory]
+    [InlineData("10.0.0.0/8x")]      // typo in the prefix length
+    [InlineData("not-an-ip")]
+    [InlineData("10.0.0.0/33")]      // out of range for IPv4
+    [InlineData("")]
+    [InlineData("   ")]
+    public void Validate_RejectsMalformedTrustedProxiesEntry(string entry)
+    {
+        // A malformed entry used to be dropped at parse time with a warning, which collapses every
+        // client behind the proxy into ONE rate-limit bucket and ONE /api/me identity.
+        var config = new AppConfig { Bgp = Bgp(), TrustedProxies = ["127.0.0.0/8", entry] };
+
+        var ex = Assert.Throws<InvalidOperationException>(config.Validate);
+        Assert.Contains("TrustedProxies[1]", ex.Message);
+    }
+
+    [Fact]
+    public void Validate_AcceptsIpAndCidrTrustedProxies()
+    {
+        // Both documented forms must keep validating: a bare IP (no prefix) becomes a /32 or /128,
+        // which is what ParseTrustedProxies does at runtime.
+        var config = new AppConfig
+        {
+            Bgp = Bgp(),
+            TrustedProxies = ["10.0.0.0/8", "192.168.1.1", "fd00::/8", "2001:db8::1"]
+        };
+
+        var act = () => config.Validate();
+        act();
+    }
+
+    [Fact]
+    public void Validate_AcceptsNoTrustedProxies()
+    {
+        // Null and empty both mean "never trust forwarding headers" — the secure default.
+        foreach (var proxies in new List<string>?[] { null, [] })
+        {
+            var config = new AppConfig { Bgp = Bgp(), TrustedProxies = proxies };
+            var act = () => config.Validate();
+            act();
+        }
+    }
+
+    [Theory]
+    [InlineData("not a url")]
+    [InlineData("example.com")]        // no scheme
+    [InlineData("ftp://example.com")]  // wrong scheme
+    [InlineData("/relative")]
+    public void Validate_RejectsMalformedCorsOrigin(string entry)
+    {
+        // The allowlist is compared literally against the request Origin, so a typo'd string was
+        // accepted at startup and then never matched anything — a silent allowlist that allows none.
+        var config = new AppConfig { Bgp = Bgp(), CorsAllowedOrigins = [entry] };
+
+        var ex = Assert.Throws<InvalidOperationException>(config.Validate);
+        Assert.Contains("CorsAllowedOrigins[0]", ex.Message);
+    }
+
+    [Fact]
+    public void Validate_AcceptsHttpAndHttpsCorsOrigins()
+    {
+        var config = new AppConfig
+        {
+            Bgp = Bgp(),
+            CorsAllowedOrigins = ["https://operator.example.com", "http://localhost:3000"]
+        };
+
+        var act = () => config.Validate();
+        act();
+    }
+
+    [Fact]
+    public void Validate_AcceptsNoCorsOrigins()
+    {
+        foreach (var origins in new List<string>?[] { null, [] })
+        {
+            var config = new AppConfig { Bgp = Bgp(), CorsAllowedOrigins = origins };
+            var act = () => config.Validate();
+            act();
+        }
+    }
+
+    [Fact]
+    public void Validate_RejectsAutoRefreshBelowTheEnforcedInterval()
+    {
+        // The timer clamps IntervalSeconds to >= 60, so a validated-but-overridden value is a
+        // config the operator believes is applied and is not.
+        var config = new AppConfig { Bgp = Bgp(), AutoRefresh = new AutoRefreshConfig { Enabled = true, IntervalSeconds = 30 } };
+
+        var ex = Assert.Throws<InvalidOperationException>(config.Validate);
+        Assert.Contains("AutoRefresh.IntervalSeconds", ex.Message);
+        Assert.Contains(AppConfig.MinAutoRefreshIntervalSeconds.ToString(), ex.Message);
+    }
+
+    [Fact]
+    public void Validate_RejectsAutoRefreshJitterAboveTheEnforcedCeiling()
+    {
+        var config = new AppConfig { Bgp = Bgp(), AutoRefresh = new AutoRefreshConfig { Enabled = true, MaxJitterMs = 120_000 } };
+
+        var ex = Assert.Throws<InvalidOperationException>(config.Validate);
+        Assert.Contains("AutoRefresh.MaxJitterMs", ex.Message);
+    }
+
+    [Fact]
+    public void Validate_RejectsRipeStatTimeoutBelowTheEnforcedFloor()
+    {
+        // The Polly timeout is Math.Max(10, TimeoutSeconds) and the XML doc tells operators to
+        // LOWER it for small ASes to fail fast — which silently did nothing below 10.
+        var config = new AppConfig { Bgp = Bgp(), RipeStat = new RipeStatConfig { TimeoutSeconds = 5 } };
+
+        var ex = Assert.Throws<InvalidOperationException>(config.Validate);
+        Assert.Contains("RipeStat.TimeoutSeconds", ex.Message);
+    }
+
+    [Fact]
+    public void Validate_AcceptsDocumentedDefaults()
+    {
+        // Guard against an accidentally-too-tight range: the shipped defaults must all validate.
+        var config = new AppConfig
+        {
+            Bgp = Bgp(),
+            AutoRefresh = new AutoRefreshConfig
+            {
+                Enabled = true,
+                IntervalSeconds = 600,
+                NoEtagIntervalSeconds = 604800,
+                MaxJitterMs = 2000
+            },
+            RipeStat = new RipeStatConfig { TimeoutSeconds = 180 }
+        };
+
+        var act = () => config.Validate();
+        act();
+    }
 }
