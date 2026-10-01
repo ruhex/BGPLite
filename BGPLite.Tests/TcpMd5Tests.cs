@@ -1,6 +1,10 @@
 using System.Net;
 using System.Net.Sockets;
+using BGPLite.Configuration;
 using BGPLite.Contracts;
+using BGPLite.Routing;
+using BGPLite.Server;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace BGPLite.Tests;
 
@@ -9,6 +13,9 @@ namespace BGPLite.Tests;
 /// (CI): a listening socket accepts <c>TcpMd5.Apply</c> and <c>Clear</c> without error. The
 /// handshake test additionally proves the kernel-level effect on Linux loopback: a client WITH
 /// the key completes the handshake, a client WITHOUT it never does (the kernel drops its SYN).
+/// Platform pins: <c>IsSupported</c> is Linux-only and every non-Linux arm/clear throws —
+/// XNU never shipped <c>TCP_MD5SIG</c> (option 0x10 there is <c>TCP_KEEPALIVE</c>), so macOS
+/// must not claim support or mutate keepalive state while the API reports tcpMd5=true.
 /// </summary>
 public class TcpMd5Tests
 {
@@ -29,52 +36,23 @@ public class TcpMd5Tests
     /// The sockaddr carries the KERNEL's address family, not .NET's (Winsock-derived) enum
     /// value: Linux wants AF_INET6 = 10, but (byte)AddressFamily.InterNetworkV6 is 23 — the
     /// kernel's md5 parse path rejects that with EINVAL (sin6_family != AF_INET6). The v4 path
-    /// could not catch this: AF_INET = 2 everywhere. Platform-dependent for the v6 value
-    /// (Darwin = 28), so asserted per-OS; the Linux branch is what CI proves.
+    /// could not catch this: AF_INET = 2 everywhere. Linux-only now: with TCP-MD5 armed only
+    /// there, no other platform has an MD5 sockaddr layout to assert.
     /// </summary>
     [Fact]
     public void WriteSockaddr_V6Peer_CarriesKernelAddressFamily()
     {
-        // TCP-MD5 is only ever applied on Linux/macOS; other platforms have no defined layout.
-        if (!OperatingSystem.IsLinux() && !OperatingSystem.IsMacOS()) return;
+        if (!OperatingSystem.IsLinux()) return;
 
         Span<byte> buffer = stackalloc byte[128];
         TcpMd5.WriteSockaddr(new IPEndPoint(IPAddress.Parse("2001:db8::1"), 0), buffer);
 
-        var expectedFamily = OperatingSystem.IsLinux() ? 10 : 28;
-        Assert.Equal(expectedFamily, buffer[0]);
-        // Linux keeps byte 1 zero (family is 2 bytes little-endian); Darwin's byte 1 is the family.
-        Assert.Equal(OperatingSystem.IsLinux() ? 0 : 28, buffer[1]);
+        Assert.Equal(10, buffer[0]);   // AF_INET6 (kernel value — NOT 23)
+        Assert.Equal(0, buffer[1]);    // Linux keeps byte 1 zero (family is 2 bytes little-endian)
 
         TcpMd5.WriteSockaddr(new IPEndPoint(IPAddress.Loopback, 0), buffer);
-        // v4 layout per OS: Linux = family in byte 0; Darwin = sin_len first, family in byte 1.
-        if (OperatingSystem.IsLinux())
-        {
-            Assert.Equal(2, buffer[0]);
-            Assert.Equal(0, buffer[1]);
-        }
-        else
-        {
-            Assert.Equal(16, buffer[0]); // sin_len
-            Assert.Equal(2, buffer[1]);  // sin_family
-        }
-    }
-
-    [Fact]
-    public void WriteSockaddr_Darwin_CarriesSinLenFirst()
-    {
-        // BSD sockaddr_in/in6 start with a LENGTH byte; the family follows in byte 1. Asserted
-        // only on Darwin, where the layout applies (the Linux expectations live above).
-        if (!OperatingSystem.IsMacOS()) return;
-
-        var buffer = new byte[128];
-        TcpMd5.WriteSockaddr(new IPEndPoint(IPAddress.Loopback, 0), buffer);
-        Assert.Equal(16, buffer[0]); // sin_len
-        Assert.Equal(2, buffer[1]);  // sin_family
-
-        TcpMd5.WriteSockaddr(new IPEndPoint(IPAddress.Parse("2001:db8::1"), 0), buffer);
-        Assert.Equal(28, buffer[0]); // sin6_len
-        Assert.Equal(28, buffer[1]); // sin6_family
+        Assert.Equal(2, buffer[0]);    // AF_INET
+        Assert.Equal(0, buffer[1]);
     }
 
     [Fact]
@@ -133,5 +111,65 @@ public class TcpMd5Tests
 
         goodClient.Dispose();
         accepted.Dispose();
+    }
+
+    [Fact]
+    public void IsSupported_IsLinuxOnly_MacOsMustNotClaimSupport()
+    {
+        // XNU never shipped TCP_MD5SIG: setsockopt(IPPROTO_TCP, 0x10) on Darwin hits
+        // TCP_KEEPALIVE (netinet/tcp.h:223), not an MD5 signature — claiming macOS support
+        // armed nothing while the control plane reported tcpMd5=true. Pinned per-OS so the
+        // claim cannot silently return.
+        if (OperatingSystem.IsMacOS())
+            Assert.False(TcpMd5.IsSupported);
+        else if (OperatingSystem.IsLinux())
+            Assert.True(TcpMd5.IsSupported);
+        // Windows and others: no TCP-MD5 anywhere; excluded on both sides of the branch above.
+    }
+
+    [Fact]
+    public void ApplyAndClear_OnUnsupportedPlatform_ThrowInsteadOfMutatingSockets()
+    {
+        if (!OperatingSystem.IsMacOS()) return; // Linux arming is covered by the Linux_* tests
+
+        using var socket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
+        socket.Bind(new IPEndPoint(IPAddress.Loopback, 0));
+        socket.Listen(1);
+
+        // Pre-fix these calls "succeeded": a 209-byte buffer either failed setsockopt with
+        // EINVAL (swallowed by the caller) or, for a 1-2 byte key, silently overwrote the
+        // listener's TCP keepalive idle time — never an MD5 key.
+        Assert.Throws<PlatformNotSupportedException>(() => TcpMd5.Apply(socket, IPAddress.Loopback, Key));
+        Assert.Throws<PlatformNotSupportedException>(() => TcpMd5.Clear(socket, IPAddress.Loopback));
+    }
+
+    [Fact]
+    public void SetPeerMd5Key_FailsLoud_WhenPlatformCannotArmTheKey()
+    {
+        var server = new BgpServer(
+            new AppConfig { Bgp = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1" } },
+            new RouteTable(),
+            AllowAllFilter.Instance,
+            new BgpMetrics(),
+            new NoopSessionFactory(),
+            NullLogger<BgpServer>.Instance);
+
+        if (OperatingSystem.IsMacOS())
+        {
+            // Pre-fix: the key was stored and the listener never armed (ApplyMd5 swallowed the
+            // failure into a Warning) — the API kept answering tcpMd5=true.
+            Assert.Throws<PlatformNotSupportedException>(() => server.SetPeerMd5Key("192.0.2.10", "secret"));
+        }
+        else if (OperatingSystem.IsLinux())
+        {
+            // The supported platform keeps its contract: a valid password is accepted (the
+            // listener is not started here, so there is nothing to arm yet — no throw).
+            Assert.Null(Record.Exception(() => server.SetPeerMd5Key("192.0.2.10", "secret")));
+        }
+    }
+
+    private sealed class NoopSessionFactory : IBgpSessionFactory
+    {
+        public BgpSession Create(IBgpConnection connection, PeerConfig peerConfig) => null!;
     }
 }

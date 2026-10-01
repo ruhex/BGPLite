@@ -203,6 +203,9 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
     [Fact]
     public async Task Md5Password_CreateEnabled_SecretNeverEchoed_UpdateClears()
     {
+        // TCP-MD5 arming exists on Linux only — the macOS/unsupported-platform contract
+        // (400 on write, tcpMd5:false on read) is pinned by the platform-specific tests below.
+        if (!OperatingSystem.IsLinux()) return;
         var config = new AppConfig { Bgp = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1" } };
         _port = await StartAsync(config);
         _client = new HttpClient();
@@ -260,6 +263,8 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
         // through RearmPeerIpMd5KeyAsync/ResolveSharedIpKey. Create goes through the same resolver:
         // with "key-a" already keyed on the IP, creating a sibling with "key-b" must arm the
         // deterministic ordinal pick ("key-a"), not the new row's key.
+        // Linux-only: on platforms without TCP-MD5 the API rejects md5Password with 400.
+        if (!OperatingSystem.IsLinux()) return;
         var sessions = new RecordingSessions();
         _port = await StartAsync(
             new AppConfig { Bgp = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1" } },
@@ -276,6 +281,45 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
         var armed = sessions.Md5Keys.Last(k => k.Password is not null);
         Assert.Equal("203.0.113.11", armed.Ip);
         Assert.Equal("key-a", armed.Password);
+    }
+
+    [Fact]
+    public async Task Md5Password_RejectedWith400_WhenPlatformCannotArmIt()
+    {
+        // XNU has no TCP_MD5SIG (opt 0x10 is TCP_KEEPALIVE): accepting the password and
+        // answering tcpMd5:true reported a security feature that never existed on this host.
+        if (!OperatingSystem.IsMacOS()) return; // the Linux write path is covered above
+
+        _port = await StartAsync(new AppConfig { Bgp = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1" } });
+        _client = new HttpClient();
+
+        using var create = await _client.PostAsync($"http://127.0.0.1:{_port}/api/peers",
+            new StringContent("""{"ip":"198.51.100.9","asn":65012,"md5Password":"tcp-md5-s3cret"}""", Encoding.UTF8, "application/json"));
+
+        Assert.Equal(HttpStatusCode.BadRequest, create.StatusCode);
+        Assert.DoesNotContain("tcp-md5-s3cret", await create.Content.ReadAsStringAsync());
+    }
+
+    [Fact]
+    public async Task TcpMd5Flag_FalseOnUnsupportedPlatform_EvenWhenRowCarriesPassword()
+    {
+        // A legacy row written before the platform truth was enforced must not report
+        // tcpMd5=true — the flag means "this server actually enforces RFC 2385 for the peer".
+        if (!OperatingSystem.IsMacOS()) return;
+
+        var store = new PeerStore(new StaticOptionsFactory(new DbContextOptionsBuilder<BgpDbContext>().UseSqlite(_connection).Options));
+        var saved = await store.SavePeerConfigurationAsync(
+            "198.51.100.11", 65014, null, [], [], [], md5Password: "legacy-secret");
+
+        _port = await StartAsync(new AppConfig { Bgp = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1" } });
+        _client = new HttpClient();
+
+        using var detail = await _client.GetAsync($"http://127.0.0.1:{_port}/api/peers/{saved.Id}");
+        var json = await detail.Content.ReadAsStringAsync();
+
+        Assert.True(detail.IsSuccessStatusCode, $"detail: {(int)detail.StatusCode} {json}");
+        Assert.Contains(""""tcpMd5":false"""", json);
+        Assert.DoesNotContain("legacy-secret", json);
     }
 
     private static int FreeTcpPort()

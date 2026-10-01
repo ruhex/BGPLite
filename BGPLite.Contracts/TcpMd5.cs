@@ -5,32 +5,35 @@ using System.Text;
 namespace BGPLite.Contracts;
 
 /// <summary>
-/// TCP MD5 Signature Option (RFC 2385) — per-peer socket option plumbing. The kernel
-/// verifies the MD5 signature on every segment of the connection: with a key attached to the
-/// listening socket for a peer's address, unsigned segments are dropped before they ever reach
-/// the application, so a peer without the password cannot complete the handshake.
+/// TCP MD5 Signature Option (RFC 2385) — per-peer socket option plumbing for the one platform
+/// with kernel support. The kernel verifies the MD5 signature on every segment of the
+/// connection: with a key attached to the listening socket for a peer's address, unsigned
+/// segments are dropped before they ever reach the application, so a peer without the password
+/// cannot complete the handshake.
 /// <para>
 /// Linux: <c>TCP_MD5SIG</c> (opt 14) with <c>struct tcp_md5sig</c> (sockaddr_storage, keylen,
-/// 80-byte key). macOS/Darwin: <c>TCP_MD5SIG</c> (opt 0x10) with <c>struct tcpmd5sig</c>
-/// (keylen first, then the key, then sockaddr_storage). Both attach the key to the
-/// (remote address, port 0) pair = "any port from this peer". Windows has no TCP-MD5 support.
+/// 80-byte key), attached to the (remote address, port 0) pair = "any port from this peer".
+/// Windows has no TCP-MD5 support, and neither does macOS: XNU never shipped TCP_MD5SIG
+/// (zero matches across the macOS SDK headers), and option 0x10 — long mistaken for an MD5
+/// signature — is <c>TCP_KEEPALIVE</c> in <c>netinet/tcp.h</c>, so "arming" it would set the
+/// keepalive idle time instead of a key (or fail setsockopt with EINVAL for longer keys).
+/// Every non-Linux arm/clear attempt throws <see cref="PlatformNotSupportedException"/>.
 /// </para>
 /// <para>
 /// Accepted sockets inherit the listener's key on Linux. Re-applying to the accepted socket is
-/// harmless (idempotent) and covers platforms/setups where inheritance does not hold.
+/// harmless (idempotent) and covers setups where inheritance does not hold.
 /// </para>
 /// </summary>
 public static class TcpMd5
 {
     private const int IpprotoTcp = 6;
     private const int LinuxTcpMd5Sig = 14;
-    private const int DarwinTcpMd5Sig = 0x10;
     private const int MaxKeyBytes = 80;
     private const int SockaddrStorageSize = 128;
 
-    /// <summary>Whether this platform can enforce TCP-MD5 (Linux and macOS; not Windows).</summary>
-    public static bool IsSupported =>
-        OperatingSystem.IsLinux() || OperatingSystem.IsMacOS();
+    /// <summary>Whether this platform can enforce TCP-MD5 (Linux only — Windows lacks it and
+    /// XNU never shipped TCP_MD5SIG).</summary>
+    public static bool IsSupported => OperatingSystem.IsLinux();
 
     /// <summary>UTF-8 byte length limit of the shared key (Linux tcpm_key[80]).</summary>
     public const int PasswordMaxBytes = MaxKeyBytes;
@@ -52,10 +55,8 @@ public static class TcpMd5
 
         if (OperatingSystem.IsLinux())
             socket.SetRawSocketOption(IpprotoTcp, LinuxTcpMd5Sig, LinuxTcpMd5SigValue(peer, key));
-        else if (OperatingSystem.IsMacOS())
-            socket.SetRawSocketOption(IpprotoTcp, DarwinTcpMd5Sig, DarwinTcpMd5SigValue(peer, key));
         else
-            throw new PlatformNotSupportedException("TCP-MD5 (RFC 2385) is supported on Linux and macOS only.");
+            throw new PlatformNotSupportedException("TCP-MD5 (RFC 2385) is supported on Linux only.");
     }
 
     /// <summary>Removes the key for <paramref name="peer"/> from <paramref name="socket"/> (disables enforcement).</summary>
@@ -69,10 +70,8 @@ public static class TcpMd5
 
         if (OperatingSystem.IsLinux())
             socket.SetRawSocketOption(IpprotoTcp, LinuxTcpMd5Sig, LinuxTcpMd5SigValue(peer, ReadOnlySpan<byte>.Empty));
-        else if (OperatingSystem.IsMacOS())
-            socket.SetRawSocketOption(IpprotoTcp, DarwinTcpMd5Sig, DarwinTcpMd5SigValue(peer, ReadOnlySpan<byte>.Empty));
         else
-            throw new PlatformNotSupportedException("TCP-MD5 (RFC 2385) is supported on Linux and macOS only.");
+            throw new PlatformNotSupportedException("TCP-MD5 (RFC 2385) is supported on Linux only.");
     }
 
     /// <summary>Builds <c>struct tcp_md5sig</c>: sockaddr_storage(128) + pad1(2) + keylen(2) + pad2(4) + key(80).</summary>
@@ -88,51 +87,27 @@ public static class TcpMd5
         return buffer;
     }
 
-    /// <summary>Builds <c>struct tcpmd5sig</c>: keylen(1) + key(80) + sockaddr_storage(128).</summary>
-    private static byte[] DarwinTcpMd5SigValue(IPEndPoint peer, ReadOnlySpan<byte> key)
-    {
-        var buffer = new byte[1 + MaxKeyBytes + SockaddrStorageSize];
-        buffer[0] = (byte)key.Length;                                 // tcpmd5keylen
-        key.CopyTo(new Span<byte>(buffer, 1, key.Length));
-        WriteSockaddr(peer, buffer.AsSpan(1 + MaxKeyBytes));
-        return buffer;
-    }
-
-    /// <summary>Writes a sockaddr_storage-shaped sockaddr_in/inn6 for the peer, port 0 = "any port".
-    /// <para>
-    /// Two per-OS differences live here:
-    /// <list type="bullet">
-    /// <item><b>Address family constants are the KERNEL's</b>, not .NET's <see cref="AddressFamily"/>
-    /// values (which follow Winsock: InterNetworkV6 = 23). Linux wants AF_INET6 = 10, Darwin 28 —
-    /// writing 23 makes Linux's md5 parse path reject the entry with EINVAL
-    /// (<c>sin6_family != AF_INET6</c>).</item>
-    /// <item><b>Darwin sockaddr_in/in6 carry a length byte first</b> (<c>sin_len</c>/<c>sin6_len</c>),
-    /// with the family in byte 1; Linux has no length byte and keeps the family in bytes 0-1.
-    /// Darwin's own tcpmd5sig path reads that length field, so omitting it (or writing the family
-    /// into byte 0) breaks key lookup there.</item>
-    /// </list>
-    /// </para>
+    /// <summary>Writes a Linux <c>sockaddr_storage</c>-shaped sockaddr_in/inn6 for the peer,
+    /// port 0 = "any port". Address family constants are the KERNEL's, not .NET's
+    /// <see cref="AddressFamily"/> values (which follow Winsock: InterNetworkV6 = 23): Linux
+    /// wants AF_INET6 = 10 — writing 23 makes the md5 parse path reject the entry with EINVAL
+    /// (<c>sin6_family != AF_INET6</c>); AF_INET = 2 matches everywhere.
     /// </summary>
     internal static void WriteSockaddr(IPEndPoint peer, Span<byte> destination)
     {
         destination.Clear();
         var port = (ushort)peer.Port;
         var isV4 = peer.Address.AddressFamily == AddressFamily.InterNetwork;
-        var darwin = OperatingSystem.IsMacOS();
         if (isV4)
         {
-            var af = AfInet;
-            if (darwin) { destination[0] = 16; destination[1] = af; } // sin_len, sin_family
-            else { destination[0] = af; }                             // Linux: family, host order
+            destination[0] = AfInet;                                  // family, host order
             destination[2] = (byte)(port >> 8);                       // port, network byte order
             destination[3] = (byte)port;
             peer.Address.TryWriteBytes(destination.Slice(4, 4), out _);
         }
         else
         {
-            var af = AfInet6;
-            if (darwin) { destination[0] = 28; destination[1] = af; } // sin6_len, sin6_family
-            else { destination[0] = af; }
+            destination[0] = AfInet6;
             destination[2] = (byte)(port >> 8);
             destination[3] = (byte)port;
             peer.Address.TryWriteBytes(destination.Slice(8, 16), out _);
@@ -141,7 +116,7 @@ public static class TcpMd5
 
     private static byte AfInet => 2;
 
-    private static byte AfInet6 => OperatingSystem.IsMacOS() ? (byte)28 : (byte)10;
+    private static byte AfInet6 => 10;
 
     /// <summary>True when <paramref name="password"/> would be accepted as a TCP-MD5 key.</summary>
     public static bool IsValidPassword(string? password) =>
