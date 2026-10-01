@@ -157,8 +157,10 @@ public sealed class ManagementApi : IHostedService, IDisposable
     /// <paramref name="newConfig"/> and swapped atomically with <see cref="Interlocked.Exchange"/> so
     /// in-flight requests keep observing the previous state while subsequent requests pick up the new
     /// one. The OLD rate / concurrency limiters are disposed after the swap (they hold timers). All
-    /// other fields (Bgp, Peers, ApiPort, PrefixSources, RipeStat, communities) are intentionally NOT
+    /// other fields (Bgp, ApiPort, PrefixSources, RipeStat, communities) are intentionally NOT
     /// applied here — they are baked into established sessions / the listener and require a restart;
+    /// ("Peers" is absent deliberately: AppConfig.Validate now rejects a non-empty Peers list, so it
+    /// never reaches this method.)
     /// the caller logs those as "requires restart". This method never throws: the caller
     /// (<c>ConfigReloader</c>) validates first, and the rebuild steps here only reuse already-validated
     /// parsing helpers.

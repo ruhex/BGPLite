@@ -47,7 +47,6 @@ var config = ConfigLoader.Load(configPath);
 config.Validate();
 
 var routeTable = new RouteTable();
-var nextHop = BgpConstants.IPAddressToUint(config.Bgp.GetRouterIdAddress());
 
 // SQLite peer store
 var dbPath = Path.Combine(dataDir, "bgplite.db");
