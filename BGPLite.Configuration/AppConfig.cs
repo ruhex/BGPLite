@@ -252,9 +252,13 @@ public sealed class AppConfig
         // disable retries or (worse) schedule a zero-second timer storm. Fail loud.
         if (RipeStat is { } ripe)
         {
-            if (ripe.TimeoutSeconds < 0)
+            // The Polly per-attempt timeout is Math.Max(10, TimeoutSeconds) (Program.cs), and the
+            // XML doc advises lowering it "for small ASes to fail fast" — so a value below 10 was
+            // accepted here and silently raised. Validate the range that is actually used.
+            if (ripe.TimeoutSeconds < MinRipeStatTimeoutSeconds)
                 throw new InvalidOperationException(
-                    $"Invalid configuration: RipeStat.TimeoutSeconds must be >= 0 seconds (got {ripe.TimeoutSeconds}).");
+                    $"Invalid configuration: RipeStat.TimeoutSeconds must be at least " +
+                    $"{MinRipeStatTimeoutSeconds} seconds (got {ripe.TimeoutSeconds}).");
             if (ripe.RetryAttempts < 0)
                 throw new InvalidOperationException(
                     $"Invalid configuration: RipeStat.RetryAttempts must be >= 0 (got {ripe.RetryAttempts}).");
@@ -263,19 +267,72 @@ public sealed class AppConfig
                     $"Invalid configuration: RipeStat.RetryDelaySeconds must be >= 0 seconds (got {ripe.RetryDelaySeconds}).");
         }
 
+        // ApiRateLimit: the only section with NO validation until now. Its runtime clamps
+        // (Math.Max(1, …)) turned a typo into silently different behaviour — a negative
+        // PeriodSeconds became a 1-second period, i.e. 120 rps instead of 2 rps, which DISABLES
+        // the flood protection the section exists to configure.
+        if (ApiRateLimit is { } rateLimit)
+            rateLimit.Validate();
+
+        // TrustedProxies / CorsAllowedOrigins: both are List<string> and were only walked for null
+        // elements, so a malformed entry passed startup and was dropped at parse time with a
+        // warning. For TrustedProxies that silently collapses every client behind the proxy into
+        // ONE rate-limit bucket and ONE /api/me identity (the parser trusts X-Forwarded-For only
+        // from a listed proxy). Validate here so the operator gets the entry and its index.
+        for (var i = 0; i < (TrustedProxies ?? []).Count; i++)
+        {
+            var entry = TrustedProxies![i].Trim();
+            if (entry.Length == 0)
+                throw new InvalidOperationException(
+                    $"Invalid configuration: TrustedProxies[{i}] is empty — remove the entry or give it an IP or CIDR.");
+            if (!IPNetwork.TryParse(entry, out _) && !IPAddress.TryParse(entry, out _))
+                throw new InvalidOperationException(
+                    $"Invalid configuration: TrustedProxies[{i}] must be an IP address or a CIDR prefix (got '{entry}').");
+        }
+
+        for (var i = 0; i < (CorsAllowedOrigins ?? []).Count; i++)
+        {
+            var entry = CorsAllowedOrigins![i].Trim();
+            // Compared literally against the request Origin later, so it must be a real absolute
+            // origin — a typo'd string is accepted at startup and then never matches anything.
+            if (!Uri.TryCreate(entry, UriKind.Absolute, out var origin)
+                || (origin.Scheme != Uri.UriSchemeHttp && origin.Scheme != Uri.UriSchemeHttps))
+            {
+                throw new InvalidOperationException(
+                    $"Invalid configuration: CorsAllowedOrigins[{i}] must be an absolute http(s) origin such as " +
+                    $"'https://operator.example.com' (got '{entry}').");
+            }
+        }
+
         if (AutoRefresh is { } auto)
         {
-            if (auto.IntervalSeconds < 1)
+            // Bounds are the values the runtime actually honours, not merely "positive":
+            // PrefixAutoRefreshService clamps IntervalSeconds to >= 60 and MaxJitterMs to <= 60000,
+            // so a config accepted here but overridden there is a config the operator believes is
+            // applied and is not.
+            if (auto.IntervalSeconds < MinAutoRefreshIntervalSeconds)
                 throw new InvalidOperationException(
-                    $"Invalid configuration: AutoRefresh.IntervalSeconds must be a positive number of seconds (got {auto.IntervalSeconds}).");
-            if (auto.NoEtagIntervalSeconds < 1)
+                    $"Invalid configuration: AutoRefresh.IntervalSeconds must be at least " +
+                    $"{MinAutoRefreshIntervalSeconds} seconds (got {auto.IntervalSeconds}).");
+            if (auto.NoEtagIntervalSeconds < MinAutoRefreshIntervalSeconds)
                 throw new InvalidOperationException(
-                    $"Invalid configuration: AutoRefresh.NoEtagIntervalSeconds must be a positive number of seconds (got {auto.NoEtagIntervalSeconds}).");
-            if (auto.MaxJitterMs < 0)
+                    $"Invalid configuration: AutoRefresh.NoEtagIntervalSeconds must be at least " +
+                    $"{MinAutoRefreshIntervalSeconds} seconds (got {auto.NoEtagIntervalSeconds}).");
+            if (auto.MaxJitterMs is < 0 or > MaxAutoRefreshJitterMs)
                 throw new InvalidOperationException(
-                    $"Invalid configuration: AutoRefresh.MaxJitterMs must be >= 0 ms (got {auto.MaxJitterMs}).");
+                    $"Invalid configuration: AutoRefresh.MaxJitterMs must be between 0 and " +
+                    $"{MaxAutoRefreshJitterMs} ms (got {auto.MaxJitterMs}).");
         }
     }
+
+    /// <summary>Lower bound the auto-refresh timer enforces (PrefixAutoRefreshService).</summary>
+    public const int MinAutoRefreshIntervalSeconds = 60;
+
+    /// <summary>Upper jitter bound the auto-refresh timer enforces (PrefixAutoRefreshService).</summary>
+    public const int MaxAutoRefreshJitterMs = 60_000;
+
+    /// <summary>Lower bound the RIPEstat per-attempt timeout enforces (Program.cs Polly pipeline).</summary>
+    public const int MinRipeStatTimeoutSeconds = 10;
 
     /// <summary>
     /// Fail-loud variant of the community format check: the runtime layers (ConfigCommunityResolver,

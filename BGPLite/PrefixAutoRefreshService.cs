@@ -76,7 +76,9 @@ internal sealed class PrefixAutoRefreshService : IHostedService, IDisposable
             return Task.CompletedTask;
         }
 
-        var intervalSeconds = Math.Max(60, _config.IntervalSeconds);
+        // AppConfig.Validate rejects anything below AppConfig.MinAutoRefreshIntervalSeconds, so this
+        // clamp is defence-in-depth for a hand-built config (tests), not a normalisation path.
+        var intervalSeconds = Math.Max(AppConfig.MinAutoRefreshIntervalSeconds, _config.IntervalSeconds);
         var noEtagSeconds = _config.NoEtagIntervalSeconds > 0
             ? Math.Max(intervalSeconds, _config.NoEtagIntervalSeconds)
             : intervalSeconds;
@@ -150,12 +152,12 @@ internal sealed class PrefixAutoRefreshService : IHostedService, IDisposable
     {
         var changed = new HashSet<string>();
         var now = _timeProvider.GetUtcNow();
-        var etagInterval = TimeSpan.FromSeconds(Math.Max(60, _config.IntervalSeconds));
+        var etagInterval = TimeSpan.FromSeconds(Math.Max(AppConfig.MinAutoRefreshIntervalSeconds, _config.IntervalSeconds));
         var noEtagInterval = _config.NoEtagIntervalSeconds > 0
             ? TimeSpan.FromSeconds(Math.Max(_config.IntervalSeconds, _config.NoEtagIntervalSeconds))
             : etagInterval;
         var maxJitter = _config.MaxJitterMs > 0
-            ? TimeSpan.FromMilliseconds(Math.Min(_config.MaxJitterMs, 60_000))
+            ? TimeSpan.FromMilliseconds(Math.Min(_config.MaxJitterMs, AppConfig.MaxAutoRefreshJitterMs))
             : TimeSpan.Zero;
 
         var polledInThisCycle = 0;

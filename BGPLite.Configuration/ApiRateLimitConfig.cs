@@ -36,4 +36,35 @@ public sealed class ApiRateLimitConfig
     /// </summary>
     [YamlMember(Alias = "MaxConcurrentRequests")]
     public int MaxConcurrentRequests { get; init; } = 0;
+
+    /// <summary>
+    /// Validates the ranges this section is actually honoured in. Called from
+    /// <see cref="AppConfig.Validate"/> so a bad value fails at startup instead of being silently
+    /// clamped by the runtime.
+    /// <para>
+    /// The clamps in <c>ClientIpRateLimiter</c> / <c>ManagementApi</c> (<c>Math.Max(1, …)</c>)
+    /// are defence against a divide-by-zero, not a normalisation policy: they turned a typo into
+    /// silently different behaviour. The worst case is <see cref="PeriodSeconds"/> — a negative
+    /// value clamped to 1 s turns 120 tokens/60 s into 120 requests/SECOND, i.e. it disables the
+    /// flood protection it is meant to configure. A negative <see cref="MaxConcurrentRequests"/>
+    /// is worse still: the limiter is only constructed when the value is <c>&gt; 0</c>, so it is
+    /// not clamped at all but silently absent.
+    /// </para>
+    /// </summary>
+    public void Validate()
+    {
+        if (TokenLimit < 1)
+            throw new InvalidOperationException(
+                $"Invalid configuration: ApiRateLimit.TokenLimit must be at least 1 (got {TokenLimit}).");
+        if (TokensPerPeriod < 1)
+            throw new InvalidOperationException(
+                $"Invalid configuration: ApiRateLimit.TokensPerPeriod must be at least 1 (got {TokensPerPeriod}).");
+        if (PeriodSeconds < 1)
+            throw new InvalidOperationException(
+                $"Invalid configuration: ApiRateLimit.PeriodSeconds must be at least 1 (got {PeriodSeconds}).");
+        // 0 is the documented "no cap" value and must stay valid — only negatives are a mistake.
+        if (MaxConcurrentRequests < 0)
+            throw new InvalidOperationException(
+                $"Invalid configuration: ApiRateLimit.MaxConcurrentRequests must be 0 (no cap) or greater (got {MaxConcurrentRequests}).");
+    }
 }
