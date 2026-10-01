@@ -232,19 +232,34 @@ public static class UpdateCodec
     }
 
     /// <summary>
-    /// Validates RFC 6793 AGGREGATOR/AS4_AGGREGATOR consistency: AS_TRANS in AGGREGATOR requires
-    /// AS4_AGGREGATOR, and a lone AS4_AGGREGATOR without AGGREGATOR is malformed.
+    /// Reports RFC 6793 AGGREGATOR/AS4_AGGREGATOR pairing violations: AS_TRANS in AGGREGATOR
+    /// without AS4_AGGREGATOR, and a lone AS4_AGGREGATOR without AGGREGATOR.
+    /// <para>
+    /// Returns the violations instead of throwing, so the caller can take ATTRIBUTE DISCARD and
+    /// keep processing the UPDATE. RFC 4271 §6.3 prescribes exactly that for a recognized optional
+    /// attribute whose value fails a check: "the attribute MUST be discarded, and the Error
+    /// Subcode MUST be set to Optional Attribute Error" — subcode 9 is correct, treat-as-withdraw
+    /// is not. RFC 7606 §2 permits discard only for "an attribute that has no effect on route
+    /// selection or installation", which holds here: neither value is carried into
+    /// <see cref="RouteAttributes"/>, so dropping them changes nothing downstream.
+    /// </para>
+    /// <para>
+    /// A malformed attribute already discarded by the caller is not reported: the UPDATE did
+    /// carry it, and what remains satisfies everything this pairing exists to check.
+    /// </para>
     /// </summary>
-    public static void ValidateAggregatorReconstruction(uint? aggregatorAsn, uint? as4AggregatorAsn, bool aggregatorDiscarded = false, bool as4AggregatorDiscarded = false)
+    public static IReadOnlyList<string> FindAggregatorPairingViolations(
+        uint? aggregatorAsn, uint? as4AggregatorAsn, bool aggregatorDiscarded = false, bool as4AggregatorDiscarded = false)
     {
-        // A discarded-malformed attribute must not penalize the pairing rules —
-        // the UPDATE carried it; it was dropped per RFC 7606 §7.7 (AGGREGATOR) / RFC 6793 §6
-        // (AS4_AGGREGATOR), and what remains satisfies everything the check exists for.
+        var violations = new List<string>(2);
+
         if (aggregatorAsn == BgpConstants.AsPath.AsTrans && as4AggregatorAsn is null && !as4AggregatorDiscarded)
-            throw new BgpNotificationException(BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.OptionalAttributeError, "Missing AS4_AGGREGATOR for AGGREGATOR AS_TRANS");
+            violations.Add("Missing AS4_AGGREGATOR for AGGREGATOR AS_TRANS");
 
         if (!aggregatorAsn.HasValue && as4AggregatorAsn.HasValue && !aggregatorDiscarded)
-            throw new BgpNotificationException(BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.OptionalAttributeError, "Missing AGGREGATOR attribute for AS4_AGGREGATOR");
+            violations.Add("Missing AGGREGATOR attribute for AS4_AGGREGATOR");
+
+        return violations;
     }
 
     /// <summary>
@@ -353,7 +368,16 @@ public static class UpdateCodec
                         asPathSeen = true;
                         break;
                     case BgpConstants.Attribute.As4Path when !fourByteAsnSession:
-                        as4Path = AttributeHelper.ReadAs4Path(attr);
+                        // A malformed AS4_PATH takes ATTRIBUTE DISCARD, not treat-as-withdraw —
+                        // RFC 6793 §6 names "attribute discard" as the approach for this attribute
+                        // ("MUST discard the attribute and continue processing the UPDATE"). RFC
+                        // 7606 §7 does not list attribute 17, so the §2 carve-out does not reach
+                        // it; RFC 6793 governs. MergeAsPathWithAs4Path(asPath, []) then falls back
+                        // to AS_PATH, which is the same outcome the RFC prescribes.
+                        // The RFC prescribes discarding AS_CONFED_* path segments inside AS4_PATH
+                        // too, so those land here as a parse failure and are dropped whole.
+                        try { as4Path = AttributeHelper.ReadAs4Path(attr); }
+                        catch (BgpParseException ex) { discarded.Add((attr.TypeCode, ex.Message)); }
                         break;
                     case BgpConstants.Attribute.NextHop:
                         // Length is guaranteed to be exactly 4 by ValidateAttributeShape (RFC 7606
@@ -394,10 +418,30 @@ public static class UpdateCodec
             // path per RFC 7606 §7.3.
             if (nextHopSeen)
                 ValidateNextHopSemantics(nextHop, localRouterId);
-            asPath = MergeAsPathWithAs4Path(asPath, as4Path);
-            ValidateAggregatorReconstruction(aggregatorAsn, as4AggregatorAsn,
-                aggregatorDiscarded: discarded.Any(d => d.TypeCode == BgpConstants.Attribute.Aggregator),
-                as4AggregatorDiscarded: discarded.Any(d => d.TypeCode == BgpConstants.Attribute.As4Aggregator));
+
+            // RFC 6793 §4.2.3 gates the AS4_PATH reconstruction on the AGGREGATOR attribute: when
+            // both aggregator attributes are present and the AGGREGATOR AS is NOT AS_TRANS, the
+            // AS4_AGGREGATOR and AS4_PATH attributes SHALL be ignored and AS_PATH taken as the path
+            // information. The merge therefore needs the aggregator values, so they are read from
+            // `discarded`/`aggregatorAsn` here rather than passed in.
+            var aggregatorWasDiscarded = discarded.Any(d => d.TypeCode == BgpConstants.Attribute.Aggregator);
+            var as4AggregatorWasDiscarded = discarded.Any(d => d.TypeCode == BgpConstants.Attribute.As4Aggregator);
+            var useAs4Path = !(aggregatorAsn.HasValue && as4AggregatorAsn.HasValue
+                               && aggregatorAsn != BgpConstants.AsPath.AsTrans);
+            asPath = MergeAsPathWithAs4Path(asPath, useAs4Path ? as4Path : []);
+
+            // Pairing violations are ATTRIBUTE DISCARD, not treat-as-withdraw (see
+            // FindAggregatorPairingViolations): the values never reach RouteAttributes, so dropping
+            // them cannot change which routes install. Reported per attribute so the discard list
+            // names the one the peer actually sent.
+            foreach (var violation in FindAggregatorPairingViolations(
+                         aggregatorAsn, as4AggregatorAsn, aggregatorWasDiscarded, as4AggregatorWasDiscarded))
+            {
+                var typeCode = aggregatorAsn == BgpConstants.AsPath.AsTrans
+                    ? BgpConstants.Attribute.Aggregator
+                    : BgpConstants.Attribute.As4Aggregator;
+                discarded.Add((typeCode, $"{violation} (attribute discarded per RFC 4271 §6.3)"));
+            }
 
             return new RouteAttributes(asPath, nextHop, communities, largeCommunities,
                 discarded.Select(d => d.TypeCode).ToArray());
