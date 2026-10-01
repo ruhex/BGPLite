@@ -375,42 +375,54 @@ public class BgpSessionRfc6793Tests
         Assert.Equal(BgpConstants.SubError.InvalidOriginAttribute, ex.SubErrorCode);
     }
 
+    // RFC 6793 pairing violations are ATTRIBUTE DISCARD, not treat-as-withdraw: RFC 4271 §6.3
+    // says a recognized optional attribute that fails a check MUST be discarded (with Optional
+    // Attribute Error reported) while the UPDATE keeps being processed. The values never reach
+    // RouteAttributes, so discarding them cannot change which routes install.
+
     [Fact]
-    public void ValidateAggregatorReconstruction_AsTransWithAs4Aggregator_DoesNotThrow()
+    public void FindAggregatorPairingViolations_AsTransWithAs4Aggregator_ReportsNothing()
     {
-        UpdateCodec.ValidateAggregatorReconstruction(BgpConstants.AsPath.AsTrans, 200000u);
+        Assert.Empty(UpdateCodec.FindAggregatorPairingViolations(BgpConstants.AsPath.AsTrans, 200000u));
     }
 
     [Fact]
-    public void ValidateAggregatorReconstruction_NonAsTransAggregator_DoesNotThrow()
+    public void FindAggregatorPairingViolations_NonAsTransAggregator_ReportsNothing()
     {
-        UpdateCodec.ValidateAggregatorReconstruction(65001u, null);
+        Assert.Empty(UpdateCodec.FindAggregatorPairingViolations(65001u, null));
     }
 
     [Fact]
-    public void ValidateAggregatorReconstruction_NullAggregator_DoesNotThrow()
+    public void FindAggregatorPairingViolations_NeitherAggregator_ReportsNothing()
     {
-        UpdateCodec.ValidateAggregatorReconstruction(null, null);
+        Assert.Empty(UpdateCodec.FindAggregatorPairingViolations(null, null));
     }
 
     [Fact]
-    public void ValidateAggregatorReconstruction_NullAggregatorWithAs4Aggregator_Throws()
+    public void FindAggregatorPairingViolations_As4AggregatorWithoutAggregator_ReportsViolation()
     {
-        var ex = Assert.Throws<BgpNotificationException>(() =>
-            UpdateCodec.ValidateAggregatorReconstruction(null, 200000u));
+        var violations = UpdateCodec.FindAggregatorPairingViolations(null, 200000u);
 
-        Assert.Equal(BgpConstants.Error.UpdateMessageError, ex.ErrorCode);
-        Assert.Equal(BgpConstants.SubError.OptionalAttributeError, ex.SubErrorCode);
+        Assert.Contains(violations, v => v.Contains("Missing AGGREGATOR"));
     }
 
     [Fact]
-    public void ValidateAggregatorReconstruction_AsTransWithoutAs4Aggregator_Throws()
+    public void FindAggregatorPairingViolations_AsTransWithoutAs4Aggregator_ReportsViolation()
     {
-        var ex = Assert.Throws<BgpNotificationException>(() =>
-            UpdateCodec.ValidateAggregatorReconstruction(BgpConstants.AsPath.AsTrans, null));
+        var violations = UpdateCodec.FindAggregatorPairingViolations(BgpConstants.AsPath.AsTrans, null);
 
-        Assert.Equal(BgpConstants.Error.UpdateMessageError, ex.ErrorCode);
-        Assert.Equal(BgpConstants.SubError.OptionalAttributeError, ex.SubErrorCode);
+        Assert.Contains(violations, v => v.Contains("Missing AS4_AGGREGATOR"));
+    }
+
+    [Fact]
+    public void FindAggregatorPairingViolations_DiscardedCounterpart_ReportsNothing()
+    {
+        // The UPDATE did carry the attribute; it was dropped per RFC 7606 §7.7 / RFC 6793 §6, and
+        // what remains satisfies everything the pairing exists to check.
+        Assert.Empty(UpdateCodec.FindAggregatorPairingViolations(
+            null, 200000u, aggregatorDiscarded: true));
+        Assert.Empty(UpdateCodec.FindAggregatorPairingViolations(
+            BgpConstants.AsPath.AsTrans, null, as4AggregatorDiscarded: true));
     }
 
     // --- wire-format codec for AGGREGATOR (type 7) and AS4_AGGREGATOR (type 18) ---

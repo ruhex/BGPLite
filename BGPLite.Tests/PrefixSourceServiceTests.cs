@@ -191,11 +191,46 @@ public class PrefixSourceServiceTests
     }
 
     [Fact]
-    public async Task GetAsync_FailedProviderReturnsEmpty()
+    public async Task GetAsync_FailedProvider_Propagates()
     {
+        // A failed load PROPAGATES instead of collapsing to an empty list: the outbound route build
+        // counts one attempt per source and suppresses the RU fallback only when every attempt
+        // failed, so a swallowed failure made that gate unreachable and a peer whose only source
+        // was down was handed the whole RU table (D26). Same contract as LoadDefaultAsync.
         var svc = new PrefixSourceService(
             ConfigWith("ru"),
             new PrefixSourceProviderFactory([new ThrowingProvider()]),
+            NullLogger<PrefixSourceService>.Instance);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => svc.GetAsync("ru"));
+    }
+
+    [Fact]
+    public async Task GetAsync_FailedProvider_StaysPropagatingInsideNegativeBackoff()
+    {
+        // The first failure writes a NEGATIVE cache entry, and a repeat call inside the negative
+        // TTL returns that entry as a fresh EMPTY list WITHOUT throwing. That would make the
+        // failure indistinguishable from a legitimately empty source on every refresh cycle for
+        // the whole backoff window — not just the first.
+        var svc = new PrefixSourceService(
+            ConfigWith("ru"),
+            new PrefixSourceProviderFactory([new ThrowingProvider()]),
+            NullLogger<PrefixSourceService>.Instance);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => svc.GetAsync("ru"));
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => svc.GetAsync("ru"));
+        Assert.Contains("failure backoff", ex.Message);
+    }
+
+    [Fact]
+    public async Task GetAsync_LegitimatelyEmptySource_ReturnsEmptyWithoutThrowing()
+    {
+        // Control: a source that ANSWERED with zero prefixes is not a failure. The empty list must
+        // stay a valid result, otherwise the fix would turn a legitimately empty source into a
+        // fail-closed peer.
+        var svc = new PrefixSourceService(
+            ConfigWith("ru"),
+            new PrefixSourceProviderFactory([new CountingProvider([])]),
             NullLogger<PrefixSourceService>.Instance);
 
         Assert.Empty(await svc.GetAsync("ru"));

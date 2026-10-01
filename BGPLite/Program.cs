@@ -47,7 +47,6 @@ var config = ConfigLoader.Load(configPath);
 config.Validate();
 
 var routeTable = new RouteTable();
-var nextHop = BgpConstants.IPAddressToUint(config.Bgp.GetRouterIdAddress());
 
 // SQLite peer store
 var dbPath = Path.Combine(dataDir, "bgplite.db");
@@ -385,7 +384,8 @@ void ConfigureRipeStatResilience(ResiliencePipelineBuilder<HttpResponseMessage> 
         // Per-attempt timeout: the ris-prefixes endpoint can take minutes for large origin ASes
         // (e.g. AS3356). TimeoutSeconds maps here (default 180s) — HttpClient.Timeout is now
         // InfiniteTimeSpan so it does not fire across retries.
-        .AddTimeout(TimeSpan.FromSeconds(Math.Max(10, cfg.TimeoutSeconds)));
+        // AppConfig.Validate enforces this lower bound; the clamp guards a hand-built config.
+        .AddTimeout(TimeSpan.FromSeconds(Math.Max(AppConfig.MinRipeStatTimeoutSeconds, cfg.TimeoutSeconds)));
 
 await host.RunAsync();
 return;

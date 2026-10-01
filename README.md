@@ -110,10 +110,11 @@ Bgp:
   KeepAlive: 60
   HoldTime: 180
 
-Peers:
-  - Address: 10.0.0.2
-    RemoteAsn: 65001
-    Description: "example-peer"
+# Peers are NOT configured here. There is no peer allow-list: any peer that completes an
+# OPEN is registered automatically and gets the default prefix set (see D11 in
+# docs/DESIGN_DECISIONS.md). Manage peers over the API instead:
+#   curl -X POST http://127.0.0.1:5001/api/peers -H 'Content-Type: application/json' \
+#        -d '{"ip":"10.0.0.2","asn":65001,"lists":["ru"]}'
 
 RipeStat:                      # ASN → prefixes via stat.ripe.net (cached, retried)
   TimeoutSeconds: 180
@@ -149,22 +150,36 @@ DefaultPrefixSource: ru        # served to unconfigured/auto-registered peers
 
 Listens on `ApiPort` (default **5001**, loopback by default).
 
+Peers are addressed by the opaque `id` returned on create (a peer is keyed by IP **and**
+remote ASN, so two peers behind one source IP are distinct rows).
+
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `GET`  | `/api/my-ip` | Returns the caller's IP |
+| `GET`  | `/api/server` | Server identity and effective settings |
+| `GET`  | `/api/me` | The caller's IP plus the `peers` seen at it (all of them, or one with `?asn=`) |
 | `POST` | `/api/peers` | Register a peer |
-| `GET`  | `/api/peers` | List all peers |
+| `GET`  | `/api/peers/{id}` | Peer detail (own path only) |
+| `PUT`  | `/api/peers/{id}` | Partial update — an omitted field is left unchanged |
+| `DELETE` | `/api/peers/{id}` | Delete the peer and tear down its session |
+| `GET`  | `/api/peers/{id}/prefixes` | Prefixes advertised to the peer — plain text by default, `?format=json` for an array |
+| `GET`  | `/api/peers/{id}/sources` | List the peer's own URL prefix sources |
+| `POST` | `/api/peers/{id}/sources` | Add a URL prefix source |
+| `DELETE` | `/api/peers/{id}/sources/{sourceId}` | Remove a source |
+| `PATCH` | `/api/peers/{id}/sources/{sourceId}` | Pause / resume a source (body is `{"active": bool}`) |
 | `GET`  | `/api/asn-lists` | Available AS-lists with prefix counts |
-| `GET`  | `/api/as/{asn}/prefixes/count` | Prefix count for an ASN |
+| `GET`  | `/api/community-scheme` | The community naming scheme in use |
 | `GET`  | `/api/sessions` | Active BGP session count |
-| `GET`  | `/api/routes/count` | Route counts by community |
-| `GET` / `PUT` / `DELETE` | `/api/peer/{ip}/communities` | Get / set / clear community filter |
-| `PUT`  | `/api/peer/{ip}/description` | Set peer description |
+| `GET`  | `/api/routes` | Route counts by community |
+| `GET`  | `/api/as/{asn}/prefixes` | `?count=true` returns the prefix count; without it, a hint message |
+
+All mutating routes refuse `Sec-Fetch-Site: cross-site`. The routes that carry a body also
+require `Content-Type: application/json`, which forces the CORS preflight that keeps
+cross-origin callers out.
 
 ```bash
 curl -X POST http://localhost:5001/api/peers -H 'Content-Type: application/json' -d '{
   "ip": "10.0.0.2", "asn": 65001, "description": "customer-1",
-  "asnLists": ["cloudflare", "google"], "customPrefixes": ["203.0.113.0/24"]
+  "lists": ["cloudflare", "google"], "customPrefixes": ["203.0.113.0/24"]
 }'
 ```
 

@@ -1,4 +1,3 @@
-using System.Net;
 using YamlDotNet.Serialization;
 
 namespace BGPLite.Configuration;
@@ -21,8 +20,6 @@ public sealed class PeerConfig
     /// <see cref="Address"/> in <see cref="ToString"/> so session logs can tell apart the several
     /// peers that may share one source IP behind a NAT/VPN.</summary>
     public int Port { get; init; }
-
-    public IPAddress GetAddress() => IPAddress.Parse(Address);
 
     /// <summary><c>"address"</c>, or <c>"address:port"</c> when <see cref="Port"/> is set — used as
     /// the peer label in session logs. Callers that need the bare IP (peer-store lookups) use

@@ -22,6 +22,15 @@ services:
       - ./appsettings.yml:/app/appsettings.yml:ro
       - ./data:/app/data
     restart: unless-stopped
+    # Must outlast the host's own shutdown budget, which is SHARED and not additive:
+    # HostOptions.ShutdownTimeout (left at its default) gives the host 30 s to stop every hosted
+    # service, and each StopAsync is handed a token that fires when that budget runs out. So
+    # ManagementApi's 10 s in-flight drain consumes PART of those 30 s, and BgpServer's session
+    # teardown — which runs after it, because services stop in reverse registration order — gets
+    # whatever remains. Docker's default 10 s SIGTERM->SIGKILL deadline lands in the middle of that,
+    # so the process was killed mid-teardown. 45 s gives a clear margin over the host's budget so
+    # the host, not Docker, stays the authority on when to give up.
+    stop_grace_period: 45s
     logging:
       driver: json-file
       options:

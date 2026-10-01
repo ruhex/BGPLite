@@ -157,8 +157,10 @@ public sealed class ManagementApi : IHostedService, IDisposable
     /// <paramref name="newConfig"/> and swapped atomically with <see cref="Interlocked.Exchange"/> so
     /// in-flight requests keep observing the previous state while subsequent requests pick up the new
     /// one. The OLD rate / concurrency limiters are disposed after the swap (they hold timers). All
-    /// other fields (Bgp, Peers, ApiPort, PrefixSources, RipeStat, communities) are intentionally NOT
+    /// other fields (Bgp, ApiPort, PrefixSources, RipeStat, communities) are intentionally NOT
     /// applied here — they are baked into established sessions / the listener and require a restart;
+    /// ("Peers" is absent deliberately: AppConfig.Validate now rejects a non-empty Peers list, so it
+    /// never reaches this method.)
     /// the caller logs those as "requires restart". This method never throws: the caller
     /// (<c>ConfigReloader</c>) validates first, and the rebuild steps here only reuse already-validated
     /// parsing helpers.
@@ -487,6 +489,26 @@ public sealed class ManagementApi : IHostedService, IDisposable
             return;
         }
 
+        // Defence in depth for any unsafe method that reaches the API without a preflight:
+        // Sec-Fetch-Site is set by the browser itself and needs no allowlist, so a cross-site
+        // request is refused even if a client skips preflighting. Same-origin requests send
+        // "same-origin" and are unaffected; non-browser clients send nothing.
+        //
+        // This lives here, not in ReadBodyAsync, so it also covers the two DELETE routes, which
+        // read no body and so would otherwise bypass it. DELETE is a non-simple method and is
+        // normally preflighted, but the allowlist is operator-configured: an allowlisted origin
+        // must not become a licence to delete peers cross-origin. Keep the JSON media-type check
+        // in ReadBodyAsync — that one is about parsing, not about who may call.
+        if (ctx.Request.HttpMethod is "POST" or "PUT" or "PATCH" or "DELETE"
+            && string.Equals(ctx.Request.Headers["Sec-Fetch-Site"], "cross-site", StringComparison.OrdinalIgnoreCase))
+        {
+            // Sanitized like every other user-supplied value that reaches a log line here
+            // (cs/log-forging): the method is attacker-controlled even if the real verb set is small.
+            _logger.LogWarning("Refused cross-site {Method} request", SanitizeForLog(ctx.Request.HttpMethod));
+            await WriteResponse(ctx, ApiResponse.Error("Cross-site requests are not accepted.", 403));
+            return;
+        }
+
         var path = ctx.Request.Url!.AbsolutePath;
         var method = ctx.Request.HttpMethod;
         var segments = path.Split('/', StringSplitOptions.RemoveEmptyEntries);
@@ -670,12 +692,43 @@ public sealed class ManagementApi : IHostedService, IDisposable
     {
         var maxBytes = Volatile.Read(ref _maxRequestBodyBytes);
 
+        // CSRF: the body is deserialized regardless of its declared media type, so a
+        // CORS-"simple" request can mutate state cross-origin. Per the Fetch standard,
+        // Content-Type values application/x-www-form-urlencoded, multipart/form-data and
+        // text/plain are safelisted — a cross-origin POST carrying one of them is sent with NO
+        // preflight, and the absence of Access-Control-Allow-Origin on the response does not undo
+        // the state change that already happened. Requiring application/json makes every mutating
+        // request preflighted, which the browser blocks unless the origin is allowlisted — the same
+        // allowlist that already gates response reads, and AddCorsHeaders runs before the OPTIONS
+        // short-circuit, so a legitimately configured cross-origin UI keeps working.
+        // This is the POST gap specifically: PUT/PATCH/DELETE are non-simple methods and are
+        // already preflighted by the browser.
+        if (!IsJsonContentType(ctx.Request.ContentType))
+            return (null, ApiResponse.Error(
+                "Mutating requests require Content-Type: application/json.", 415));
+
         // Fast path: Content-Length present and already over the cap → reject without reading.
         if (ctx.Request.ContentLength64 > maxBytes)
             return (null, ApiResponse.Error(
                 $"Request body too large ({ctx.Request.ContentLength64} bytes, max {maxBytes}).", 413));
 
         return await ReadBoundedBodyAsync(ctx.Request.InputStream, maxBytes, BodyReadTimeout);
+    }
+
+    /// <summary>
+    /// True for a JSON media type: <c>application/json</c> or any <c>+json</c> structured suffix.
+    /// Parameters (<c>; charset=utf-8</c>) and casing are ignored.
+    /// </summary>
+    internal static bool IsJsonContentType(string? contentType)
+    {
+        if (string.IsNullOrWhiteSpace(contentType))
+            return false;
+
+        var semicolon = contentType.IndexOf(';');
+        var mediaType = (semicolon >= 0 ? contentType[..semicolon] : contentType).Trim();
+
+        return mediaType.Equals("application/json", StringComparison.OrdinalIgnoreCase)
+               || mediaType.EndsWith("+json", StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>Per-read deadline for request bodies — the time dimension of the size cap.</summary>
@@ -1443,10 +1496,6 @@ public sealed class ManagementApi : IHostedService, IDisposable
 
         return prefixes.Distinct().OrderBy(p => p).ToList();
     }
-
-    #endregion
-
-    #region /api/peers/{id}/communities
 
     #endregion
 

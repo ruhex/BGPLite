@@ -93,6 +93,13 @@ public sealed class RouteAssembler : IRouteAssembler
             // failure (every attempted fetch failed). A mixed build (one source failed, another
             // resolved — even to an empty list) is not total: the fallback keeps the documented
             // "configured peer resolved 0 prefixes" behavior.
+            //
+            // Reachability depends on the fetch members THROWING on failure, which is why
+            // PrefixService.GetPrefixesForAsns throws when every requested ASN failed and
+            // PrefixSourceService.GetAsync propagates a load failure instead of collapsing it to
+            // an empty list. When those resolved failures to [] this counter stayed 0, the gate
+            // below was unreachable, and a peer whose whole subscription was down was handed the
+            // full RU table (D26).
             var fetchAttempts = 0;
             var fetchFailures = 0;
 

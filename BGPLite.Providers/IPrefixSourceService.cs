@@ -13,7 +13,13 @@ public interface IPrefixSourceService
     /// <summary>All configured sources with their cached prefix lists.</summary>
     Task<IReadOnlyList<(PrefixSourceConfig Source, IReadOnlyList<IpPrefix> Prefixes)>> LoadAllAsync(CancellationToken ct = default);
 
-    /// <summary>One source by name (cache-through). Empty list if missing or failed.</summary>
+    /// <summary>One source by name (cache-through).</summary>
+    /// <remarks>
+    /// Empty list when the name matches no configured source. Load failures PROPAGATE — a failure
+    /// is not reported as an empty list, so the outbound build can tell "the operator emptied this
+    /// source" from "the fetch failed" and suppress the RU fallback on a total failure. Same
+    /// contract as <see cref="LoadDefaultAsync"/>; a stale copy is still served when one exists.
+    /// </remarks>
     Task<IReadOnlyList<IpPrefix>> GetAsync(string name, CancellationToken ct = default);
 
     /// <summary>

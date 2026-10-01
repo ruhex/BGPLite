@@ -474,4 +474,207 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
         Assert.True(response.IsSuccessStatusCode, $"expected a partial response, got {(int)response.StatusCode}");   // pre-fix: the connection was aborted (HttpRequestException)
         Assert.Contains("\"ru\"", body);   // the ASN-list half of the response survived
     }
+
+    // ---------------------------------------------------------------- CSRF (#530)
+
+    /// <summary>
+    /// A CORS-"simple" cross-origin POST must not mutate the control plane. text/plain and
+    /// application/x-www-form-urlencoded are CORS-safelisted, so the browser sends NO preflight and
+    /// the missing Access-Control-Allow-Origin on the response does not undo the state change.
+    /// The status code alone does not prove the fix — the peer must not exist afterwards.
+    /// </summary>
+    [Theory]
+    [InlineData("text/plain")]
+    [InlineData("text/plain; charset=utf-8")]
+    [InlineData("application/x-www-form-urlencoded")]
+    [InlineData("multipart/form-data")]
+    public async Task CreatePeer_CorsSimpleContentType_IsRejected_NoPeerCreated(string mediaType)
+    {
+        var store = new PeerStore(new StaticOptionsFactory(new DbContextOptionsBuilder<BgpDbContext>().UseSqlite(_connection).Options));
+        _port = await StartAsync(new AppConfig { Bgp = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1" } });
+        _client = new HttpClient();
+
+        var body = JsonSerializer.Serialize(new { ip = "203.0.113.66", asn = 65099, description = "csrf-pwned" });
+        using var content = new StringContent(body);
+        // Set explicitly so a media type carrying parameters (charset) can be exercised too.
+        content.Headers.ContentType = System.Net.Http.Headers.MediaTypeHeaderValue.Parse(mediaType);
+        using var request = new HttpRequestMessage(HttpMethod.Post, $"http://127.0.0.1:{_port}/api/peers")
+        {
+            Content = content
+        };
+        request.Headers.Add("Origin", "https://evil.example");
+
+        using var response = await _client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.UnsupportedMediaType, response.StatusCode);   // pre-fix: 200 Created
+        // The decisive assertion: the attacker-controlled peer must not be in the database.
+        Assert.Null(await store.GetPeerAsync("203.0.113.66", 65099));
+    }
+
+    [Fact]
+    public async Task AddSource_CorsSimpleContentType_IsRejected_NoSourceCreated()
+    {
+        // The SSRF-relevant route: it makes the server persist and then FETCH an operator-visible
+        // URL. A drive-by page must not be able to seed one.
+        var store = new PeerStore(new StaticOptionsFactory(new DbContextOptionsBuilder<BgpDbContext>().UseSqlite(_connection).Options));
+        var id = (await store.SavePeerConfigurationAsync("198.51.100.7", 65090, null, [], [], [])).Id;
+        _port = await StartAsync(new AppConfig { Bgp = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1" } });
+        _client = new HttpClient();
+
+        var body = JsonSerializer.Serialize(new { name = "pwn", url = "https://evil.example/list.txt" });
+        using var content = new StringContent(body, Encoding.UTF8, "text/plain");
+        using var request = new HttpRequestMessage(HttpMethod.Post, $"http://127.0.0.1:{_port}/api/peers/{id}/sources")
+        {
+            Content = content
+        };
+        request.Headers.Add("Origin", "https://evil.example");
+
+        using var response = await _client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.UnsupportedMediaType, response.StatusCode);
+        Assert.Empty(await store.GetCustomSourcesAsync(id));
+    }
+
+    [Fact]
+    public async Task CreatePeer_CrossSiteFetchMetadata_IsRejected_EvenWithJson()
+    {
+        // Defence in depth: Sec-Fetch-Site is set by the browser and needs no allowlist, so a
+        // cross-site request is refused even if a client skips preflighting.
+        _port = await StartAsync(new AppConfig { Bgp = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1" } });
+        _client = new HttpClient();
+
+        var body = JsonSerializer.Serialize(new { ip = "203.0.113.77", asn = 65098, description = "pwned" });
+        using var request = new HttpRequestMessage(HttpMethod.Post, $"http://127.0.0.1:{_port}/api/peers")
+        {
+            Content = new StringContent(body, Encoding.UTF8, "application/json")
+        };
+        request.Headers.Add("Sec-Fetch-Site", "cross-site");
+
+        using var response = await _client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task CreatePeer_SameOriginFetchMetadata_IsAccepted()
+    {
+        // The operator's own UI is same-origin; it must keep working.
+        var store = new PeerStore(new StaticOptionsFactory(new DbContextOptionsBuilder<BgpDbContext>().UseSqlite(_connection).Options));
+        _port = await StartAsync(new AppConfig { Bgp = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1" } });
+        _client = new HttpClient();
+
+        var body = JsonSerializer.Serialize(new { ip = "198.51.100.9", asn = 65097, description = "legit" });
+        using var request = new HttpRequestMessage(HttpMethod.Post, $"http://127.0.0.1:{_port}/api/peers")
+        {
+            Content = new StringContent(body, Encoding.UTF8, "application/json")
+        };
+        request.Headers.Add("Sec-Fetch-Site", "same-origin");
+
+        using var response = await _client.SendAsync(request);
+
+        Assert.True(response.IsSuccessStatusCode, $"got {(int)response.StatusCode}");
+        Assert.NotNull(await store.GetPeerAsync("198.51.100.9", 65097));
+    }
+
+    [Fact]
+    public async Task CreatePeer_JsonContentType_WithoutFetchMetadata_IsAccepted()
+    {
+        // CLI / curl / script clients send no Sec-Fetch-Site at all. They must not be broken.
+        _port = await StartAsync(new AppConfig { Bgp = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1" } });
+        _client = new HttpClient();
+
+        var body = JsonSerializer.Serialize(new { ip = "198.51.100.10", asn = 65096, description = "cli" });
+        using var response = await _client.PostAsync($"http://127.0.0.1:{_port}/api/peers",
+            new StringContent(body, Encoding.UTF8, "application/json"));
+
+        Assert.True(response.IsSuccessStatusCode, $"got {(int)response.StatusCode}");
+    }
+
+    [Fact]
+    public async Task Preflight_ForJson_IsAnswered_SoConfiguredCrossOriginUiKeepsWorking()
+    {
+        // The Content-Type requirement turns a cross-origin JSON POST into a preflighted request.
+        // A legitimately configured cross-origin UI must still get its CORS headers back, or the
+        // fix would break it. AddCorsHeaders runs before the OPTIONS short-circuit for this reason.
+        _port = await StartAsync(new AppConfig
+        {
+            Bgp = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1" },
+            CorsAllowedOrigins = ["http://example.com"],
+        });
+        _client = new HttpClient();
+
+        var preflight = new HttpRequestMessage(HttpMethod.Options, $"http://127.0.0.1:{_port}/api/peers");
+        preflight.Headers.Add("Origin", "http://example.com");
+        preflight.Headers.Add("Access-Control-Request-Method", "POST");
+        preflight.Headers.Add("Access-Control-Request-Headers", "content-type");
+        using var response = await _client.SendAsync(preflight);
+
+        Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
+        Assert.Equal("http://example.com", response.Headers.GetValues("Access-Control-Allow-Origin").First());
+        Assert.Contains("POST", response.Headers.GetValues("Access-Control-Allow-Methods").First());
+    }
+
+    [Fact]
+    public async Task DeletePeer_CrossSiteFetchMetadata_IsRejected_PeerSurvives()
+    {
+        // The Sec-Fetch-Site guard lives in HandleAsync, not in ReadBodyAsync: DELETE reads no
+        // body, so a guard inside ReadBodyAsync would silently skip this route. A browser
+        // preflights DELETE, but CorsAllowedOrigins is operator-configured — an allowlisted
+        // origin must not become a licence to delete peers cross-origin.
+        var store = new PeerStore(new StaticOptionsFactory(new DbContextOptionsBuilder<BgpDbContext>().UseSqlite(_connection).Options));
+        var id = (await store.SavePeerConfigurationAsync("198.51.100.20", 65090, null, [], [], [])).Id;
+        _port = await StartAsync(new AppConfig
+        {
+            Bgp = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1" },
+            CorsAllowedOrigins = ["http://example.com"],
+        });
+        _client = new HttpClient();
+
+        using var request = new HttpRequestMessage(HttpMethod.Delete, $"http://127.0.0.1:{_port}/api/peers/{id}")
+        {
+            Content = new StringContent(string.Empty)
+        };
+        request.Headers.Add("Origin", "http://example.com");
+        request.Headers.Add("Sec-Fetch-Site", "cross-site");
+
+        using var response = await _client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+        Assert.NotNull(await store.GetDbPeerByIdAsync(id));   // the peer must still be there
+    }
+
+    [Fact]
+    public async Task DeletePeer_SameOrigin_NoContentType_IsAccepted()
+    {
+        // DELETE carries no body, so it must not be forced to send a JSON media type — only the
+        // body-reading routes require one.
+        var store = new PeerStore(new StaticOptionsFactory(new DbContextOptionsBuilder<BgpDbContext>().UseSqlite(_connection).Options));
+        var id = (await store.SavePeerConfigurationAsync("198.51.100.21", 65090, null, [], [], [])).Id;
+        _port = await StartAsync(new AppConfig { Bgp = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1" } });
+        _client = new HttpClient();
+
+        using var request = new HttpRequestMessage(HttpMethod.Delete, $"http://127.0.0.1:{_port}/api/peers/{id}")
+        {
+            Content = new StringContent(string.Empty)
+        };
+        request.Headers.Add("Sec-Fetch-Site", "same-origin");
+
+        using var response = await _client.SendAsync(request);
+
+        Assert.True(response.IsSuccessStatusCode, $"got {(int)response.StatusCode}");
+        Assert.Null(await store.GetDbPeerByIdAsync(id));
+    }
+
+    [Theory]
+    [InlineData("application/json", true)]
+    [InlineData("application/json; charset=utf-8", true)]
+    [InlineData("APPLICATION/JSON", true)]
+    [InlineData("application/merge-patch+json", true)]
+    [InlineData("text/plain", false)]
+    [InlineData("application/x-www-form-urlencoded", false)]
+    [InlineData("multipart/form-data", false)]
+    [InlineData("", false)]
+    [InlineData(null, false)]
+    public void IsJsonContentType_AcceptsOnlyJsonMediaTypes(string? contentType, bool expected)
+        => Assert.Equal(expected, ManagementApi.IsJsonContentType(contentType));
 }

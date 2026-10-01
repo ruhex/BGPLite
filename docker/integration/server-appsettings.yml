@@ -35,5 +35,8 @@ PrefixSources:
     Community: "65001:110"
 
 RipeStat:
-  TimeoutSeconds: 5
+  # Floor is 10 s: the Polly per-attempt timeout is Math.Max(10, TimeoutSeconds) and Validate()
+  # now rejects anything below it rather than silently raising it. The stand used to ask for 5
+  # and quietly got 10, so this value is unchanged in practice.
+  TimeoutSeconds: 10
   RetryAttempts: 0
