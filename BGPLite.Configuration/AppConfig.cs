@@ -295,8 +295,13 @@ public sealed class AppConfig
             var entry = CorsAllowedOrigins![i].Trim();
             // Compared literally against the request Origin later, so it must be a real absolute
             // origin — a typo'd string is accepted at startup and then never matches anything.
+            // The authority round-trip additionally rejects a path, query, fragment or trailing
+            // slash ("https://op.example.com/", "https://op.example.com/ui"): Uri.TryCreate
+            // accepts those, but a browser Origin header never carries one, so they would
+            // validate and then match nothing — the exact silent no-match being prevented here.
             if (!Uri.TryCreate(entry, UriKind.Absolute, out var origin)
-                || (origin.Scheme != Uri.UriSchemeHttp && origin.Scheme != Uri.UriSchemeHttps))
+                || (origin.Scheme != Uri.UriSchemeHttp && origin.Scheme != Uri.UriSchemeHttps)
+                || !string.Equals(entry, origin.GetLeftPart(UriPartial.Authority), StringComparison.OrdinalIgnoreCase))
             {
                 throw new InvalidOperationException(
                     $"Invalid configuration: CorsAllowedOrigins[{i}] must be an absolute http(s) origin such as " +

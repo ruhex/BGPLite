@@ -614,6 +614,57 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
         Assert.Contains("POST", response.Headers.GetValues("Access-Control-Allow-Methods").First());
     }
 
+    [Fact]
+    public async Task DeletePeer_CrossSiteFetchMetadata_IsRejected_PeerSurvives()
+    {
+        // The Sec-Fetch-Site guard lives in HandleAsync, not in ReadBodyAsync: DELETE reads no
+        // body, so a guard inside ReadBodyAsync would silently skip this route. A browser
+        // preflights DELETE, but CorsAllowedOrigins is operator-configured — an allowlisted
+        // origin must not become a licence to delete peers cross-origin.
+        var store = new PeerStore(new StaticOptionsFactory(new DbContextOptionsBuilder<BgpDbContext>().UseSqlite(_connection).Options));
+        var id = (await store.SavePeerConfigurationAsync("198.51.100.20", 65090, null, [], [], [])).Id;
+        _port = await StartAsync(new AppConfig
+        {
+            Bgp = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1" },
+            CorsAllowedOrigins = ["http://example.com"],
+        });
+        _client = new HttpClient();
+
+        using var request = new HttpRequestMessage(HttpMethod.Delete, $"http://127.0.0.1:{_port}/api/peers/{id}")
+        {
+            Content = new StringContent(string.Empty)
+        };
+        request.Headers.Add("Origin", "http://example.com");
+        request.Headers.Add("Sec-Fetch-Site", "cross-site");
+
+        using var response = await _client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+        Assert.NotNull(await store.GetDbPeerByIdAsync(id));   // the peer must still be there
+    }
+
+    [Fact]
+    public async Task DeletePeer_SameOrigin_NoContentType_IsAccepted()
+    {
+        // DELETE carries no body, so it must not be forced to send a JSON media type — only the
+        // body-reading routes require one.
+        var store = new PeerStore(new StaticOptionsFactory(new DbContextOptionsBuilder<BgpDbContext>().UseSqlite(_connection).Options));
+        var id = (await store.SavePeerConfigurationAsync("198.51.100.21", 65090, null, [], [], [])).Id;
+        _port = await StartAsync(new AppConfig { Bgp = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1" } });
+        _client = new HttpClient();
+
+        using var request = new HttpRequestMessage(HttpMethod.Delete, $"http://127.0.0.1:{_port}/api/peers/{id}")
+        {
+            Content = new StringContent(string.Empty)
+        };
+        request.Headers.Add("Sec-Fetch-Site", "same-origin");
+
+        using var response = await _client.SendAsync(request);
+
+        Assert.True(response.IsSuccessStatusCode, $"got {(int)response.StatusCode}");
+        Assert.Null(await store.GetDbPeerByIdAsync(id));
+    }
+
     [Theory]
     [InlineData("application/json", true)]
     [InlineData("application/json; charset=utf-8", true)]

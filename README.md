@@ -156,29 +156,30 @@ remote ASN, so two peers behind one source IP are distinct rows).
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | `GET`  | `/api/server` | Server identity and effective settings |
-| `GET`  | `/api/me` | Returns the caller's IP |
+| `GET`  | `/api/me` | The caller's IP plus the `peers` seen at it (all of them, or one with `?asn=`) |
 | `POST` | `/api/peers` | Register a peer |
 | `GET`  | `/api/peers/{id}` | Peer detail (own path only) |
-| `PUT`  | `/api/peers/{id}` | Replace peer configuration |
+| `PUT`  | `/api/peers/{id}` | Partial update — an omitted field is left unchanged |
 | `DELETE` | `/api/peers/{id}` | Delete the peer and tear down its session |
-| `GET`  | `/api/peers/{id}/prefixes` | Prefixes advertised to the peer (`?format=txt` for a plain list) |
+| `GET`  | `/api/peers/{id}/prefixes` | Prefixes advertised to the peer — plain text by default, `?format=json` for an array |
 | `GET`  | `/api/peers/{id}/sources` | List the peer's own URL prefix sources |
 | `POST` | `/api/peers/{id}/sources` | Add a URL prefix source |
 | `DELETE` | `/api/peers/{id}/sources/{sourceId}` | Remove a source |
-| `PATCH` | `/api/peers/{id}/sources/{sourceId}` | Pause / resume / edit a source |
+| `PATCH` | `/api/peers/{id}/sources/{sourceId}` | Pause / resume a source (body is `{"active": bool}`) |
 | `GET`  | `/api/asn-lists` | Available AS-lists with prefix counts |
 | `GET`  | `/api/community-scheme` | The community naming scheme in use |
 | `GET`  | `/api/sessions` | Active BGP session count |
 | `GET`  | `/api/routes` | Route counts by community |
-| `GET`  | `/api/as/{asn}/prefixes` | Prefixes for an ASN (`?count=true` for a count only) |
+| `GET`  | `/api/as/{asn}/prefixes` | `?count=true` returns the prefix count; without it, a hint message |
 
-All mutating routes require `Content-Type: application/json` (which also forces the CORS
-preflight that keeps cross-origin callers out) and refuse `Sec-Fetch-Site: cross-site`.
+All mutating routes refuse `Sec-Fetch-Site: cross-site`. The routes that carry a body also
+require `Content-Type: application/json`, which forces the CORS preflight that keeps
+cross-origin callers out.
 
 ```bash
 curl -X POST http://localhost:5001/api/peers -H 'Content-Type: application/json' -d '{
   "ip": "10.0.0.2", "asn": 65001, "description": "customer-1",
-  "asnLists": ["cloudflare", "google"], "customPrefixes": ["203.0.113.0/24"]
+  "lists": ["cloudflare", "google"], "customPrefixes": ["203.0.113.0/24"]
 }'
 ```
 

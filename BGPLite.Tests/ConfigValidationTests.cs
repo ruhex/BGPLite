@@ -800,6 +800,9 @@ public class ConfigValidationTests
     [InlineData("example.com")]        // no scheme
     [InlineData("ftp://example.com")]  // wrong scheme
     [InlineData("/relative")]
+    [InlineData("https://operator.example.com/")]      // trailing slash: a browser Origin never has one
+    [InlineData("https://operator.example.com/ui")]    // path: same reason
+    [InlineData("https://operator.example.com/?a=b")]  // query: same reason
     public void Validate_RejectsMalformedCorsOrigin(string entry)
     {
         // The allowlist is compared literally against the request Origin, so a typo'd string was

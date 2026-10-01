@@ -489,6 +489,24 @@ public sealed class ManagementApi : IHostedService, IDisposable
             return;
         }
 
+        // Defence in depth for any unsafe method that reaches the API without a preflight:
+        // Sec-Fetch-Site is set by the browser itself and needs no allowlist, so a cross-site
+        // request is refused even if a client skips preflighting. Same-origin requests send
+        // "same-origin" and are unaffected; non-browser clients send nothing.
+        //
+        // This lives here, not in ReadBodyAsync, so it also covers the two DELETE routes, which
+        // read no body and so would otherwise bypass it. DELETE is a non-simple method and is
+        // normally preflighted, but the allowlist is operator-configured: an allowlisted origin
+        // must not become a licence to delete peers cross-origin. Keep the JSON media-type check
+        // in ReadBodyAsync — that one is about parsing, not about who may call.
+        if (ctx.Request.HttpMethod is "POST" or "PUT" or "PATCH" or "DELETE"
+            && string.Equals(ctx.Request.Headers["Sec-Fetch-Site"], "cross-site", StringComparison.OrdinalIgnoreCase))
+        {
+            _logger.LogWarning("Refused cross-site {Method} request", ctx.Request.HttpMethod);
+            await WriteResponse(ctx, ApiResponse.Error("Cross-site requests are not accepted.", 403));
+            return;
+        }
+
         var path = ctx.Request.Url!.AbsolutePath;
         var method = ctx.Request.HttpMethod;
         var segments = path.Split('/', StringSplitOptions.RemoveEmptyEntries);
@@ -686,13 +704,6 @@ public sealed class ManagementApi : IHostedService, IDisposable
         if (!IsJsonContentType(ctx.Request.ContentType))
             return (null, ApiResponse.Error(
                 "Mutating requests require Content-Type: application/json.", 415));
-
-        // Defence in depth for anything that reaches the API without a preflight: Sec-Fetch-Site is
-        // set by the browser itself and needs no allowlist, so a cross-site request is refused
-        // even if a future client skips preflighting. Same-origin requests send "same-origin" and
-        // are unaffected; non-browser clients send nothing.
-        if (string.Equals(ctx.Request.Headers["Sec-Fetch-Site"], "cross-site", StringComparison.OrdinalIgnoreCase))
-            return (null, ApiResponse.Error("Cross-site requests are not accepted.", 403));
 
         // Fast path: Content-Length present and already over the cap → reject without reading.
         if (ctx.Request.ContentLength64 > maxBytes)
