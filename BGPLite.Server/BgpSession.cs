@@ -1171,12 +1171,7 @@ public sealed class BgpSession : IDisposable
                 if (mpReachV4 is { } failedReach4)
                     foreach (var p in failedReach4.Prefixes)
                         WithdrawIfOwned(p, "Route withdrawn (treat-as-withdraw, MP_REACH IPv4)");
-                if (update.MpUnreachV6 is { Count: > 0 } failedUnreach)
-                    foreach (var p in failedUnreach)
-                        WithdrawIfOwned(p, "Route withdrawn (treat-as-withdraw, MP_UNREACH)");
-                if (update.MpUnreachV4 is { Count: > 0 } failedUnreach4)
-                    foreach (var p in failedUnreach4)
-                        WithdrawIfOwned(p, "Route withdrawn (treat-as-withdraw, MP_UNREACH IPv4)");
+                ApplyMpUnreachBeforeRethrow(update);
                 _metrics.SetRouteCount(_routeTable.Count);
                 throw;
             }
@@ -1279,6 +1274,9 @@ public sealed class BgpSession : IDisposable
                 {
                     foreach (var p in reach4.Prefixes)
                         WithdrawIfOwned(p, "Route withdrawn (treat-as-withdraw, MP_REACH IPv4)");
+                    // The rethrow skips the MP_UNREACH pass at the end of this method, so apply it
+                    // here — same rule as the attribute-parse failure above (RFC 7606 §2).
+                    ApplyMpUnreachBeforeRethrow(update);
                     _metrics.SetRouteCount(_routeTable.Count);
                     throw;
                 }
@@ -1366,6 +1364,35 @@ public sealed class BgpSession : IDisposable
         }
 
         _metrics.SetRouteCount(_routeTable.Count);
+    }
+
+    /// <summary>
+    /// Applies the MP_UNREACH_NLRI halves of an UPDATE whose announcement half is being
+    /// treat-as-withdrawn and rethrown.
+    /// <para>
+    /// RFC 7606 §2: a withdrawal riding the same frame must not be lost because a sibling
+    /// attribute was malformed. Every rethrow inside <see cref="HandleUpdateAsync"/> skips the
+    /// normal MP_UNREACH pass at the end of that method, so each one has to apply it here first —
+    /// this method exists so the two rethrow sites cannot drift apart again (the MP_REACH IPv4
+    /// next-hop path was missing it while the attribute-parse path had it, and an UPDATE carrying
+    /// both a bad MP_REACH(AFI=1) and a valid MP_UNREACH(AFI=2) left the withdrawn route
+    /// installed indefinitely).
+    /// </para>
+    /// <para>
+    /// Reads the raw message rather than the <c>_peerMpV6Disabled</c>-gated locals: the gate exists
+    /// because the accepted IPv6 routes were already withdrawn when the family was disabled, and
+    /// <see cref="WithdrawIfOwned"/> removes only what this session installed, so applying it
+    /// unconditionally here is a no-op in that state.
+    /// </para>
+    /// </summary>
+    private void ApplyMpUnreachBeforeRethrow(BgpUpdateMessage update)
+    {
+        if (update.MpUnreachV6 is { Count: > 0 } unreachV6)
+            foreach (var p in unreachV6)
+                WithdrawIfOwned(p, "Route withdrawn (treat-as-withdraw, MP_UNREACH)");
+        if (update.MpUnreachV4 is { Count: > 0 } unreachV4)
+            foreach (var p in unreachV4)
+                WithdrawIfOwned(p, "Route withdrawn (treat-as-withdraw, MP_UNREACH IPv4)");
     }
 
     /// <summary>
