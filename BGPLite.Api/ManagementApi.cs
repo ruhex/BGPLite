@@ -321,6 +321,17 @@ public sealed class ManagementApi : IHostedService, IDisposable
         _sessionManager.SetPeerMd5Key(ip, ResolveSharedIpKey(ip, remaining));
     }
 
+    /// <summary>
+    /// The <c>tcpMd5</c> indicator for one peer row: true only when a password is stored AND the
+    /// kernel actually armed it for that source IP. Derived from the session manager rather than
+    /// from the stored password alone — a row whose arming failed (unsupported platform, kernel
+    /// without CONFIG_TCP_MD5SIG, setsockopt EINVAL) is NOT protected, and reporting it as
+    /// protected told the operator the session was authenticated while any host reaching port 179
+    /// from that address could complete the handshake unsigned.
+    /// </summary>
+    private bool IsMd5Armed(string ip, string? storedPassword) =>
+        TcpMd5.IsSupported && !string.IsNullOrEmpty(storedPassword) && _sessionManager.IsPeerMd5Armed(ip);
+
     public async Task StopAsync(CancellationToken cancellationToken)
     {
         // Cancel in-flight handlers FIRST: they observe this token on provider calls, so a cold-cache
@@ -981,7 +992,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
             status = peer.Status,
             createdAt = peer.CreatedAt,
             maxPrefix = peer.MaxPrefix,
-            tcpMd5 = TcpMd5.IsSupported && !string.IsNullOrEmpty(peer.Md5Password),
+            tcpMd5 = IsMd5Armed(peer.Ip, peer.Md5Password),
             lastSessionAt = peer.LastSessionAt,
             lists = peer.Subscriptions,
             customPrefixes = peer.CustomPrefixes,
@@ -1095,7 +1106,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
             status = saved.Status,
             createdAt = saved.CreatedAt,
             maxPrefix = saved.MaxPrefix,
-            tcpMd5 = TcpMd5.IsSupported && !string.IsNullOrEmpty(data.Md5Password),
+            tcpMd5 = IsMd5Armed(normalizedIp, data.Md5Password),
             lists = asnLists,
             customPrefixes = data.CustomPrefixes ?? [],
             customAsns = data.CustomAsns ?? []
@@ -1118,7 +1129,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
             status = peer.Status,
             createdAt = peer.CreatedAt,
             maxPrefix = peer.MaxPrefix,
-            tcpMd5 = TcpMd5.IsSupported && !string.IsNullOrEmpty(peer.Md5Password),
+            tcpMd5 = IsMd5Armed(peer.Ip, peer.Md5Password),
             lastSessionAt = peer.LastSessionAt,
             lists = peer.Subscriptions,
             customPrefixes = peer.CustomPrefixes,
