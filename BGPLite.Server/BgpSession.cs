@@ -40,7 +40,7 @@ public sealed class BgpSession : IDisposable
     private volatile bool _peerMpV6Disabled;
     // The EFFECTIVE per-peer prefix ceiling — the peer row's MaxPrefix override when the peer is
     // configured, else the global Bgp.MaxPrefixesPerPeer. Resolved once per establish/refresh
-    // cycle in SendAllRoutesAsync (never per UPDATE); read on the UPDATE path via Volatile.Read.
+    // cycle in ResolveOutboundRoutesAsync (never per UPDATE); read on the UPDATE path via Volatile.Read.
     // 0 = unlimited, > 0 = the cap.
     private int _effectiveMaxPrefix;
     private readonly IPeerStore? _peerStore;
