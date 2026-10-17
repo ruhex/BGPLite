@@ -532,8 +532,9 @@ public static class UpdateCodec
         //
         // ONLY those two bits. The Partial bit is deliberately not checked: RFC 7606 narrows the
         // RFC 4271 §5 "MUST be 0 for well-known attributes" rule to Optional/Transitive, and
-        // rejecting on Partial would drop routes that conformant implementations accept. Bit 0x08
-        // (reserved) is already rejected at the wire level by BgpMessageReader.ParseAttribute.
+        // rejecting on Partial would drop routes that conformant implementations accept. The
+        // lower-order four bits (0x01/0x02/0x04/0x08) are not checked either: RFC 4271 §4.3 says
+        // they MUST be ignored when received.
         if (attr.Optional != expected.Optional || attr.Transitive != expected.Transitive)
             throw new BgpNotificationException(
                 BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.AttributeFlagsError,

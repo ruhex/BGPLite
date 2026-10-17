@@ -1105,9 +1105,10 @@ public class BgpMessageTests
     }
 
     /// <summary>
-    /// RFC 4271 §4.3: flag bit 0x08 is reserved and MUST be zero. The reader rejects it, so
-    /// emitting it would make the writer produce a frame its own reader refuses — the same
-    /// round-trip break fixed for the Extended Length bit.
+    /// RFC 4271 §4.3: the lower-order four bits "MUST be zero when sent and MUST be ignored when
+    /// received". This pins the SEND half — a caller handing the writer a reserved bit is a local
+    /// bug and is refused. The receive half is the reader's, and it ignores these bits rather
+    /// than rejecting them (see ParseAttribute_ReservedFlagBits_AreIgnoredNotRejected).
     /// </summary>
     [Theory]
     [InlineData((byte)0x08)]                      // reserved alone
