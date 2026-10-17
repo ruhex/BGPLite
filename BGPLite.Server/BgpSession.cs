@@ -208,8 +208,23 @@ public sealed class BgpSession : IDisposable
         try
         {
             _logger.LogInformation("Refreshing routes for {Peer}", _peer);
+            // Resolve the new route set BEFORE withdrawing the old one. WithdrawAllAsync drops the
+            // peer's entire advertisement and clears the mirror, so with the resolve running after
+            // it a recoverable store failure inside BuildOutboundRoutesAsync — LoadPeerRoutingViewAsync
+            // issues a write, and SQLite serializes writers, so an operator saving a peer through
+            // the management API while RefreshAllEstablishedAsync fans out across every session can
+            // push one past the busy timeout — unwound to the generic catch below and left the
+            // session Established advertising nothing. Nothing re-announces on its own: that is a
+            // blackhole for the peer until some later refresh happens to succeed, i.e. never with
+            // auto-refresh off, which is the default. Resolving first turns the same failure into a
+            // no-op cycle where the peer keeps the route set it already has, and shortens the
+            // withdraw→re-announce gap on the wire into the bargain. The wire order is unchanged:
+            // the withdrawals still precede the re-announcement.
+            var routes = await ResolveOutboundRoutesAsync();
+            if (routes is null)
+                return;   // session disposed mid-resolve — nothing withdrawn, nothing to send
             await WithdrawAllAsync();
-            await SendAllRoutesAsync();
+            await SendResolvedRoutesAsync(routes);
         }
         catch (OperationCanceledException) { /* shutdown / caller cancel — best effort */ }
         catch (IOException ex)
@@ -1439,15 +1454,34 @@ public sealed class BgpSession : IDisposable
     /// the per-peer route set, then delegates the aggregate + batch + send to <see cref="SendRoutesAsync"/>.
     /// The decision tree (RU defaults / subscriptions / custom prefixes / custom AS / user sources) and
     /// the outgoing filter live in the assembler; the send/withdraw mirror stays here.
+    /// <para>
+    /// Split into <see cref="ResolveOutboundRoutesAsync"/> + <see cref="SendResolvedRoutesAsync"/>
+    /// so <see cref="RefreshCycleAsync"/> can resolve before it withdraws; this path (the initial
+    /// dump, which has nothing advertised yet) just runs the two in order.
+    /// </para>
     /// </summary>
     private async Task SendAllRoutesAsync()
+    {
+        var routes = await ResolveOutboundRoutesAsync();
+        if (routes is null)
+            return;   // session disposed mid-resolve
+        await SendResolvedRoutesAsync(routes);
+    }
+
+    /// <summary>
+    /// Resolves this peer's outbound route set — the per-peer MaxPrefix refresh plus the
+    /// assembler's decision tree — WITHOUT touching the wire, so a caller can fail here without
+    /// having changed anything the peer can see. Returns <c>null</c> when the session is already
+    /// disposed.
+    /// </summary>
+    private async Task<List<Route>?> ResolveOutboundRoutesAsync()
     {
         // _cts.Token throws ObjectDisposedException once Dispose has run, so a send cycle that
         // outlives its session would otherwise log a normal unwind as a MaxPrefix/refresh ERROR.
         // RefreshRoutesAsync guards the same read; capture the token once and bail quietly.
         CancellationToken sessionToken;
         try { sessionToken = _cts.Token; }
-        catch (ObjectDisposedException) { return; }
+        catch (ObjectDisposedException) { return null; }
 
         // Refresh the effective per-peer prefix ceiling once per cycle: the peer row's MaxPrefix
         // override when configured (operator edits apply on the next refresh), else the global
@@ -1455,9 +1489,11 @@ public sealed class BgpSession : IDisposable
         // their row exists.
         if (_peerStore is not null)
         {
-            // Best-effort: on the refresh path WithdrawAllAsync has ALREADY run, so a throw here
-            // (e.g. transient "database is locked") would leave the peer withdrawn until some
-            // later successful refresh — keep the last known cap instead.
+            // Best-effort: a transient store failure here (e.g. "database is locked") concerns a
+            // value we already hold, so keep the last known cap rather than failing the whole
+            // cycle over it. Since the refresh path now resolves BEFORE it withdraws, a throw here
+            // would no longer strand the peer withdrawn — but a refresh that re-advertises under
+            // the previous cap is still strictly better than one that does not run at all.
             try
             {
                 var overrideCap = await _peerStore.GetPeerMaxPrefixAsync(_peerConfig.Address, _remoteAsn, sessionToken);
@@ -1472,11 +1508,17 @@ public sealed class BgpSession : IDisposable
             }
         }
 
-        var nextHop = BgpConstants.IPAddressToUint(_bgpConfig.GetRouterIdAddress());
-        var routes = await _routeAssembler.BuildOutboundRoutesAsync(
+        return await _routeAssembler.BuildOutboundRoutesAsync(
             _peerConfig.Address, _remoteAsn, GetFilterPeerConfig(), _peer, sessionToken);
-        if (routes.Count > 0)
-            await SendRoutesAsync(nextHop, routes);
+    }
+
+    /// <summary>Puts an already-resolved route set on the wire (aggregate + batch + send).</summary>
+    private async Task SendResolvedRoutesAsync(List<Route> routes)
+    {
+        if (routes.Count == 0)
+            return;
+        var nextHop = BgpConstants.IPAddressToUint(_bgpConfig.GetRouterIdAddress());
+        await SendRoutesAsync(nextHop, routes);
     }
 
     /// <summary>The local global IPv6 next hop (Bgp.NextHopIpv6) or null when unset/invalid —
