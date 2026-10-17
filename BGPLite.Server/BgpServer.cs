@@ -30,6 +30,8 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
     // (always-allow) when Bgp.MaxAcceptsPerIpPerMinute <= 0.
     private readonly IpAcceptThrottle _acceptThrottle;
     private int _acceptingConnections = 1;
+    // Dispose test-and-set latch (0 = live, 1 = disposed) — see Dispose.
+    private int _disposed;
     private Socket? _listener;
     // Per-peer TCP-MD5 (RFC 2385) shared keys, keyed by the peer's source IP (TCP keys the
     // connection by address, not by (IP, ASN) — peers sharing one source IP share the key).
@@ -598,8 +600,27 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
             _logger.LogWarning("Auto-refresh: {Failed}/{Total} sessions failed to refresh", failures, established.Count);
     }
 
+    /// <summary>
+    /// Idempotent — a second call is a no-op, not a double-release. The composition root registers
+    /// this one instance under three descriptors (the <c>BgpServer</c> singleton, the hosted
+    /// service, and <c>ISessionManager</c>), and <c>ServiceProviderEngineScope.CaptureDisposable</c>
+    /// does not de-duplicate, so MS.DI captures it once per descriptor and disposes it that many
+    /// times. <c>StopAsync</c> cancels but never disposes <c>_cts</c>, so the first call always
+    /// succeeded and the second threw <see cref="ObjectDisposedException"/> out of
+    /// <c>_cts.Cancel()</c>. The provider walks its disposables in reverse with no per-item
+    /// try/catch, so that throw skipped every disposable captured earlier — in this composition the
+    /// logging stack (the console logger provider, the <c>LoggerFactory</c>, the options monitors)
+    /// and the HTTP plumbing (the meter factory and the Polly resilience registries) — and escaped
+    /// <c>host.RunAsync()</c>. Every clean shutdown (SIGTERM in Docker, Ctrl-C locally) therefore
+    /// ended in a stack trace and a non-zero exit instead of a clean stop, losing the buffered
+    /// shutdown logs with it. Same guard, same reason as <c>ManagementApi.Dispose</c> (#141) and
+    /// <c>BgpSession.Dispose</c>.
+    /// </summary>
     public void Dispose()
     {
+        if (Interlocked.Exchange(ref _disposed, 1) == 1)
+            return;
+
         Volatile.Write(ref _acceptingConnections, 0);
         _listener?.Close();
         _cts.Cancel();
