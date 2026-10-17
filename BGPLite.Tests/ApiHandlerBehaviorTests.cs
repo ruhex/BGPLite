@@ -322,6 +322,35 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
         Assert.DoesNotContain("legacy-secret", json);
     }
 
+    [Fact]
+    public async Task TcpMd5Flag_FalseWhenTheKernelRefusedTheKey_EvenOnASupportedPlatform()
+    {
+        // The platform half is covered above; this is the residual (#546 item 3). On a SUPPORTED
+        // platform whose kernel still refuses the key — a Linux build without CONFIG_TCP_MD5SIG,
+        // or any setsockopt failure — the password is stored but nothing is armed. The indicator
+        // used to read `TcpMd5.IsSupported && password != ""`, so it answered true and told the
+        // operator the session was MD5-protected while any host reaching port 179 from that
+        // address could complete the handshake unsigned. It now follows actual arming state.
+        //
+        // Only distinguishing where TcpMd5.IsSupported is true (Linux, and CI runs ubuntu-latest);
+        // elsewhere the platform term already forces false and the assertion holds trivially.
+        var store = new PeerStore(new StaticOptionsFactory(new DbContextOptionsBuilder<BgpDbContext>().UseSqlite(_connection).Options));
+        var saved = await store.SavePeerConfigurationAsync(
+            "198.51.100.12", 65015, null, [], [], [], md5Password: "unarmed-secret");
+
+        _port = await StartAsync(
+            new AppConfig { Bgp = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1" } },
+            sessions: new UnarmedSessions());
+        _client = new HttpClient();
+
+        using var detail = await _client.GetAsync($"http://127.0.0.1:{_port}/api/peers/{saved.Id}");
+        var json = await detail.Content.ReadAsStringAsync();
+
+        Assert.True(detail.IsSuccessStatusCode, $"detail: {(int)detail.StatusCode} {json}");
+        Assert.Contains(""""tcpMd5":false"""", json);   // RED pre-fix on Linux: answered true
+        Assert.DoesNotContain("unarmed-secret", json);
+    }
+
     private static int FreeTcpPort()
     {
         using var socket = new System.Net.Sockets.Socket(System.Net.Sockets.AddressFamily.InterNetwork, System.Net.Sockets.SocketType.Stream, System.Net.Sockets.ProtocolType.Tcp);
@@ -357,13 +386,42 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
         public bool SourceSupportsConditional(string sourceName) => false;
     }
 
+    /// <summary>
+    /// Stands in for a server that arms every key it is given — the default for API tests, which
+    /// are about the HTTP surface, not about the kernel. Tracks what was armed so the
+    /// <c>tcpMd5</c> indicator (now derived from arming state) reads true after a successful set.
+    /// <see cref="UnarmedSessions"/> is the counterpart for the failed-arming case.
+    /// </summary>
     private sealed class InertSessions : ISessionManager
+    {
+        private readonly HashSet<string> _armed = [];
+        public Task RefreshPeerAsync(string peerIp, uint asn) => Task.CompletedTask;
+        public List<string> GetActivePeerIps() => [];
+        public Task TerminatePeerAsync(string peerIp, uint asn, CancellationToken ct = default) => Task.CompletedTask;
+        public Task TerminatePeerByIpAsync(string peerIp, CancellationToken ct = default) => Task.CompletedTask;
+        public void SetPeerMd5Key(string peerIp, string? password)
+        {
+            if (string.IsNullOrEmpty(password)) _armed.Remove(peerIp);
+            else _armed.Add(peerIp);
+        }
+        public bool IsPeerMd5Armed(string peerIp) => _armed.Contains(peerIp);
+        public int GetAdvertisedPrefixCount(string peerIp, uint asn) => 0;
+        public Task RefreshAllEstablishedAsync() => Task.CompletedTask;
+    }
+
+    /// <summary>
+    /// A server whose kernel refuses every key: the password is stored, nothing is armed. Models
+    /// a Linux host without CONFIG_TCP_MD5SIG (or any setsockopt failure), where the indicator
+    /// used to read true off the stored password alone.
+    /// </summary>
+    private sealed class UnarmedSessions : ISessionManager
     {
         public Task RefreshPeerAsync(string peerIp, uint asn) => Task.CompletedTask;
         public List<string> GetActivePeerIps() => [];
         public Task TerminatePeerAsync(string peerIp, uint asn, CancellationToken ct = default) => Task.CompletedTask;
         public Task TerminatePeerByIpAsync(string peerIp, CancellationToken ct = default) => Task.CompletedTask;
         public void SetPeerMd5Key(string peerIp, string? password) { }
+        public bool IsPeerMd5Armed(string peerIp) => false;
         public int GetAdvertisedPrefixCount(string peerIp, uint asn) => 0;
         public Task RefreshAllEstablishedAsync() => Task.CompletedTask;
     }
@@ -377,6 +435,8 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
         public Task TerminatePeerAsync(string peerIp, uint asn, CancellationToken ct = default) => Task.CompletedTask;
         public Task TerminatePeerByIpAsync(string peerIp, CancellationToken ct = default) => Task.CompletedTask;
         public void SetPeerMd5Key(string peerIp, string? password) => Md5Keys.Add((peerIp, password));
+        public bool IsPeerMd5Armed(string peerIp) =>
+            Md5Keys.Any(k => k.Item1 == peerIp && !string.IsNullOrEmpty(k.Item2));
         public int GetAdvertisedPrefixCount(string peerIp, uint asn) => 0;
         public Task RefreshAllEstablishedAsync() => Task.CompletedTask;
     }

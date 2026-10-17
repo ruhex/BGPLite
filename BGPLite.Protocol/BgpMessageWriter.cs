@@ -209,9 +209,10 @@ public static class BgpMessageWriter
 
     private static int WriteAttribute(PathAttribute attr, Span<byte> buffer)
     {
-        // RFC 4271 §4.3: flag bit 0x08 is reserved and MUST be zero on the wire. BgpMessageReader
-        // rejects it on the way in; emitting it would make the writer produce a frame its
-        // own reader refuses — the same round-trip break fixed for the Extended Length bit.
+        // RFC 4271 §4.3: the lower-order four bits "MUST be zero when sent and MUST be ignored
+        // when received". This is the send half, and it is ours to enforce — a caller handing us
+        // a reserved bit is a local bug, not peer input. (The receive half belongs to
+        // BgpMessageReader.ParseAttribute, which ignores these bits rather than rejecting them.)
         // Checked BEFORE anything is written so a rejected attribute leaves the caller's span
         // untouched, matching WriteOpen's RequireFitsByte guard.
         if ((attr.Flags & BgpConstants.Attribute.FlagReserved) != 0)
