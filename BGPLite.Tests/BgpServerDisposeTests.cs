@@ -17,8 +17,8 @@ namespace BGPLite.Tests;
 /// the second threw <see cref="ObjectDisposedException"/> out of <c>_cts.Cancel()</c> — which the
 /// provider's reverse walk does not catch, so every disposable captured EARLIER was skipped and the
 /// exception escaped <c>host.RunAsync()</c>. The symptom was a stack trace and a non-zero exit on
-/// every clean shutdown (SIGTERM in Docker, Ctrl-C locally), with buffered shutdown logs lost and
-/// SQLite never cleanly closed. The sibling class got the same guard in #141.
+/// every clean shutdown (SIGTERM in Docker, Ctrl-C locally), with the logging stack torn down
+/// abruptly and its buffered shutdown logs lost. The sibling class got the same guard in #141.
 /// </summary>
 public class BgpServerDisposeTests
 {

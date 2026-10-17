@@ -608,11 +608,13 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
     /// times. <c>StopAsync</c> cancels but never disposes <c>_cts</c>, so the first call always
     /// succeeded and the second threw <see cref="ObjectDisposedException"/> out of
     /// <c>_cts.Cancel()</c>. The provider walks its disposables in reverse with no per-item
-    /// try/catch, so that throw skipped every disposable captured earlier (the EF Core
-    /// <c>DbContext</c>/SQLite handle, the HTTP client factory, the logger providers) and escaped
-    /// <c>host.RunAsync()</c> — every clean shutdown (SIGTERM in Docker, Ctrl-C locally) ended in a
-    /// stack trace and a non-zero exit instead of a clean stop. Same guard, same reason as
-    /// <c>ManagementApi.Dispose</c> (#141) and <c>BgpSession.Dispose</c>.
+    /// try/catch, so that throw skipped every disposable captured earlier — in this composition the
+    /// logging stack (the console logger provider, the <c>LoggerFactory</c>, the options monitors)
+    /// and the HTTP plumbing (the meter factory and the Polly resilience registries) — and escaped
+    /// <c>host.RunAsync()</c>. Every clean shutdown (SIGTERM in Docker, Ctrl-C locally) therefore
+    /// ended in a stack trace and a non-zero exit instead of a clean stop, losing the buffered
+    /// shutdown logs with it. Same guard, same reason as <c>ManagementApi.Dispose</c> (#141) and
+    /// <c>BgpSession.Dispose</c>.
     /// </summary>
     public void Dispose()
     {
