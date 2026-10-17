@@ -44,11 +44,21 @@ public sealed class BgpSession : IDisposable
     // 0 = unlimited, > 0 = the cap.
     private int _effectiveMaxPrefix;
     private readonly IPeerStore? _peerStore;
-    // Set by BgpServer right after creation — "is this session still the registered one?" A false
-    // answer at teardown-time means a replacement took the slot and owns the (Ip, Asn) status now;
-    // this session must not overwrite it back to inactive.
-    private Func<BgpSession, bool>? _stillRegisteredProbe;
-    internal Func<BgpSession, bool>? StillRegisteredProbe { set => _stillRegisteredProbe = value; }
+    // Set by BgpServer right after creation — "do I still own my peer's (Ip, Asn) row?" A false
+    // answer at teardown-time means another session owns the row's status now; this session must
+    // not overwrite it back to inactive.
+    //
+    // This used to ask "am I still in the session registry?", which answers a different question.
+    // Since the registry key became (IP, remote port), a peer reconnecting from a new ephemeral
+    // port is ADDED rather than replacing, so the stale session stayed registered, answered true
+    // and flipped a live peer's row to inactive when its hold timer finally expired. Ownership of
+    // the row is what the write needs, and the row is keyed (Ip, Asn) — not by connection.
+    private Func<BgpSession, bool>? _ownsPeerRowProbe;
+    internal Func<BgpSession, bool>? OwnsPeerRowProbe { set => _ownsPeerRowProbe = value; }
+    // Set by BgpServer alongside the probe above; invoked once the OPEN is validated and the
+    // remote ASN is known, which is the first moment the (Ip, Asn) row can be identified.
+    private Action<BgpSession>? _claimPeerRow;
+    internal Action<BgpSession>? ClaimPeerRow { set => _claimPeerRow = value; }
     private readonly IPrefixAggregator _prefixAggregator;
     // The outbound route-assembly policy lives in the assembler, not the session: the session
     // delegates to BuildOutboundRoutesAsync and keeps only the send/withdraw mirror
@@ -699,8 +709,8 @@ public sealed class BgpSession : IDisposable
                 // behind a budget-bounded send) whose finally runs after the new session's first
                 // LoadPeerRoutingView already wrote active.
                 var silent = (TeardownReason)Interlocked.CompareExchange(ref _teardownReason, 0, 0) == TeardownReason.SilentClose;
-                var stillRegistered = _stillRegisteredProbe?.Invoke(this) ?? true;
-                if (!silent && stillRegistered)
+                var ownsPeerRow = _ownsPeerRowProbe?.Invoke(this) ?? true;
+                if (!silent && ownsPeerRow)
                 {
                     if (_peerStore is not null)
                         try { await _peerStore.UpdateSessionStatusAsync(_peerConfig.Address, _remoteAsn, false); }
@@ -713,7 +723,7 @@ public sealed class BgpSession : IDisposable
                     // race-free in the other direction — the own-runner's registry removal happens
                     // only AFTER RunAsync returns, so during this finally a false probe can only
                     // mean replacement. Genuine teardowns (still registered) never repair.
-                    if (_stillRegisteredProbe?.Invoke(this) == false)
+                    if (_ownsPeerRowProbe?.Invoke(this) == false)
                     {
                         _logger.LogInformation("Replacement detected after status write for {Peer} — restoring active", _peer);
                         if (_peerStore is not null)
@@ -742,7 +752,7 @@ public sealed class BgpSession : IDisposable
     private volatile bool _refreshPending;
     // Test seam used by RefreshDebounceTests: parks the runner between the final
     // _refreshPending read and the _refreshRunning release — the debounce exit window.
-    // Null in production; the property mirrors StillRegisteredProbe's setter-only shape.
+    // Null in production; the property mirrors OwnsPeerRowProbe's setter-only shape.
     private Action? _refreshExitWindowProbe;
     internal Action? RefreshExitWindowProbe { get => _refreshExitWindowProbe; set => _refreshExitWindowProbe = value; }
 
@@ -2108,6 +2118,11 @@ public sealed class BgpSession : IDisposable
         var negotiation = OpenNegotiator.Validate(open, _peerConfig.RemoteAsn, localRouterId, _bgpConfig.HoldTime);
 
         _remoteAsn = negotiation.RemoteAsn;
+        // First moment the peer row is identifiable: claim it before anything writes Status=active
+        // to it below. The claim decides which session is allowed to write Status=inactive when it
+        // tears down — a peer reconnecting on a new source port takes the row from its own stale
+        // session, so the stale one's teardown cannot report a live peer as down.
+        _claimPeerRow?.Invoke(this);
         _remoteFourByteAsn = negotiation.RemoteFourByteAsn;
         _localFourByteAsn = negotiation.LocalFourByteAsn;
         _remoteRouteRefresh = negotiation.RemoteRouteRefresh;
