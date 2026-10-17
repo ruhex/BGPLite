@@ -23,6 +23,11 @@ namespace BGPLite.Protocol;
 /// <item><b>Family</b>: the <see cref="TryParse(string?, out IpPrefix, bool)"/> overload accepts
 /// both families; the <see cref="TryParse(string?, out uint, out byte, bool)"/>
 /// overload stays IPv4-only — the management API's custom-prefix path is still IPv4-scoped.</item>
+/// <item><b>IPv4 literals must be canonical dotted quads</b> — see
+/// <see cref="IsCanonicalIpv4"/>. <see cref="IPAddress.TryParse"/> still accepts the inet_aton
+/// forms and REWRITES them into a different network, so a lenient parse here originates
+/// somebody else's address space rather than rejecting the line. IPv6 literal parsing is
+/// already strict and is left to the framework.</item>
 /// <item><b>Garbage is rejected, never thrown.</b> Returns <c>false</c> on any malformed input so
 /// callers can surface a clean 400 / skip the line, rather than propagating a <c>FormatException</c>.</item>
 /// </list>
@@ -52,7 +57,8 @@ public static class PrefixCidr
         if (slash <= 0 || slash == cidr.Length - 1)
             return false;
 
-        if (!IPAddress.TryParse(cidr[..slash], out var addr))
+        var address = cidr.AsSpan()[..slash];
+        if (!IPAddress.TryParse(address, out var addr))
             return false;
 
         // IPv4-mapped forms (::ffff:a.b.c.d) are NOT accepted as IPv6 prefixes: they name the
@@ -61,6 +67,11 @@ public static class PrefixCidr
         var isIpv4 = addr.AddressFamily == AddressFamily.InterNetwork;
         var isIpv6 = addr.AddressFamily == AddressFamily.InterNetworkV6 && !addr.IsIPv4MappedToIPv6;
         if (!isIpv4 && !isIpv6)
+            return false;
+
+        // IPAddress.TryParse ACCEPTED the literal, so a non-canonical IPv4 form has already been
+        // rewritten into a different network by this point — gate it out instead of originating it.
+        if (isIpv4 && !IsCanonicalIpv4(address))
             return false;
 
         var maxLength = isIpv4 ? 32 : 128;
@@ -100,8 +111,14 @@ public static class PrefixCidr
         if (slash <= 0 || slash == cidr.Length - 1)
             return false;
 
-        if (!IPAddress.TryParse(cidr[..slash], out var addr) || addr.AddressFamily != AddressFamily.InterNetwork)
+        var address = cidr.AsSpan()[..slash];
+        if (!IPAddress.TryParse(address, out var addr) || addr.AddressFamily != AddressFamily.InterNetwork)
             return false; // IPv4 only
+
+        // Same gate as the family-aware overload: a non-canonical literal names a different
+        // network than the operator typed, so it must be rejected, not silently rewritten.
+        if (!IsCanonicalIpv4(address))
+            return false;
 
         if (!byte.TryParse(cidr[(slash + 1)..], out var len))
             return false;
@@ -118,5 +135,46 @@ public static class PrefixCidr
         prefix = masked;
         length = len;
         return true;
+    }
+
+    /// <summary>
+    /// True only for a canonical dotted quad: exactly four decimal octets, each 0..255, with no
+    /// leading zeros and no sign/whitespace/radix prefix.
+    /// <para>
+    /// <see cref="IPAddress.TryParse"/> still honours the inet_aton grammar, and the problem is
+    /// that it does not reject those forms — it REWRITES them: <c>010.0.0.0</c> parses as octal to
+    /// <c>8.0.0.0</c>, <c>0xC0A80000</c> to <c>192.168.0.0</c>, and the short forms <c>172.16</c>
+    /// and <c>192.168.1</c> to <c>172.0.0.16</c> and <c>192.168.0.1</c>. A zero-padded or
+    /// shortened line in <c>nets.txt</c>, in a peer's URL source, or in a <c>POST /api/peers</c>
+    /// custom prefix would therefore make the route server originate a DIFFERENT network than the
+    /// operator configured — <c>010.0.0.0/8</c> as 8.0.0.0/8, somebody else's address space — with
+    /// no rejection and no log line on the file/URL and RIPEstat paths, because to the parser the
+    /// line is not malformed, merely transformed. Zero-padded and short forms are shapes real
+    /// tooling emits, so the gate lives here, at the one canonical parser, rather than at each of
+    /// the four input paths.
+    /// </para>
+    /// </summary>
+    private static bool IsCanonicalIpv4(ReadOnlySpan<char> text)
+    {
+        var octets = 0;
+        while (true)
+        {
+            var dot = text.IndexOf('.');
+            var part = dot < 0 ? text : text[..dot];
+            if (part.Length is 0 or > 3)
+                return false;
+            if (part.Length > 1 && part[0] == '0')
+                return false;                       // leading zero — octal under inet_aton
+            foreach (var c in part)
+                if (c is < '0' or > '9')
+                    return false;                   // rejects "0x7f", "+1", whitespace
+            if (!byte.TryParse(part, out _))
+                return false;                       // 0..255 (all-digit by now, so range only)
+            if (++octets > 4)
+                return false;
+            if (dot < 0)
+                return octets == 4;
+            text = text[(dot + 1)..];
+        }
     }
 }

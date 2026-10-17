@@ -183,6 +183,78 @@ public class PrefixCidrTests
         Assert.Equal(default, prefix);
     }
 
+    // ---- non-canonical IPv4 literals (#545 item 1) ----
+
+    /// <summary>
+    /// <see cref="System.Net.IPAddress.TryParse"/> honours the inet_aton grammar and does not
+    /// reject those forms — it rewrites them into a DIFFERENT network. Left lenient here,
+    /// <c>010.0.0.0/8</c> was accepted as 8.0.0.0/8 (a leading zero turns the octet octal), so a
+    /// zero-padded line in <c>nets.txt</c>, in a peer's URL source, or in an API custom prefix made
+    /// the route server originate somebody else's address space to every subscribed peer — with no
+    /// rejection and no log line on the file/URL and RIPEstat paths, because the line is not
+    /// malformed to the parser, merely transformed. Each input below is the operator's intent
+    /// mis-parsed, not garbage, which is exactly why it has to be rejected rather than normalized.
+    /// </summary>
+    [Theory]
+    [InlineData("010.0.0.0/8")]        // octal octet → 8.0.0.0/8 (a Level 3 block)
+    [InlineData("192.168.000.001/24")] // zero-padded throughout
+    [InlineData("0x7f.0.0.1/32")]      // hex octet → 127.0.0.1
+    [InlineData("0xC0A80000/24")]      // single hex word → 192.168.0.0
+    [InlineData("172.16/12")]          // two-part short form → 172.0.0.16
+    [InlineData("192.168.1/24")]       // three-part short form → 192.168.0.1
+    [InlineData("1.2/32")]             // two-part short form → 1.0.0.2
+    [InlineData("2130706433/32")]      // bare 32-bit integer → 127.0.0.1
+    [InlineData("1.2.3.4.5/24")]       // five octets
+    [InlineData("1.2.3./24")]          // trailing dot
+    [InlineData(".1.2.3/24")]          // leading dot
+    [InlineData("1..2.3/24")]          // empty octet
+    [InlineData("1.2.3.+4/24")]        // signed octet
+    [InlineData("1.2.3.0400/24")]      // over-long octet
+    public void TryParse_Rejects_NonCanonical_Ipv4_Literals(string cidr)
+    {
+        // Family-aware overload (file sources, RIPEstat, URL sources).
+        Assert.False(PrefixCidr.TryParse(cidr, out var ipPrefix));
+        Assert.Equal(default, ipPrefix);
+
+        // IPv4-only overload (management API custom prefixes, RouteAssembler's DB re-parse).
+        Assert.False(PrefixCidr.TryParse(cidr, out var packed, out var length));
+        Assert.Equal(0u, packed);
+        Assert.Equal((byte)0, length);
+    }
+
+    /// <summary>
+    /// The canonical forms the gate must keep accepting — including the boundary octets a strict
+    /// dotted-quad check is easiest to get wrong on (a bare <c>0</c> octet is canonical; <c>00</c>
+    /// is not, and 255 must not be read as out of range).
+    /// </summary>
+    [Theory]
+    [InlineData("0.0.0.0/8", 0x00000000u)]
+    [InlineData("10.0.0.0/8", 0x0A000000u)]
+    [InlineData("255.255.255.255/32", 0xFFFFFFFFu)]
+    [InlineData("100.64.0.0/10", 0x64400000u)]
+    [InlineData("203.0.113.0/24", 0xCB007100u)]
+    public void TryParse_Still_Accepts_Canonical_Ipv4(string cidr, uint expected)
+    {
+        Assert.True(PrefixCidr.TryParse(cidr, out var packed, out _));
+        Assert.Equal(expected, packed);
+
+        Assert.True(PrefixCidr.TryParse(cidr, out var ipPrefix));
+        Assert.True(ipPrefix.IsIpv4);
+        Assert.Equal(expected, (uint)ipPrefix.Address);
+    }
+
+    /// <summary>IPv6 literal parsing is already strict, so the IPv4 gate must not touch it —
+    /// including the compressed and mixed-case forms a dotted-quad check could trip over.</summary>
+    [Theory]
+    [InlineData("2001:DB8::/32")]
+    [InlineData("2001:db8:0:0:0:0:0:1/128")]
+    [InlineData("fc00::/7")]
+    public void TryParse_Ipv6_Unaffected_By_The_Ipv4_Gate(string cidr)
+    {
+        Assert.True(PrefixCidr.TryParse(cidr, out var prefix));
+        Assert.False(prefix.IsIpv4);
+    }
+
     [Fact]
     public void TryParse_Ipv4OnlyOverload_StillRejectsIpv6()
     {
