@@ -1111,7 +1111,11 @@ public class BgpMessageTests
     /// than rejecting them (see ParseAttribute_ReservedFlagBits_AreIgnoredNotRejected).
     /// </summary>
     [Theory]
-    [InlineData((byte)0x08)]                      // reserved alone
+    [InlineData((byte)0x01)]
+    [InlineData((byte)0x02)]
+    [InlineData((byte)0x04)]
+    [InlineData((byte)0x08)]
+    [InlineData((byte)0x0F)]                      // every reserved bit
     [InlineData((byte)0xC8)]                      // optional | transitive | reserved
     [InlineData((byte)0xD8)]                      // ...also extended length
     public void WriteAttribute_ReservedFlagBitSet_Throws(byte flags)
