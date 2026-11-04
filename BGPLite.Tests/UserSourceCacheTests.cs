@@ -164,11 +164,10 @@ public class UserSourceCacheTests
         await Assert.ThrowsAsync<InvalidOperationException>(
             () => cache.GetOrLoadAsync("https://example.com/l", "src", f.Invoke, default));
 
-        // Second call within the negative TTL returns [] WITHOUT invoking the fetcher — repeated
-        // failures don't hammer the upstream.
-        var served = await cache.GetOrLoadAsync("https://example.com/l", "src", f.Invoke, default);
+        // Second call within the negative TTL preserves the failure WITHOUT invoking the fetcher.
+        await Assert.ThrowsAsync<InvalidOperationException>(
+            () => cache.GetOrLoadAsync("https://example.com/l", "src", f.Invoke, default));
         Assert.Equal(1, f.Calls);
-        Assert.Empty(served);
     }
 
     [Fact]
@@ -309,11 +308,9 @@ public class UserSourceCacheTests
         await Assert.ThrowsAnyAsync<OperationCanceledException>(
             () => cache.GetOrLoadAsync("https://example.com/l", "src", f.Invoke, CancellationToken.None));
 
-        // Second call within the negative TTL: throttled — the loader is NOT invoked again and
-        // the negative entry reports "no prefixes" instead of re-paying the budget.
-        var second = await cache.GetOrLoadAsync("https://example.com/l", "src", f.Invoke, CancellationToken.None);
-
-        Assert.Empty(second);
+        // Second call within the negative TTL: throttled and still a failure, never success-empty.
+        await Assert.ThrowsAsync<InvalidOperationException>(
+            () => cache.GetOrLoadAsync("https://example.com/l", "src", f.Invoke, CancellationToken.None));
         Assert.Equal(1, f.Calls);
     }
 

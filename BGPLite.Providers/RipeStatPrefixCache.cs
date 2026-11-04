@@ -13,11 +13,9 @@ namespace BGPLite.Providers;
 /// Letting the two mechanisms fetch the same ASN independently with separate TTLs would
 /// double RIPEstat traffic for an ASN configured in both and could serve disagreeing snapshots.
 /// <para>
-/// The negative-entry fast path serves [] to callers that accept the
-/// "nothing this cycle" semantic (the RouteAssembler fan-out). A SOURCE provider must pass
-/// <c>serveNegativeEntries: false</c> — wrapping a cached failure into SourceLoadResult.Ok([])
-/// would store a positive empty list in the name-level cache and mark the source changed,
-/// withdrawing a previously-good advertisement over a transient RIPEstat blip.
+/// A negative entry represents a cached failure, not successful empty content. Production route
+/// assembly and source providers pass <c>serveNegativeEntries: false</c> and receive an exception
+/// during the negative TTL; the optional empty-list path is retained only for explicit callers.
 /// </para>
 /// <para>
 /// Shape: per-ASN TTL cache with stale-on-failure, a short negative TTL for failed fetches,
@@ -88,11 +86,14 @@ public sealed class RipeStatPrefixCache
             SweepExpired();
         }
 
-        // Fast path: fresh entry (positive, or negative within its TTL when the caller accepts
-        // the []-on-recent-failure semantic — the RouteAssembler fan-out does; a source provider
-        // must NOT, see the class doc).
-        if (TryGetFresh(asn, out var fresh, out var freshIsNegative) && (serveNegativeEntries || !freshIsNegative))
-            return fresh;
+        // A cached negative result stays a failure unless the caller explicitly opted into []
+        // so route assembly cannot mistake an outage for a successfully empty ASN.
+        if (TryGetFresh(asn, out var fresh, out var freshIsNegative))
+        {
+            if (!freshIsNegative || serveNegativeEntries)
+                return fresh;
+            throw new InvalidOperationException($"AS{asn}: RIPEstat fetch is in negative-cache backoff.");
+        }
 
         // Register in-flight BEFORE the gate is taken (unregistered only after this
         // caller's own turn is over) so the capacity sweep can never drop the gate this caller is
@@ -124,8 +125,12 @@ public sealed class RipeStatPrefixCache
             // Re-check after acquiring the lock: another caller may have just populated the entry
             // (with the same negative-entry discriminator as the outer fast path —
             // forgetting it here re-introduces exactly the Ok([]) hole the provider opts out of).
-            if (TryGetFresh(asn, out var rechecked, out var recheckIsNegative) && (serveNegativeEntries || !recheckIsNegative))
-                return rechecked;
+            if (TryGetFresh(asn, out var rechecked, out var recheckIsNegative))
+            {
+                if (!recheckIsNegative || serveNegativeEntries)
+                    return rechecked;
+                throw new InvalidOperationException($"AS{asn}: RIPEstat fetch is in negative-cache backoff.");
+            }
 
             IReadOnlyList<IpPrefix> prefixes;
             try
