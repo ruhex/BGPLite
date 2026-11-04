@@ -292,7 +292,7 @@ public sealed class AppConfig
 
         for (var i = 0; i < (CorsAllowedOrigins ?? []).Count; i++)
         {
-            var entry = CorsAllowedOrigins![i].Trim();
+            var entry = CorsAllowedOrigins![i];
             // Compared literally against the request Origin later, so it must be a real absolute
             // origin — a typo'd string is accepted at startup and then never matches anything.
             // The authority round-trip additionally rejects a path, query, fragment or trailing
