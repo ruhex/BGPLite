@@ -215,9 +215,9 @@ public static class BgpMessageWriter
         // BgpMessageReader.ParseAttribute, which ignores these bits rather than rejecting them.)
         // Checked BEFORE anything is written so a rejected attribute leaves the caller's span
         // untouched, matching WriteOpen's RequireFitsByte guard.
-        if ((attr.Flags & BgpConstants.Attribute.FlagReserved) != 0)
+        if ((attr.Flags & BgpConstants.Attribute.FlagReservedMask) != 0)
             throw new ArgumentOutOfRangeException(nameof(attr), attr.Flags,
-                $"Path attribute flag bit 0x{BgpConstants.Attribute.FlagReserved:X2} is reserved and must be zero (RFC 4271 §4.3).");
+                $"Path attribute reserved flag bits 0x{BgpConstants.Attribute.FlagReservedMask:X2} must be zero (RFC 4271 §4.3).");
 
         var extended = UsesExtendedLength(attr);
 
