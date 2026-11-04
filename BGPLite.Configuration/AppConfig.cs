@@ -164,7 +164,7 @@ public sealed class AppConfig
                 "declare peers — it has never been read by any code path, and it is not an allow-list " +
                 $"(any peer that completes an OPEN is registered automatically, see D11). Found {Peers.Count} " +
                 "entry/entries. Remove the 'Peers:' block and register peers through the management API " +
-                "instead: POST http://127.0.0.1:5001/api/peers with {\"ip\":\"...\",\"asn\":N}.");
+                $"instead: POST http://127.0.0.1:{ApiPort}/api/peers with {{\"ip\":\"...\",\"asn\":N}}.");
 
         // Prefix-source errors otherwise surface only at load time, where LoadAllAsync absorbs
         // them into a Warning plus an empty prefix set — a config typo silently serves zero prefixes

@@ -356,13 +356,15 @@ public class ConfigValidationTests
         // peers in the database. It is also not an allow-list (per D11 any peer completing an OPEN
         // is registered), so silently ignoring it left operators believing they had restricted
         // who could peer in. Rejecting it is the honest outcome; the message must say what to do.
-        var config = Config(peers: [new PeerConfig { Address = "10.0.0.2", RemoteAsn = 65002 }]);
+        var config = Config(apiPort: 5101, peers: [new PeerConfig { Address = "10.0.0.2", RemoteAsn = 65002 }]);
 
         var ex = Assert.Throws<InvalidOperationException>(config.Validate);
 
         Assert.Contains("'Peers:' list is no longer applied", ex.Message);
         Assert.Contains("not an allow-list", ex.Message);
         Assert.Contains("management API", ex.Message);   // actionable, not just a rejection
+        Assert.Contains("http://127.0.0.1:5101/api/peers", ex.Message);
+        Assert.DoesNotContain("127.0.0.1:5001", ex.Message);
     }
 
     [Fact]
