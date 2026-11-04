@@ -802,6 +802,7 @@ public class ConfigValidationTests
     [InlineData("example.com")]        // no scheme
     [InlineData("ftp://example.com")]  // wrong scheme
     [InlineData("/relative")]
+    [InlineData(" https://operator.example.com ")]       // raw values are compared literally at runtime
     [InlineData("https://operator.example.com/")]      // trailing slash: a browser Origin never has one
     [InlineData("https://operator.example.com/ui")]    // path: same reason
     [InlineData("https://operator.example.com/?a=b")]  // query: same reason

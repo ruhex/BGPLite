@@ -203,6 +203,26 @@ public class ConfigHotReloadTests
         finally { TryDelete(path); }
     }
 
+    [Fact]
+    public void Reload_WhitespacePaddedCorsOrigin_KeepsPreviousConfig()
+    {
+        var path = TempConfigPath();
+        try
+        {
+            File.WriteAllText(path, Yaml(corsOrigins: [" https://operator.example.com "]));
+            using var harness = NewApi(Config(corsOrigins: ["https://operator.example.com"]));
+            var logger = new CapturingLogger<ConfigReloader>();
+            var reloader = new ConfigReloader(path, harness.Api, logger);
+
+            Assert.Null(Record.Exception(() => reloader.Reload()));
+
+            Assert.Contains(logger.Entries, e => e.Level == LogLevel.Error);
+            Assert.Equal("https://operator.example.com",
+                harness.Api.ResolveCorsOriginLive("https://operator.example.com"));
+        }
+        finally { TryDelete(path); }
+    }
+
     // --- ConfigReloader.Reload: invalid edits never crash, keep previous -----------------------
 
     [Fact]
