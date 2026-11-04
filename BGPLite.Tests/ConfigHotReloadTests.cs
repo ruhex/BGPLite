@@ -392,7 +392,7 @@ public class ConfigHotReloadTests
         public Task TerminatePeerAsync(string peerIp, uint asn, CancellationToken ct = default) => Task.CompletedTask;
         public Task TerminatePeerByIpAsync(string peerIp, CancellationToken ct = default) => Task.CompletedTask;
         public void SetPeerMd5Key(string peerIp, string? password) { }
-        public bool IsPeerMd5Armed(string peerIp) => false;
+        public bool IsPeerMd5Armed(string peerIp, string? password) => false;
     }
 
     private sealed class ApiHarness : IDisposable

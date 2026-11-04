@@ -330,7 +330,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
     /// from that address could complete the handshake unsigned.
     /// </summary>
     private bool IsMd5Armed(string ip, string? storedPassword) =>
-        TcpMd5.IsSupported && !string.IsNullOrEmpty(storedPassword) && _sessionManager.IsPeerMd5Armed(ip);
+        TcpMd5.IsSupported && !string.IsNullOrEmpty(storedPassword) && _sessionManager.IsPeerMd5Armed(ip, storedPassword);
 
     public async Task StopAsync(CancellationToken cancellationToken)
     {
@@ -1086,10 +1086,18 @@ public sealed class ManagementApi : IHostedService, IDisposable
             md5Password: string.IsNullOrEmpty(data.Md5Password) ? null : data.Md5Password);
         if (!string.IsNullOrEmpty(data.Md5Password))
         {
-            // Resolve through the SAME shared-IP re-arm the delete/PATCH/bootstrap paths use —
-            // TCP keys by address, so arming the new row's key directly silently overrode a
-            // sibling's key on the same IP (last-writer-wins, no disagreement warning).
-            await RearmPeerIpMd5KeyAsync(normalizedIp);
+            // Resolve through the SAME shared-IP re-arm the delete/PATCH/bootstrap paths use.
+            // If the kernel refuses the selected key, remove the newly stored password so startup
+            // cannot retry it later, and tell the caller that the non-MD5 peer row was committed.
+            try { await RearmPeerIpMd5KeyAsync(normalizedIp); }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "TCP-MD5 arming failed after creating peer {Ip}; removing its stored password", normalizedIp);
+                await _store.UpdatePeerConfigurationAsync(saved.Id, null, null, null, null,
+                    md5Password: "");
+                return ApiResponse.Error(
+                    "The peer was created, but TCP-MD5 could not be armed; its stored password was removed.", 500);
+            }
         }
 
         _logger.LogInformation("Created peer {Ip} AS{Asn} ({Id}): {Subs} lists, {Prefixes} custom prefixes, {Asns} custom AS",
@@ -1222,9 +1230,18 @@ public sealed class ManagementApi : IHostedService, IDisposable
             return ApiResponse.Error("Peer not found", 404);
         if (data.Md5Password is not null)
         {
-            // Re-arm from ALL surviving rows for this IP — clearing this peer's key must
-            // fall back to a sibling's, not silently disarm the address for every peer on it.
-            await RearmPeerIpMd5KeyAsync(surviving.Ip);
+            // Re-arm from ALL surviving rows for this IP. On failure restore the previous stored
+            // password and make the partial commit explicit instead of returning a bare 500.
+            try { await RearmPeerIpMd5KeyAsync(surviving.Ip); }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "TCP-MD5 re-arming failed after updating peer {Id}; restoring its previous password",
+                    SanitizeForLog(peerId));
+                await _store.UpdatePeerConfigurationAsync(peerId, null, null, null, null,
+                    md5Password: peer.Md5Password ?? "");
+                return ApiResponse.Error(
+                    "The peer changes were saved, but TCP-MD5 re-arming failed; the previous stored password was restored.", 500);
+            }
         }
 
         _logger.LogInformation("Updated peer {Id}", SanitizeForLog(peerId));
@@ -1289,7 +1306,14 @@ public sealed class ManagementApi : IHostedService, IDisposable
         // Re-arm the IP's TCP-MD5 key from the SURVIVING rows — deleting one sibling
         // must not disarm TCP-MD5 for the other peers sharing the source IP. No key left on the
         // IP resolves to null (disarm).
-        await RearmPeerIpMd5KeyAsync(peer.Ip);
+        try { await RearmPeerIpMd5KeyAsync(peer.Ip); }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Peer {Id} was deleted, but TCP-MD5 re-arming failed for {Ip}",
+                SanitizeForLog(peerId), peer.Ip);
+            return ApiResponse.Error(
+                "The peer was deleted, but TCP-MD5 state for its shared source IP could not be updated.", 500);
+        }
         _logger.LogInformation("Deleted peer {Id} ({Ip})", SanitizeForLog(peerId), peer.Ip);
         return ApiResponse.Ok(new { id = peerId, deleted = true });
     }

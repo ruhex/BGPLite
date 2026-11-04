@@ -167,12 +167,131 @@ public class TcpMd5Tests
             Assert.Null(Record.Exception(() => server.SetPeerMd5Key("192.0.2.10", "secret")));
         }
 
-        // Either way the two must agree: the armed query is what the control plane's tcpMd5
-        // indicator is derived from, so it may never claim protection a failed arm did not
-        // deliver (#546 item 3).
-        Assert.Equal(OperatingSystem.IsLinux(), server.IsPeerMd5Armed("192.0.2.10"));
-        Assert.False(server.IsPeerMd5Armed("192.0.2.99"));   // never configured
-        Assert.False(server.IsPeerMd5Armed("not-an-ip"));    // unparseable, not a crash
+        // No listener has applied the key yet, so even Linux must not claim kernel enforcement.
+        Assert.False(server.IsPeerMd5Armed("192.0.2.10", "secret"));
+        Assert.False(server.IsPeerMd5Armed("192.0.2.99", "secret"));   // never configured
+        Assert.False(server.IsPeerMd5Armed("not-an-ip", "secret"));    // unparseable, not a crash
+    }
+
+    [Fact]
+    public async Task PrestartKey_IsArmedDuringStart_BeforeAccepting()
+    {
+        if (!OperatingSystem.IsLinux()) return;
+        using var server = NewServer();
+        server.SetPeerMd5Key("192.0.2.10", "secret");
+        Assert.False(server.IsPeerMd5Armed("192.0.2.10", "secret"));
+
+        await server.StartAsync(CancellationToken.None);
+        try
+        {
+            Assert.True(server.IsPeerMd5Armed("192.0.2.10", "secret"));
+            Assert.False(server.IsPeerMd5Armed("192.0.2.10", "another"));
+        }
+        finally
+        {
+            await server.StopAsync(CancellationToken.None);
+        }
+        Assert.False(server.IsPeerMd5Armed("192.0.2.10", "secret"));
+    }
+
+    [Fact]
+    public async Task FailedReplacementOrClear_PreservesPreviousKey()
+    {
+        if (!OperatingSystem.IsLinux()) return;
+        using var server = NewServer();
+        await server.StartAsync(CancellationToken.None);
+        var fail = false;
+        server.Md5ApplyProbe = (_, _, _) => !fail;
+
+        try
+        {
+            server.SetPeerMd5Key("192.0.2.10", "old");
+            fail = true;
+            Assert.Throws<InvalidOperationException>(() => server.SetPeerMd5Key("192.0.2.10", "new"));
+            Assert.True(server.IsPeerMd5Armed("192.0.2.10", "old"));
+            Assert.False(server.IsPeerMd5Armed("192.0.2.10", "new"));
+
+            Assert.Throws<InvalidOperationException>(() => server.SetPeerMd5Key("192.0.2.10", null));
+            Assert.True(server.IsPeerMd5Armed("192.0.2.10", "old"));
+        }
+        finally
+        {
+            fail = false;
+            server.SetPeerMd5Key("192.0.2.10", null);
+            await server.StopAsync(CancellationToken.None);
+        }
+    }
+
+    [Fact]
+    public void ClearWithoutConfiguredKey_DoesNotTouchKernel()
+    {
+        using var server = NewServer();
+        var calls = 0;
+        server.Md5ApplyProbe = (_, _, _) => { calls++; return true; };
+
+        server.SetPeerMd5Key("192.0.2.10", null);
+
+        Assert.Equal(0, calls);
+    }
+
+    [Fact]
+    public async Task ConcurrentKeyMutations_AreSerialized()
+    {
+        if (!OperatingSystem.IsLinux()) return;
+        using var server = NewServer();
+        await server.StartAsync(CancellationToken.None);
+        var firstEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var secondEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var calls = 0;
+        var active = 0;
+        var maxActive = 0;
+        server.Md5ApplyProbe = (_, _, _) =>
+        {
+            var call = Interlocked.Increment(ref calls);
+            var current = Interlocked.Increment(ref active);
+            maxActive = Math.Max(maxActive, current);
+            if (call == 1)
+            {
+                firstEntered.TrySetResult();
+                release.Task.GetAwaiter().GetResult();
+            }
+            if (call == 2)
+                secondEntered.TrySetResult();
+            Interlocked.Decrement(ref active);
+            return true;
+        };
+
+        Task first = null!;
+        Task second = null!;
+        try
+        {
+            first = Task.Run(() => server.SetPeerMd5Key("192.0.2.10", "first"));
+            await firstEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            second = Task.Run(() => server.SetPeerMd5Key("192.0.2.10", "second"));
+            var early = await Task.WhenAny(secondEntered.Task, Task.Delay(100));
+            Assert.NotSame(secondEntered.Task, early);
+            release.TrySetResult();
+            await Task.WhenAll(first, second).WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.Equal(1, maxActive);
+        }
+        finally
+        {
+            release.TrySetResult();
+            if (first is not null && second is not null)
+                await Task.WhenAll(first, second).WaitAsync(TimeSpan.FromSeconds(5));
+            await server.StopAsync(CancellationToken.None);
+        }
+    }
+
+    private static BgpServer NewServer()
+    {
+        var server = new BgpServer(
+            new AppConfig { Bgp = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1" } },
+            new RouteTable(), AllowAllFilter.Instance, new BgpMetrics(),
+            new NoopSessionFactory(), NullLogger<BgpServer>.Instance);
+        server.ListenPort = 0;
+        return server;
     }
 
     private sealed class NoopSessionFactory : IBgpSessionFactory
