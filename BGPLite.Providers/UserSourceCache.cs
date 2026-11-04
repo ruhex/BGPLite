@@ -20,7 +20,8 @@ namespace BGPLite.Providers;
 /// one peer does NOT evict the entry here — another peer with the same URL may still need it; orphaned
 /// entries (no active subscriber) simply expire via TTL. The cache sits above the fetcher and is
 /// transparent to the SSRF defense, which lives in <see cref="HttpPrefixProvider"/>'s named client.
-/// <see cref="OperationCanceledException"/> always propagates and is never cached as negative.
+/// Caller cancellation propagates and is never cached; a per-fetch timeout is a negative failure.
+/// A fresh negative hit throws instead of masquerading as a successfully loaded empty list.
 /// </remarks>
 internal sealed class UserSourceCache
 {
@@ -99,7 +100,7 @@ internal sealed class UserSourceCache
         // until the entry cap was hit. Cheap (every Nth call), idempotent under concurrency.
         SweepIfNeeded();
 
-        if (TryGetFresh(url, out var fresh))
+        if (TryGetFresh(url, logLabel, out var fresh))
             return fresh;
 
         // Serialize per-key so concurrent callers (e.g. several peers refreshing the same URL) share
@@ -129,7 +130,7 @@ internal sealed class UserSourceCache
             entered = true;
             try
             {
-                if (TryGetFresh(url, out var rechecked))
+                if (TryGetFresh(url, logLabel, out var rechecked))
                     return rechecked;
 
                 IReadOnlyList<IpPrefix> prefixes;
@@ -253,7 +254,7 @@ internal sealed class UserSourceCache
         }
     }
 
-    private bool TryGetFresh(string url, out IReadOnlyList<IpPrefix> list)
+    private bool TryGetFresh(string url, string logLabel, out IReadOnlyList<IpPrefix> list)
     {
         list = null!;
         if (!_cache.TryGetValue(url, out var entry)) return false;
@@ -261,6 +262,9 @@ internal sealed class UserSourceCache
         var ttl = entry.Negative ? _negativeTtl : _positiveTtl;
         if (_timeProvider.GetUtcNow().UtcDateTime - entry.CachedAt < ttl)
         {
+            if (entry.Negative)
+                throw new InvalidOperationException(
+                    $"User-source '{logLabel}' is in failure backoff; the last load failed.");
             list = entry.List;
             return true;
         }

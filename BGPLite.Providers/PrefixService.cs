@@ -116,7 +116,7 @@ public sealed class PrefixService : IPrefixService
         // Per-ASN caching, stale-on-failure, negative TTL, fetch gates, and the eviction
         // sweep all live in the shared cache — one wire fetch per ASN regardless
         // of which mechanism asked.
-        => ToContract(await _ripeStatCache.GetPrefixesAsync(asn, ct));
+        => ToContract(await _ripeStatCache.GetPrefixesAsync(asn, ct, serveNegativeEntries: false));
 
     /// <summary>Bounds how many ASNs are resolved against RIPEstat concurrently on a cold cache
     /// (warm traffic is cache-flat). Keeps cold-start fan-out from tripping RIPEstat rate limits.</summary>

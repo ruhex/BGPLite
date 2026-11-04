@@ -296,10 +296,9 @@ public class PrefixServiceTests
         await Assert.ThrowsAsync<HttpRequestException>(() => service.GetPrefixesAsync(100));
         Assert.Equal(1, handler.Calls); // single attempt, no retries
 
-        // Second call within negative TTL: no fetch, returns [] (negative cache).
-        var second = await service.GetPrefixesAsync(100);
-        Assert.Empty(second);
-        Assert.Equal(1, handler.Calls); // still one fetch — negative cache served
+        // Second call within negative TTL preserves the failure without another upstream call.
+        await Assert.ThrowsAsync<InvalidOperationException>(() => service.GetPrefixesAsync(100));
+        Assert.Equal(1, handler.Calls); // still one fetch — negative-cache backoff served
     }
 
     [Fact]
@@ -629,9 +628,9 @@ public class PrefixServiceTests
             () => service.GetUserSourcePrefixesAsync("slow", "https://example.com/slow.txt", null)
                 .WaitAsync(TimeSpan.FromSeconds(8)));
 
-        // The negative cache throttles the retry: no second HTTP attempt.
-        var second = await service.GetUserSourcePrefixesAsync("slow", "https://example.com/slow.txt", null);
-        Assert.Empty(second);
+        // The negative cache throttles the retry without turning the failure into success.
+        await Assert.ThrowsAsync<InvalidOperationException>(
+            () => service.GetUserSourcePrefixesAsync("slow", "https://example.com/slow.txt", null));
         Assert.Equal(1, handler.Calls);
     }
 

@@ -70,7 +70,7 @@ public class AsnPrefixProviderTests
     /// A cached RIPEstat failure must PROPAGATE
     /// from the provider path — Ok([]) would store a positive empty list in the name-level cache
     /// and mark the source changed, withdrawing a good advertisement over a transient blip.
-    /// The RouteAssembler path keeps its []-on-recent-failure semantic.
+    /// The route-assembly path preserves the same failure during negative backoff.
     /// </summary>
     private sealed class FailingRipeHandler : HttpMessageHandler
     {
@@ -83,7 +83,7 @@ public class AsnPrefixProviderTests
     }
 
     [Fact]
-    public async Task CachedFailure_PropagatesFromProvider_ServesEmptyToAssemblerPath()
+    public async Task CachedFailure_PropagatesToProviderAndAssembler_WithoutAnotherFetch()
     {
         var handler = new FailingRipeHandler();
         var ripe = new RipeStatProvider(new StubFactory(handler), NullLogger<RipeStatProvider>.Instance,
@@ -92,21 +92,15 @@ public class AsnPrefixProviderTests
         var service = new PrefixService(new AppConfig(), cache, null!, null!);
         var provider = new AsnPrefixProvider(cache, NullLogger<AsnPrefixProvider>.Instance);
 
-        // Prime the negative entry through the assembler path: the first fetch FAILS (no stale
-        // copy exists yet, so it throws and negative-caches), the second serves [] per that path's
-        // documented semantic.
+        // Both production consumers preserve the cached failure instead of converting it to a
+        // successful empty list or paying another upstream attempt during the negative TTL.
         await Assert.ThrowsAnyAsync<Exception>(() => service.GetPrefixesAsync(65010));
-        var viaService = await service.GetPrefixesAsync(65010);
-        Assert.Empty(viaService);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => service.GetPrefixesAsync(65010));
         var primedCalls = handler.Calls;
 
-        // Provider path: the cached failure must THROW, not come back as Ok([]) — Ok would store a
-        // positive empty list in the name-level cache and mark the source changed. The provider
-        // re-fetches (one wire attempt per load); throttling for
-        // sources lives at the NAME level (PrefixSourceService stale/negative), not here.
-        await Assert.ThrowsAnyAsync<Exception>(() =>
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
             provider.LoadAsync(new PrefixSourceConfig { Name = "x", Kind = "asn", Asn = 65010 }));
-        Assert.Equal(primedCalls + 1, handler.Calls);   // exactly one provider-driven wire attempt
+        Assert.Equal(primedCalls, handler.Calls);
     }
 
     [Fact]
