@@ -105,8 +105,8 @@ public sealed class PeerStore : IPeerStore
         var now = DateTime.UtcNow.ToString("O");
         await db.Database.ExecuteSqlInterpolatedAsync($@"
             INSERT INTO Peers (Id, Ip, Asn, Description, Status, CreatedAt, LastSessionAt)
-            VALUES ({id}, {ip}, {asn}, NULL, 'active', {now}, {now})
-            ON CONFLICT(Ip, Asn) DO UPDATE SET Status = 'active', LastSessionAt = {now}", ct);
+            VALUES ({id}, {ip}, {asn}, NULL, 'inactive', {now}, NULL)
+            ON CONFLICT(Ip, Asn) DO NOTHING", ct);
     }
 
     public async Task UpdateSessionStatusAsync(string ip, uint asn, bool active, CancellationToken ct = default)

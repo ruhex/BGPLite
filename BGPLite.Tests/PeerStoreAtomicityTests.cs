@@ -176,11 +176,11 @@ public class PeerStoreAtomicityTests
     }
 
     /// <summary>
-    /// UpsertPeer sets Status=active and stamps LastSessionAt, both on a fresh insert and on
-    /// a second call (update path). Called from the BGP connect path — must never throw.
+    /// UpsertPeer records identity during OPEN without claiming that the session is Established.
+    /// Activation and LastSessionAt belong to the subsequent Established route-build path.
     /// </summary>
     [Fact]
-    public async Task UpsertPeer_SetsActive_And_StampsLastSessionAt()
+    public async Task UpsertPeer_DoesNotMarkActiveBeforeEstablished()
     {
         var (store, connection) = NewStore();
         using var conn = connection;
@@ -188,24 +188,19 @@ public class PeerStoreAtomicityTests
         await store.UpsertPeerAsync(Ip, Asn);
         var peer = await store.GetPeerAsync(Ip, Asn);
         Assert.NotNull(peer);
-        Assert.Equal("active", peer!.Status);
-        Assert.NotNull(peer.LastSessionAt);
+        Assert.Equal("inactive", peer!.Status);
+        Assert.Null(peer.LastSessionAt);
 
-        var firstSessionAt = peer.LastSessionAt!;
-        // Sleep so a regression that stamps LastSessionAt with the OLD value (or a fixed value)
-        // would be caught by the comparison below. SQLite stores the timestamp as text in the
-        // round-trip "O" format, which sorts lexicographically = chronologically, so a string
-        // comparison is a valid ordering check.
-        Thread.Sleep(15);
+        await store.UpdateSessionStatusAsync(Ip, Asn, active: true);
+        var established = await store.GetPeerAsync(Ip, Asn);
+        Assert.Equal("active", established!.Status);
+        Assert.NotNull(established.LastSessionAt);
 
-        // Second call (update path) — must refresh LastSessionAt, not throw.
+        // A pre-Established reconnect must not change the existing session's status or history.
         await store.UpsertPeerAsync(Ip, Asn);
-        var peer2 = await store.GetPeerAsync(Ip, Asn);
-        Assert.NotNull(peer2);
-        Assert.Equal("active", peer2!.Status);
-        Assert.NotNull(peer2.LastSessionAt);
-        Assert.True(string.CompareOrdinal(peer2.LastSessionAt, firstSessionAt) >= 0,
-            $"LastSessionAt must not go backwards: first={firstSessionAt}, second={peer2.LastSessionAt}");
+        var reidentified = await store.GetPeerAsync(Ip, Asn);
+        Assert.Equal("active", reidentified!.Status);
+        Assert.Equal(established.LastSessionAt, reidentified.LastSessionAt);
     }
 
     /// <summary>

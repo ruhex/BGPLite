@@ -498,10 +498,9 @@ public class BgpSessionRouteOwnershipTests
     }
 
     /// <summary>
-    /// a REPLACED session's slow finally must not flip the peer row back to
-    /// inactive after the replacement wrote active. Two guards: the SilentClose teardown reason
-    /// (replacement / GR-aware shutdown) skips the write, and the registration probe answers
-    /// false once the session is no longer the registered one. A genuine teardown still writes.
+    /// A replaced session's slow finally must not flip the peer row back to inactive after a
+    /// replacement wrote active. SilentClose skips the write; otherwise a live Established sibling
+    /// keeps the row active. The last genuine teardown writes inactive.
     /// </summary>
     private sealed class RecordingPeerStore : IPeerStore
     {
@@ -523,7 +522,7 @@ public class BgpSessionRouteOwnershipTests
     }
 
     private static async Task<(BgpSession Session, Task Run, RecordingPeerStore Store)> EstablishWithStoreAsync(
-        RouteTable routeTable, Func<BgpSession, bool>? probe = null, BgpServer? owner = null,
+        RouteTable routeTable, Func<BgpSession, bool>? siblingProbe = null,
         ScriptedConnection? connection = null)
     {
         var conn = connection ?? new ScriptedConnection();
@@ -538,17 +537,7 @@ public class BgpSessionRouteOwnershipTests
             new BgpMetrics(),
             NullLogger<BgpSession>.Instance,
             peerStore: store);
-        // With an owner, wire the REAL BgpServer delegates the accept loop installs, so the test
-        // exercises the production ownership rule rather than a stub.
-        if (owner is not null)
-        {
-            session.ClaimPeerRow = s => owner.ClaimPeerRow(IPAddress.Loopback, s);
-            session.OwnsPeerRowProbe = s => owner.OwnsPeerRow(IPAddress.Loopback, s);
-        }
-        else
-        {
-            session.OwnsPeerRowProbe = probe ?? (_ => true);
-        }
+        session.HasEstablishedSiblingProbe = siblingProbe ?? (_ => false);
         var run = session.RunAsync();
         conn.EnqueueMessage(new BgpOpenMessage
         {
@@ -565,62 +554,27 @@ public class BgpSessionRouteOwnershipTests
         return (session, run, store);
     }
 
-    /// <summary>
-    /// #546 item 4. The guard used to ask "am I still in the session registry?", but the registry
-    /// is keyed by TCP connection (IP + remote port) while the peer row is keyed (Ip, Asn). A peer
-    /// reconnecting from a new ephemeral port is therefore ADDED alongside its own stale session
-    /// rather than replacing it, so the stale session answered true and, when its hold timer
-    /// finally expired, flipped a live peer's row to inactive — with the repair re-probe answering
-    /// true as well, so nothing restored it.
-    ///
-    /// Drives the real BgpServer ownership delegates: two sessions for the same (Ip, Asn), the
-    /// second claiming the row, then a NON-silent teardown of the first.
-    /// </summary>
     [Fact]
     public async Task StaleSessionForSamePeer_Teardown_DoesNotReportTheLiveSessionInactive()
     {
-        var server = new BgpServer(
-            new AppConfig { Bgp = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1" } },
-            new RouteTable(), AllowAllFilter.Instance, new BgpMetrics(),
-            new NoopSessionFactory(), NullLogger<BgpServer>.Instance);
-
-        // Session A establishes first and owns the row.
         var connA = new ScriptedConnection();
-        var (sessionA, runA, storeA) = await EstablishWithStoreAsync(new RouteTable(), owner: server, connection: connA);
-        Assert.True(server.OwnsPeerRow(IPAddress.Loopback, sessionA));
+        var (sessionA, runA, storeA) = await EstablishWithStoreAsync(new RouteTable(), connection: connA);
+        var (sessionB, runB, _) = await EstablishWithStoreAsync(new RouteTable());
+        sessionA.HasEstablishedSiblingProbe = _ => sessionB.IsEstablished;
 
-        // The peer reconnects (a different source port — a different SessionKey, so no
-        // replacement happens) and session B takes the row.
-        var (sessionB, runB, _) = await EstablishWithStoreAsync(new RouteTable(), owner: server);
-        Assert.True(server.OwnsPeerRow(IPAddress.Loopback, sessionB));
-        Assert.False(server.OwnsPeerRow(IPAddress.Loopback, sessionA), "B's claim displaces A");
-
-        // A tears down NON-silently (peer NOTIFICATION), so only the ownership guard can stop the
-        // status write. Pre-fix it wrote inactive for a peer whose session B is Established.
         connA.EnqueueMessage(new BgpNotificationMessage { ErrorCode = BgpConstants.Error.Cease, SubErrorCode = 0 });
         await runA.WaitAsync(TimeSpan.FromSeconds(5));
 
         Assert.DoesNotContain(storeA.StatusWrites, w => !w.Active);
-
         sessionA.Dispose();
         await TeardownAsync(sessionB, runB);
     }
 
-    /// <summary>
-    /// The control for the test above: with no sibling holding the row, a non-silent teardown
-    /// MUST still report the peer inactive — the ownership guard narrows the write, it does not
-    /// remove it.
-    /// </summary>
     [Fact]
     public async Task SoleSession_Teardown_StillReportsInactive()
     {
-        var server = new BgpServer(
-            new AppConfig { Bgp = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1" } },
-            new RouteTable(), AllowAllFilter.Instance, new BgpMetrics(),
-            new NoopSessionFactory(), NullLogger<BgpServer>.Instance);
-
         var conn = new ScriptedConnection();
-        var (session, run, store) = await EstablishWithStoreAsync(new RouteTable(), owner: server, connection: conn);
+        var (session, run, store) = await EstablishWithStoreAsync(new RouteTable(), connection: conn);
 
         conn.EnqueueMessage(new BgpNotificationMessage { ErrorCode = BgpConstants.Error.Cease, SubErrorCode = 0 });
         await run.WaitAsync(TimeSpan.FromSeconds(5));
@@ -629,19 +583,34 @@ public class BgpSessionRouteOwnershipTests
         session.Dispose();
     }
 
-    private sealed class NoopSessionFactory : IBgpSessionFactory
+    [Fact]
+    public async Task LastSessionTeardown_AfterSiblingCloses_WritesInactive()
     {
-        public BgpSession Create(IBgpConnection connection, PeerConfig peerConfig) => null!;
+        var connA = new ScriptedConnection();
+        var connB = new ScriptedConnection();
+        var (sessionA, runA, storeA) = await EstablishWithStoreAsync(new RouteTable(), connection: connA);
+        var (sessionB, runB, storeB) = await EstablishWithStoreAsync(new RouteTable(), connection: connB);
+        sessionA.HasEstablishedSiblingProbe = _ => sessionB.IsEstablished;
+        sessionB.HasEstablishedSiblingProbe = _ => sessionA.IsEstablished;
+
+        connB.EnqueueMessage(new BgpNotificationMessage { ErrorCode = BgpConstants.Error.Cease, SubErrorCode = 0 });
+        await runB.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.DoesNotContain(storeB.StatusWrites, w => !w.Active);
+
+        connA.EnqueueMessage(new BgpNotificationMessage { ErrorCode = BgpConstants.Error.Cease, SubErrorCode = 0 });
+        await runA.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Contains(storeA.StatusWrites, w => !w.Active);
+
+        sessionA.Dispose();
+        sessionB.Dispose();
     }
 
     [Fact]
     public async Task ReplacedSession_Teardown_DoesNotOverwriteStatusInactive()
     {
-        // The probe answers false — the registry no longer holds this session (TryUpdate
-        // swapped a replacement in). Its finally must not write inactive.
-        var (session, run, store) = await EstablishWithStoreAsync(new RouteTable(), probe: _ => false);
+        var (session, run, store) = await EstablishWithStoreAsync(new RouteTable());
 
-        await TeardownAsync(session, run);   // SilentClose + probe-false — both guards skip
+        await TeardownAsync(session, run);   // SilentClose skips the inactive write
 
         Assert.DoesNotContain(store.StatusWrites, w => !w.Active);
     }
@@ -663,7 +632,7 @@ public class BgpSessionRouteOwnershipTests
             conn, new PeerConfig { Address = "127.0.0.1" }, config, new RouteTable(),
             AllowAllFilter.Instance, new BgpMetrics(), NullLogger<BgpSession>.Instance, peerStore: store);
         var calls = 0;
-        session.OwnsPeerRowProbe = _ => Interlocked.Increment(ref calls) switch { 1 => true, _ => false };
+        session.HasEstablishedSiblingProbe = _ => Interlocked.Increment(ref calls) > 1;
         var run = session.RunAsync();
         conn.EnqueueMessage(new BgpOpenMessage
         {
@@ -684,6 +653,21 @@ public class BgpSessionRouteOwnershipTests
         Assert.NotEmpty(store.StatusWrites);
         Assert.True(store.StatusWrites[^1].Active, "the replacement-during-write race must end with the row ACTIVE");
         Assert.Contains(store.StatusWrites, w => !w.Active);   // the stale inactive write happened, then the repair
+    }
+
+    [Fact]
+    public async Task ReleasedReplacement_DoesNotRestoreActive()
+    {
+        var conn = new ScriptedConnection();
+        var (session, run, store) = await EstablishWithStoreAsync(
+            new RouteTable(), siblingProbe: _ => false, connection: conn);
+
+        conn.EnqueueMessage(new BgpNotificationMessage { ErrorCode = BgpConstants.Error.Cease, SubErrorCode = 0 });
+        await run.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Contains(store.StatusWrites, w => !w.Active);
+        Assert.DoesNotContain(store.StatusWrites, w => w.Active);
+        session.Dispose();
     }
 
     [Fact]
