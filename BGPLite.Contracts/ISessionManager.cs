@@ -40,6 +40,18 @@ public interface ISessionManager
     /// by the kernel); null/empty disables it. Passwords are never logged. Arming is Linux-only:
     /// passing a non-empty password on any other platform throws
     /// <see cref="PlatformNotSupportedException"/> instead of silently storing an unverifiable key.
+    /// A kernel that refuses the key (setsockopt failure — e.g. a Linux build without
+    /// CONFIG_TCP_MD5SIG) throws for the same reason: the key is NOT retained, so
+    /// <see cref="IsPeerMd5Armed"/> never reports protection the kernel is not enforcing.
     /// </summary>
     void SetPeerMd5Key(string peerIp, string? password);
+
+    /// <summary>
+    /// Whether a TCP-MD5 key is currently armed for <paramref name="peerIp"/> — i.e. the kernel
+    /// accepted it and will enforce RFC 2385 for that source IP. The control plane's
+    /// <c>tcpMd5</c> indicator must be derived from THIS, not from "a password is stored":
+    /// a stored password whose arming failed means the peer is unprotected, and reporting it as
+    /// protected is the worse half of the failure.
+    /// </summary>
+    bool IsPeerMd5Armed(string peerIp);
 }

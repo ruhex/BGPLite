@@ -424,11 +424,18 @@ public static class BgpMessageReader
                 BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.MalformedAttributeList);
 
         var flags = data[0];
-        // RFC 4271 §4.3: flag bit 0x08 is reserved and MUST be zero — an attribute with it set
-        // is malformed (Attribute Flags Error, subcode 4) and is rejected via treat-as-withdraw.
-        if ((flags & BgpConstants.Attribute.FlagReserved) != 0)
-            throw new BgpParseException($"Reserved attribute flag bit 0x08 set (flags=0x{flags:X2})",
-                BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.AttributeFlagsError);
+        // RFC 4271 §4.3, in full: "The lower-order four bits of the Attribute Flags octet are
+        // unused. They MUST be zero when sent and MUST be ignored when received." Both halves
+        // bind, and they bind different directions — the writer enforces the send half
+        // (BgpMessageWriter.WriteAttribute), the reader MUST NOT.
+        //
+        // This used to reject bit 0x08 with Attribute Flags Error (#272, which quoted only the
+        // send half of the sentence). That made every UPDATE from a peer leaving a stray
+        // low-order bit set treat-as-withdraw: the session stayed up and the peer's routes were
+        // silently never installed, with no NOTIFICATION explaining why, while conformant
+        // neighbours accepted the same frames. It was also inconsistent with itself — bits
+        // 0x01/0x02/0x04 were ignored and only 0x08 rejected. The bits are carried through on
+        // the parsed attribute (nothing downstream reads them) and simply not acted upon.
         var typeCode = data[1];
         var offset = 2;
 

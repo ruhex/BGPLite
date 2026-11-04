@@ -166,6 +166,13 @@ public class TcpMd5Tests
             // listener is not started here, so there is nothing to arm yet — no throw).
             Assert.Null(Record.Exception(() => server.SetPeerMd5Key("192.0.2.10", "secret")));
         }
+
+        // Either way the two must agree: the armed query is what the control plane's tcpMd5
+        // indicator is derived from, so it may never claim protection a failed arm did not
+        // deliver (#546 item 3).
+        Assert.Equal(OperatingSystem.IsLinux(), server.IsPeerMd5Armed("192.0.2.10"));
+        Assert.False(server.IsPeerMd5Armed("192.0.2.99"));   // never configured
+        Assert.False(server.IsPeerMd5Armed("not-an-ip"));    // unparseable, not a crash
     }
 
     private sealed class NoopSessionFactory : IBgpSessionFactory

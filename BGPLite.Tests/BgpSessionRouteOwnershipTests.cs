@@ -1,3 +1,4 @@
+using System.Net;
 using System.Threading.Channels;
 using BGPLite.Configuration;
 using BGPLite.Contracts;
@@ -522,9 +523,10 @@ public class BgpSessionRouteOwnershipTests
     }
 
     private static async Task<(BgpSession Session, Task Run, RecordingPeerStore Store)> EstablishWithStoreAsync(
-        RouteTable routeTable, Func<BgpSession, bool>? probe = null)
+        RouteTable routeTable, Func<BgpSession, bool>? probe = null, BgpServer? owner = null,
+        ScriptedConnection? connection = null)
     {
-        var conn = new ScriptedConnection();
+        var conn = connection ?? new ScriptedConnection();
         var store = new RecordingPeerStore();
         var config = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1", HoldTime = 0, KeepAlive = 0 };
         var session = new BgpSession(
@@ -536,7 +538,17 @@ public class BgpSessionRouteOwnershipTests
             new BgpMetrics(),
             NullLogger<BgpSession>.Instance,
             peerStore: store);
-        session.StillRegisteredProbe = probe ?? (_ => true);
+        // With an owner, wire the REAL BgpServer delegates the accept loop installs, so the test
+        // exercises the production ownership rule rather than a stub.
+        if (owner is not null)
+        {
+            session.ClaimPeerRow = s => owner.ClaimPeerRow(IPAddress.Loopback, s);
+            session.OwnsPeerRowProbe = s => owner.OwnsPeerRow(IPAddress.Loopback, s);
+        }
+        else
+        {
+            session.OwnsPeerRowProbe = probe ?? (_ => true);
+        }
         var run = session.RunAsync();
         conn.EnqueueMessage(new BgpOpenMessage
         {
@@ -551,6 +563,75 @@ public class BgpSessionRouteOwnershipTests
             await Task.Delay(TimeSpan.FromMilliseconds(10));
         Assert.True(session.IsEstablished, "session must reach Established");
         return (session, run, store);
+    }
+
+    /// <summary>
+    /// #546 item 4. The guard used to ask "am I still in the session registry?", but the registry
+    /// is keyed by TCP connection (IP + remote port) while the peer row is keyed (Ip, Asn). A peer
+    /// reconnecting from a new ephemeral port is therefore ADDED alongside its own stale session
+    /// rather than replacing it, so the stale session answered true and, when its hold timer
+    /// finally expired, flipped a live peer's row to inactive — with the repair re-probe answering
+    /// true as well, so nothing restored it.
+    ///
+    /// Drives the real BgpServer ownership delegates: two sessions for the same (Ip, Asn), the
+    /// second claiming the row, then a NON-silent teardown of the first.
+    /// </summary>
+    [Fact]
+    public async Task StaleSessionForSamePeer_Teardown_DoesNotReportTheLiveSessionInactive()
+    {
+        var server = new BgpServer(
+            new AppConfig { Bgp = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1" } },
+            new RouteTable(), AllowAllFilter.Instance, new BgpMetrics(),
+            new NoopSessionFactory(), NullLogger<BgpServer>.Instance);
+
+        // Session A establishes first and owns the row.
+        var connA = new ScriptedConnection();
+        var (sessionA, runA, storeA) = await EstablishWithStoreAsync(new RouteTable(), owner: server, connection: connA);
+        Assert.True(server.OwnsPeerRow(IPAddress.Loopback, sessionA));
+
+        // The peer reconnects (a different source port — a different SessionKey, so no
+        // replacement happens) and session B takes the row.
+        var (sessionB, runB, _) = await EstablishWithStoreAsync(new RouteTable(), owner: server);
+        Assert.True(server.OwnsPeerRow(IPAddress.Loopback, sessionB));
+        Assert.False(server.OwnsPeerRow(IPAddress.Loopback, sessionA), "B's claim displaces A");
+
+        // A tears down NON-silently (peer NOTIFICATION), so only the ownership guard can stop the
+        // status write. Pre-fix it wrote inactive for a peer whose session B is Established.
+        connA.EnqueueMessage(new BgpNotificationMessage { ErrorCode = BgpConstants.Error.Cease, SubErrorCode = 0 });
+        await runA.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.DoesNotContain(storeA.StatusWrites, w => !w.Active);
+
+        sessionA.Dispose();
+        await TeardownAsync(sessionB, runB);
+    }
+
+    /// <summary>
+    /// The control for the test above: with no sibling holding the row, a non-silent teardown
+    /// MUST still report the peer inactive — the ownership guard narrows the write, it does not
+    /// remove it.
+    /// </summary>
+    [Fact]
+    public async Task SoleSession_Teardown_StillReportsInactive()
+    {
+        var server = new BgpServer(
+            new AppConfig { Bgp = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1" } },
+            new RouteTable(), AllowAllFilter.Instance, new BgpMetrics(),
+            new NoopSessionFactory(), NullLogger<BgpServer>.Instance);
+
+        var conn = new ScriptedConnection();
+        var (session, run, store) = await EstablishWithStoreAsync(new RouteTable(), owner: server, connection: conn);
+
+        conn.EnqueueMessage(new BgpNotificationMessage { ErrorCode = BgpConstants.Error.Cease, SubErrorCode = 0 });
+        await run.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Contains(store.StatusWrites, w => !w.Active);
+        session.Dispose();
+    }
+
+    private sealed class NoopSessionFactory : IBgpSessionFactory
+    {
+        public BgpSession Create(IBgpConnection connection, PeerConfig peerConfig) => null!;
     }
 
     [Fact]
@@ -582,7 +663,7 @@ public class BgpSessionRouteOwnershipTests
             conn, new PeerConfig { Address = "127.0.0.1" }, config, new RouteTable(),
             AllowAllFilter.Instance, new BgpMetrics(), NullLogger<BgpSession>.Instance, peerStore: store);
         var calls = 0;
-        session.StillRegisteredProbe = _ => Interlocked.Increment(ref calls) switch { 1 => true, _ => false };
+        session.OwnsPeerRowProbe = _ => Interlocked.Increment(ref calls) switch { 1 => true, _ => false };
         var run = session.RunAsync();
         conn.EnqueueMessage(new BgpOpenMessage
         {

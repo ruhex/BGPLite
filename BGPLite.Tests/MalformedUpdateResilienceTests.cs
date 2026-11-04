@@ -47,17 +47,39 @@ public class MalformedUpdateResilienceTests
         Assert.Equal(BgpConstants.SubError.MalformedAttributeList, ex.SubErrorCode);
     }
 
+    /// <summary>
+    /// RFC 4271 §4.3: "The lower-order four bits of the Attribute Flags octet are unused. They
+    /// MUST be zero when sent and MUST be ignored when received." The reader used to reject bit
+    /// 0x08 with Attribute Flags Error (#272 quoted only the send half), which turned every
+    /// UPDATE from a peer leaving a stray low-order bit set into a treat-as-withdraw — the peer's
+    /// routes silently never installed while conformant neighbours accepted the same frames.
+    /// All four bits must now parse through, alone and in combination with the real flags.
+    /// </summary>
     [Theory]
-    [InlineData(0x08)]
-    [InlineData(0x18)] // ExtendedLength | reserved
-    public void ParseAttribute_ReservedFlagBitSet_RejectedWithAttributeFlagsError(byte flags)
+    [InlineData(0x08)]                           // reserved alone (the bit #272 rejected)
+    [InlineData(0x01)]
+    [InlineData(0x02)]
+    [InlineData(0x04)]
+    [InlineData(0x0F)]                           // all four reserved bits
+    [InlineData(0x18)]                           // ExtendedLength | reserved
+    [InlineData(0x4F)]                           // Transitive | all four reserved bits
+    public void ParseAttribute_ReservedFlagBits_AreIgnoredNotRejected(byte reservedBits)
     {
-        // RFC 4271 §4.3: bit 0x08 is reserved and MUST be zero.
-        var attrBytes = new byte[] { flags, 0x01, 0x01, 0x00 };
+        // ORIGIN (type 1, well-known transitive, 1 octet, value 0 = IGP) carrying the reserved
+        // bits on top of its correct flags. Extended Length (0x10) changes the length encoding,
+        // so it is applied to the frame shape as well as to the flag byte.
+        var flags = (byte)(BgpConstants.Attribute.FlagTransitive | reservedBits);
+        var attrBytes = (flags & BgpConstants.Attribute.FlagExtendedLength) != 0
+            ? new byte[] { flags, BgpConstants.Attribute.Origin, 0x00, 0x01, 0x00 }
+            : [flags, BgpConstants.Attribute.Origin, 0x01, 0x00];
 
-        var ex = Assert.Throws<BgpParseException>(() => BgpMessageReader.ReadMessage(BuildUpdateFrame([.. attrBytes])));
-        Assert.Equal(BgpConstants.Error.UpdateMessageError, ex.ErrorCode);
-        Assert.Equal(BgpConstants.SubError.AttributeFlagsError, ex.SubErrorCode);
+        var message = BgpMessageReader.ReadMessage(BuildUpdateFrame([.. attrBytes]));
+
+        var update = Assert.IsType<BgpUpdateMessage>(message);
+        var attr = Assert.Single(update.PathAttributes);
+        Assert.Equal(BgpConstants.Attribute.Origin, attr.TypeCode);
+        Assert.Equal(flags, attr.Flags);   // carried through verbatim, simply not acted upon
+        Assert.Equal<byte[]>([0x00], attr.Data);
     }
 
     [Fact]

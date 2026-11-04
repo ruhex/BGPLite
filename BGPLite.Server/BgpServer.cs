@@ -25,6 +25,12 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
     // arriving from the same source IP (different ephemeral source ports) must coexist as separate
     // entries; keying by IP only made them clobber each other.
     private readonly ConcurrentDictionary<SessionKey, BgpSession> _sessions = new();
+    // Which session currently owns each peer ROW — keyed (Ip, Asn) like the row, unlike _sessions
+    // which is keyed by TCP connection. Only the owner may write the row's Status, so two live
+    // sessions for one peer (a reconnect on a new source port while the old one waits out its
+    // hold timer) cannot report each other's state. Claimed when the OPEN names the ASN, released
+    // by the owning session's runner after RunAsync returns.
+    private readonly ConcurrentDictionary<(IPAddress Ip, uint Asn), BgpSession> _peerRowOwners = new();
     private readonly CancellationTokenSource _cts = new();
     // Per-source-IP accept throttle: bounds inbound-connect floods from a single IP. Disabled
     // (always-allow) when Bgp.MaxAcceptsPerIpPerMinute <= 0.
@@ -214,14 +220,38 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
                 $"Remove Md5Password for peer {peerIp} or run the server on Linux.");
 
         var key = TcpMd5.KeyBytes(password);
+        // Store BEFORE arming so the per-accept re-apply can find it, but roll the store back if
+        // the kernel refuses the key: _md5Keys membership is what IsPeerMd5Armed — and through it
+        // the control plane's tcpMd5 indicator — reports, so a retained-but-unarmed key would
+        // state that a peer is MD5-protected while the socket enforces nothing. A supported
+        // platform whose kernel still rejects the key (no CONFIG_TCP_MD5SIG, setsockopt EINVAL)
+        // is the same configuration error as an unsupported platform, and fails the same way.
         _md5Keys[address] = key;
-        ApplyMd5(_listener, address, key);
+        if (!ApplyMd5(_listener, address, key))
+        {
+            _md5Keys.TryRemove(address, out _);
+            throw new InvalidOperationException(
+                $"TCP-MD5 (RFC 2385) could not be armed for peer {peerIp} — the kernel refused the key. " +
+                $"Remove Md5Password for that peer or run on a kernel with TCP-MD5 support.");
+        }
     }
 
-    private void ApplyMd5(Socket? socket, IPAddress peer, byte[]? key)
+    /// <inheritdoc cref="ISessionManager.IsPeerMd5Armed" />
+    public bool IsPeerMd5Armed(string peerIp) =>
+        IPAddress.TryParse(peerIp, out var address) && _md5Keys.ContainsKey(address);
+
+    /// <summary>
+    /// Arms or clears the kernel TCP-MD5 key for one peer on <paramref name="socket"/>.
+    /// Returns false when the kernel refused the operation — the caller decides whether that is
+    /// fatal (arming: yes, see <see cref="SetPeerMd5Key"/>) or best-effort (clearing, and the
+    /// per-accept re-apply, which must not take a session down).
+    /// </summary>
+    private bool ApplyMd5(Socket? socket, IPAddress peer, byte[]? key)
     {
+        // No listener yet (keys armed before StartAsync): nothing to refuse. The key stays in
+        // _md5Keys and reaches the kernel through the accept path.
         if (socket is null)
-            return;
+            return true;
         var wire = Md5WireAddress(socket.AddressFamily, peer);
         try
         {
@@ -229,12 +259,14 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
                 TcpMd5.Clear(socket, wire);
             else
                 TcpMd5.Apply(socket, wire, key);
+            return true;
         }
         catch (Exception ex)
         {
             _logger.LogWarning(ex,
                 "TCP-MD5: could not {Verb} the key for {Peer} on this platform — the peer keeps {State} (kernel TCP-MD5 unavailable; RFC 2385 arming is Linux-only)",
                 key is null ? "clear" : "set", peer, key is null ? "unprotected" : "unprotected until supported");
+            return false;
         }
     }
 
@@ -323,11 +355,18 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
                 // RunSessionAsync's finally all go through it), so the accept-window finally
                 // must not touch the socket again.
                 sessionOwnsSocket = true;
-                // The session's finally-block consults this before flipping the peer row to
-                // inactive — "still the registered session for your slot?" A replacement
-                // (TryUpdate below) removes this session from the registry, so its slow unwind
-                // cannot clobber the replacement's Status=active.
-                session.StillRegisteredProbe = s => _sessions.Values.Any(v => ReferenceEquals(v, s));
+                // Peer-row ownership. The session's finally-block consults the probe before
+                // flipping the peer row to inactive — "do I still own this peer's (Ip, Asn) row?"
+                // The claim runs once the OPEN names the ASN, so the newest session for a peer
+                // owns the row and a stale sibling's slow unwind cannot clobber its Status=active.
+                //
+                // Keyed (Ip, Asn) like the row itself, NOT by SessionKey: the registry is keyed by
+                // the TCP connection (IP + remote port), so a peer reconnecting from a new
+                // ephemeral port is added alongside its own stale session instead of replacing it.
+                // The old reference-identity probe ("am I anywhere in the registry?") answered
+                // true for that stale session and reported a live peer as inactive.
+                session.ClaimPeerRow = s => ClaimPeerRow(address, s);
+                session.OwnsPeerRowProbe = s => OwnsPeerRow(address, s);
 
                 if (Volatile.Read(ref _acceptingConnections) == 0)
                 {
@@ -427,9 +466,36 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
             // implementation removes the pair only when both key AND value match — an atomic
             // compare-and-remove. So a newer session installed after our exit is left untouched.
             RemoveSessionIfOwner(key, session);
+            ReleasePeerRow(key.Address, session);
             session.Dispose();
         }
     }
+
+    /// <summary>
+    /// Claims the (Ip, Asn) peer row for <paramref name="session"/> — invoked from the session
+    /// once its OPEN names the remote ASN, which is the first point the row is identifiable.
+    /// Last claimer wins: a peer reconnecting takes the row from its own stale session.
+    /// internal for tests.
+    /// </summary>
+    internal void ClaimPeerRow(IPAddress ip, BgpSession session) =>
+        _peerRowOwners[(ip, session.RemoteAsn)] = session;
+
+    /// <summary>
+    /// Whether <paramref name="session"/> is still the owner of its peer's (Ip, Asn) row, i.e.
+    /// whether it may write that row's Status. internal for tests.
+    /// </summary>
+    internal bool OwnsPeerRow(IPAddress ip, BgpSession session) =>
+        _peerRowOwners.TryGetValue((ip, session.RemoteAsn), out var owner) && ReferenceEquals(owner, session);
+
+    /// <summary>
+    /// Compare-and-remove of the peer row claim, mirroring <see cref="RemoveSessionIfOwner"/>:
+    /// a session that was already displaced removes nothing. Called only AFTER
+    /// <c>RunAsync</c> returns, so the owner still owns the row throughout its own finally-block
+    /// and does write the Status=inactive a genuine teardown owes. internal for tests.
+    /// </summary>
+    internal void ReleasePeerRow(IPAddress ip, BgpSession session) =>
+        ((ICollection<KeyValuePair<(IPAddress, uint), BgpSession>>)_peerRowOwners)
+            .Remove(new KeyValuePair<(IPAddress, uint), BgpSession>((ip, session.RemoteAsn), session));
 
     /// <summary>
     /// Atomically removes <paramref name="session"/> from <see cref="_sessions"/> only if it is
