@@ -51,7 +51,10 @@ public interface ISessionManager
     /// accepted it and will enforce RFC 2385 for that source IP. The control plane's
     /// <c>tcpMd5</c> indicator must be derived from THIS, not from "a password is stored":
     /// a stored password whose arming failed means the peer is unprotected, and reporting it as
-    /// protected is the worse half of the failure.
+    /// protected is the worse half of the failure. The stored <paramref name="password"/> must
+    /// also match the key selected for this source IP: a shared-IP sibling with another password
+    /// is not protected by a different key that happens to be armed.
     /// </summary>
-    bool IsPeerMd5Armed(string peerIp);
+    /// <param name="password">The peer row's stored password, or null/empty when none exists.</param>
+    bool IsPeerMd5Armed(string peerIp, string? password);
 }

@@ -36,6 +36,9 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
     // Per-peer TCP-MD5 (RFC 2385) shared keys, keyed by the peer's source IP (TCP keys the
     // connection by address, not by (IP, ASN) — peers sharing one source IP share the key).
     private readonly ConcurrentDictionary<IPAddress, byte[]> _md5Keys = new();
+    private readonly object _md5Sync = new();
+    private int _md5ListenerReady;
+    internal Func<Socket?, IPAddress, byte[]?, bool>? Md5ApplyProbe { get; set; }
     private Task? _acceptTask;
     private PeriodicTimer? _statusTimer;
     private Task? _statusTask;
@@ -95,6 +98,17 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
             _listener.Bind(new IPEndPoint(IPAddress.Any, ListenPort));
             _logger.LogWarning("IPv6 is not available on this host — serving IPv4 peers only");
         }
+        // Apply every pre-start key after Bind but before Listen, so no unauthenticated SYN can
+        // enter the accept queue. The ready flag is deliberately false until every key succeeded.
+        lock (_md5Sync)
+        {
+            foreach (var (peer, key) in _md5Keys)
+                if (!ApplyMd5(_listener, peer, key))
+                    throw new InvalidOperationException(
+                        $"TCP-MD5 could not arm the persisted key for peer {peer}; startup aborted.");
+            Volatile.Write(ref _md5ListenerReady, 1);
+        }
+
         // After a restart every peer reconnects at once; a backlog of 16 dropped SYNs and pushed
         // peers into their own retry backoff, stretching reconvergence for no benefit. A few
         // hundred pending accepts costs nothing on a route-server host.
@@ -119,6 +133,7 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
         // Otherwise a connection that sneaks in between the GR mark loop and _cts.Cancel()
         // can miss SilentClose and later emit a protocol-incorrect Cease.
         Volatile.Write(ref _acceptingConnections, 0);
+        Volatile.Write(ref _md5ListenerReady, 0);
 
         if (_listener is not null)
         {
@@ -195,35 +210,42 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
             return;
         }
 
-        if (string.IsNullOrEmpty(password))
+        // A key update is one synchronous dictionary + kernel transaction. The same lock also
+        // covers startup application before Listen, so a competing mutation cannot interleave.
+        lock (_md5Sync)
         {
-            _md5Keys.TryRemove(address, out _);
-            ApplyMd5(_listener, address, key: null);
-            return;
-        }
+            if (string.IsNullOrEmpty(password))
+            {
+                if (!_md5Keys.ContainsKey(address))
+                    return;
+                if (!ApplyMd5(_listener, address, key: null))
+                    throw new InvalidOperationException(
+                        $"TCP-MD5 could not clear the key for peer {peerIp}; the previous key remains configured.");
+                _md5Keys.TryRemove(address, out _);
+                return;
+            }
 
-        if (!TcpMd5.IsValidPassword(password))
-        {
-            _logger.LogWarning("TCP-MD5: rejecting a password with an invalid length (must be 1..{Max} UTF-8 bytes)", TcpMd5.PasswordMaxBytes);
-            return;
-        }
+            if (!TcpMd5.IsValidPassword(password))
+            {
+                _logger.LogWarning("TCP-MD5: rejecting a password with an invalid length (must be 1..{Max} UTF-8 bytes)", TcpMd5.PasswordMaxBytes);
+                return;
+            }
 
-        if (!TcpMd5.IsSupported)
-            throw new PlatformNotSupportedException(
-                $"TCP-MD5 (RFC 2385) cannot be armed on this platform — it is Linux-only. " +
-                $"Remove Md5Password for peer {peerIp} or run the server on Linux.");
+            if (!TcpMd5.IsSupported)
+                throw new PlatformNotSupportedException(
+                    $"TCP-MD5 (RFC 2385) cannot be armed on this platform — it is Linux-only. " +
+                    $"Remove Md5Password for peer {peerIp} or run the server on Linux.");
 
-        var key = TcpMd5.KeyBytes(password);
-        // Store BEFORE arming so the per-accept re-apply can find it, but roll the store back if
-        // the kernel refuses the key: _md5Keys membership is what IsPeerMd5Armed — and through it
-        // the control plane's tcpMd5 indicator — reports, so a retained-but-unarmed key would
-        // state that a peer is MD5-protected while the socket enforces nothing. A supported
-        // platform whose kernel still rejects the key (no CONFIG_TCP_MD5SIG, setsockopt EINVAL)
-        // is the same configuration error as an unsupported platform, and fails the same way.
-        _md5Keys[address] = key;
-        if (!ApplyMd5(_listener, address, key))
-        {
-            _md5Keys.TryRemove(address, out _);
+            var key = TcpMd5.KeyBytes(password);
+            var hasPrevious = _md5Keys.TryGetValue(address, out var previous);
+            _md5Keys[address] = key;
+            if (ApplyMd5(_listener, address, key))
+                return;
+
+            if (hasPrevious)
+                _md5Keys[address] = previous!;
+            else
+                _md5Keys.TryRemove(address, out _);
             throw new InvalidOperationException(
                 $"TCP-MD5 (RFC 2385) could not be armed for peer {peerIp} — the kernel refused the key. " +
                 $"Remove Md5Password for that peer or run on a kernel with TCP-MD5 support.");
@@ -231,8 +253,14 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
     }
 
     /// <inheritdoc cref="ISessionManager.IsPeerMd5Armed" />
-    public bool IsPeerMd5Armed(string peerIp) =>
-        IPAddress.TryParse(peerIp, out var address) && _md5Keys.ContainsKey(address);
+    public bool IsPeerMd5Armed(string peerIp, string? password)
+    {
+        if (Volatile.Read(ref _md5ListenerReady) == 0 || string.IsNullOrEmpty(password)
+            || !IPAddress.TryParse(peerIp, out var address))
+            return false;
+        return _md5Keys.TryGetValue(address, out var armed)
+            && armed.AsSpan().SequenceEqual(TcpMd5.KeyBytes(password));
+    }
 
     /// <summary>
     /// Arms or clears the kernel TCP-MD5 key for one peer on <paramref name="socket"/>.
@@ -242,8 +270,11 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
     /// </summary>
     private bool ApplyMd5(Socket? socket, IPAddress peer, byte[]? key)
     {
-        // No listener yet (keys armed before StartAsync): nothing to refuse. The key stays in
-        // _md5Keys and reaches the kernel through the accept path.
+        if (Md5ApplyProbe is { } probe)
+            return probe(socket, peer, key);
+
+        // Before StartAsync this records the desired key only; IsPeerMd5Armed stays false until
+        // StartAsync applies every key successfully before Listen.
         if (socket is null)
             return true;
         var wire = Md5WireAddress(socket.AddressFamily, peer);
@@ -654,6 +685,7 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
             return;
 
         Volatile.Write(ref _acceptingConnections, 0);
+        Volatile.Write(ref _md5ListenerReady, 0);
         _listener?.Close();
         _cts.Cancel();
         _cts.Dispose();  // StopAsync's graceful path doesn't reach here — dispose explicitly

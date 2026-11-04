@@ -338,8 +338,8 @@ public sealed class PeerDeleteTeardownTests
             return Task.CompletedTask;
         }
         public void SetPeerMd5Key(string peerIp, string? password) => Md5Keys.Add((peerIp, password));
-        public bool IsPeerMd5Armed(string peerIp) =>
-            Md5Keys.Any(k => k.Item1 == peerIp && !string.IsNullOrEmpty(k.Item2));
+        public bool IsPeerMd5Armed(string peerIp, string? password) =>
+            !string.IsNullOrEmpty(password) && Md5Keys.LastOrDefault(k => k.Ip == peerIp).Password == password;
     }
 
     private sealed class StaticOptionsFactory(DbContextOptions<BgpDbContext> options) : IDbContextFactory<BgpDbContext>
