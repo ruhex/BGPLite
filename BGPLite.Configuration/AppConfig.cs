@@ -243,6 +243,9 @@ public sealed class AppConfig
             if (list.Asns is null)
                 throw new InvalidOperationException(
                     $"Invalid configuration: RipeStat.AsnLists[{i}].Asns is null — use [] (or omit the key) for a country-only list.");
+            if (list.Country is not null && !string.Equals(list.Country, "RU", StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException(
+                    $"Invalid configuration: RipeStat.AsnLists[{i}].Country is unsupported — only RU is implemented.");
             ValidateCommunity(list.Community, $"RipeStat.AsnLists[{i}] ('{list.Name}'): Community");
             for (var j = 0; j < list.Asns.Count; j++)
                 AsnValidation.RequirePositive(list.Asns[j], $"RipeStat.AsnLists[{i}].Asns[{j}]");

@@ -150,6 +150,36 @@ public sealed class RouteAssemblerPolicyTests
     }
 
     [Fact]
+    public async Task MultipleCountrySubscriptions_KeepEachListsCommunity()
+    {
+        var config = new AppConfig
+        {
+            Bgp = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1" },
+            RipeStat = new RipeStatConfig
+            {
+                AsnLists =
+                [
+                    new AsnList { Name = "ru-a", Country = "RU", Community = "65001:200" },
+                    new AsnList { Name = "ru-b", Country = "RU", Community = "65001:201" }
+                ]
+            }
+        };
+        var store = new ConfiguredPeerStore { Subscriptions = ["ru-a", "ru-b"] };
+        var assembler = new RouteAssembler(
+            new StubPrefixService(), store,
+            new ConfigCommunityResolver(config, config.Bgp),
+            AllowAllFilter.Instance, config, config.Bgp, NullLogger<RouteAssembler>.Instance);
+
+        var routes = await assembler.BuildOutboundRoutesAsync(
+            "203.0.113.7", 65002, new PeerConfig { Address = "203.0.113.7" }, "203.0.113.7", CancellationToken.None);
+
+        Assert.Equal(2, routes.Count);
+        var communities = routes.SelectMany(r => r.Communities).ToArray();
+        Assert.Contains(CommunityCodec.Parse("65001:200"), communities);
+        Assert.Contains(CommunityCodec.Parse("65001:201"), communities);
+    }
+
+    [Fact]
     public async Task NullAsnListsCollection_IsTreatedAsEmpty_NotNre()
     {
         // Explicit YAML null ("AsnLists:") passes Validate as "none", so the build must treat it
