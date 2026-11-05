@@ -272,6 +272,40 @@ public class ConfigHotReloadTests
     }
 
     [Fact]
+    public void Reload_SubscriptionCollision_RejectsWithoutChangingLiveState()
+    {
+        var path = TempConfigPath();
+        try
+        {
+            File.WriteAllText(path, """
+                Bgp:
+                  Asn: 65001
+                  RouterId: 10.0.0.1
+                TrustedProxies:
+                  - 127.0.0.0/8
+                PrefixSources:
+                  - Name: shared
+                    Kind: file
+                    Path: nets.txt
+                RipeStat:
+                  AsnLists:
+                    - Name: shared
+                      Asns: [65010]
+                """);
+            using var harness = NewApi(Config(trustedProxies: []));
+            var logger = new CapturingLogger<ConfigReloader>();
+            var reloader = new ConfigReloader(path, harness.Api, logger);
+
+            reloader.Reload();
+
+            Assert.Equal("127.0.0.1",
+                harness.Api.ResolveClientIpLive(IPAddress.Parse("127.0.0.1"), "198.51.100.5", null));
+            Assert.Contains(logger.Entries, e => e.Level == LogLevel.Error && e.Message.Contains("shared"));
+        }
+        finally { TryDelete(path); }
+    }
+
+    [Fact]
     public void Reload_Missing_File_Logs_Error_And_Does_Not_Throw()
     {
         // A path that does not exist: File.ReadAllText throws → caught → logged → no crash.

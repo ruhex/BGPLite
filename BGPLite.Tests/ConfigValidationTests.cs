@@ -213,6 +213,73 @@ public class ConfigValidationTests
         Assert.Contains("duplicate prefix source name 'dup'", ex.Message);
     }
 
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData(" ")]
+    public void Validate_AsnListRequiresName(string? name)
+    {
+        var config = new AppConfig
+        {
+            Bgp = Bgp(),
+            RipeStat = new RipeStatConfig { AsnLists = [new AsnList { Name = name!, Asns = [65010] }] }
+        };
+
+        var ex = Assert.Throws<InvalidOperationException>(config.Validate);
+        Assert.Contains("RipeStat.AsnLists[0]", ex.Message);
+        Assert.Contains("requires a Name", ex.Message);
+    }
+
+    [Fact]
+    public void Validate_DuplicateAsnListNames_IdentifiesBothEntries()
+    {
+        var config = new AppConfig
+        {
+            Bgp = Bgp(),
+            RipeStat = new RipeStatConfig
+            {
+                AsnLists =
+                [
+                    new AsnList { Name = "dup", Asns = [65010] },
+                    new AsnList { Name = "dup", Asns = [65020] }
+                ]
+            }
+        };
+
+        var ex = Assert.Throws<InvalidOperationException>(config.Validate);
+        Assert.Contains("RipeStat.AsnLists[0]", ex.Message);
+        Assert.Contains("RipeStat.AsnLists[1]", ex.Message);
+        Assert.Contains("case-sensitive", ex.Message);
+    }
+
+    [Fact]
+    public void Validate_CrossCollectionSubscriptionCollision_IdentifiesBothEntries()
+    {
+        var config = new AppConfig
+        {
+            Bgp = Bgp(),
+            PrefixSources = [new PrefixSourceConfig { Name = "shared", Kind = "file", Path = "nets.txt" }],
+            RipeStat = new RipeStatConfig { AsnLists = [new AsnList { Name = "shared", Asns = [65010] }] }
+        };
+
+        var ex = Assert.Throws<InvalidOperationException>(config.Validate);
+        Assert.Contains("PrefixSources[0]", ex.Message);
+        Assert.Contains("RipeStat.AsnLists[0]", ex.Message);
+    }
+
+    [Fact]
+    public void Validate_SubscriptionNames_RemainCaseSensitive()
+    {
+        var config = new AppConfig
+        {
+            Bgp = Bgp(),
+            PrefixSources = [new PrefixSourceConfig { Name = "RU", Kind = "file", Path = "nets.txt" }],
+            RipeStat = new RipeStatConfig { AsnLists = [new AsnList { Name = "ru", Asns = [65010] }] }
+        };
+
+        config.Validate();
+    }
+
     [Fact]
     public void Validate_DefaultPrefixSourceWithoutMatchingSource_Throws()
     {
