@@ -391,6 +391,30 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
     }
 
     [Fact]
+    public async Task Md5Create_ExistingPeerKernelFailure_RestoresPreviousStoredPassword()
+    {
+        if (!OperatingSystem.IsLinux()) return;
+        _port = await StartAsync(
+            new AppConfig { Bgp = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1" } },
+            sessions: new ThrowingMd5Sessions());
+        _client = new HttpClient();
+        var store = new PeerStore(new StaticOptionsFactory(new DbContextOptionsBuilder<BgpDbContext>().UseSqlite(_connection).Options));
+        var saved = await store.SavePeerConfigurationAsync(
+            "198.51.100.22", 65022, null, [], [], [], md5Password: "old-secret");
+
+        using var response = await _client.PostAsync($"http://127.0.0.1:{_port}/api/peers",
+            new StringContent("""{"ip":"198.51.100.22","asn":65022,"md5Password":"new-secret"}""", Encoding.UTF8, "application/json"));
+        var body = await response.Content.ReadAsStringAsync();
+
+        Assert.Equal(HttpStatusCode.InternalServerError, response.StatusCode);
+        Assert.Contains("previous stored password was restored", body, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("new-secret", body);
+        Assert.DoesNotContain("old-secret", body);
+        Assert.Equal("old-secret", (await store.GetPeerDetailAsync(saved.Id))!.Md5Password);
+        Assert.Single(await store.GetPeersByIpAsync("198.51.100.22"));
+    }
+
+    [Fact]
     public async Task Md5Update_KernelFailure_RestoresPreviousStoredPassword()
     {
         if (!OperatingSystem.IsLinux()) return;
