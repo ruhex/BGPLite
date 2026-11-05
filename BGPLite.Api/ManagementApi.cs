@@ -300,9 +300,12 @@ public sealed class ManagementApi : IHostedService, IDisposable
     /// a new one must leave the whole-IP state consistent with the store. The previous behavior
     /// armed/unarmed from the single edited row, silently disarming (or overriding) siblings.
     /// </summary>
+    internal Func<string, Task>? Md5RearmProbe { get; set; }
     internal async Task RearmPeerIpMd5KeyAsync(string ip)
     {
         var remaining = await _store.GetPeerMd5CredentialsForIpAsync(ip);
+        if (Md5RearmProbe is not null)
+            await Md5RearmProbe(ip);
         _sessionManager.SetPeerMd5Key(ip, ResolveSharedIpKey(ip, remaining, _logger));
     }
 

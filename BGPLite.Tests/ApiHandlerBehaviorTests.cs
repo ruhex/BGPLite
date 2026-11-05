@@ -665,6 +665,45 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
     }
 
     [Fact]
+    public async Task Md5Updates_SharedIp_CannotApplyCredentialsReadBeforeNewerClear()
+    {
+        if (!OperatingSystem.IsLinux()) return;
+        var sessions = new RecordingSessions();
+        _port = await StartAsync(
+            new AppConfig { Bgp = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1" } },
+            sessions);
+        _client = new HttpClient();
+        var store = new PeerStore(new StaticOptionsFactory(new DbContextOptionsBuilder<BgpDbContext>().UseSqlite(_connection).Options));
+        var saved = await store.SavePeerConfigurationAsync(
+            "198.51.100.23", 65023, null, [], [], [], md5Password: "old-secret");
+        var firstRead = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseFirst = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var probeCalls = 0;
+        _api!.Md5RearmProbe = async _ =>
+        {
+            if (Interlocked.Increment(ref probeCalls) == 1)
+            {
+                firstRead.SetResult();
+                await releaseFirst.Task;
+            }
+        };
+
+        var replace = _client.PutAsync($"http://127.0.0.1:{_port}/api/peers/{saved.Id}",
+            new StringContent("""{"md5Password":"new-secret"}""", Encoding.UTF8, "application/json"));
+        await firstRead.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        using var clear = await _client.PutAsync($"http://127.0.0.1:{_port}/api/peers/{saved.Id}",
+            new StringContent("""{"md5Password":""}""", Encoding.UTF8, "application/json"));
+        Assert.True(clear.IsSuccessStatusCode, await clear.Content.ReadAsStringAsync());
+        releaseFirst.SetResult();
+        using var replaced = await replace;
+        Assert.True(replaced.IsSuccessStatusCode, await replaced.Content.ReadAsStringAsync());
+
+        Assert.Null((await store.GetPeerDetailAsync(saved.Id))!.Md5Password);
+        Assert.False(sessions.IsPeerMd5Armed(saved.Ip, "new-secret"));
+        Assert.Null(sessions.Md5Keys.Last().Password);
+    }
+
+    [Fact]
     public async Task PeerDetail_StatusFollowsLiveEstablishedState_NotPersistedWriteRaces()
     {
         var sessions = new RecordingSessions();
