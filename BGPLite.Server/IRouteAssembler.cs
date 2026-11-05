@@ -3,6 +3,9 @@ using BGPLite.Routing;
 
 namespace BGPLite.Server;
 
+/// <summary>Outbound routes plus whether every configured source resolved without failure.</summary>
+public sealed record RouteAssemblyResult(List<Route> Routes, bool Complete);
+
 /// <summary>
 /// Resolves the outbound route set for one peer — "which prefixes does this peer get" — without
 /// touching the transport. The caller (<see cref="BgpSession"/>) aggregates, batches and sends.
@@ -27,4 +30,12 @@ public interface IRouteAssembler
     /// <param name="ct">Cancels the fetches the assembly performs.</param>
     Task<List<Route>> BuildOutboundRoutesAsync(
         string peerIp, uint remoteAsn, PeerConfig filterPeerConfig, string peerLabel, CancellationToken ct);
+
+    /// <summary>
+    /// Result-consuming variant for read models such as prefix export. Existing BGP callers keep
+    /// the legacy route-list method; implementations without source failures report Complete=true.
+    /// </summary>
+    async Task<RouteAssemblyResult> BuildOutboundRouteResultAsync(
+        string peerIp, uint remoteAsn, PeerConfig filterPeerConfig, string peerLabel, CancellationToken ct) =>
+        new(await BuildOutboundRoutesAsync(peerIp, remoteAsn, filterPeerConfig, peerLabel, ct), Complete: true);
 }

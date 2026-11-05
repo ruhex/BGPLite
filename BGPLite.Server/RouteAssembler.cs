@@ -50,10 +50,16 @@ public sealed class RouteAssembler : IRouteAssembler
 
     /// <inheritdoc />
     public async Task<List<Route>> BuildOutboundRoutesAsync(
+        string peerIp, uint remoteAsn, PeerConfig filterPeerConfig, string peerLabel, CancellationToken ct) =>
+        (await BuildOutboundRouteResultAsync(peerIp, remoteAsn, filterPeerConfig, peerLabel, ct)).Routes;
+
+    /// <inheritdoc />
+    public async Task<RouteAssemblyResult> BuildOutboundRouteResultAsync(
         string peerIp, uint remoteAsn, PeerConfig filterPeerConfig, string peerLabel, CancellationToken ct)
     {
         var nextHop = BgpConstants.IPAddressToUint(_bgpConfig.GetRouterIdAddress());
         var routes = new List<Route>();
+        var complete = true;
         var defaultComms = _communityResolver.Resolve(
             new CommunitySource(CommunitySourceKind.PrefixSource, _appConfig.DefaultPrefixSource));
 
@@ -81,10 +87,12 @@ public sealed class RouteAssembler : IRouteAssembler
                 catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }  // only CALLER cancellation — a per-source timeout OCE (HttpPrefixProvider's linked CTS, live ct) must stay a fetch failure below
                 catch (Exception ex)
                 {
+                    complete = false;
                     _logger.LogError(ex, "Failed to fetch RU prefixes for {Peer}", peerLabel);
                 }
 
-                return await FilterAndReturnAsync(routes, filterPeerConfig, ct);
+                return new RouteAssemblyResult(
+                    await FilterAndReturnAsync(routes, filterPeerConfig, ct), complete);
             }
 
             _logger.LogInformation("Peer {Peer} subscriptions: [{Subs}]", peerLabel,
@@ -218,6 +226,7 @@ public sealed class RouteAssembler : IRouteAssembler
             {
                 if (!PrefixCidr.TryParse(cidr, out var prefix, out var length))
                 {
+                    complete = false;
                     _logger.LogWarning("Skipping malformed custom prefix '{Cidr}' for {Peer}", cidr, peerLabel);
                     continue;
                 }
@@ -294,11 +303,13 @@ public sealed class RouteAssembler : IRouteAssembler
                 catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
                 catch (Exception ex)
                 {
+                    complete = false;
                     _logger.LogError(ex, "Failed to fetch RU fallback for {Peer}", peerLabel);
                 }
             }
 
-            return await FilterAndReturnAsync(routes, filterPeerConfig, ct);
+            return new RouteAssemblyResult(
+                await FilterAndReturnAsync(routes, filterPeerConfig, ct), complete && fetchFailures == 0);
         }
         else
         {
@@ -309,7 +320,8 @@ public sealed class RouteAssembler : IRouteAssembler
             if (ct.IsCancellationRequested)
             {
                 _logger.LogInformation("Cancelled build for unknown peer {Ip} — not auto-registering", peerLabel);
-                return await FilterAndReturnAsync(routes, filterPeerConfig, ct);
+                return new RouteAssemblyResult(
+                    await FilterAndReturnAsync(routes, filterPeerConfig, ct), complete);
             }
 
             _logger.LogInformation("Unknown peer {Ip}, auto-registering with RU defaults", peerLabel);
@@ -326,10 +338,12 @@ public sealed class RouteAssembler : IRouteAssembler
             catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
             catch (Exception ex)
             {
+                complete = false;
                 _logger.LogError(ex, "Failed to fetch RU prefixes for {Peer}", peerLabel);
             }
 
-            return await FilterAndReturnAsync(routes, filterPeerConfig, ct);
+            return new RouteAssemblyResult(
+                await FilterAndReturnAsync(routes, filterPeerConfig, ct), complete);
         }
     }
 

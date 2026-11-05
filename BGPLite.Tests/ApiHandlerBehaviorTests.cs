@@ -44,7 +44,7 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
         _connection.Dispose();
     }
 
-    private async Task<int> StartAsync(AppConfig template, ISessionManager? sessions = null, ILogger<ManagementApi>? logger = null, IPrefixSourceService? prefixSources = null)
+    private async Task<int> StartAsync(AppConfig template, ISessionManager? sessions = null, ILogger<ManagementApi>? logger = null, IPrefixSourceService? prefixSources = null, IPrefixService? prefixService = null)
     {
         for (var attempt = 0; ; attempt++)
         {
@@ -55,18 +55,23 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
                 CorsAllowedOrigins = template.CorsAllowedOrigins,
                 ApiRateLimit = template.ApiRateLimit,
                 RipeStat = template.RipeStat,
+                PrefixSources = template.PrefixSources,
+                DefaultPrefixSource = template.DefaultPrefixSource,
                 ApiListen = "127.0.0.1",
                 ApiPort = port,
             };
+            var store = new PeerStore(new StaticOptionsFactory(new DbContextOptionsBuilder<BgpDbContext>().UseSqlite(_connection).Options));
+            IPrefixService prefixes = prefixService ?? new InertPrefixService();
             _api = new ManagementApi(
-                new PeerStore(new StaticOptionsFactory(new DbContextOptionsBuilder<BgpDbContext>().UseSqlite(_connection).Options)),
+                store,
                 new RouteTable(),
                 config,
                 new BgpMetrics(),
                 logger ?? NullLogger<ManagementApi>.Instance,
-                new InertPrefixService(),
+                prefixes,
                 prefixSources ?? new InertPrefixSources(),
-                sessions ?? new InertSessions());
+                sessions ?? new InertSessions(),
+                TestRouteAssembly.CreateExporter(store, config, prefixes));
             try
             {
                 await _api.StartAsync(CancellationToken.None);
@@ -94,6 +99,56 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
         Assert.True(response.IsSuccessStatusCode);
         Assert.Equal("text/plain", response.Content.Headers.ContentType?.MediaType);
         Assert.Equal("10.0.0.0/8", body.TrimEnd());   // pre-fix: "\"10.0.0.0/8\\n\"" with application/json
+    }
+
+    [Fact]
+    public async Task ExportJson_UsesCompleteOutboundPipeline()
+    {
+        var store = new PeerStore(new StaticOptionsFactory(new DbContextOptionsBuilder<BgpDbContext>().UseSqlite(_connection).Options));
+        var saved = await store.SavePeerConfigurationAsync(
+            "198.51.100.7", 65090, null, ["asn", "configured"], [("198.51.100.0", (byte)24)], [65020]);
+        var userSource = await store.AddCustomSourceAsync(saved.Id, "user", "https://example.com/user.txt", null);
+        await store.SetSourceActiveAsync(saved.Id, userSource.Id, true);
+        var prefixes = new ExportPrefixService();
+        var config = new AppConfig
+        {
+            Bgp = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1" },
+            RipeStat = new RipeStatConfig { AsnLists = [new AsnList { Name = "asn", Asns = [65010] }] },
+            PrefixSources = [new PrefixSourceConfig { Name = "configured", Kind = "file", Path = "nets.txt" }]
+        };
+        _port = await StartAsync(config, prefixService: prefixes);
+        _client = new HttpClient();
+
+        using var response = await _client.GetAsync($"http://127.0.0.1:{_port}/api/peers/{saved.Id}/prefixes?format=json");
+        var body = await response.Content.ReadAsStringAsync();
+        var exported = JsonSerializer.Deserialize<string[]>(body);
+
+        Assert.True(response.IsSuccessStatusCode, body);
+        Assert.Equal([
+            "10.10.0.0/16", "10.20.0.0/16", "172.16.0.0/12", "192.0.2.0/24", "198.51.100.0/24"
+        ], exported!.OrderBy(p => p, StringComparer.Ordinal));
+    }
+
+    [Fact]
+    public async Task ExportJson_SourceFailure_Returns503WithoutPartialPrefixes()
+    {
+        var store = new PeerStore(new StaticOptionsFactory(new DbContextOptionsBuilder<BgpDbContext>().UseSqlite(_connection).Options));
+        var saved = await store.SavePeerConfigurationAsync(
+            "198.51.100.8", 65091, null, ["asn"], [("198.51.100.0", (byte)24)], []);
+        var config = new AppConfig
+        {
+            Bgp = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1" },
+            RipeStat = new RipeStatConfig { AsnLists = [new AsnList { Name = "asn", Asns = [65010] }] }
+        };
+        _port = await StartAsync(config, prefixService: new ExportPrefixService { FailAsns = true });
+        _client = new HttpClient();
+
+        using var response = await _client.GetAsync($"http://127.0.0.1:{_port}/api/peers/{saved.Id}/prefixes?format=json");
+        var body = await response.Content.ReadAsStringAsync();
+
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
+        Assert.Contains("no partial list", body);
+        Assert.DoesNotContain("198.51.100.0", body);
     }
 
     [Fact]
@@ -587,6 +642,26 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
         public Task<List<(UInt128 Prefix, byte Length, bool IsIpv4, uint Asn)>> GetRuPrefixesAsync(CancellationToken ct = default) => Task.FromResult(new List<(UInt128, byte, bool, uint)>());
         public Task<IReadOnlyList<(UInt128 Prefix, byte Length, bool IsIpv4)>> GetSourcePrefixesAsync(string name, CancellationToken ct = default) => Task.FromResult<IReadOnlyList<(UInt128 Prefix, byte Length, bool IsIpv4)>>([]);
         public Task<IReadOnlyList<(UInt128 Prefix, byte Length, bool IsIpv4)>> GetUserSourcePrefixesAsync(string name, string url, string? community, CancellationToken ct = default) => Task.FromResult<IReadOnlyList<(UInt128 Prefix, byte Length, bool IsIpv4)>>([]);
+        public Task WarmUpAsync(CancellationToken ct = default) => Task.CompletedTask;
+    }
+
+    private sealed class ExportPrefixService : IPrefixService
+    {
+        public bool FailAsns { get; init; }
+        public Task<IReadOnlyList<(UInt128 Prefix, byte Length, bool IsIpv4)>> GetPrefixesAsync(uint asn, CancellationToken ct = default) => Task.FromResult<IReadOnlyList<(UInt128, byte, bool)>>([]);
+        public Task<List<(UInt128 Prefix, byte Length, bool IsIpv4, uint Asn)>> GetPrefixesForAsns(IEnumerable<uint> asns, CancellationToken ct = default)
+        {
+            if (FailAsns) throw new InvalidOperationException("simulated source outage");
+            return Task.FromResult(asns.Select(asn =>
+                ((UInt128)(0x0A000000u + (asn % 200) * 0x10000u), (byte)16, true, asn)).ToList());
+        }
+        public Task<int> GetPrefixCountAsync(uint asn, CancellationToken ct = default) => Task.FromResult(0);
+        public Task<List<(UInt128 Prefix, byte Length, bool IsIpv4, uint Asn)>> GetRuPrefixesAsync(CancellationToken ct = default) =>
+            Task.FromResult(new List<(UInt128, byte, bool, uint)> { (0xCB007100, 24, true, 0) });
+        public Task<IReadOnlyList<(UInt128 Prefix, byte Length, bool IsIpv4)>> GetSourcePrefixesAsync(string name, CancellationToken ct = default) =>
+            Task.FromResult<IReadOnlyList<(UInt128, byte, bool)>>([(0xAC100000, 12, true)]);
+        public Task<IReadOnlyList<(UInt128 Prefix, byte Length, bool IsIpv4)>> GetUserSourcePrefixesAsync(string name, string url, string? community, CancellationToken ct = default) =>
+            Task.FromResult<IReadOnlyList<(UInt128, byte, bool)>>([(0xC0000200, 24, true)]);
         public Task WarmUpAsync(CancellationToken ct = default) => Task.CompletedTask;
     }
 
