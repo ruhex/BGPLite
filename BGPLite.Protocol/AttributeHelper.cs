@@ -176,10 +176,9 @@ public static class AttributeHelper
 
     public static uint[] ReadCommunities(PathAttribute attr)
     {
-        // RFC 1997 §3: each community is exactly 4 octets — a non-multiple-of-4 payload would
-        // silently drop tail bytes otherwise (mirrors the % 12 rule of ReadLargeCommunities).
-        if (attr.Data.Length % 4 != 0)
-            throw new BgpParseException($"COMMUNITY attribute length must be a multiple of 4, got {attr.Data.Length}",
+        // RFC 7606 §7.8: COMMUNITY requires a non-zero multiple of 4 and treat-as-withdraw.
+        if (attr.Data.Length == 0 || attr.Data.Length % 4 != 0)
+            throw new BgpParseException($"COMMUNITY attribute length must be a non-zero multiple of 4, got {attr.Data.Length}",
                 BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.OptionalAttributeError);
 
         var count = attr.Data.Length / 4;
