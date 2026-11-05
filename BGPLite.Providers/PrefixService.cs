@@ -70,6 +70,7 @@ public sealed class PrefixService : IPrefixService
     {
         if (!string.Equals(sourceName, _config.DefaultPrefixSource, StringComparison.Ordinal))
             return;
+        Interlocked.Increment(ref _ruGeneration);
         Volatile.Write(ref _ruCache, null);
     }
 
@@ -269,6 +270,8 @@ public sealed class PrefixService : IPrefixService
     /// </summary>
     private sealed record RuCacheEntry(List<(UInt128 Prefix, byte Length, bool IsIpv4, uint Asn)> Projected, long CachedAtTicks);
     private RuCacheEntry? _ruCache;
+    private long _ruGeneration;
+    internal Action? RuPublishProbe { get; set; }
     private readonly Func<string, Task>? _onSourceChanged;
 
     public async Task<List<(UInt128 Prefix, byte Length, bool IsIpv4, uint Asn)>> GetRuPrefixesAsync(CancellationToken ct = default)
@@ -291,6 +294,7 @@ public sealed class PrefixService : IPrefixService
             if (cached is not null && _timeProvider.GetUtcNow().UtcDateTime.Ticks - cached.CachedAtTicks < _ruCacheTtl.Ticks)
                 return cached.Projected;
 
+            var generation = Volatile.Read(ref _ruGeneration);
             try
             {
                 // Callback-free load: no onSourceChanged can fire while this frame holds
@@ -319,9 +323,13 @@ public sealed class PrefixService : IPrefixService
                 throw;
             }
 
-            // Swap the whole entry atomically — projection and timestamp move together, so a reader
-            // can never observe a mismatched (new projection, old timestamp) pair.
-            Interlocked.Exchange(ref _ruCache, new RuCacheEntry(projected, _timeProvider.GetUtcNow().UtcDateTime.Ticks));
+            // A source commit during the load invalidates this snapshot. Do not republish it over
+            // the invalidation; the next caller reloads the newer committed source content.
+            RuPublishProbe?.Invoke();
+            if (generation == Volatile.Read(ref _ruGeneration))
+                Interlocked.Exchange(ref _ruCache, new RuCacheEntry(projected, _timeProvider.GetUtcNow().UtcDateTime.Ticks));
+            else
+                _logger?.LogDebug("Discarded a stale RU/default projection after a concurrent source commit");
         }
         finally
         {

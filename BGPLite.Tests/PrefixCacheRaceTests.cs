@@ -184,10 +184,31 @@ public class PrefixCacheRaceTests
         Assert.Equal(2, pushes.Count);
     }
 
+    [Fact]
+    public async Task GetRuPrefixesAsync_CommitDuringOldLoad_DoesNotPublishStaleProjection()
+    {
+        var source = new CountingPrefixSource();
+        var service = Service(source, defaultSource: string.Empty);
+        var committed = false;
+        service.RuPublishProbe = () =>
+        {
+            if (committed) return;
+            committed = true;
+            source.Commit([new IpPrefix(0xCB000000u, 8)]); // 203.0.0.0/8
+        };
+
+        await service.GetRuPrefixesAsync();
+        var latest = await service.GetRuPrefixesAsync();
+
+        var prefix = Assert.Single(latest);
+        Assert.Equal(0xCB000000u, prefix.Prefix);
+        Assert.Equal(2, source.LoadCalls); // stale publication was rejected, so the new content reloads
+    }
+
     // ---- helpers ----
 
-    private static PrefixService Service(CountingPrefixSource source, TimeSpan? cacheTtl = null, TimeProvider? timeProvider = null, Func<string, Task>? onSourceChanged = null) =>
-        new(new AppConfig(),
+    private static PrefixService Service(CountingPrefixSource source, TimeSpan? cacheTtl = null, TimeProvider? timeProvider = null, Func<string, Task>? onSourceChanged = null, string? defaultSource = null) =>
+        new(new AppConfig { DefaultPrefixSource = defaultSource },
             // Both are required in production; neither is on the GetRuPrefixesAsync path this
             // fixture exercises, so the fake composition states that explicitly rather than relying
             // on a nullable parameter that production code could also leave unset.
@@ -214,6 +235,14 @@ public class PrefixCacheRaceTests
         public bool FailNext { get; set; }
         /// <summary>Whether the next completed load reports a content change (the push trigger).</summary>
         public bool ChangedOnNextLoad { get; set; }
+        public IReadOnlyList<IpPrefix> Current { get; private set; } =
+            [new IpPrefix(0x0A000000u, 8), new IpPrefix(0xC0A80000u, 16)];
+
+        public void Commit(IReadOnlyList<IpPrefix> prefixes)
+        {
+            Current = prefixes;
+            ContentCommitted?.Invoke(string.Empty);
+        }
 
         public Task<IReadOnlyList<(PrefixSourceConfig Source, IReadOnlyList<IpPrefix> Prefixes)>> LoadAllAsync(CancellationToken ct = default) =>
             throw new NotImplementedException();
@@ -229,12 +258,7 @@ public class PrefixCacheRaceTests
             if (FailNext) throw new InvalidOperationException("simulated default-source failure");
             var changed = ChangedOnNextLoad;
             ChangedOnNextLoad = false;
-            IReadOnlyList<IpPrefix> prefixes = new List<IpPrefix>
-            {
-                new(0x0A000000u, 8),
-                new(0xC0A80000u, 16),
-            };
-            return (prefixes, changed);
+            return (Current, changed);
         }
 
         public Task<IReadOnlyList<IpPrefix>> GetDefaultAsync(CancellationToken ct = default) =>
