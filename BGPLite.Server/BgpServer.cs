@@ -77,6 +77,7 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
         _acceptThrottle = new IpAcceptThrottle(config.Bgp.MaxAcceptsPerIpPerMinute);
     }
 
+    /// <summary>Binds the listener, arms persisted MD5 keys before Listen, and starts the accept and status loops.</summary>
     public Task StartAsync(CancellationToken cancellationToken)
     {
         // Prefer the dual-mode IPv6 listener — it accepts both IPv6 peers and IPv4 peers (the
@@ -476,6 +477,7 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
         }
     }
 
+    /// <summary>Accepts through the native async path, using a managed blocking task on macOS to contain RST callback failures.</summary>
     private async Task<Socket> AcceptSocketAsync(CancellationToken cancellationToken)
     {
         // Darwin's async socket engine can materialize a zero-length RST endpoint on its callback

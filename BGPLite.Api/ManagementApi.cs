@@ -1722,6 +1722,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
         return sb.ToString();
     }
 
+    /// <summary>Returns a descriptive 400 with both indexes for the first duplicate key, or null when all values are distinct.</summary>
     private static ApiResponse? FindDuplicateError<T>(
         IReadOnlyList<T>? values, string field, Func<T, string> keySelector)
     {
