@@ -19,11 +19,13 @@ namespace BGPLite.Server;
 internal sealed class IpAcceptThrottle
 {
     private const int SweepEvery = 64;
+    private const int MaxTrackedIps = 10_000;
     private readonly int _maxPerMinute;
     private readonly long _windowTicks;
     private readonly ConcurrentDictionary<string, Window> _byIp = new(StringComparer.Ordinal);
     private readonly Func<long> _nowTicks;
     private int _callsSinceSweep;
+    private long _nextCapacitySweepTicks;
     // Coarse throttle-level lock: serializes the dictionary-mutation parts of TryAccept and
     // SweepStale so a sweep cannot TryRemove a Window that a concurrent TryAccept just refreshed —
     // a sweep racing a refresh could orphan the just-recorded accept and effectively reset the
@@ -85,18 +87,30 @@ internal sealed class IpAcceptThrottle
 
         var nowTicks = _nowTicks();
         bool allowed;
-        // Hold _dictLock across GetOrAdd + Decide + store so SweepStale cannot remove this Window
-        // between the refresh and the store. The Decide computation is cheap (small list),
-        // so the critical section is short.
+        // The coarse lock keeps lookup, capacity admission, and window update atomic with sweeps.
         lock (_dictLock)
         {
-            var window = _byIp.GetOrAdd(ip, _ => new Window());
+            if (!_byIp.TryGetValue(ip, out var window))
+            {
+                if (_byIp.Count >= MaxTrackedIps)
+                {
+                    // Do not turn a sustained distinct-IP flood into a full-map scan per accept.
+                    if (nowTicks >= _nextCapacitySweepTicks)
+                    {
+                        SweepStaleLocked(nowTicks);
+                        _nextCapacitySweepTicks = nowTicks + _windowTicks;
+                    }
+                    if (_byIp.Count >= MaxTrackedIps)
+                        return false;
+                }
+                window = new Window();
+                _byIp[ip] = window;
+            }
             allowed = Decide(window.Timestamps, nowTicks, _windowTicks, _maxPerMinute, out var updated);
             window.Timestamps = updated;
         }
 
-        // Amortized eviction of idle IPs (no timestamp newer than one window) so the tracker can't
-        // grow without bound under a distinct-IP flood. Active/recent IPs are always retained.
+        // Amortized eviction of idle IPs; active/recent IPs are retained within the hard cap.
         if (Interlocked.Increment(ref _callsSinceSweep) >= SweepEvery)
         {
             _callsSinceSweep = 0;
@@ -108,18 +122,19 @@ internal sealed class IpAcceptThrottle
     /// <summary>Removes tracked IPs whose every timestamp is older than one window (idle IPs).</summary>
     internal void SweepStale(long nowTicks)
     {
-        var cutoff = nowTicks - _windowTicks;
-        // Hold _dictLock across the whole sweep so a racing TryAccept cannot refresh a Window
-        // between the staleness check and the removal; removing while iterating a
-        // ConcurrentDictionary is supported, but that alone would not make check+remove atomic.
+        // Check + remove is atomic with TryAccept's refresh under the same lock.
         lock (_dictLock)
+            SweepStaleLocked(nowTicks);
+    }
+
+    private void SweepStaleLocked(long nowTicks)
+    {
+        var cutoff = nowTicks - _windowTicks;
+        foreach (var (ip, window) in _byIp)
         {
-            foreach (var (ip, window) in _byIp)
-            {
-                var stale = window.Timestamps.Count == 0 || IsAllStale(window.Timestamps, cutoff);
-                if (stale)
-                    _byIp.TryRemove(ip, out _);
-            }
+            var stale = window.Timestamps.Count == 0 || IsAllStale(window.Timestamps, cutoff);
+            if (stale)
+                _byIp.TryRemove(ip, out _);
         }
     }
 

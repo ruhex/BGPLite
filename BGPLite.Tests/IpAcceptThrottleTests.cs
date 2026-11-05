@@ -158,6 +158,26 @@ public class IpAcceptThrottleTests
     }
 
     [Fact]
+    public void DistinctIpFlood_CapsActiveState_WithoutResettingExistingLimits()
+    {
+        const int capacity = 10_000;
+        var ticks = 1_000L;
+        var throttle = new IpAcceptThrottle(maxPerMinute: 1, nowTicks: () => ticks);
+
+        for (var i = 0; i < capacity; i++)
+            Assert.True(throttle.TryAccept($"198.{i / 65536}.{i / 256 % 256}.{i % 256}"));
+        Assert.Equal(capacity, throttle.TrackedCount);
+
+        Assert.False(throttle.TryAccept("203.0.113.1"), "a new IP beyond capacity must be rejected");
+        Assert.Equal(capacity, throttle.TrackedCount);
+        Assert.False(throttle.TryAccept("198.0.0.0"), "an existing IP must retain its exhausted window");
+
+        ticks += MinuteTicks + 1;
+        Assert.True(throttle.TryAccept("203.0.113.1"), "stale capacity must be reclaimable");
+        Assert.True(throttle.TrackedCount < capacity);
+    }
+
+    [Fact]
     public void SweepStale_Evicts_Idle_Ips()
     {
         var ticks = 1_000L;
