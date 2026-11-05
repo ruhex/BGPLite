@@ -11,4 +11,9 @@
     <ProjectReference Include="..\BGPLite.Protocol\BGPLite.Protocol.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <InternalsVisibleTo Include="BGPLite.Server" />
+    <InternalsVisibleTo Include="BGPLite.Tests" />
+  </ItemGroup>
+
 </Project>

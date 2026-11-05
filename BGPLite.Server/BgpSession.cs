@@ -1202,6 +1202,10 @@ public sealed class BgpSession : IDisposable
                 // remove it. A route the filter dropped is never installed and therefore never
                 // owned, so a later withdrawal for it removes nothing.
                 _routeTable.AddOrUpdate(route, owner: this);
+                // A stale loss callback may have run after the initial TryAdd. Restore membership
+                // only if this session is still the current owner after the table mutation.
+                if (_routeTable.IsOwnedBy(nlri.Address, nlri.Length, nlri.IsIpv4, this))
+                    _installedPrefixes.TryAdd(nlri, 0);
 
                 // Warn AFTER the install with the actual count: the pre-install count logged
                 // "0/1" for the very first route under cap=1 (threshold floor 0).
@@ -1293,6 +1297,10 @@ public sealed class BgpSession : IDisposable
                                     $"Peer {_peer} exceeded the per-peer prefix limit ({cap}); session reset per RFC 4486");
                             _installedPrefixes.TryAdd(nlri, 0);
                             _routeTable.AddOrUpdate(route, owner: this);
+                            // A stale loss callback may have run after the initial TryAdd. Restore membership
+                            // only if this session is still the current owner after the table mutation.
+                            if (_routeTable.IsOwnedBy(nlri.Address, nlri.Length, nlri.IsIpv4, this))
+                                _installedPrefixes.TryAdd(nlri, 0);
 
                             if (cap > 0 && !_maxPrefixesWarned && _installedPrefixes.Count >= MaxPrefixWarningThreshold(cap))
                             {
@@ -1357,13 +1365,13 @@ public sealed class BgpSession : IDisposable
     }
 
     /// <summary>
-    /// Another session took over a key we installed — stop counting it. Runs on the REPLACING
-    /// session's thread (see RouteTable.EntryOwnershipLost); the concurrent set makes that safe,
-    /// and a late/duplicate notification only removes an entry already gone.
+    /// Another session took over a key we installed — stop counting it unless this session has
+    /// already reacquired the key before this stale callback ran. Runs on the replacer's thread.
     /// </summary>
     private void OnEntryOwnershipLost(object previousOwner, (UInt128 Prefix, byte Length, bool IsIpv4) key)
     {
-        if (!ReferenceEquals(previousOwner, this))
+        if (!ReferenceEquals(previousOwner, this)
+            || _routeTable.IsOwnedBy(key.Prefix, key.Length, key.IsIpv4, this))
             return;
         _installedPrefixes.TryRemove(new IpPrefix(key.Prefix, key.Length, key.IsIpv4), out _);
     }
