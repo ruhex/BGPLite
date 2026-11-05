@@ -185,6 +185,7 @@ public class PrefixCacheRaceTests
     }
 
     [Fact]
+    /// <summary>Commits during an old load and verifies that generation validation rejects its stale projection.</summary>
     public async Task GetRuPrefixesAsync_CommitDuringOldLoad_DoesNotPublishStaleProjection()
     {
         var source = new CountingPrefixSource();

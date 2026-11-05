@@ -36,6 +36,7 @@ public class MalformedUpdateResilienceTests
     }
 
     [Fact]
+    /// <summary>Verifies that an extended-length attribute with a truncated header produces a bounded BGP parse error.</summary>
     public void ParseAttribute_ExtendedLengthFlag_TooFewHeaderBytes_ThrowsBgpParseException()
     {
         // Extended-Length flag set (0x10) but only the 2 fixed header bytes present — the

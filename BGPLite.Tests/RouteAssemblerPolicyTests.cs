@@ -112,6 +112,7 @@ public sealed class RouteAssemblerPolicyTests
     }
 
     [Fact]
+    /// <summary>Verifies that mixed failure plus successful empty resolution retains the documented RU fallback.</summary>
     public async Task MixedFailureAndEmptyResolution_StillFallsBackToRu()
     {
         // D26 refinement: fail-closed is for TOTAL failure only. tier1 fails
@@ -160,6 +161,7 @@ public sealed class RouteAssemblerPolicyTests
     }
 
     [Fact]
+    /// <summary>Verifies that an unknown peer subscription produces an actionable warning instead of silent zero routes.</summary>
     public async Task UnknownSubscriptionName_IsWarned_NotSilentlyIgnored()
     {
         // A subscription matching no AsnLists entry and no PrefixSource is a config typo —
@@ -209,6 +211,7 @@ public sealed class RouteAssemblerPolicyTests
     }
 
     [Fact]
+    /// <summary>Verifies that control characters in a user-source name cannot forge additional log lines.</summary>
     public async Task UserSourceName_ControlCharacters_CannotForgeLogLines()
     {
         var logger = new CapturingLogger();

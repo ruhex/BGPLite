@@ -217,6 +217,7 @@ public class ConfigValidationTests
     [InlineData(null)]
     [InlineData("")]
     [InlineData(" ")]
+    /// <summary>Verifies that every configured ASN list has a non-blank subscription name.</summary>
     public void Validate_AsnListRequiresName(string? name)
     {
         var config = new AppConfig
@@ -231,6 +232,7 @@ public class ConfigValidationTests
     }
 
     [Fact]
+    /// <summary>Verifies that duplicate subscription names identify both conflicting configuration entries.</summary>
     public void Validate_DuplicateAsnListNames_IdentifiesBothEntries()
     {
         var config = new AppConfig
@@ -894,6 +896,7 @@ public class ConfigValidationTests
     }
 
     [Fact]
+    /// <summary>Verifies that null and empty trusted-proxy lists both preserve the secure no-forwarding-header default.</summary>
     public void Validate_AcceptsNoTrustedProxies()
     {
         // Null and empty both mean "never trust forwarding headers" — the secure default.

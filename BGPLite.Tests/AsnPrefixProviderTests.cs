@@ -47,6 +47,7 @@ public class AsnPrefixProviderTests
     }
 
     [Fact]
+    /// <summary>Verifies that ASN subscriptions and ASN prefix sources share one RIPEstat cache and wire fetch.</summary>
     public async Task SameAsn_BothMechanisms_SingleWireFetch()
     {
         var handler = new CountingRipeHandler();

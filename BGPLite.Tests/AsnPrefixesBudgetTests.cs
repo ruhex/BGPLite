@@ -40,6 +40,7 @@ public sealed class AsnPrefixesBudgetTests : IDisposable
     }
 
     [Fact]
+    /// <summary>Verifies that a cold upstream fetch cannot pin the ASN-count endpoint beyond its external-fetch budget.</summary>
     public async Task AsnPrefixesCount_ColdFetchExceedsBudget_AnswersWithinBudget()
     {
         var port = FreeTcpPort();

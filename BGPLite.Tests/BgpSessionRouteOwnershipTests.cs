@@ -587,6 +587,7 @@ public class BgpSessionRouteOwnershipTests
     }
 
     [Fact]
+    /// <summary>Verifies that ownership takeover releases the previous session's prefix-cap budget.</summary>
     public async Task TakenOverPrefix_FreesTheOriginalOwnersCapBudget()
     {
         var routeTable = new RouteTable();
@@ -629,6 +630,7 @@ public class BgpSessionRouteOwnershipTests
     }
 
     [Fact]
+    /// <summary>Verifies that a delayed ownership-loss callback cannot remove membership after the session reacquires the route.</summary>
     public async Task LateOwnershipLost_AfterReacquire_DoesNotUndercountPrefixCap()
     {
         var routeTable = new RouteTable();
