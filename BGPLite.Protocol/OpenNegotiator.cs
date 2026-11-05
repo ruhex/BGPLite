@@ -38,6 +38,7 @@ public static class OpenNegotiator
         && (routerId >> 24) != 127
         && (routerId >> 28) < 0xE;
 
+    /// <summary>Validates OPEN fields and capabilities, returning negotiated ASN, timer, identifier, and feature state.</summary>
     public static OpenNegotiation Validate(BgpOpenMessage open, uint? expectedRemoteAsn, uint localRouterId, int localHoldTime)
     {
         // The local hold time is the locally configured BgpConfig.HoldTime (validated at

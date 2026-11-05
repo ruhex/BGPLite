@@ -277,6 +277,7 @@ public static class AttributeHelper
         _ => false
     };
 
+    /// <summary>Decodes bounded AS path segments without flattening, rejecting invalid segment types, counts, and lengths.</summary>
     private static AsPathSegment[] ReadPathData(ReadOnlySpan<byte> data, int asSize, string attributeName)
     {
         var segments = new List<AsPathSegment>();
@@ -331,6 +332,7 @@ public static class AttributeHelper
         return segments.ToArray();
     }
 
+    /// <summary>Encodes one AS_SEQUENCE with the requested ASN width and rejects lengths that cannot be represented.</summary>
     private static byte[] WritePathData(uint[] ases, int asSize, string attributeName)
     {
         // Intentionally emits a single AS_SEQUENCE segment. For the current route-server use case,

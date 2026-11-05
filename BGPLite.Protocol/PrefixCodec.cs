@@ -122,6 +122,7 @@ public static class PrefixCodec
         return offset;
     }
 
+    /// <summary>Decodes a declared NLRI section into the supplied bounded span, rejecting truncation and output overflow.</summary>
     public static int DecodeList(ReadOnlySpan<byte> buffer, int length, Span<IpPrefix> prefixes)
     {
         if (length < 0 || length > buffer.Length)
