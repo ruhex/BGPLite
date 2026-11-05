@@ -46,10 +46,15 @@ public sealed class RouteAssemblerPolicyTests
     private class StubPrefixService : IPrefixService
     {
         public Func<IEnumerable<uint>, CancellationToken, Task<List<(UInt128 Prefix, byte Length, bool IsIpv4, uint Asn)>>>? OnGetPrefixesForAsns { get; set; }
+        public Func<IEnumerable<uint>, CancellationToken, Task<AsnPrefixResolution>>? OnGetPrefixesForAsnsResult { get; set; }
         public Task<IReadOnlyList<(UInt128 Prefix, byte Length, bool IsIpv4)>> GetPrefixesAsync(uint asn, CancellationToken ct = default)
             => Task.FromResult<IReadOnlyList<(UInt128 Prefix, byte Length, bool IsIpv4)>>([]);
         public Task<List<(UInt128 Prefix, byte Length, bool IsIpv4, uint Asn)>> GetPrefixesForAsns(IEnumerable<uint> asns, CancellationToken ct = default)
             => OnGetPrefixesForAsns?.Invoke(asns, ct) ?? Task.FromResult(new List<(UInt128 Prefix, byte Length, bool IsIpv4, uint Asn)>());
+        public async Task<AsnPrefixResolution> GetPrefixesForAsnsResultAsync(IEnumerable<uint> asns, CancellationToken ct = default)
+            => OnGetPrefixesForAsnsResult is not null
+                ? await OnGetPrefixesForAsnsResult(asns, ct)
+                : new AsnPrefixResolution(await GetPrefixesForAsns(asns, ct), []);
         public Task<int> GetPrefixCountAsync(uint asn, CancellationToken ct = default) => Task.FromResult(0);
         public Task<List<(UInt128 Prefix, byte Length, bool IsIpv4, uint Asn)>> GetRuPrefixesAsync(CancellationToken ct = default)
             => Task.FromResult(new List<(UInt128 Prefix, byte Length, bool IsIpv4, uint Asn)> { (RuPrefix, 8, true, 0u) });
@@ -130,6 +135,28 @@ public sealed class RouteAssemblerPolicyTests
 
         var route = Assert.Single(routes);
         Assert.Equal((RuPrefix, (byte)8), (route.Prefix, route.PrefixLength));   // the RU fallback fired
+    }
+
+    [Fact]
+    public async Task PartialAsnFailure_MarksResultIncomplete_ButKeepsBgpSurvivingRoutes()
+    {
+        var service = new StubPrefixService
+        {
+            OnGetPrefixesForAsnsResult = (_, _) => Task.FromResult(new AsnPrefixResolution(
+                [(0xC0000200, 24, true, 65020u)], [65010u]))
+        };
+        var assembler = NewAssembler(service, Config());
+
+        var result = await assembler.BuildOutboundRouteResultAsync(
+            "203.0.113.7", 65002, new PeerConfig { Address = "203.0.113.7" }, "203.0.113.7", CancellationToken.None);
+        var bgpRoutes = await assembler.BuildOutboundRoutesAsync(
+            "203.0.113.7", 65002, new PeerConfig { Address = "203.0.113.7" }, "203.0.113.7", CancellationToken.None);
+
+        Assert.False(result.Complete);
+        var assembledRoute = Assert.Single(result.Routes);
+        var bgpRoute = Assert.Single(bgpRoutes);
+        Assert.Equal((0xC0000200, (byte)24), (assembledRoute.Prefix, assembledRoute.PrefixLength));
+        Assert.Equal((0xC0000200, (byte)24), (bgpRoute.Prefix, bgpRoute.PrefixLength));
     }
 
     [Fact]

@@ -1,5 +1,6 @@
 using System.Net;
 using BGPLite.Configuration;
+using BGPLite.Contracts;
 using BGPLite.Providers;
 using BGPLite.Protocol;
 using Microsoft.Extensions.Http;
@@ -125,6 +126,17 @@ public class PrefixServiceTests
         Assert.Equal([100u, 300u], result.Select(r => r.Asn).ToArray());
         Assert.Equal(PrefixFor(100), result[0].Prefix);
         Assert.Equal(PrefixFor(300), result[1].Prefix);
+    }
+
+    [Fact]
+    public async Task GetPrefixesForAsnsResult_ReportsFailedAsns_AndKeepsSurvivingPrefixes()
+    {
+        var service = Service(new PerAsnHandler(200));
+
+        var result = await ((IPrefixService)service).GetPrefixesForAsnsResultAsync([100, 200, 300]);
+
+        Assert.Equal([100u, 300u], result.Prefixes.Select(r => r.Asn).ToArray());
+        Assert.Equal([200u], result.FailedAsns);
     }
 
     [Fact]

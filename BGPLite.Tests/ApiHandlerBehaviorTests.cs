@@ -152,6 +152,29 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
     }
 
     [Fact]
+    public async Task ExportJson_PartialAsnFailure_Returns503WithoutSurvivingPrefixes()
+    {
+        var store = new PeerStore(new StaticOptionsFactory(new DbContextOptionsBuilder<BgpDbContext>().UseSqlite(_connection).Options));
+        var saved = await store.SavePeerConfigurationAsync(
+            "198.51.100.9", 65092, null, ["asn"], [], []);
+        var config = new AppConfig
+        {
+            Bgp = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1" },
+            RipeStat = new RipeStatConfig { AsnLists = [new AsnList { Name = "asn", Asns = [65010, 65020] }] }
+        };
+        _port = await StartAsync(config, prefixService: new ExportPrefixService { PartialAsns = true });
+        _client = new HttpClient();
+
+        using var response = await _client.GetAsync($"http://127.0.0.1:{_port}/api/peers/{saved.Id}/prefixes?format=json");
+        var body = await response.Content.ReadAsStringAsync();
+
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
+        Assert.Contains("no partial list", body);
+        Assert.DoesNotContain("10.10.0.0", body);
+        Assert.DoesNotContain("65020", body);
+    }
+
+    [Fact]
     public async Task OptionsPreflight_AdvertisesPatch_AndConsumesRateBucket()
     {
         var config = new AppConfig
@@ -691,6 +714,12 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
     private sealed class ExportPrefixService : IPrefixService
     {
         public bool FailAsns { get; init; }
+        public bool PartialAsns { get; init; }
+        public async Task<AsnPrefixResolution> GetPrefixesForAsnsResultAsync(IEnumerable<uint> asns, CancellationToken ct = default)
+        {
+            var prefixes = await GetPrefixesForAsns(asns, ct);
+            return PartialAsns ? new AsnPrefixResolution(prefixes.Take(1).ToList(), [65020u]) : new AsnPrefixResolution(prefixes, []);
+        }
         public Task<IReadOnlyList<(UInt128 Prefix, byte Length, bool IsIpv4)>> GetPrefixesAsync(uint asn, CancellationToken ct = default) => Task.FromResult<IReadOnlyList<(UInt128, byte, bool)>>([]);
         public Task<List<(UInt128 Prefix, byte Length, bool IsIpv4, uint Asn)>> GetPrefixesForAsns(IEnumerable<uint> asns, CancellationToken ct = default)
         {

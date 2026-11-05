@@ -136,11 +136,15 @@ public sealed class PrefixService : IPrefixService
     /// whose whole ASN subscription was unreachable fell back to the full RU table.
     /// </para>
     /// </summary>
-    public async Task<List<(UInt128 Prefix, byte Length, bool IsIpv4, uint Asn)>> GetPrefixesForAsns(IEnumerable<uint> asns, CancellationToken ct = default)
+    public async Task<List<(UInt128 Prefix, byte Length, bool IsIpv4, uint Asn)>> GetPrefixesForAsns(IEnumerable<uint> asns, CancellationToken ct = default) =>
+        (await GetPrefixesForAsnsResultAsync(asns, ct)).Prefixes;
+
+    /// <inheritdoc cref="IPrefixService.GetPrefixesForAsnsResultAsync" />
+    public async Task<AsnPrefixResolution> GetPrefixesForAsnsResultAsync(IEnumerable<uint> asns, CancellationToken ct = default)
     {
         // Materialize once: we enumerate for fan-out and again for ordered assembly.
         var asnList = asns as IList<uint> ?? asns.ToList();
-        if (asnList.Count == 0) return [];
+        if (asnList.Count == 0) return new AsnPrefixResolution([], []);
 
         // Resolve each DISTINCT ASN concurrently (bounded) — latency is max, not sum, on cold
         // RIPEstat misses. Duplicates are coalesced for the fan-out so they cannot race the cold
@@ -187,7 +191,7 @@ public sealed class PrefixService : IPrefixService
             throw new InvalidOperationException(
                 $"All {failedAsns.Count} requested ASN(s) failed to resolve ({string.Join(", ", failedAsns.Select(a => "AS" + a))}).");
 
-        return result;
+        return new AsnPrefixResolution(result, failedAsns);
     }
 
     /// <summary>
