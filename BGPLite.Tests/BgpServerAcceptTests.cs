@@ -318,6 +318,21 @@ public class BgpServerAcceptTests
         }
     }
 
+    /// <summary>Verifies that macOS shutdown interrupts an idle accept before closing its listener.</summary>
+    [Fact]
+    public async Task StopAsync_MacIdleAccept_CompletesWithoutPendingConnection()
+    {
+        if (!OperatingSystem.IsMacOS()) return;
+        using var server = new BgpServer(
+            new AppConfig { Bgp = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1" } },
+            new RouteTable(), AllowAllFilter.Instance, new BgpMetrics(),
+            new NeverReachedSessionFactory(), NullLogger<BgpServer>.Instance);
+        server.ListenPort = FreeTcpPort();
+        await server.StartAsync(CancellationToken.None);
+
+        await server.StopAsync(CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(5));
+    }
+
     private static int FreeTcpPort()
     {
         var listener = new TcpListener(IPAddress.Loopback, 0);

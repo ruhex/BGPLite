@@ -26,6 +26,7 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
     // entries; keying by IP only made them clobber each other.
     private readonly ConcurrentDictionary<SessionKey, BgpSession> _sessions = new();
     private readonly CancellationTokenSource _cts = new();
+    private readonly CancellationTokenSource _acceptSocketCts;
     // Per-source-IP accept throttle: bounds inbound-connect floods from a single IP. Disabled
     // (always-allow) when Bgp.MaxAcceptsPerIpPerMinute <= 0.
     private readonly IpAcceptThrottle _acceptThrottle;
@@ -74,6 +75,7 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
         _metrics = metrics;
         _sessionFactory = sessionFactory;
         _logger = logger;
+        _acceptSocketCts = CancellationTokenSource.CreateLinkedTokenSource(_cts.Token);
         _acceptThrottle = new IpAcceptThrottle(config.Bgp.MaxAcceptsPerIpPerMinute);
     }
 
@@ -138,6 +140,19 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
         Volatile.Write(ref _acceptingConnections, 0);
         Volatile.Write(ref _md5ListenerReady, 0);
 
+        // On macOS, interrupt and join the managed accept BEFORE closing its listener. Other
+        // platforms retain the native close-to-interrupt behavior.
+        if (OperatingSystem.IsMacOS())
+        {
+            _acceptSocketCts.Cancel();
+            if (_acceptTask is not null)
+            {
+                try { await _acceptTask.WaitAsync(cancellationToken); }
+                catch (OperationCanceledException) { /* host grace elapsed — proceed to force teardown */ }
+                catch { }
+            }
+        }
+
         if (_listener is not null)
         {
             _listener.Close();
@@ -147,7 +162,7 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
         // window full → WriteAsync blocks on the send buffer) must not pin StopAsync past the host's
         // grace. WaitAsync propagates the cancellation as OperationCanceledException; on
         // cancel we abandon the pending step and move on to force-disposing the sessions below.
-        if (_acceptTask is not null)
+        if (!OperatingSystem.IsMacOS() && _acceptTask is not null)
         {
             try { await _acceptTask.WaitAsync(cancellationToken); }
             catch (OperationCanceledException) { /* host grace elapsed — proceed to force teardown */ }
@@ -479,15 +494,25 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
         }
     }
 
-    /// <summary>Accepts through the native async path, using a managed blocking task on macOS to contain RST callback failures.</summary>
+    /// <summary>Uses native async accept normally and a cancellation-aware managed accept loop on macOS.</summary>
     private async Task<Socket> AcceptSocketAsync(CancellationToken cancellationToken)
     {
         // Darwin's async socket engine can materialize a zero-length RST endpoint on its callback
-        // thread, outside the awaiting catch. A managed blocking-accept task keeps that failure
-        // inside this loop; other platforms retain the native async accept path.
+        // thread. Polling and accepting on a managed task contains that failure and lets StopAsync
+        // interrupt the operation before closing the listener.
         if (OperatingSystem.IsMacOS())
-            return await Task.Run(() => _listener!.Accept(), cancellationToken);
+            return await Task.Run(AcceptSocketOnMac, _acceptSocketCts.Token);
         return await _listener!.AcceptAsync(cancellationToken);
+    }
+
+    private Socket AcceptSocketOnMac()
+    {
+        while (true)
+        {
+            _acceptSocketCts.Token.ThrowIfCancellationRequested();
+            if (_listener!.Poll(100_000, SelectMode.SelectRead))
+                return _listener.Accept();
+        }
     }
 
     /// <summary>Runs one session and removes only its own registration before deterministic disposal.</summary>
@@ -711,8 +736,10 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
 
         Volatile.Write(ref _acceptingConnections, 0);
         Volatile.Write(ref _md5ListenerReady, 0);
+        _acceptSocketCts.Cancel();
         _listener?.Close();
         _cts.Cancel();
+        _acceptSocketCts.Dispose();
         _cts.Dispose();  // StopAsync's graceful path doesn't reach here — dispose explicitly
         _statusTimer?.Dispose();  // the abort path never runs StopAsync — don't leak the timer to GC
         foreach (var session in _sessions.Values)
