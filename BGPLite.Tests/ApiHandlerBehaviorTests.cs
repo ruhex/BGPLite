@@ -869,16 +869,24 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
     /// <summary>Records SetPeerMd5Key calls so a test can assert WHAT was armed.</summary>
     private sealed class RecordingSessions : ISessionManager
     {
+        private readonly object _md5Sync = new();
         public List<(string Ip, string? Password)> Md5Keys { get; } = [];
         public bool Established { get; set; }
         public Task RefreshPeerAsync(string peerIp, uint asn) => Task.CompletedTask;
         public List<string> GetActivePeerIps() => [];
         public Task TerminatePeerAsync(string peerIp, uint asn, CancellationToken ct = default) => Task.CompletedTask;
         public Task TerminatePeerByIpAsync(string peerIp, CancellationToken ct = default) => Task.CompletedTask;
-        public void SetPeerMd5Key(string peerIp, string? password) => Md5Keys.Add((peerIp, password));
+        public void SetPeerMd5Key(string peerIp, string? password)
+        {
+            lock (_md5Sync)
+                Md5Keys.Add((peerIp, password));
+        }
         public bool IsPeerEstablished(string peerIp, uint asn) => Established;
-        public bool IsPeerMd5Armed(string peerIp, string? password) =>
-            !string.IsNullOrEmpty(password) && Md5Keys.LastOrDefault(k => k.Ip == peerIp).Password == password;
+        public bool IsPeerMd5Armed(string peerIp, string? password)
+        {
+            lock (_md5Sync)
+                return !string.IsNullOrEmpty(password) && Md5Keys.LastOrDefault(k => k.Ip == peerIp).Password == password;
+        }
         public int GetAdvertisedPrefixCount(string peerIp, uint asn) => 0;
         public Task RefreshAllEstablishedAsync() => Task.CompletedTask;
     }
