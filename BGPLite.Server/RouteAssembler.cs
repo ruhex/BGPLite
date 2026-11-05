@@ -143,25 +143,27 @@ public sealed class RouteAssembler : IRouteAssembler
                     routes.Count - before, peerLabel);
             }
 
-            // Country-based lists (e.g. RU with no ASNs → use local nets.txt).
+            // Country-based lists currently support RU only (enforced by config validation).
+            // Resolve each list separately so its community is applied to its own RU projection.
             var countryLists = subscribedLists.Where(l => l.Asns.Count == 0 && l.Country is not null).ToList();
-            if (countryLists.Count > 0)
+            foreach (var list in countryLists)
             {
                 fetchAttempts++;
                 try
                 {
                     var comms = _communityResolver.Resolve(
-                        new CommunitySource(CommunitySourceKind.Country, countryLists[0].Name));
+                        new CommunitySource(CommunitySourceKind.Country, list.Name));
                     var ruPrefixes = await _prefixService.GetRuPrefixesAsync(ct);
                     foreach (var p in ruPrefixes)
                         routes.Add(MakeRoute(p.Prefix, p.Length, p.IsIpv4, nextHop, null, comms));
-                    _logger.LogInformation("Fetched {Count} RU prefixes for {Peer}", ruPrefixes.Count, peerLabel);
+                    _logger.LogInformation("Fetched {Count} RU prefixes for {Peer} (list '{List}')",
+                        ruPrefixes.Count, peerLabel, list.Name);
                 }
                 catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
                 catch (Exception ex)
                 {
                     fetchFailures++;
-                    _logger.LogError(ex, "Failed to fetch RU prefixes for {Peer}", peerLabel);
+                    _logger.LogError(ex, "Failed to fetch RU prefixes for {Peer} (list '{List}')", peerLabel, list.Name);
                 }
             }
 

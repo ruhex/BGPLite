@@ -234,6 +234,43 @@ public class ConfigValidationTests
         Assert.Contains("CustomPrefixCommunity", ex.Message);
     }
 
+    [Theory]
+    [InlineData("DE")]
+    [InlineData("")]
+    [InlineData("RU ")]
+    public void Validate_UnsupportedAsnListCountry_ThrowsWithPath(string country)
+    {
+        var config = new AppConfig
+        {
+            Bgp = Bgp(),
+            RipeStat = new RipeStatConfig
+            {
+                AsnLists = [new AsnList { Name = "country", Country = country }]
+            }
+        };
+
+        var ex = Assert.Throws<InvalidOperationException>(config.Validate);
+        Assert.Contains("RipeStat.AsnLists[0].Country", ex.Message);
+        Assert.Contains("only RU", ex.Message);
+    }
+
+    [Theory]
+    [InlineData("RU")]
+    [InlineData("ru")]
+    public void Validate_SupportedAsnListCountry_IsCaseInsensitive(string country)
+    {
+        var config = new AppConfig
+        {
+            Bgp = Bgp(),
+            RipeStat = new RipeStatConfig
+            {
+                AsnLists = [new AsnList { Name = "country", Country = country }]
+            }
+        };
+
+        config.Validate();
+    }
+
     [Fact]
     public void Validate_RipeStatAsnListCommunity_Throws()
     {
