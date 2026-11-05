@@ -238,6 +238,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
     /// <summary>Whether a global concurrency limiter is currently active — exposed for hot-reload tests.</summary>
     internal bool IsConcurrencyLimitEnabled => Volatile.Read(ref _concurrencyLimiter) is not null;
 
+    /// <summary>Binds the configured management listener, logs exposure warnings, and starts the request loop.</summary>
     public Task StartAsync(CancellationToken cancellationToken)
     {
         _listener = new HttpListener();
@@ -297,13 +298,13 @@ public sealed class ManagementApi : IHostedService, IDisposable
         return creds[0].Md5Password;
     }
 
-    /// <summary>
-    /// Re-arms the per-IP TCP-MD5 key from the SURVIVING peer rows: deleting a peer or
-    /// clearing its password must fall back to a sibling's key on the same source IP, and setting
-    /// a new one must leave the whole-IP state consistent with the store. The previous behavior
-    /// armed/unarmed from the single edited row, silently disarming (or overriding) siblings.
-    /// </summary>
     internal Func<string, Task>? Md5RearmProbe { get; set; }
+
+    /// <summary>
+    /// Re-arms the per-IP TCP-MD5 key from the SURVIVING peer rows under the caller's mutation gate:
+    /// deleting or clearing one row falls back to a sibling key, and setting a key leaves whole-IP
+    /// state consistent with the store.
+    /// </summary>
     internal async Task RearmPeerIpMd5KeyAsync(string ip)
     {
         var remaining = await _store.GetPeerMd5CredentialsForIpAsync(ip);
@@ -961,6 +962,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
         return ApiResponse.Ok(new { ip = clientIp, peers = details });
     }
 
+    /// <summary>Maps the live Established lookup to the public active/inactive peer status.</summary>
     private string PeerStatus(string ip, uint? asn) =>
         asn.HasValue && _sessionManager.IsPeerEstablished(ip, asn.Value) ? "active" : "inactive";
 
@@ -1141,6 +1143,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
         });
     }
 
+    /// <summary>Returns the current peer detail with live status and MD5 state, or 404 after deletion.</summary>
     private async Task<ApiResponse> HandleGetPeer(string peerId)
     {
         // Single DbContext roundtrip via PeerStore.GetPeerDetail (was 6 separate DbContexts).
@@ -1309,6 +1312,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
         }
     }
 
+    /// <summary>Terminates sessions, deletes the peer, and serializes shared-IP MD5 rearming with other mutations.</summary>
     internal async Task<ApiResponse> HandleDeletePeer(string peerId)
     {
         var peer = await _store.GetDbPeerByIdAsync(peerId);
@@ -1479,6 +1483,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
         return ApiResponse.Ok(new { id = sourceId, deleted = true });
     }
 
+    /// <summary>Validates and applies a user-source activation change, then schedules the owning peer's refresh.</summary>
     private async Task<ApiResponse> HandlePatchSource(string peerId, string sourceId, HttpListenerContext ctx)
     {
         var peer = await _store.GetDbPeerByIdAsync(peerId);
@@ -1547,6 +1552,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
 
     #region GET /api/asn-lists
 
+    /// <summary>Returns ASN-list counts with explicit total/partial failure markers under the external-fetch budget.</summary>
     private async Task<ApiResponse> HandleGetAsnListsAsync()
     {
         // Bound the whole handler — see ExternalFetchBudget. Shutdown still propagates;
@@ -2127,6 +2133,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
 
     private bool _disposed;
 
+    /// <summary>Cancels request work and releases listeners, limiters, and mutation gates exactly once.</summary>
     public void Dispose()
     {
         if (_disposed) return;

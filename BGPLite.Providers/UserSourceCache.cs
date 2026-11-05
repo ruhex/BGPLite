@@ -254,6 +254,7 @@ internal sealed class UserSourceCache
         }
     }
 
+    /// <summary>Returns fresh cached content or throws for a negative-cache entry, using the source name rather than its URL in errors.</summary>
     private bool TryGetFresh(string url, string logLabel, out IReadOnlyList<IpPrefix> list)
     {
         list = null!;

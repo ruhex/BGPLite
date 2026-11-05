@@ -117,6 +117,7 @@ public sealed class PrefixService : IPrefixService
         return ToContract(prefixes);
     }
 
+    /// <summary>Resolves one ASN through the shared RIPEstat cache without serving negative entries as empty success.</summary>
     public async Task<IReadOnlyList<(UInt128 Prefix, byte Length, bool IsIpv4)>> GetPrefixesAsync(uint asn, CancellationToken ct = default)
         // Per-ASN caching, stale-on-failure, negative TTL, fetch gates, and the eviction
         // sweep all live in the shared cache — one wire fetch per ASN regardless

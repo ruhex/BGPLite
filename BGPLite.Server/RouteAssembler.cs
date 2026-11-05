@@ -464,6 +464,7 @@ public sealed class RouteAssembler : IRouteAssembler
         }
     }
 
+    /// <summary>Replaces control characters and bounds operator-controlled text before structured logging.</summary>
     private static string SanitizeForLog(string? value)
     {
         if (string.IsNullOrEmpty(value)) return string.Empty;

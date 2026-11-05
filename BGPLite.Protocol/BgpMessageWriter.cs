@@ -195,6 +195,7 @@ public static class BgpMessageWriter
     private static bool UsesExtendedLength(PathAttribute attr) =>
         attr.Data.Length > 255 || (attr.Flags & BgpConstants.Attribute.FlagExtendedLength) != 0;
 
+    /// <summary>Computes the encoded attribute-section size using normal or extended length for each attribute.</summary>
     private static int GetAttributesLength(List<PathAttribute> attributes)
     {
         var len = 0;

@@ -490,6 +490,7 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
         return await _listener!.AcceptAsync(cancellationToken);
     }
 
+    /// <summary>Runs one session and removes only its own registration before deterministic disposal.</summary>
     private async Task RunSessionAsync(SessionKey key, BgpSession session, CancellationToken cancellationToken)
     {
         try

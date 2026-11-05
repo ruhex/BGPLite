@@ -114,6 +114,7 @@ public static class PrefixCodec
         return (new IpPrefix(addr, length), 1 + byteCount);
     }
 
+    /// <summary>Encodes prefixes consecutively and returns the total byte count written.</summary>
     public static int EncodeList(ReadOnlySpan<IpPrefix> prefixes, Span<byte> buffer)
     {
         var offset = 0;

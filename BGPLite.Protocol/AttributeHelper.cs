@@ -30,6 +30,7 @@ public static class AttributeHelper
         };
     }
 
+    /// <summary>Decodes and flattens AS_PATH for consumers that do not need segment boundaries.</summary>
     public static uint[] ReadAsPath(PathAttribute attr, bool fourByteAsn) =>
         AsPathSegment.Flatten(ReadAsPathSegments(attr, fourByteAsn));
 
@@ -62,6 +63,7 @@ public static class AttributeHelper
         };
     }
 
+    /// <summary>Decodes and flattens AS4_PATH after applying segment and AS_TRANS validation.</summary>
     public static uint[] ReadAs4Path(PathAttribute attr) =>
         AsPathSegment.Flatten(ReadAs4PathSegments(attr));
 
@@ -180,6 +182,7 @@ public static class AttributeHelper
         };
     }
 
+    /// <summary>Decodes standard communities after enforcing the non-empty four-octet alignment contract.</summary>
     public static uint[] ReadCommunities(PathAttribute attr)
     {
         // RFC 7606 §7.8: COMMUNITY requires a non-zero multiple of 4 and treat-as-withdraw.
