@@ -606,6 +606,70 @@ public class BgpSessionRouteOwnershipTests
         await TeardownAsync(b, bRun);
     }
 
+    [Fact]
+    public async Task LateOwnershipLost_AfterReacquire_DoesNotUndercountPrefixCap()
+    {
+        var routeTable = new RouteTable();
+        BgpSession? aInstance = null;
+        BgpSession? bInstance = null;
+        var staleEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseStale = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var reacquired = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var staleFinished = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        void GateStale(object owner, (UInt128 Prefix, byte Length, bool IsIpv4) key)
+        {
+            if (ReferenceEquals(owner, aInstance) && key.Prefix == TenSlashEight)
+            {
+                staleEntered.TrySetResult();
+                releaseStale.Task.GetAwaiter().GetResult();
+            }
+            if (ReferenceEquals(owner, bInstance) && key.Prefix == TenSlashEight)
+                reacquired.TrySetResult();
+        }
+        void ObserveFinished(object owner, (UInt128 Prefix, byte Length, bool IsIpv4) key)
+        {
+            if (ReferenceEquals(owner, aInstance) && key.Prefix == TenSlashEight)
+                staleFinished.TrySetResult();
+        }
+        routeTable.EntryOwnershipLost += GateStale;
+        var (a, aRun, aConn) = await EstablishCappedAsync(routeTable, cap: 1, routerId: 0x0A000002);
+        aInstance = a;
+        var (b, bRun, bConn) = await EstablishCappedAsync(routeTable, cap: 0, routerId: 0x0A000003);
+        bInstance = b;
+        routeTable.EntryOwnershipLost += ObserveFinished;
+
+        try
+        {
+            aConn.EnqueueFrame(AnnounceFrame(8, 0x0A));
+            await SettleAsync(aConn, () => routeTable.Count == 1);
+            bConn.EnqueueFrame(AnnounceFrame(8, 0x0A));
+            await staleEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+            aConn.EnqueueFrame(AnnounceFrame(8, 0x0A));
+            await reacquired.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            releaseStale.TrySetResult();
+            await staleFinished.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+            // A really owns 10/8 again. A second distinct prefix must exceed cap=1; the stale
+            // callback must not delete 10/8 from A's bookkeeping and incorrectly leave budget.
+            aConn.EnqueueFrame(AnnounceFrame(24, 0xC0, 0x00, 0x02));
+            await aRun.WaitAsync(TimeSpan.FromSeconds(5));
+
+            Assert.False(a.IsEstablished);
+            var notification = aConn.Sent.Select(f => BgpMessageReader.ReadMessage(f))
+                .OfType<BgpNotificationMessage>().Single(n => n.ErrorCode == BgpConstants.Error.Cease);
+            Assert.Equal(BgpConstants.SubError.CeaseMaxPrefixes, notification.SubErrorCode);
+        }
+        finally
+        {
+            releaseStale.TrySetResult();
+            routeTable.EntryOwnershipLost -= GateStale;
+            routeTable.EntryOwnershipLost -= ObserveFinished;
+            await TeardownAsync(a, aRun);
+            await TeardownAsync(b, bRun);
+        }
+    }
+
     private static async Task<(BgpSession Session, Task Run, ScriptedConnection Conn, RouteTable Table)> EstablishCappedAsync(int cap)
     {
         var routeTable = new RouteTable();
