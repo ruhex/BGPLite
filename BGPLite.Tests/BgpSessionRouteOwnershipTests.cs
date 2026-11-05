@@ -385,6 +385,23 @@ public class BgpSessionRouteOwnershipTests
         Assert.Equal(0, routeTable.Count);
     }
 
+    [Fact]
+    public async Task IdentificationFailure_AfterEstablished_DoesNotResetSessionOrSkipInitialRoutes()
+    {
+        var routeTable = Seeded((TenSlashEight, 8));
+        var (session, run, conn) = await EstablishAsync(routeTable,
+            onPeerIdentified: (_, _, _) => Task.FromException(new InvalidOperationException("database locked")));
+
+        var advertised = await CollectAdvertisedNlriAsync(conn);
+
+        Assert.Contains((TenSlashEight, (byte)8), advertised);
+        Assert.True(session.IsEstablished);
+        Assert.False(run.IsCompleted);
+        Assert.DoesNotContain(conn.Sent, frame => BgpMessageReader.ReadMessage(frame) is BgpNotificationMessage);
+
+        await TeardownAsync(session, run);
+    }
+
     // ---- harness ----
 
     private static RouteTable Seeded(params (UInt128 Prefix, byte Length)[] routes)
@@ -396,7 +413,8 @@ public class BgpSessionRouteOwnershipTests
     }
 
     private static async Task<(BgpSession Session, Task Run, ScriptedConnection Conn)> EstablishAsync(
-        RouteTable routeTable, uint routerId = 0x0A000002, IRouteFilter? filter = null)
+        RouteTable routeTable, uint routerId = 0x0A000002, IRouteFilter? filter = null,
+        Func<string, uint, CancellationToken, Task>? onPeerIdentified = null)
     {
         var conn = new ScriptedConnection();
         var config = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1", HoldTime = 0, KeepAlive = 0 };
@@ -407,7 +425,8 @@ public class BgpSessionRouteOwnershipTests
             routeTable,
             filter ?? AllowAllFilter.Instance,
             new BgpMetrics(),
-            NullLogger<BgpSession>.Instance);
+            NullLogger<BgpSession>.Instance,
+            onPeerIdentified: onPeerIdentified);
 
         var run = session.RunAsync();
         conn.EnqueueMessage(new BgpOpenMessage

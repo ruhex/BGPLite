@@ -203,18 +203,10 @@ public sealed class BgpSession : IDisposable
         try
         {
             _logger.LogInformation("Refreshing routes for {Peer}", _peer);
-            // Resolve the new route set BEFORE withdrawing the old one. WithdrawAllAsync drops the
-            // peer's entire advertisement and clears the mirror, so with the resolve running after
-            // it a recoverable store failure inside BuildOutboundRoutesAsync — LoadPeerRoutingViewAsync
-            // issues a write, and SQLite serializes writers, so an operator saving a peer through
-            // the management API while RefreshAllEstablishedAsync fans out across every session can
-            // push one past the busy timeout — unwound to the generic catch below and left the
-            // session Established advertising nothing. Nothing re-announces on its own: that is a
-            // blackhole for the peer until some later refresh happens to succeed, i.e. never with
-            // auto-refresh off, which is the default. Resolving first turns the same failure into a
-            // no-op cycle where the peer keeps the route set it already has, and shortens the
-            // withdraw→re-announce gap on the wire into the bargain. The wire order is unchanged:
-            // the withdrawals still precede the re-announcement.
+            // Resolve the new route set BEFORE withdrawing the old one. A recoverable store/source
+            // failure after WithdrawAllAsync would otherwise leave the session Established with no
+            // advertised routes until another refresh. Resolving first keeps the previous route set
+            // on failure; the wire order remains withdraw followed by re-announcement on success.
             var routes = await ResolveOutboundRoutesAsync();
             if (routes is null)
                 return;   // session disposed mid-resolve — nothing withdrawn, nothing to send
@@ -544,7 +536,14 @@ public sealed class BgpSession : IDisposable
             // Record identity/history only after the session is actually Established. API status is
             // projected from live sessions, so teardown needs no racy persisted active/inactive write.
             if (_onPeerIdentified is not null)
-                await _onPeerIdentified(_peerConfig.Address, _remoteAsn, linkedCts.Token);
+            {
+                try { await _onPeerIdentified(_peerConfig.Address, _remoteAsn, linkedCts.Token); }
+                catch (OperationCanceledException) when (linkedCts.IsCancellationRequested) { throw; }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Could not record peer identity/history for {Peer} — session continues", _peer);
+                }
+            }
 
             // Send initial routes. _sendLock is acquired inside SendMessageAsync for byte-level
             // ordering; _advertisedPrefixesLock guards the list against a RefreshRoutesAsync fired
