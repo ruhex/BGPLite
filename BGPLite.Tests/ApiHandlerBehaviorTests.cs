@@ -833,6 +833,7 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
     {
         public bool FailAsns { get; init; }
         public bool PartialAsns { get; init; }
+        /// <summary>Models either a complete ASN fan-out or one surviving prefix plus an explicit failed ASN.</summary>
         public async Task<AsnPrefixResolution> GetPrefixesForAsnsResultAsync(IEnumerable<uint> asns, CancellationToken ct = default)
         {
             var prefixes = await GetPrefixesForAsns(asns, ct);
