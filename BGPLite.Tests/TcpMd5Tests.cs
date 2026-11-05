@@ -258,6 +258,41 @@ public class TcpMd5Tests
     }
 
     [Fact]
+    public async Task FailedReplacement_DoesNotPublishNewKeyBeforeKernelApply()
+    {
+        if (!OperatingSystem.IsLinux()) return;
+        using var server = NewServer();
+        await server.StartAsync(CancellationToken.None);
+        server.SetPeerMd5Key("192.0.2.10", "old");
+        bool? newDuringApply = null;
+        bool? oldDuringApply = null;
+        server.Md5ApplyProbe = (_, _, key) =>
+        {
+            if (key is not null && key.Length == 3 && key[0] == (byte)'n')
+            {
+                newDuringApply = server.IsPeerMd5Armed("192.0.2.10", "new");
+                oldDuringApply = server.IsPeerMd5Armed("192.0.2.10", "old");
+            }
+            return false;
+        };
+
+        try
+        {
+            Assert.Throws<InvalidOperationException>(() => server.SetPeerMd5Key("192.0.2.10", "new"));
+
+            Assert.True(newDuringApply.HasValue, "the replacement must reach the kernel seam");
+            Assert.False(newDuringApply);
+            Assert.True(oldDuringApply);
+            Assert.True(server.IsPeerMd5Armed("192.0.2.10", "old"));
+            Assert.False(server.IsPeerMd5Armed("192.0.2.10", "new"));
+        }
+        finally
+        {
+            await server.StopAsync(CancellationToken.None);
+        }
+    }
+
+    [Fact]
     public async Task IsPeerMd5Armed_DoesNotObserveProvisionalReplacement()
     {
         if (!OperatingSystem.IsLinux()) return;
