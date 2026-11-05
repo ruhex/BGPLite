@@ -70,8 +70,11 @@ public sealed class PrefixService : IPrefixService
     {
         if (!string.Equals(sourceName, _config.DefaultPrefixSource, StringComparison.Ordinal))
             return;
-        Interlocked.Increment(ref _ruGeneration);
-        Volatile.Write(ref _ruCache, null);
+        lock (_ruPublicationSync)
+        {
+            Interlocked.Increment(ref _ruGeneration);
+            Volatile.Write(ref _ruCache, null);
+        }
     }
 
     /// <summary>Default per-fetch budget for peer-supplied URL sources.</summary>
@@ -275,7 +278,9 @@ public sealed class PrefixService : IPrefixService
     private sealed record RuCacheEntry(List<(UInt128 Prefix, byte Length, bool IsIpv4, uint Asn)> Projected, long CachedAtTicks);
     private RuCacheEntry? _ruCache;
     private long _ruGeneration;
+    private readonly object _ruPublicationSync = new();
     internal Action? RuPublishProbe { get; set; }
+    internal Action? RuAfterGenerationCheckProbe { get; set; }
     private readonly Func<string, Task>? _onSourceChanged;
 
     public async Task<List<(UInt128 Prefix, byte Length, bool IsIpv4, uint Asn)>> GetRuPrefixesAsync(CancellationToken ct = default)
@@ -330,10 +335,16 @@ public sealed class PrefixService : IPrefixService
             // A source commit during the load invalidates this snapshot. Do not republish it over
             // the invalidation; the next caller reloads the newer committed source content.
             RuPublishProbe?.Invoke();
-            if (generation == Volatile.Read(ref _ruGeneration))
-                Interlocked.Exchange(ref _ruCache, new RuCacheEntry(projected, _timeProvider.GetUtcNow().UtcDateTime.Ticks));
-            else
-                _logger?.LogDebug("Discarded a stale RU/default projection after a concurrent source commit");
+            lock (_ruPublicationSync)
+            {
+                if (generation == Volatile.Read(ref _ruGeneration))
+                {
+                    RuAfterGenerationCheckProbe?.Invoke();
+                    Interlocked.Exchange(ref _ruCache, new RuCacheEntry(projected, _timeProvider.GetUtcNow().UtcDateTime.Ticks));
+                }
+                else
+                    _logger?.LogDebug("Discarded a stale RU/default projection after a concurrent source commit");
+            }
         }
         finally
         {
