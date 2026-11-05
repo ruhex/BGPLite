@@ -102,20 +102,12 @@ public static class MpReachCodec
     }
 
     /// <summary>
-    /// RFC 2545 §3: the MP_REACH next hop must be a GLOBAL IPv6 address. Rejects the
-    /// unspecified address (::), loopback (::1), multicast (ff00::/8) and link-local
-    /// (fe80::/10) — a lone link-local is only meaningful on a shared subnet and rides as the
-    /// SECOND half of the RFC 2545 32-byte form, which the decoder never adopts. IPv4-mapped
-    /// forms are global-scope representations and are accepted.
+    /// The supported RFC 2545 §3 next-hop policy is global unicast 2000::/3, shared with the
+    /// outbound configuration validator. This rejects ULA, mapped, unspecified, loopback,
+    /// multicast, and lone-link-local values. The 32-byte form keeps its first/global address.
     /// </summary>
-    public static bool IsGlobalUnicastNextHop(UInt128 nextHop)
-    {
-        if (nextHop == UInt128.Zero) return false;                              // ::
-        if (nextHop == UInt128.One) return false;                               // ::1
-        if ((nextHop >> 120) == (UInt128)0xFF) return false;                    // ff00::/8
-        if ((nextHop >> 118) == (UInt128)0b1111111010) return false;            // fe80::/10
-        return true;
-    }
+    public static bool IsGlobalUnicastNextHop(UInt128 nextHop) =>
+        (nextHop >> 125) == 1; // 2000::/3
 
     /// <summary>Builds the MP_REACH_NLRI (type 14) attribute VALUE for IPv6/Unicast:
     /// a 16-byte global next hop plus the NLRI prefix list.</summary>
