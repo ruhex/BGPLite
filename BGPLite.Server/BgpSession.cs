@@ -2034,6 +2034,12 @@ public sealed class BgpSession : IDisposable
         {
             _logger.LogDebug(ex, "Failed to send Cease to {Peer} on shutdown", _peer);
         }
+        finally
+        {
+            // Cease is terminal: stop reads/timers/keepalives even when the best-effort send failed.
+            try { _cts.Cancel(); }
+            catch (ObjectDisposedException) { /* already disposed — nothing to unwind */ }
+        }
     }
 
     /// <summary>
