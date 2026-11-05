@@ -166,6 +166,19 @@ public class OpenNegotiatorTests
         Assert.Equal(BgpConstants.SubError.BadBgpIdentifier, ex.SubErrorCode);
     }
 
+    [Theory]
+    [InlineData(0x7F000001u)]
+    [InlineData(0xE0000001u)]
+    [InlineData(0xF0000001u)]
+    [InlineData(0xFFFFFFFFu)]
+    public void RouterId_NonUnicast_Throws_BadBgpIdentifier(uint routerId)
+    {
+        var ex = Assert.Throws<BgpNotificationException>(() => Negotiate(Open(routerId: routerId)));
+
+        Assert.Equal(BgpConstants.Error.OpenMessageError, ex.ErrorCode);
+        Assert.Equal(BgpConstants.SubError.BadBgpIdentifier, ex.SubErrorCode);
+    }
+
     [Fact]
     public void RouterId_CollisionWithLocal_Throws_BadBgpIdentifier()
     {

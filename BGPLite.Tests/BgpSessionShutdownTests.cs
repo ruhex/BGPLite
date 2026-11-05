@@ -256,7 +256,7 @@ public class BgpSessionShutdownTests
             Version = BgpConstants.BgpVersion,
             Asn = 65002,
             HoldTime = 3,
-            RouterId = 0x7F000002,
+            RouterId = 0x0A000002,
             Capabilities = [BgpCapabilityInfo.FourOctetAsn(65002)]
         };
         var openBuf = new byte[BgpMessageWriter.GetBufferSize(open)];
@@ -339,7 +339,7 @@ public class BgpSessionShutdownTests
             Version = BgpConstants.BgpVersion,
             Asn = 65002,
             HoldTime = (ushort)bgpConfig.HoldTime,
-            RouterId = 0x7F000002,
+            RouterId = 0x0A000002,
             Capabilities = [BgpCapabilityInfo.FourOctetAsn(65002)]
         };
         var openBuf = new byte[BgpMessageWriter.GetBufferSize(open)];
