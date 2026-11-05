@@ -108,7 +108,7 @@ public class RouteRefreshHoldTimerTests
             Version = BgpConstants.BgpVersion,
             Asn = 65002,
             HoldTime = 3,
-            RouterId = 0x7F000002,
+            RouterId = 0x0A000002,
             Capabilities = [BgpCapabilityInfo.FourOctetAsn(65002), BgpCapabilityInfo.RouteRefresh()]
         };
         var openBuf = new byte[BgpMessageWriter.GetBufferSize(open)];

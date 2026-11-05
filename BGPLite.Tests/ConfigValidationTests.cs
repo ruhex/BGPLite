@@ -476,6 +476,10 @@ public class ConfigValidationTests
 
     [Theory]
     [InlineData("0.0.0.0")]   // RFC 4271 §6.8 forbids an all-zero BGP Identifier
+    [InlineData("127.0.0.1")]
+    [InlineData("224.0.0.1")]
+    [InlineData("240.0.0.1")]
+    [InlineData("255.255.255.255")]
     [InlineData("not-an-ip")]
     [InlineData("::1")]        // IPv6 must be rejected
     public void Validate_RejectsBadRouterId(string routerId)

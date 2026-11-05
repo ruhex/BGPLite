@@ -29,6 +29,15 @@ public sealed record OpenNegotiation(
 /// </summary>
 public static class OpenNegotiator
 {
+    /// <summary>
+    /// RFC 4271 §6.2/§6.8 unicast BGP Identifier policy: reject unspecified (0/8), loopback
+    /// (127/8), multicast (224/4), and reserved (240/4) values, including the limited broadcast.
+    /// </summary>
+    public static bool IsValidBgpIdentifier(uint routerId) =>
+        (routerId >> 24) != 0
+        && (routerId >> 24) != 127
+        && (routerId >> 28) < 0xE;
+
     public static OpenNegotiation Validate(BgpOpenMessage open, uint? expectedRemoteAsn, uint localRouterId, int localHoldTime)
     {
         // The local hold time is the locally configured BgpConfig.HoldTime (validated at
@@ -80,9 +89,10 @@ public static class OpenNegotiator
         if (peerHoldTime != 0 && peerHoldTime < 3)
             throw new BgpNotificationException(BgpConstants.Error.OpenMessageError, BgpConstants.SubError.UnacceptableHoldTime, $"Unacceptable hold time: {peerHoldTime}");
 
-        // BGP Identifier must be non-zero and must not collide with our own (RFC 4271 §6.2).
-        if (open.RouterId == 0)
-            throw new BgpNotificationException(BgpConstants.Error.OpenMessageError, BgpConstants.SubError.BadBgpIdentifier, "Invalid BGP identifier: 0.0.0.0");
+        // RFC 4271 §6.2/§6.8: invalid non-unicast identifiers and local collisions are rejected.
+        if (!IsValidBgpIdentifier(open.RouterId))
+            throw new BgpNotificationException(BgpConstants.Error.OpenMessageError, BgpConstants.SubError.BadBgpIdentifier,
+                $"Invalid non-unicast BGP identifier: {BgpConstants.UintToIPAddress(open.RouterId)}");
 
         if (open.RouterId == localRouterId)
             throw new BgpNotificationException(BgpConstants.Error.OpenMessageError, BgpConstants.SubError.BadBgpIdentifier, "BGP identifier collision with local RouterId");
