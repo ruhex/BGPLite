@@ -367,6 +367,21 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
     }
 
     [Fact]
+    public async Task NonCanonicalPeerIp_Returns400_WithoutRewritingTargetHost()
+    {
+        _port = await StartAsync(new AppConfig { Bgp = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1" } });
+        _client = new HttpClient();
+        var store = new PeerStore(new StaticOptionsFactory(new DbContextOptionsBuilder<BgpDbContext>().UseSqlite(_connection).Options));
+
+        using var response = await _client.PostAsync($"http://127.0.0.1:{_port}/api/peers",
+            new StringContent("""{"ip":"010.1.1.1","asn":65010}""", Encoding.UTF8, "application/json"));
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Empty(await store.GetPeersByIpAsync("010.1.1.1"));
+        Assert.Empty(await store.GetPeersByIpAsync("8.1.1.1"));
+    }
+
+    [Fact]
     public async Task Md5Create_KernelFailure_RemovesStoredPassword_AndReportsCommittedPeer()
     {
         if (!OperatingSystem.IsLinux()) return;
