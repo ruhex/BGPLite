@@ -61,9 +61,8 @@ public sealed class BgpSessionFactory : IBgpSessionFactory
     /// <inheritdoc />
     public BgpSession Create(IBgpConnection connection, PeerConfig peerConfig) =>
         new(connection, peerConfig, _bgpConfig, _routeTable, _routeFilter, _metrics, _sessionLogger,
-            // The peer row is upserted as soon as OPEN identifies the peer, so a peer that has never
-            // been configured in the UI still shows up there. Async because the upsert used to run
-            // synchronously on the OPEN-handshake path.
+            // The peer row is upserted once the session is Established, so a peer that has never
+            // been configured in the UI still shows up there without a pre-handshake active status.
             onPeerIdentified: (ip, asn, ct) => _peerStore.UpsertPeerAsync(ip, asn, ct),
             peerStore: _peerStore,
             prefixAggregator: _prefixAggregator,

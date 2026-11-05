@@ -68,6 +68,7 @@ public class RouteSeedingServiceTests
         public Task TerminatePeerAsync(string peerIp, uint asn, CancellationToken ct = default) => Task.CompletedTask;
         public Task TerminatePeerByIpAsync(string peerIp, CancellationToken ct = default) => Task.CompletedTask;
         public void SetPeerMd5Key(string peerIp, string? password) { }
+        public bool IsPeerEstablished(string peerIp, uint asn) => false;
         public bool IsPeerMd5Armed(string peerIp, string? password) => false;
     }
 

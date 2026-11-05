@@ -144,7 +144,7 @@ DefaultPrefixSource: ru        # served to unconfigured/auto-registered peers
    - known peer — fetches prefixes for its subscriptions (cached) plus custom prefixes and advertises them;
      a custom prefix overrides the source prefixes it covers: covered more-specifics are not sent (#220);
    - unknown peer — auto-registers it and advertises the default prefix source.
-4. Peer status and session timestamps are updated in the store.
+4. Session history is stored; live peer status is projected from Established sessions.
 
 ## Management API
 

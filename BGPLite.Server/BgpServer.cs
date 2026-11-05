@@ -380,10 +380,6 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
                 // RunSessionAsync's finally all go through it), so the accept-window finally
                 // must not touch the socket again.
                 sessionOwnsSocket = true;
-                // Peer status is the aggregate of live Established sessions for the same (Ip, Asn).
-                // The probe runs at teardown and again after a possible inactive write to close the
-                // establishment race without a separate pre-Established ownership registry.
-                session.HasEstablishedSiblingProbe = s => HasEstablishedPeerSibling(address, s);
 
                 if (Volatile.Read(ref _acceptingConnections) == 0)
                 {
@@ -487,12 +483,12 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
         }
     }
 
-    private bool HasEstablishedPeerSibling(IPAddress ip, BgpSession session) =>
-        _sessions.Any(kvp =>
+    public bool IsPeerEstablished(string peerIp, uint asn) =>
+        IPAddress.TryParse(peerIp, out var ip)
+        && _sessions.Any(kvp =>
             kvp.Key.Address.Equals(ip)
-            && !ReferenceEquals(kvp.Value, session)
             && kvp.Value.IsEstablished
-            && kvp.Value.RemoteAsn == session.RemoteAsn);
+            && kvp.Value.RemoteAsn == asn);
 
     /// <summary>
     /// Atomically removes <paramref name="session"/> from <see cref="_sessions"/> only if it is

@@ -338,6 +338,7 @@ public sealed class PeerDeleteTeardownTests
             return Task.CompletedTask;
         }
         public void SetPeerMd5Key(string peerIp, string? password) => Md5Keys.Add((peerIp, password));
+        public bool IsPeerEstablished(string peerIp, uint asn) => false;
         public bool IsPeerMd5Armed(string peerIp, string? password) =>
             !string.IsNullOrEmpty(password) && Md5Keys.LastOrDefault(k => k.Ip == peerIp).Password == password;
     }

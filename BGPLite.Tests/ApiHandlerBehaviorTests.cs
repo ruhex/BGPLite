@@ -416,6 +416,30 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
         Assert.Equal("old-secret", (await store.GetPeerDetailAsync(saved.Id))!.Md5Password);
     }
 
+    [Fact]
+    public async Task PeerDetail_StatusFollowsLiveEstablishedState_NotPersistedWriteRaces()
+    {
+        var sessions = new RecordingSessions();
+        _port = await StartAsync(
+            new AppConfig { Bgp = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1" } },
+            sessions);
+        _client = new HttpClient();
+        var store = new PeerStore(new StaticOptionsFactory(new DbContextOptionsBuilder<BgpDbContext>().UseSqlite(_connection).Options));
+        var saved = await store.SavePeerConfigurationAsync("198.51.100.30", 65030, null, [], [], []);
+
+        using var inactive = await _client.GetAsync($"http://127.0.0.1:{_port}/api/peers/{saved.Id}");
+        Assert.Contains("\"status\":\"inactive\"", await inactive.Content.ReadAsStringAsync());
+
+        sessions.Established = true;
+        using var active = await _client.GetAsync($"http://127.0.0.1:{_port}/api/peers/{saved.Id}");
+        Assert.Contains("\"status\":\"active\"", await active.Content.ReadAsStringAsync());
+
+        sessions.Established = false;
+        using var closed = await _client.GetAsync($"http://127.0.0.1:{_port}/api/peers/{saved.Id}");
+        Assert.Contains("\"status\":\"inactive\"", await closed.Content.ReadAsStringAsync());
+        Assert.Equal("inactive", (await store.GetPeerDetailAsync(saved.Id))!.Status);
+    }
+
     private static int FreeTcpPort()
     {
         using var socket = new System.Net.Sockets.Socket(System.Net.Sockets.AddressFamily.InterNetwork, System.Net.Sockets.SocketType.Stream, System.Net.Sockets.ProtocolType.Tcp);
@@ -469,6 +493,7 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
             if (string.IsNullOrEmpty(password)) _armed.Remove(peerIp);
             else _armed[peerIp] = password;
         }
+        public bool IsPeerEstablished(string peerIp, uint asn) => false;
         public bool IsPeerMd5Armed(string peerIp, string? password) =>
             _armed.TryGetValue(peerIp, out var armed) && armed == password;
         public int GetAdvertisedPrefixCount(string peerIp, uint asn) => 0;
@@ -487,6 +512,7 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
         public Task TerminatePeerAsync(string peerIp, uint asn, CancellationToken ct = default) => Task.CompletedTask;
         public Task TerminatePeerByIpAsync(string peerIp, CancellationToken ct = default) => Task.CompletedTask;
         public void SetPeerMd5Key(string peerIp, string? password) { }
+        public bool IsPeerEstablished(string peerIp, uint asn) => false;
         public bool IsPeerMd5Armed(string peerIp, string? password) => false;
         public int GetAdvertisedPrefixCount(string peerIp, uint asn) => 0;
         public Task RefreshAllEstablishedAsync() => Task.CompletedTask;
@@ -500,6 +526,7 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
         public Task TerminatePeerByIpAsync(string peerIp, CancellationToken ct = default) => Task.CompletedTask;
         public void SetPeerMd5Key(string peerIp, string? password) =>
             throw new InvalidOperationException("simulated kernel refusal");
+        public bool IsPeerEstablished(string peerIp, uint asn) => false;
         public bool IsPeerMd5Armed(string peerIp, string? password) => false;
         public int GetAdvertisedPrefixCount(string peerIp, uint asn) => 0;
         public Task RefreshAllEstablishedAsync() => Task.CompletedTask;
@@ -509,11 +536,13 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
     private sealed class RecordingSessions : ISessionManager
     {
         public List<(string Ip, string? Password)> Md5Keys { get; } = [];
+        public bool Established { get; set; }
         public Task RefreshPeerAsync(string peerIp, uint asn) => Task.CompletedTask;
         public List<string> GetActivePeerIps() => [];
         public Task TerminatePeerAsync(string peerIp, uint asn, CancellationToken ct = default) => Task.CompletedTask;
         public Task TerminatePeerByIpAsync(string peerIp, CancellationToken ct = default) => Task.CompletedTask;
         public void SetPeerMd5Key(string peerIp, string? password) => Md5Keys.Add((peerIp, password));
+        public bool IsPeerEstablished(string peerIp, uint asn) => Established;
         public bool IsPeerMd5Armed(string peerIp, string? password) =>
             !string.IsNullOrEmpty(password) && Md5Keys.LastOrDefault(k => k.Ip == peerIp).Password == password;
         public int GetAdvertisedPrefixCount(string peerIp, uint asn) => 0;

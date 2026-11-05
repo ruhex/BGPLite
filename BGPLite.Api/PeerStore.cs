@@ -105,8 +105,8 @@ public sealed class PeerStore : IPeerStore
         var now = DateTime.UtcNow.ToString("O");
         await db.Database.ExecuteSqlInterpolatedAsync($@"
             INSERT INTO Peers (Id, Ip, Asn, Description, Status, CreatedAt, LastSessionAt)
-            VALUES ({id}, {ip}, {asn}, NULL, 'inactive', {now}, NULL)
-            ON CONFLICT(Ip, Asn) DO NOTHING", ct);
+            VALUES ({id}, {ip}, {asn}, NULL, 'inactive', {now}, {now})
+            ON CONFLICT(Ip, Asn) DO UPDATE SET LastSessionAt = {now}", ct);
     }
 
     public async Task UpdateSessionStatusAsync(string ip, uint asn, bool active, CancellationToken ct = default)
@@ -212,14 +212,10 @@ public sealed class PeerStore : IPeerStore
     }
 
     /// <summary>
-    /// Single-roundtrip replacement for the <c>GetPeer</c> + <c>UpdateSessionStatus</c> +
-    /// <c>GetSubscriptions</c> + <c>GetCustomPrefixes</c> + <c>GetCustomAsns</c> sequence the BGP
-    /// send path used to issue as FIVE separate <c>DbContext</c>s. Loads the peer by
-    /// <c>(Ip, Asn)</c> with the four routing-relevant child collections <c>Include</c>'d in ONE
-    /// <c>AsNoTracking</c> query (read-only intent, consistent with the other getters), then folds
-    /// the "session active" status write into the SAME <c>DbContext</c> via <c>ExecuteUpdate</c> —
-    /// so the whole read+update is one connection (six statements on five connections → two
-    /// statements on one). The returned collection shapes match the standalone getters exactly.
+    /// Loads the peer by <c>(Ip, Asn)</c> with all routing-relevant child collections through
+    /// one read-only <c>DbContext</c>. This path never mutates status or session timestamps:
+    /// live status is derived from the session manager, and Established history is recorded once
+    /// by the session-identification upsert. The returned collection shapes match the standalone getters.
     /// </summary>
     public async Task<PeerRoutingView?> LoadPeerRoutingViewAsync(string ip, uint asn, CancellationToken ct = default)
     {
@@ -253,13 +249,6 @@ public sealed class PeerStore : IPeerStore
             await read.CommitAsync(ct);
         }
         if (peer is null) return null;
-
-        // Fold the status update (was UpdateSessionStatus(active:true) on its own DbContext) into
-        // this one. ExecuteUpdate is scoped by (Ip, Asn) — identical effect, no extra connection.
-        await db.Peers.Where(p => p.Ip == ip && p.Asn == asn)
-            .ExecuteUpdateAsync(s => s
-                .SetProperty(p => p.Status, "active")
-                .SetProperty(p => p.LastSessionAt, DateTime.UtcNow), ct);
 
         return new PeerRoutingView(
             peer.Id,
