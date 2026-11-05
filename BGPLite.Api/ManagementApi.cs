@@ -1517,23 +1517,37 @@ public sealed class ManagementApi : IHostedService, IDisposable
 
         foreach (var l in lists)
         {
-            int prefixCount = 0;
+            var prefixCount = 0;
+            var attempted = 0;
+            var failed = 0;
             if (l.Asns.Count > 0)
             {
                 foreach (var asn in l.Asns)
                 {
+                    attempted++;
                     try { prefixCount += await _prefixService.GetPrefixCountAsync(asn, ct); }
-                    catch (OperationCanceledException) when (_shutdownCts.IsCancellationRequested) { throw; }  // only SHUTDOWN propagates — a fetch-budget cancellation fires as OCE on a live shutdown token and degrades below
-                    catch (Exception ex) { _logger.LogWarning(ex, "Failed to get prefix count for AS{Asn}", asn); }
+                    catch (OperationCanceledException) when (_shutdownCts.IsCancellationRequested) { throw; }
+                    catch (Exception ex)
+                    {
+                        failed++;
+                        _logger.LogWarning(ex, "Failed to get prefix count for AS{Asn}", asn);
+                    }
                 }
             }
             else if (l.Country is not null)
             {
+                attempted = 1;
                 try { prefixCount = (await _prefixService.GetRuPrefixesAsync(ct)).Count; }
-                catch (OperationCanceledException) when (_shutdownCts.IsCancellationRequested) { throw; }  // see above
-                catch (Exception ex) { _logger.LogWarning(ex, "Failed to get RU prefix count"); }
+                catch (OperationCanceledException) when (_shutdownCts.IsCancellationRequested) { throw; }
+                catch (Exception ex)
+                {
+                    failed = 1;
+                    _logger.LogWarning(ex, "Failed to get RU prefix count");
+                }
             }
 
+            var allFailed = attempted > 0 && failed == attempted;
+            var partial = failed > 0 && !allFailed;
             result.Add(new
             {
                 id = l.Name,
@@ -1541,7 +1555,11 @@ public sealed class ManagementApi : IHostedService, IDisposable
                 l.Description,
                 l.Country,
                 Community = l.Community,
-                prefixCount,
+                prefixCount = allFailed ? (int?)null : prefixCount,
+                partial,
+                countError = allFailed
+                    ? "All configured sources failed; prefix count is unavailable."
+                    : partial ? "Some sources failed; the count includes only successful sources." : null,
                 type = l.Country is not null ? "country" : "asn"
             });
         }
