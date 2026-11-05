@@ -230,6 +230,92 @@ public class BgpServerAcceptTests
         }
     }
 
+    [Fact]
+    public async Task AcceptWindow_PerConnectionFailure_DoesNotBackoffOrBlockNextAccept()
+    {
+        var server = new BgpServer(
+            new AppConfig { Bgp = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1" } },
+            new RouteTable(), AllowAllFilter.Instance, new BgpMetrics(),
+            new NeverReachedSessionFactory(), NullLogger<BgpServer>.Instance);
+        var firstAccepted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var secondAccepted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var acceptCount = 0;
+        var backoffCalls = 0;
+        server.AcceptBackoffProbe = (_, _) =>
+        {
+            Interlocked.Increment(ref backoffCalls);
+            return Task.CompletedTask;
+        };
+        server.AcceptWindowProbe = _ =>
+        {
+            if (Interlocked.Increment(ref acceptCount) == 1)
+            {
+                firstAccepted.TrySetResult();
+                throw new InvalidOperationException("simulated per-connection failure");
+            }
+            server.AcceptWindowProbe = null;
+            secondAccepted.TrySetResult();
+        };
+        server.ListenPort = FreeTcpPort();
+        await server.StartAsync(CancellationToken.None);
+
+        try
+        {
+            using (var first = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp))
+                await first.ConnectAsync(new IPEndPoint(IPAddress.Loopback, server.ListenPort));
+            await firstAccepted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+            using (var second = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp))
+                await second.ConnectAsync(new IPEndPoint(IPAddress.Loopback, server.ListenPort));
+            await secondAccepted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+            Assert.Equal(0, backoffCalls);
+        }
+        finally
+        {
+            await server.StopAsync(CancellationToken.None);
+        }
+    }
+
+    [Fact]
+    public async Task RstConnections_DoNotStopListener_OrBlockHealthyAccept()
+    {
+        var server = new BgpServer(
+            new AppConfig { Bgp = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1" } },
+            new RouteTable(), AllowAllFilter.Instance, new BgpMetrics(),
+            new NeverReachedSessionFactory(), NullLogger<BgpServer>.Instance);
+        var healthyAccepted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var healthyPort = 0;
+        server.AcceptWindowProbe = socket =>
+        {
+            if (socket.RemoteEndPoint is IPEndPoint endpoint && endpoint.Port == healthyPort)
+                healthyAccepted.TrySetResult();
+        };
+        server.ListenPort = FreeTcpPort();
+        await server.StartAsync(CancellationToken.None);
+
+        try
+        {
+            for (var i = 0; i < 10; i++)
+            {
+                using var client = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
+                client.LingerState = new LingerOption(true, 0);
+                await client.ConnectAsync(new IPEndPoint(IPAddress.Loopback, server.ListenPort));
+            }
+
+            using var healthy = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
+            healthy.Bind(new IPEndPoint(IPAddress.Loopback, 0));
+            healthyPort = ((IPEndPoint)healthy.LocalEndPoint!).Port;
+            await healthy.ConnectAsync(new IPEndPoint(IPAddress.Loopback, server.ListenPort));
+
+            await healthyAccepted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        }
+        finally
+        {
+            await server.StopAsync(CancellationToken.None);
+        }
+    }
+
     private static int FreeTcpPort()
     {
         var listener = new TcpListener(IPAddress.Loopback, 0);
