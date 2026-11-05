@@ -669,9 +669,10 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
     {
         if (!OperatingSystem.IsLinux()) return;
         var sessions = new RecordingSessions();
+        var logger = new RecordingLogger();
         _port = await StartAsync(
             new AppConfig { Bgp = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1" } },
-            sessions);
+            sessions, logger);
         _client = new HttpClient();
         var store = new PeerStore(new StaticOptionsFactory(new DbContextOptionsBuilder<BgpDbContext>().UseSqlite(_connection).Options));
         var saved = await store.SavePeerConfigurationAsync(
@@ -696,7 +697,8 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
         releaseFirst.SetResult();
         using var clear = await clearTask;
         using var replaced = await replace;
-        Assert.True(clear.IsSuccessStatusCode, await clear.Content.ReadAsStringAsync());
+        Assert.True(clear.IsSuccessStatusCode,
+            $"{await clear.Content.ReadAsStringAsync()}\n{string.Join("\n", logger.Messages)}");
         Assert.True(replaced.IsSuccessStatusCode, await replaced.Content.ReadAsStringAsync());
 
         Assert.Null((await store.GetPeerDetailAsync(saved.Id))!.Md5Password);
@@ -888,7 +890,7 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
         public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
         public bool IsEnabled(LogLevel logLevel) => true;
         public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
-            => Messages.Add(formatter(state, exception));
+            => Messages.Add(formatter(state, exception) + (exception is null ? string.Empty : $" | {exception}"));
     }
 
     [Fact]
