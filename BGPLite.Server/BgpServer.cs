@@ -238,18 +238,11 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
                     $"Remove Md5Password for peer {peerIp} or run the server on Linux.");
 
             var key = TcpMd5.KeyBytes(password);
-            var hasPrevious = _md5Keys.TryGetValue(address, out var previous);
+            if (!ApplyMd5(_listener, address, key))
+                throw new InvalidOperationException(
+                    $"TCP-MD5 (RFC 2385) could not be armed for peer {peerIp} — the kernel refused the key. " +
+                    $"Remove Md5Password for that peer or run on a kernel with TCP-MD5 support.");
             _md5Keys[address] = key;
-            if (ApplyMd5(_listener, address, key))
-                return;
-
-            if (hasPrevious)
-                _md5Keys[address] = previous!;
-            else
-                _md5Keys.TryRemove(address, out _);
-            throw new InvalidOperationException(
-                $"TCP-MD5 (RFC 2385) could not be armed for peer {peerIp} — the kernel refused the key. " +
-                $"Remove Md5Password for that peer or run on a kernel with TCP-MD5 support.");
         }
     }
 
