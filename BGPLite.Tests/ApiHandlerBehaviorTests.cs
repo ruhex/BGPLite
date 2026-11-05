@@ -366,6 +366,94 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
         Assert.DoesNotContain("unarmed-secret", json);
     }
 
+    [Theory]
+    [InlineData(false, "lists", "[\"ru\",\"ru\"]", "ru")]
+    [InlineData(true, "lists", "[\"ru\",\"ru\"]", "ru")]
+    [InlineData(false, "customAsns", "[65010,65010]", "65010")]
+    [InlineData(true, "customAsns", "[65010,65010]", "65010")]
+    [InlineData(false, "customPrefixes", "[\"10.0.0.0/24\",\"10.0.0.0/24\"]", "10.0.0.0/24")]
+    [InlineData(true, "customPrefixes", "[\"10.0.0.0/24\",\"10.0.0.0/24\"]", "10.0.0.0/24")]
+    [InlineData(false, "customPrefixes", "[\"10.0.0.1/24\",\"10.0.0.0/24\"]", "10.0.0.0/24")]
+    [InlineData(true, "customPrefixes", "[\"10.0.0.1/24\",\"10.0.0.0/24\"]", "10.0.0.0/24")]
+    public async Task DuplicatePeerValues_Return400WithFieldValueIndexes_AndDoNotMutateStore(
+        bool update, string field, string values, string duplicate)
+    {
+        _port = await StartAsync(new AppConfig { Bgp = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1" } });
+        _client = new HttpClient();
+        var store = new PeerStore(new StaticOptionsFactory(new DbContextOptionsBuilder<BgpDbContext>().UseSqlite(_connection).Options));
+        var saved = update
+            ? await store.SavePeerConfigurationAsync("198.51.100.30", 65030, "unchanged", [], [("192.0.2.0", 24)], [64999])
+            : null;
+        var url = update
+            ? $"http://127.0.0.1:{_port}/api/peers/{saved!.Id}"
+            : $"http://127.0.0.1:{_port}/api/peers";
+
+        var json = update
+            ? $"{{\"{field}\":{values}}}"
+            : $"{{\"ip\":\"198.51.100.30\",\"asn\":65030,\"{field}\":{values}}}";
+        using var response = await _client.SendAsync(new HttpRequestMessage(update ? HttpMethod.Put : HttpMethod.Post, url)
+        {
+            Content = new StringContent(json, Encoding.UTF8, "application/json")
+        });
+        var body = await response.Content.ReadAsStringAsync();
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Contains(field, body);
+        Assert.Contains(duplicate, body);
+        Assert.Contains("indexes 0 and 1", body);
+        if (update)
+        {
+            var detail = await store.GetPeerDetailAsync(saved!.Id);
+            Assert.Equal("unchanged", detail!.Description);
+            Assert.Equal(["192.0.2.0/24"], detail.CustomPrefixes);
+            Assert.Equal([64999u], detail.CustomAsns);
+        }
+        else
+        {
+            Assert.Empty(await store.GetPeersByIpAsync("198.51.100.30"));
+        }
+    }
+
+    [Fact]
+    public async Task DistinctOmittedAndEmptyPeerValues_PreserveCreateAndPartialUpdateSemantics()
+    {
+        _port = await StartAsync(new AppConfig
+        {
+            Bgp = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1" },
+            RipeStat = new RipeStatConfig
+            {
+                AsnLists =
+                [
+                    new AsnList { Name = "ru-a", Country = "RU" },
+                    new AsnList { Name = "ru-b", Country = "RU" }
+                ]
+            }
+        });
+        _client = new HttpClient();
+        var store = new PeerStore(new StaticOptionsFactory(new DbContextOptionsBuilder<BgpDbContext>().UseSqlite(_connection).Options));
+
+        using var created = await _client.PostAsync($"http://127.0.0.1:{_port}/api/peers",
+            new StringContent("""{"ip":"198.51.100.31","asn":65031,"lists":["ru-a","ru-b"],"customPrefixes":["10.0.0.1/24","192.0.2.0/24"],"customAsns":[65010,65011]}""", Encoding.UTF8, "application/json"));
+        Assert.True(created.IsSuccessStatusCode, await created.Content.ReadAsStringAsync());
+        var peer = Assert.Single(await store.GetPeersByIpAsync("198.51.100.31"));
+
+        using (var omitted = await _client.PutAsync($"http://127.0.0.1:{_port}/api/peers/{peer.Id}",
+                   new StringContent("{}", Encoding.UTF8, "application/json")))
+            Assert.True(omitted.IsSuccessStatusCode, await omitted.Content.ReadAsStringAsync());
+        var preserved = await store.GetPeerDetailAsync(peer.Id);
+        Assert.Equal(["ru-a", "ru-b"], preserved!.Subscriptions);
+        Assert.Equal(["10.0.0.0/24", "192.0.2.0/24"], preserved.CustomPrefixes);
+        Assert.Equal([65010u, 65011u], preserved.CustomAsns);
+
+        using var cleared = await _client.PutAsync($"http://127.0.0.1:{_port}/api/peers/{peer.Id}",
+            new StringContent("""{"lists":[],"customPrefixes":[],"customAsns":[]}""", Encoding.UTF8, "application/json"));
+        Assert.True(cleared.IsSuccessStatusCode, await cleared.Content.ReadAsStringAsync());
+        var empty = await store.GetPeerDetailAsync(peer.Id);
+        Assert.Empty(empty!.Subscriptions);
+        Assert.Empty(empty.CustomPrefixes);
+        Assert.Empty(empty.CustomAsns);
+    }
+
     [Fact]
     public async Task Md5Create_KernelFailure_RemovesStoredPassword_AndReportsCommittedPeer()
     {
