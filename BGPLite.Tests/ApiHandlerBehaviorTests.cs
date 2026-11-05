@@ -44,7 +44,7 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
         _connection.Dispose();
     }
 
-    private async Task<int> StartAsync(AppConfig template, ISessionManager? sessions = null, ILogger<ManagementApi>? logger = null, IPrefixSourceService? prefixSources = null, IPrefixService? prefixService = null)
+    private async Task<int> StartAsync(AppConfig template, ISessionManager? sessions = null, ILogger<ManagementApi>? logger = null, IPrefixSourceService? prefixSources = null, IPrefixService? prefixService = null, DbContextOptions<BgpDbContext>? dbOptions = null)
     {
         for (var attempt = 0; ; attempt++)
         {
@@ -60,7 +60,7 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
                 ApiListen = "127.0.0.1",
                 ApiPort = port,
             };
-            var store = new PeerStore(new StaticOptionsFactory(new DbContextOptionsBuilder<BgpDbContext>().UseSqlite(_connection).Options));
+            var store = new PeerStore(new StaticOptionsFactory(dbOptions ?? new DbContextOptionsBuilder<BgpDbContext>().UseSqlite(_connection).Options));
             IPrefixService prefixes = prefixService ?? new InertPrefixService();
             _api = new ManagementApi(
                 store,
@@ -670,11 +670,17 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
         if (!OperatingSystem.IsLinux()) return;
         var sessions = new RecordingSessions();
         var logger = new RecordingLogger();
+        var connectionString = $"Data Source={Guid.NewGuid():N};Mode=Memory;Cache=Shared";
+        using var keepAlive = new SqliteConnection(connectionString);
+        keepAlive.Open();
+        var dbOptions = new DbContextOptionsBuilder<BgpDbContext>().UseSqlite(connectionString).Options;
+        using (var boot = new BgpDbContext(dbOptions))
+            BgpDbContext.Initialize(boot);
         _port = await StartAsync(
             new AppConfig { Bgp = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1" } },
-            sessions, logger);
+            sessions, logger, dbOptions: dbOptions);
         _client = new HttpClient();
-        var store = new PeerStore(new StaticOptionsFactory(new DbContextOptionsBuilder<BgpDbContext>().UseSqlite(_connection).Options));
+        var store = new PeerStore(new StaticOptionsFactory(dbOptions));
         var saved = await store.SavePeerConfigurationAsync(
             "198.51.100.23", 65023, null, [], [], [], md5Password: "old-secret");
         var firstRead = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
