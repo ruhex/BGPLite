@@ -1090,9 +1090,12 @@ public sealed class ManagementApi : IHostedService, IDisposable
             try { await RearmPeerIpMd5KeyAsync(normalizedIp); }
             catch (Exception ex)
             {
-                _logger.LogWarning(ex, "TCP-MD5 arming failed after saving peer {Ip}; restoring its previous password state", normalizedIp);
-                await _store.UpdatePeerConfigurationAsync(saved.Id, null, null, null, null,
-                    md5Password: existingPeer is null ? "" : previousMd5Password ?? "");
+                _logger.LogWarning(ex, "TCP-MD5 arming failed after saving peer {Ip}; attempting a conditional password rollback", normalizedIp);
+                var restored = await _store.RestorePeerMd5PasswordIfCurrentAsync(
+                    saved.Id, data.Md5Password, existingPeer is null ? null : previousMd5Password);
+                if (!restored)
+                    return ApiResponse.Error(
+                        "The peer changes were saved, but TCP-MD5 could not be armed; a newer concurrent password change was left intact.", 500);
                 return ApiResponse.Error(existingPeer is null
                     ? "The peer was created, but TCP-MD5 could not be armed; its stored password was removed."
                     : "The peer configuration was saved, but TCP-MD5 could not be armed; the previous stored password was restored.", 500);
@@ -1240,12 +1243,13 @@ public sealed class ManagementApi : IHostedService, IDisposable
             try { await RearmPeerIpMd5KeyAsync(surviving.Ip); }
             catch (Exception ex)
             {
-                _logger.LogWarning(ex, "TCP-MD5 re-arming failed after updating peer {Id}; restoring its previous password",
+                _logger.LogWarning(ex, "TCP-MD5 re-arming failed after updating peer {Id}; attempting a conditional password rollback",
                     SanitizeForLog(peerId));
-                await _store.UpdatePeerConfigurationAsync(peerId, null, null, null, null,
-                    md5Password: peer.Md5Password ?? "");
-                return ApiResponse.Error(
-                    "The peer changes were saved, but TCP-MD5 re-arming failed; the previous stored password was restored.", 500);
+                var restored = await _store.RestorePeerMd5PasswordIfCurrentAsync(peerId,
+                    string.IsNullOrEmpty(data.Md5Password) ? null : data.Md5Password, peer.Md5Password);
+                return ApiResponse.Error(restored
+                    ? "The peer changes were saved, but TCP-MD5 re-arming failed; the previous stored password was restored."
+                    : "The peer changes were saved, but TCP-MD5 re-arming failed; a newer concurrent password change was left intact.", 500);
             }
         }
 

@@ -220,6 +220,25 @@ public class PeerStoreConfigurationAtomicityTests
         Assert.Empty(await store.GetPeerMd5CredentialsAsync());
     }
 
+    [Fact]
+    public async Task Md5Password_StaleRollback_DoesNotOverwriteNewerValue()
+    {
+        var (store, connection) = NewStore();
+        using var _ = connection;
+        var saved = await store.SavePeerConfigurationAsync(
+            Ip, Asn, null, [], [], [], md5Password: "old");
+        await store.UpdatePeerConfigurationAsync(saved.Id, null, null, null, null, md5Password: "new-a");
+        await store.UpdatePeerConfigurationAsync(saved.Id, null, null, null, null, md5Password: "new-b");
+
+        var staleRestored = await store.RestorePeerMd5PasswordIfCurrentAsync(saved.Id, "new-a", "old");
+        Assert.False(staleRestored);
+        Assert.Equal("new-b", (await store.GetPeerDetailAsync(saved.Id))!.Md5Password);
+
+        var currentRestored = await store.RestorePeerMd5PasswordIfCurrentAsync(saved.Id, "new-b", "old");
+        Assert.True(currentRestored);
+        Assert.Equal("old", (await store.GetPeerDetailAsync(saved.Id))!.Md5Password);
+    }
+
     /// <summary>A store over an in-memory SQLite DB that records every transaction EF opens.</summary>
     private static (PeerStore Store, SqliteConnection Connection, List<string> Transactions) NewStoreCountingTransactions()
     {
