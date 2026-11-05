@@ -269,6 +269,9 @@ builder.Services.AddHostedService(sp => new RouteSeedingService(
     config,
     sp.GetRequiredService<ISessionManager>(),
     sp.GetRequiredService<ILogger<RouteSeedingService>>()));
+// Persisted MD5 keys must be loaded before BgpServer binds and accepts reconnecting peers.
+// This hosted service is independent of the management HTTP listener and fails startup on error.
+builder.Services.AddHostedService<PeerMd5BootstrapService>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<BgpServer>());
 builder.Services.AddSingleton<ISessionManager>(sp => sp.GetRequiredService<BgpServer>());
 

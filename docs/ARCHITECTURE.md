@@ -80,8 +80,9 @@ leaves).
   dependencies (audited 2026-08-27).
 - `BgpServer` is registered as a singleton first, then adopted by `AddHostedService`; `ISessionManager`
   resolves to that same instance (#231).
-- Hosted services, in start order: `RouteSeedingService` (background seeding, #251) → `BgpServer`
-  → `ManagementApi` → `ConfigReloader` (hot-reload of soft config) → `PrefixAutoRefreshService`.
+- Hosted services, in start order: `RouteSeedingService` (background seeding, #251) →
+  `PeerMd5BootstrapService` (loads persisted keys before the listener, #555) → `BgpServer` →
+  `ManagementApi` → `ConfigReloader` (hot-reload of soft config) → `PrefixAutoRefreshService`.
 
 ## Key seams (deliberate abstractions)
 
