@@ -708,6 +708,24 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
         public Task WarmUpAsync(CancellationToken ct = default) => Task.CompletedTask;
     }
 
+    private sealed class CountFailurePrefixService : IPrefixService
+    {
+        public Task<IReadOnlyList<(UInt128 Prefix, byte Length, bool IsIpv4)>> GetPrefixesAsync(uint asn, CancellationToken ct = default) => Task.FromResult<IReadOnlyList<(UInt128, byte, bool)>>([]);
+        public Task<List<(UInt128 Prefix, byte Length, bool IsIpv4, uint Asn)>> GetPrefixesForAsns(IEnumerable<uint> asns, CancellationToken ct = default) => Task.FromResult(new List<(UInt128, byte, bool, uint)>());
+        public Task<int> GetPrefixCountAsync(uint asn, CancellationToken ct = default) => asn switch
+        {
+            65010 => Task.FromResult(2),
+            65020 => Task.FromResult(3),
+            65040 => Task.FromResult(0),
+            _ => Task.FromException<int>(new InvalidOperationException("simulated source outage"))
+        };
+        public Task<List<(UInt128 Prefix, byte Length, bool IsIpv4, uint Asn)>> GetRuPrefixesAsync(CancellationToken ct = default) =>
+            Task.FromException<List<(UInt128, byte, bool, uint)>>(new InvalidOperationException("simulated country-source outage"));
+        public Task<IReadOnlyList<(UInt128 Prefix, byte Length, bool IsIpv4)>> GetSourcePrefixesAsync(string name, CancellationToken ct = default) => Task.FromResult<IReadOnlyList<(UInt128, byte, bool)>>([]);
+        public Task<IReadOnlyList<(UInt128 Prefix, byte Length, bool IsIpv4)>> GetUserSourcePrefixesAsync(string name, string url, string? community, CancellationToken ct = default) => Task.FromResult<IReadOnlyList<(UInt128, byte, bool)>>([]);
+        public Task WarmUpAsync(CancellationToken ct = default) => Task.CompletedTask;
+    }
+
     private sealed class InertPrefixSources : IPrefixSourceService
     {
 
