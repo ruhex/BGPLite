@@ -691,11 +691,12 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
         var replace = _client.PutAsync($"http://127.0.0.1:{_port}/api/peers/{saved.Id}",
             new StringContent("""{"md5Password":"new-secret"}""", Encoding.UTF8, "application/json"));
         await firstRead.Task.WaitAsync(TimeSpan.FromSeconds(5));
-        using var clear = await _client.PutAsync($"http://127.0.0.1:{_port}/api/peers/{saved.Id}",
+        var clearTask = _client.PutAsync($"http://127.0.0.1:{_port}/api/peers/{saved.Id}",
             new StringContent("""{"md5Password":""}""", Encoding.UTF8, "application/json"));
-        Assert.True(clear.IsSuccessStatusCode, await clear.Content.ReadAsStringAsync());
         releaseFirst.SetResult();
+        using var clear = await clearTask;
         using var replaced = await replace;
+        Assert.True(clear.IsSuccessStatusCode, await clear.Content.ReadAsStringAsync());
         Assert.True(replaced.IsSuccessStatusCode, await replaced.Content.ReadAsStringAsync());
 
         Assert.Null((await store.GetPeerDetailAsync(saved.Id))!.Md5Password);

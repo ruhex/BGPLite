@@ -48,6 +48,9 @@ public sealed class ManagementApi : IHostedService, IDisposable
     private readonly IPrefixService _prefixService;
     private readonly IPrefixSourceService _prefixSources;
     private readonly ISessionManager _sessionManager;
+    // Serializes each complete DB → credential-resolution → kernel mutation, including rollback.
+    // A single low-volume management gate avoids unbounded per-IP lock retention.
+    private readonly SemaphoreSlim _md5MutationGate = new(1, 1);
     private readonly IPrefixExportService _prefixExport;
     private readonly ILogger<ManagementApi> _logger;
     private readonly int _port;
@@ -1076,33 +1079,45 @@ public sealed class ManagementApi : IHostedService, IDisposable
         // peer row. The API now rejects UI duplicates; store-level dedup remains defense in depth.
         // The upsert returns (Id, Status, CreatedAt) from its RETURNING clause — no
         // follow-up GetDbPeerById roundtrip for fields the caller already knows.
-        var existingPeer = string.IsNullOrEmpty(data.Md5Password)
-            ? null
-            : await _store.GetPeerAsync(normalizedIp, data.Asn);
-        var previousMd5Password = existingPeer is null
-            ? null
-            : (await _store.GetDbPeerByIdAsync(existingPeer.Id))?.Md5Password;
-        var saved = await _store.SavePeerConfigurationAsync(
-            normalizedIp, data.Asn, data.Description, asnLists, customPrefixes, data.CustomAsns ?? [], data.MaxPrefix,
-            md5Password: string.IsNullOrEmpty(data.Md5Password) ? null : data.Md5Password);
-        if (!string.IsNullOrEmpty(data.Md5Password))
+        var gateMd5 = !string.IsNullOrEmpty(data.Md5Password);
+        if (gateMd5)
+            await _md5MutationGate.WaitAsync();
+        SavedPeer saved;
+        try
         {
-            // Resolve through the SAME shared-IP re-arm the delete/PATCH/bootstrap paths use.
-            // If the kernel refuses the selected key, restore the password state from before this
-            // request so startup cannot retry an unarmable key, and make the partial commit explicit.
-            try { await RearmPeerIpMd5KeyAsync(normalizedIp); }
-            catch (Exception ex)
+            var existingPeer = string.IsNullOrEmpty(data.Md5Password)
+                ? null
+                : await _store.GetPeerAsync(normalizedIp, data.Asn);
+            var previousMd5Password = existingPeer is null
+                ? null
+                : (await _store.GetDbPeerByIdAsync(existingPeer.Id))?.Md5Password;
+            saved = await _store.SavePeerConfigurationAsync(
+                normalizedIp, data.Asn, data.Description, asnLists, customPrefixes, data.CustomAsns ?? [], data.MaxPrefix,
+                md5Password: string.IsNullOrEmpty(data.Md5Password) ? null : data.Md5Password);
+            if (gateMd5)
             {
-                _logger.LogWarning(ex, "TCP-MD5 arming failed after saving peer {Ip}; attempting a conditional password rollback", normalizedIp);
-                var restored = await _store.RestorePeerMd5PasswordIfCurrentAsync(
-                    saved.Id, data.Md5Password, existingPeer is null ? null : previousMd5Password);
-                if (!restored)
-                    return ApiResponse.Error(
-                        "The peer changes were saved, but TCP-MD5 could not be armed; a newer concurrent password change was left intact.", 500);
-                return ApiResponse.Error(existingPeer is null
-                    ? "The peer was created, but TCP-MD5 could not be armed; its stored password was removed."
-                    : "The peer configuration was saved, but TCP-MD5 could not be armed; the previous stored password was restored.", 500);
+                // Resolve through the SAME shared-IP re-arm the delete/PATCH/bootstrap paths use.
+                // If the kernel refuses the selected key, restore the password state from before this
+                // request so startup cannot retry an unarmable key, and make the partial commit explicit.
+                try { await RearmPeerIpMd5KeyAsync(normalizedIp); }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "TCP-MD5 arming failed after saving peer {Ip}; attempting a conditional password rollback", normalizedIp);
+                    var restored = await _store.RestorePeerMd5PasswordIfCurrentAsync(
+                        saved.Id, data.Md5Password, existingPeer is null ? null : previousMd5Password);
+                    if (!restored)
+                        return ApiResponse.Error(
+                            "The peer changes were saved, but TCP-MD5 could not be armed; a newer concurrent password change was left intact.", 500);
+                    return ApiResponse.Error(existingPeer is null
+                        ? "The peer was created, but TCP-MD5 could not be armed; its stored password was removed."
+                        : "The peer configuration was saved, but TCP-MD5 could not be armed; the previous stored password was restored.", 500);
+                }
             }
+        }
+        finally
+        {
+            if (gateMd5)
+                _md5MutationGate.Release();
         }
 
         _logger.LogInformation("Created peer {Ip} AS{Asn} ({Id}): {Subs} lists, {Prefixes} custom prefixes, {Asns} custom AS",
@@ -1230,30 +1245,41 @@ public sealed class ManagementApi : IHostedService, IDisposable
         if (!string.IsNullOrEmpty(data.Md5Password) && !TcpMd5.IsSupported)
             return ApiResponse.Error("TCP-MD5 (RFC 2385) is supported on Linux only — this host cannot arm an md5Password; remove it or run the server on Linux.", 400);
 
-        await _store.UpdatePeerConfigurationAsync(peerId, data.Description, data.Lists, parsedPrefixes, data.CustomAsns, data.MaxPrefix,
-            md5Password: data.Md5Password);
-        // A concurrent DELETE between the top-of-handler GET and this UPDATE left the
-        // ExecuteUpdates touching 0 rows while the handler still logged "Updated peer", answered
-        // 200 and fired a refresh — the follow-up GET then 404ed. Re-check the row and answer 404
-        // directly (the write itself is harmless: transaction-scoped, 0 rows affected).
-        var surviving = await _store.GetDbPeerByIdAsync(peerId);
-        if (surviving is null)
-            return ApiResponse.Error("Peer not found", 404);
-        if (data.Md5Password is not null)
+        var gateMd5 = data.Md5Password is not null;
+        if (gateMd5)
+            await _md5MutationGate.WaitAsync();
+        try
         {
-            // Re-arm from ALL surviving rows for this IP. On failure restore the previous stored
-            // password and make the partial commit explicit instead of returning a bare 500.
-            try { await RearmPeerIpMd5KeyAsync(surviving.Ip); }
-            catch (Exception ex)
+            await _store.UpdatePeerConfigurationAsync(peerId, data.Description, data.Lists, parsedPrefixes, data.CustomAsns, data.MaxPrefix,
+                md5Password: data.Md5Password);
+            // A concurrent DELETE between the top-of-handler GET and this UPDATE left the
+            // ExecuteUpdates touching 0 rows while the handler still logged "Updated peer", answered
+            // 200 and fired a refresh — the follow-up GET then 404ed. Re-check the row and answer 404
+            // directly (the write itself is harmless: transaction-scoped, 0 rows affected).
+            var surviving = await _store.GetDbPeerByIdAsync(peerId);
+            if (surviving is null)
+                return ApiResponse.Error("Peer not found", 404);
+            if (gateMd5)
             {
-                _logger.LogWarning(ex, "TCP-MD5 re-arming failed after updating peer {Id}; attempting a conditional password rollback",
-                    SanitizeForLog(peerId));
-                var restored = await _store.RestorePeerMd5PasswordIfCurrentAsync(peerId,
-                    string.IsNullOrEmpty(data.Md5Password) ? null : data.Md5Password, peer.Md5Password);
-                return ApiResponse.Error(restored
-                    ? "The peer changes were saved, but TCP-MD5 re-arming failed; the previous stored password was restored."
-                    : "The peer changes were saved, but TCP-MD5 re-arming failed; a newer concurrent password change was left intact.", 500);
+                // Re-arm from ALL surviving rows for this IP. On failure restore the previous stored
+                // password and make the partial commit explicit instead of returning a bare 500.
+                try { await RearmPeerIpMd5KeyAsync(surviving.Ip); }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "TCP-MD5 re-arming failed after updating peer {Id}; attempting a conditional password rollback",
+                        SanitizeForLog(peerId));
+                    var restored = await _store.RestorePeerMd5PasswordIfCurrentAsync(peerId,
+                        string.IsNullOrEmpty(data.Md5Password) ? null : data.Md5Password, peer.Md5Password);
+                    return ApiResponse.Error(restored
+                        ? "The peer changes were saved, but TCP-MD5 re-arming failed; the previous stored password was restored."
+                        : "The peer changes were saved, but TCP-MD5 re-arming failed; a newer concurrent password change was left intact.", 500);
+                }
             }
+        }
+        finally
+        {
+            if (gateMd5)
+                _md5MutationGate.Release();
         }
 
         _logger.LogInformation("Updated peer {Id}", SanitizeForLog(peerId));
@@ -1313,18 +1339,26 @@ public sealed class ManagementApi : IHostedService, IDisposable
             await _sessionManager.TerminatePeerByIpAsync(peer.Ip, bound.Token);
         }
 
-        await _store.DeletePeerAsync(peerId);
-
-        // Re-arm the IP's TCP-MD5 key from the SURVIVING rows — deleting one sibling
-        // must not disarm TCP-MD5 for the other peers sharing the source IP. No key left on the
-        // IP resolves to null (disarm).
-        try { await RearmPeerIpMd5KeyAsync(peer.Ip); }
-        catch (Exception ex)
+        await _md5MutationGate.WaitAsync();
+        try
         {
-            _logger.LogWarning(ex, "Peer {Id} was deleted, but TCP-MD5 re-arming failed for {Ip}",
-                SanitizeForLog(peerId), peer.Ip);
-            return ApiResponse.Error(
-                "The peer was deleted, but TCP-MD5 state for its shared source IP could not be updated.", 500);
+            await _store.DeletePeerAsync(peerId);
+
+            // Re-arm the IP's TCP-MD5 key from the SURVIVING rows — deleting one sibling
+            // must not disarm TCP-MD5 for the other peers sharing the source IP. No key left on the
+            // IP resolves to null (disarm).
+            try { await RearmPeerIpMd5KeyAsync(peer.Ip); }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Peer {Id} was deleted, but TCP-MD5 re-arming failed for {Ip}",
+                    SanitizeForLog(peerId), peer.Ip);
+                return ApiResponse.Error(
+                    "The peer was deleted, but TCP-MD5 state for its shared source IP could not be updated.", 500);
+            }
+        }
+        finally
+        {
+            _md5MutationGate.Release();
         }
         _logger.LogInformation("Deleted peer {Id} ({Ip})", SanitizeForLog(peerId), peer.Ip);
         return ApiResponse.Ok(new { id = peerId, deleted = true });
@@ -2110,6 +2144,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
         Volatile.Read(ref _rateLimiter)?.Dispose();
         Volatile.Read(ref _concurrencyLimiter)?.Dispose();
         _inflightCap.Dispose();
+        _md5MutationGate.Dispose();
         _listener?.Close();
     }
 
