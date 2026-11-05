@@ -510,6 +510,49 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
     }
 
     [Fact]
+    public async Task AsnLists_CountsDistinguishAllFailedPartialAndRealZero()
+    {
+        var config = new AppConfig
+        {
+            Bgp = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1" },
+            RipeStat = new RipeStatConfig
+            {
+                AsnLists =
+                [
+                    new AsnList { Name = "all-failed", Asns = [65011, 65012] },
+                    new AsnList { Name = "partial", Asns = [65010, 65011, 65020] },
+                    new AsnList { Name = "zero", Asns = [65040] },
+                    new AsnList { Name = "country-failed", Country = "RU" }
+                ]
+            }
+        };
+        _port = await StartAsync(config, prefixService: new CountFailurePrefixService());
+        _client = new HttpClient();
+
+        using var response = await _client.GetAsync($"http://127.0.0.1:{_port}/api/asn-lists");
+        var body = await response.Content.ReadAsStringAsync();
+        using var json = JsonDocument.Parse(body);
+        var entries = json.RootElement.EnumerateArray().ToArray();
+        var allFailed = entries.Single(e => e.GetProperty("id").GetString() == "all-failed");
+        var partial = entries.Single(e => e.GetProperty("id").GetString() == "partial");
+        var zero = entries.Single(e => e.GetProperty("id").GetString() == "zero");
+        var country = entries.Single(e => e.GetProperty("id").GetString() == "country-failed");
+
+        Assert.True(response.IsSuccessStatusCode, body);
+        Assert.Equal(JsonValueKind.Null, allFailed.GetProperty("prefixCount").ValueKind);
+        Assert.False(allFailed.GetProperty("partial").GetBoolean());
+        Assert.Contains("unavailable", allFailed.GetProperty("countError").GetString());
+        Assert.Equal(5, partial.GetProperty("prefixCount").GetInt32());
+        Assert.True(partial.GetProperty("partial").GetBoolean());
+        Assert.Contains("only successful", partial.GetProperty("countError").GetString());
+        Assert.Equal(0, zero.GetProperty("prefixCount").GetInt32());
+        Assert.False(zero.GetProperty("partial").GetBoolean());
+        Assert.Equal(JsonValueKind.Null, zero.GetProperty("countError").ValueKind);
+        Assert.Equal(JsonValueKind.Null, country.GetProperty("prefixCount").ValueKind);
+        Assert.Contains("unavailable", country.GetProperty("countError").GetString());
+    }
+
+    [Fact]
     public async Task NonCanonicalPeerIp_Returns400_WithoutRewritingTargetHost()
     {
         _port = await StartAsync(new AppConfig { Bgp = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1" } });
@@ -662,6 +705,24 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
             Task.FromResult<IReadOnlyList<(UInt128, byte, bool)>>([(0xAC100000, 12, true)]);
         public Task<IReadOnlyList<(UInt128 Prefix, byte Length, bool IsIpv4)>> GetUserSourcePrefixesAsync(string name, string url, string? community, CancellationToken ct = default) =>
             Task.FromResult<IReadOnlyList<(UInt128, byte, bool)>>([(0xC0000200, 24, true)]);
+        public Task WarmUpAsync(CancellationToken ct = default) => Task.CompletedTask;
+    }
+
+    private sealed class CountFailurePrefixService : IPrefixService
+    {
+        public Task<IReadOnlyList<(UInt128 Prefix, byte Length, bool IsIpv4)>> GetPrefixesAsync(uint asn, CancellationToken ct = default) => Task.FromResult<IReadOnlyList<(UInt128, byte, bool)>>([]);
+        public Task<List<(UInt128 Prefix, byte Length, bool IsIpv4, uint Asn)>> GetPrefixesForAsns(IEnumerable<uint> asns, CancellationToken ct = default) => Task.FromResult(new List<(UInt128, byte, bool, uint)>());
+        public Task<int> GetPrefixCountAsync(uint asn, CancellationToken ct = default) => asn switch
+        {
+            65010 => Task.FromResult(2),
+            65020 => Task.FromResult(3),
+            65040 => Task.FromResult(0),
+            _ => Task.FromException<int>(new InvalidOperationException("simulated source outage"))
+        };
+        public Task<List<(UInt128 Prefix, byte Length, bool IsIpv4, uint Asn)>> GetRuPrefixesAsync(CancellationToken ct = default) =>
+            Task.FromException<List<(UInt128, byte, bool, uint)>>(new InvalidOperationException("simulated country-source outage"));
+        public Task<IReadOnlyList<(UInt128 Prefix, byte Length, bool IsIpv4)>> GetSourcePrefixesAsync(string name, CancellationToken ct = default) => Task.FromResult<IReadOnlyList<(UInt128, byte, bool)>>([]);
+        public Task<IReadOnlyList<(UInt128 Prefix, byte Length, bool IsIpv4)>> GetUserSourcePrefixesAsync(string name, string url, string? community, CancellationToken ct = default) => Task.FromResult<IReadOnlyList<(UInt128, byte, bool)>>([]);
         public Task WarmUpAsync(CancellationToken ct = default) => Task.CompletedTask;
     }
 
