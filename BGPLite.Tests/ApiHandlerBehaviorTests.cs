@@ -44,7 +44,7 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
         _connection.Dispose();
     }
 
-    private async Task<int> StartAsync(AppConfig template, ISessionManager? sessions = null, ILogger<ManagementApi>? logger = null, IPrefixSourceService? prefixSources = null, IPrefixService? prefixService = null)
+    private async Task<int> StartAsync(AppConfig template, ISessionManager? sessions = null, ILogger<ManagementApi>? logger = null, IPrefixSourceService? prefixSources = null, IPrefixService? prefixService = null, DbContextOptions<BgpDbContext>? dbOptions = null)
     {
         for (var attempt = 0; ; attempt++)
         {
@@ -60,7 +60,7 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
                 ApiListen = "127.0.0.1",
                 ApiPort = port,
             };
-            var store = new PeerStore(new StaticOptionsFactory(new DbContextOptionsBuilder<BgpDbContext>().UseSqlite(_connection).Options));
+            var store = new PeerStore(new StaticOptionsFactory(dbOptions ?? new DbContextOptionsBuilder<BgpDbContext>().UseSqlite(_connection).Options));
             IPrefixService prefixes = prefixService ?? new InertPrefixService();
             _api = new ManagementApi(
                 store,
@@ -665,6 +665,54 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
     }
 
     [Fact]
+    public async Task Md5Updates_SharedIp_CannotApplyCredentialsReadBeforeNewerClear()
+    {
+        if (!OperatingSystem.IsLinux()) return;
+        var sessions = new RecordingSessions();
+        var logger = new RecordingLogger();
+        var connectionString = $"Data Source={Guid.NewGuid():N};Mode=Memory;Cache=Shared";
+        using var keepAlive = new SqliteConnection(connectionString);
+        keepAlive.Open();
+        var dbOptions = new DbContextOptionsBuilder<BgpDbContext>().UseSqlite(connectionString).Options;
+        using (var boot = new BgpDbContext(dbOptions))
+            BgpDbContext.Initialize(boot);
+        _port = await StartAsync(
+            new AppConfig { Bgp = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1" } },
+            sessions, logger, dbOptions: dbOptions);
+        _client = new HttpClient();
+        var store = new PeerStore(new StaticOptionsFactory(dbOptions));
+        var saved = await store.SavePeerConfigurationAsync(
+            "198.51.100.23", 65023, null, [], [], [], md5Password: "old-secret");
+        var firstRead = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseFirst = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var probeCalls = 0;
+        _api!.Md5RearmProbe = async _ =>
+        {
+            if (Interlocked.Increment(ref probeCalls) == 1)
+            {
+                firstRead.SetResult();
+                await releaseFirst.Task;
+            }
+        };
+
+        var replace = _client.PutAsync($"http://127.0.0.1:{_port}/api/peers/{saved.Id}",
+            new StringContent("""{"md5Password":"new-secret"}""", Encoding.UTF8, "application/json"));
+        await firstRead.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        var clearTask = _client.PutAsync($"http://127.0.0.1:{_port}/api/peers/{saved.Id}",
+            new StringContent("""{"md5Password":""}""", Encoding.UTF8, "application/json"));
+        releaseFirst.SetResult();
+        using var clear = await clearTask;
+        using var replaced = await replace;
+        Assert.True(clear.IsSuccessStatusCode,
+            $"{await clear.Content.ReadAsStringAsync()}\n{string.Join("\n", logger.Messages)}");
+        Assert.True(replaced.IsSuccessStatusCode, await replaced.Content.ReadAsStringAsync());
+
+        Assert.Null((await store.GetPeerDetailAsync(saved.Id))!.Md5Password);
+        Assert.False(sessions.IsPeerMd5Armed("198.51.100.23", "new-secret"));
+        Assert.Null(sessions.Md5Keys.Last().Password);
+    }
+
+    [Fact]
     public async Task PeerDetail_StatusFollowsLiveEstablishedState_NotPersistedWriteRaces()
     {
         var sessions = new RecordingSessions();
@@ -827,16 +875,24 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
     /// <summary>Records SetPeerMd5Key calls so a test can assert WHAT was armed.</summary>
     private sealed class RecordingSessions : ISessionManager
     {
+        private readonly object _md5Sync = new();
         public List<(string Ip, string? Password)> Md5Keys { get; } = [];
         public bool Established { get; set; }
         public Task RefreshPeerAsync(string peerIp, uint asn) => Task.CompletedTask;
         public List<string> GetActivePeerIps() => [];
         public Task TerminatePeerAsync(string peerIp, uint asn, CancellationToken ct = default) => Task.CompletedTask;
         public Task TerminatePeerByIpAsync(string peerIp, CancellationToken ct = default) => Task.CompletedTask;
-        public void SetPeerMd5Key(string peerIp, string? password) => Md5Keys.Add((peerIp, password));
+        public void SetPeerMd5Key(string peerIp, string? password)
+        {
+            lock (_md5Sync)
+                Md5Keys.Add((peerIp, password));
+        }
         public bool IsPeerEstablished(string peerIp, uint asn) => Established;
-        public bool IsPeerMd5Armed(string peerIp, string? password) =>
-            !string.IsNullOrEmpty(password) && Md5Keys.LastOrDefault(k => k.Ip == peerIp).Password == password;
+        public bool IsPeerMd5Armed(string peerIp, string? password)
+        {
+            lock (_md5Sync)
+                return !string.IsNullOrEmpty(password) && Md5Keys.LastOrDefault(k => k.Ip == peerIp).Password == password;
+        }
         public int GetAdvertisedPrefixCount(string peerIp, uint asn) => 0;
         public Task RefreshAllEstablishedAsync() => Task.CompletedTask;
     }
@@ -848,7 +904,7 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
         public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
         public bool IsEnabled(LogLevel logLevel) => true;
         public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
-            => Messages.Add(formatter(state, exception));
+            => Messages.Add(formatter(state, exception) + (exception is null ? string.Empty : $" | {exception}"));
     }
 
     [Fact]
