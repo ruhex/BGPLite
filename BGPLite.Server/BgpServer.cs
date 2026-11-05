@@ -58,6 +58,7 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
     /// can force a throw exactly where the socket-must-never-leak invariant lives. Null (never
     /// invoked) in production.</summary>
     internal Action<Socket>? AcceptWindowProbe { get; set; }
+    internal Func<TimeSpan, CancellationToken, Task>? AcceptBackoffProbe { get; set; }
 
     public BgpServer(
         AppConfig config,
@@ -326,16 +327,33 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
     {
         while (!cancellationToken.IsCancellationRequested)
         {
-            // Hoisted out of the try so the finally below can always see the accepted socket.
-            // Until the session takes ownership, EVERY exit from this block (throw, cancellation,
-            // break, continue) must dispose the FD — the generic catch cannot dispose what it
-            // cannot see, and an orphaned accept socket waits for the finalizer. This is the
-            // loop whose entire purpose is bounding FD use under accept pressure.
-            Socket? socket = null;
+            Socket? socket;
+            try
+            {
+                socket = await AcceptSocketAsync(cancellationToken);
+            }
+            catch (OperationCanceledException) { break; }
+            catch (Exception ex)
+            {
+                if (Volatile.Read(ref _acceptingConnections) == 0)
+                    break;
+                _logger.LogError(ex, "Error accepting connection");
+                // Listener/resource failures such as EMFILE need a bounded retry rate.
+                try
+                {
+                    if (AcceptBackoffProbe is { } backoff)
+                        await backoff(AcceptFailureBackoff, cancellationToken);
+                    else
+                        await Task.Delay(AcceptFailureBackoff, cancellationToken);
+                }
+                catch (OperationCanceledException) { break; }
+                continue;
+            }
+
+            // Until the session takes ownership, EVERY exit from this block must dispose the FD.
             var sessionOwnsSocket = false;
             try
             {
-                socket = await _listener!.AcceptAsync(cancellationToken);
                 AcceptWindowProbe?.Invoke(socket);
                 var remoteEndpoint = (IPEndPoint)socket.RemoteEndPoint!;
                 // Normalize BEFORE anything keys on the address (session key, PeerStore, throttle
@@ -441,18 +459,14 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
                 if (sessionRegistered)
                     _ = RunSessionAsync(key, session, cancellationToken);
             }
-            catch (OperationCanceledException) { break; }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { break; }
             catch (Exception ex)
             {
                 if (Volatile.Read(ref _acceptingConnections) == 0)
                     break;
-                _logger.LogError(ex, "Error accepting connection");
-                // A persistent accept failure (fd exhaustion/EMFILE is the classic) used to spin
-                // this loop at full speed — log + immediate retry thousands of times a second,
-                // exactly when the host is already out of resources. Bound the retry rate; the
-                // shutdown token breaks the wait so shutdown latency is unaffected.
-                try { await Task.Delay(AcceptFailureBackoff, cancellationToken); }
-                catch (OperationCanceledException) { break; }
+                // A bad accepted socket/factory result is isolated to this connection. Unlike a
+                // listener/resource failure, it must not delay the next unrelated accept.
+                _logger.LogWarning(ex, "Error handling accepted connection; closing only this socket");
             }
             finally
             {
@@ -464,6 +478,16 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
                     socket.Dispose();
             }
         }
+    }
+
+    private async Task<Socket> AcceptSocketAsync(CancellationToken cancellationToken)
+    {
+        // Darwin's async socket engine can materialize a zero-length RST endpoint on its callback
+        // thread, outside the awaiting catch. A managed blocking-accept task keeps that failure
+        // inside this loop; other platforms retain the native async accept path.
+        if (OperatingSystem.IsMacOS())
+            return await Task.Run(() => _listener!.Accept(), cancellationToken);
+        return await _listener!.AcceptAsync(cancellationToken);
     }
 
     private async Task RunSessionAsync(SessionKey key, BgpSession session, CancellationToken cancellationToken)
