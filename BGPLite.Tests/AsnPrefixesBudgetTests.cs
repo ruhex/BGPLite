@@ -40,6 +40,7 @@ public sealed class AsnPrefixesBudgetTests : IDisposable
     }
 
     [Fact]
+    /// <summary>Verifies that a cold upstream fetch cannot pin the ASN-count endpoint beyond its external-fetch budget.</summary>
     public async Task AsnPrefixesCount_ColdFetchExceedsBudget_AnswersWithinBudget()
     {
         var port = FreeTcpPort();
@@ -49,15 +50,18 @@ public sealed class AsnPrefixesBudgetTests : IDisposable
             ApiListen = "127.0.0.1",
             ApiPort = port,
         };
+        var store = new PeerStore(new StaticOptionsFactory(new DbContextOptionsBuilder<BgpDbContext>().UseSqlite(_connection).Options));
+        var prefixes = new HangingPrefixService();
         _api = new ManagementApi(
-            new PeerStore(new StaticOptionsFactory(new DbContextOptionsBuilder<BgpDbContext>().UseSqlite(_connection).Options)),
+            store,
             new RouteTable(),
             config,
             new BgpMetrics(),
             NullLogger<ManagementApi>.Instance,
-            new HangingPrefixService(),
+            prefixes,
             new InertSources(),
-            new InertSessions());
+            new InertSessions(),
+            TestRouteAssembly.CreateExporter(store, config, prefixes));
         await _api.StartAsync(CancellationToken.None);
         _api.ExternalFetchBudget = TimeSpan.FromMilliseconds(300);
 
@@ -113,6 +117,8 @@ public sealed class AsnPrefixesBudgetTests : IDisposable
         public Task TerminatePeerAsync(string peerIp, uint asn, CancellationToken ct = default) => Task.CompletedTask;
         public Task TerminatePeerByIpAsync(string peerIp, CancellationToken ct = default) => Task.CompletedTask;
         public void SetPeerMd5Key(string peerIp, string? password) { }
+        public bool IsPeerEstablished(string peerIp, uint asn) => false;
+        public bool IsPeerMd5Armed(string peerIp, string? password) => false;
         public int GetAdvertisedPrefixCount(string peerIp, uint asn) => 0;
         public Task RefreshAllEstablishedAsync() => Task.CompletedTask;
     }

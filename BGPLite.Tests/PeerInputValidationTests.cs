@@ -18,27 +18,17 @@ public class PeerInputValidationTests
 {
     // ---- addresses ----
 
-    /// <summary>
-    /// Forms IPAddress.TryParse accepts but rewrites. Storing the input rather than the parse result
-    /// is the phantom-peer bug; the three-part form is the sharpest case, since 1.2.3 resolves to a
-    /// different host than a reader expects.
-    /// </summary>
     [Theory]
     [InlineData("1.2.3.4", "1.2.3.4")]
-    [InlineData("01.02.03.04", "1.2.3.4")]
-    [InlineData("0x1.2.3.4", "1.2.3.4")]
-    [InlineData("1.2.3", "1.2.0.3")]
-    [InlineData("192.168.000.001", "192.168.0.1")]
-    public void NormalizePeerIp_CanonicalizesAcceptedForms(string input, string expected)
+    [InlineData("2001:db8::1", "2001:db8::1")]
+    [InlineData("::ffff:192.0.2.1", "192.0.2.1")]
+    public void NormalizePeerIp_AcceptsCanonicalAndIpv6Forms(string input, string expected)
     {
         Assert.Equal(expected, ManagementApi.NormalizePeerIp(input));
     }
 
     /// <summary>
-    /// Rejected outright: unparseable input, absent input (which reached the store as null and
-    /// surfaced as a 500 from a NOT NULL violation), and addresses no BGP session can ever
-    /// originate from (unspecified / loopback / multicast / broadcast; parity with the YAML
-    /// path's validation, which already rejects 0.0.0.0).
+    /// Ambiguous inet_aton forms must be rejected instead of being rewritten into another host.
     /// </summary>
     [Theory]
     [InlineData(null)]
@@ -48,34 +38,26 @@ public class PeerInputValidationTests
     [InlineData(" 1.2.3.4")]
     [InlineData("banana")]
     [InlineData("1.2.3.4.5")]
-    [InlineData("0.0.0.0")]              // unspecified (the YAML path rejects it too)
-    [InlineData("0.1.2.3")]              // 0.0.0.0/8
-    [InlineData("127.0.0.1")]            // loopback
-    [InlineData("224.0.0.1")]            // multicast
-    [InlineData("255.255.255.255")]      // broadcast
-    [InlineData("::")]                   // IPv6 unspecified
-    [InlineData("::1")]                  // IPv6 loopback
-    [InlineData("ff02::1")]              // IPv6 multicast
-    [InlineData("::ffff:224.0.0.1")]     // multicast hidden behind the mapped form
-    public void NormalizePeerIp_RejectsUnusableInput(string? input)
+    [InlineData("01.02.03.04")]
+    [InlineData("010.1.1.1")]
+    [InlineData("0x1.2.3.4")]
+    [InlineData("0xC0A80000")]
+    [InlineData("1.2.3")]
+    [InlineData("192.168.000.001")]
+    [InlineData("+1.2.3.4")]
+    [InlineData("::ffff:010.1.1.1")]
+    [InlineData("0.0.0.0")]
+    [InlineData("0.1.2.3")]
+    [InlineData("127.0.0.1")]
+    [InlineData("224.0.0.1")]
+    [InlineData("255.255.255.255")]
+    [InlineData("::")]
+    [InlineData("::1")]
+    [InlineData("ff02::1")]
+    [InlineData("::ffff:224.0.0.1")]
+    public void NormalizePeerIp_RejectsUnusableOrNonCanonicalInput(string? input)
     {
         Assert.Null(ManagementApi.NormalizePeerIp(input));
-    }
-
-    /// <summary>
-    /// The property that actually matters: whatever spelling a client sends, what gets stored is the
-    /// form BgpServer will look the session up by.
-    /// </summary>
-    [Theory]
-    [InlineData("01.02.03.04")]
-    [InlineData("0x1.2.3.4")]
-    [InlineData("192.168.000.001")]
-    public void NormalizePeerIp_OutputMatchesWhatTheBgpPathWouldStore(string input)
-    {
-        var normalized = ManagementApi.NormalizePeerIp(input);
-        Assert.NotNull(normalized);
-        // BgpServer stores remoteEndpoint.Address.ToString(); the round trip must be a fixed point.
-        Assert.Equal(normalized, System.Net.IPAddress.Parse(normalized!).ToString());
     }
 
     // ---- AS numbers ----

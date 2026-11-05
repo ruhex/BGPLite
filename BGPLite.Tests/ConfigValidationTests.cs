@@ -213,6 +213,75 @@ public class ConfigValidationTests
         Assert.Contains("duplicate prefix source name 'dup'", ex.Message);
     }
 
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData(" ")]
+    /// <summary>Verifies that every configured ASN list has a non-blank subscription name.</summary>
+    public void Validate_AsnListRequiresName(string? name)
+    {
+        var config = new AppConfig
+        {
+            Bgp = Bgp(),
+            RipeStat = new RipeStatConfig { AsnLists = [new AsnList { Name = name!, Asns = [65010] }] }
+        };
+
+        var ex = Assert.Throws<InvalidOperationException>(config.Validate);
+        Assert.Contains("RipeStat.AsnLists[0]", ex.Message);
+        Assert.Contains("requires a Name", ex.Message);
+    }
+
+    [Fact]
+    /// <summary>Verifies that duplicate subscription names identify both conflicting configuration entries.</summary>
+    public void Validate_DuplicateAsnListNames_IdentifiesBothEntries()
+    {
+        var config = new AppConfig
+        {
+            Bgp = Bgp(),
+            RipeStat = new RipeStatConfig
+            {
+                AsnLists =
+                [
+                    new AsnList { Name = "dup", Asns = [65010] },
+                    new AsnList { Name = "dup", Asns = [65020] }
+                ]
+            }
+        };
+
+        var ex = Assert.Throws<InvalidOperationException>(config.Validate);
+        Assert.Contains("RipeStat.AsnLists[0]", ex.Message);
+        Assert.Contains("RipeStat.AsnLists[1]", ex.Message);
+        Assert.Contains("case-sensitive", ex.Message);
+    }
+
+    [Fact]
+    public void Validate_CrossCollectionSubscriptionCollision_IdentifiesBothEntries()
+    {
+        var config = new AppConfig
+        {
+            Bgp = Bgp(),
+            PrefixSources = [new PrefixSourceConfig { Name = "shared", Kind = "file", Path = "nets.txt" }],
+            RipeStat = new RipeStatConfig { AsnLists = [new AsnList { Name = "shared", Asns = [65010] }] }
+        };
+
+        var ex = Assert.Throws<InvalidOperationException>(config.Validate);
+        Assert.Contains("PrefixSources[0]", ex.Message);
+        Assert.Contains("RipeStat.AsnLists[0]", ex.Message);
+    }
+
+    [Fact]
+    public void Validate_SubscriptionNames_RemainCaseSensitive()
+    {
+        var config = new AppConfig
+        {
+            Bgp = Bgp(),
+            PrefixSources = [new PrefixSourceConfig { Name = "RU", Kind = "file", Path = "nets.txt" }],
+            RipeStat = new RipeStatConfig { AsnLists = [new AsnList { Name = "ru", Asns = [65010] }] }
+        };
+
+        config.Validate();
+    }
+
     [Fact]
     public void Validate_DefaultPrefixSourceWithoutMatchingSource_Throws()
     {
@@ -232,6 +301,43 @@ public class ConfigValidationTests
 
         var ex = Assert.Throws<InvalidOperationException>(config.Validate);
         Assert.Contains("CustomPrefixCommunity", ex.Message);
+    }
+
+    [Theory]
+    [InlineData("DE")]
+    [InlineData("")]
+    [InlineData("RU ")]
+    public void Validate_UnsupportedAsnListCountry_ThrowsWithPath(string country)
+    {
+        var config = new AppConfig
+        {
+            Bgp = Bgp(),
+            RipeStat = new RipeStatConfig
+            {
+                AsnLists = [new AsnList { Name = "country", Country = country }]
+            }
+        };
+
+        var ex = Assert.Throws<InvalidOperationException>(config.Validate);
+        Assert.Contains("RipeStat.AsnLists[0].Country", ex.Message);
+        Assert.Contains("only RU", ex.Message);
+    }
+
+    [Theory]
+    [InlineData("RU")]
+    [InlineData("ru")]
+    public void Validate_SupportedAsnListCountry_IsCaseInsensitive(string country)
+    {
+        var config = new AppConfig
+        {
+            Bgp = Bgp(),
+            RipeStat = new RipeStatConfig
+            {
+                AsnLists = [new AsnList { Name = "country", Country = country }]
+            }
+        };
+
+        config.Validate();
     }
 
     [Fact]
@@ -356,13 +462,15 @@ public class ConfigValidationTests
         // peers in the database. It is also not an allow-list (per D11 any peer completing an OPEN
         // is registered), so silently ignoring it left operators believing they had restricted
         // who could peer in. Rejecting it is the honest outcome; the message must say what to do.
-        var config = Config(peers: [new PeerConfig { Address = "10.0.0.2", RemoteAsn = 65002 }]);
+        var config = Config(apiPort: 5101, peers: [new PeerConfig { Address = "10.0.0.2", RemoteAsn = 65002 }]);
 
         var ex = Assert.Throws<InvalidOperationException>(config.Validate);
 
         Assert.Contains("'Peers:' list is no longer applied", ex.Message);
         Assert.Contains("not an allow-list", ex.Message);
         Assert.Contains("management API", ex.Message);   // actionable, not just a rejection
+        Assert.Contains("http://127.0.0.1:5101/api/peers", ex.Message);
+        Assert.DoesNotContain("127.0.0.1:5001", ex.Message);
     }
 
     [Fact]
@@ -437,6 +545,10 @@ public class ConfigValidationTests
 
     [Theory]
     [InlineData("0.0.0.0")]   // RFC 4271 §6.8 forbids an all-zero BGP Identifier
+    [InlineData("127.0.0.1")]
+    [InlineData("224.0.0.1")]
+    [InlineData("240.0.0.1")]
+    [InlineData("255.255.255.255")]
     [InlineData("not-an-ip")]
     [InlineData("::1")]        // IPv6 must be rejected
     public void Validate_RejectsBadRouterId(string routerId)
@@ -784,6 +896,7 @@ public class ConfigValidationTests
     }
 
     [Fact]
+    /// <summary>Verifies that null and empty trusted-proxy lists both preserve the secure no-forwarding-header default.</summary>
     public void Validate_AcceptsNoTrustedProxies()
     {
         // Null and empty both mean "never trust forwarding headers" — the secure default.
@@ -800,6 +913,7 @@ public class ConfigValidationTests
     [InlineData("example.com")]        // no scheme
     [InlineData("ftp://example.com")]  // wrong scheme
     [InlineData("/relative")]
+    [InlineData(" https://operator.example.com ")]       // raw values are compared literally at runtime
     [InlineData("https://operator.example.com/")]      // trailing slash: a browser Origin never has one
     [InlineData("https://operator.example.com/ui")]    // path: same reason
     [InlineData("https://operator.example.com/?a=b")]  // query: same reason

@@ -70,7 +70,13 @@ public sealed class PrefixService : IPrefixService
     {
         if (!string.Equals(sourceName, _config.DefaultPrefixSource, StringComparison.Ordinal))
             return;
-        Volatile.Write(ref _ruCache, null);
+        RuInvalidationProbe?.Invoke();
+        lock (_ruPublicationSync)
+        {
+            RuInvalidationCriticalProbe?.Invoke();
+            Interlocked.Increment(ref _ruGeneration);
+            Volatile.Write(ref _ruCache, null);
+        }
     }
 
     /// <summary>Default per-fetch budget for peer-supplied URL sources.</summary>
@@ -112,11 +118,12 @@ public sealed class PrefixService : IPrefixService
         return ToContract(prefixes);
     }
 
+    /// <summary>Resolves one ASN through the shared RIPEstat cache without serving negative entries as empty success.</summary>
     public async Task<IReadOnlyList<(UInt128 Prefix, byte Length, bool IsIpv4)>> GetPrefixesAsync(uint asn, CancellationToken ct = default)
         // Per-ASN caching, stale-on-failure, negative TTL, fetch gates, and the eviction
         // sweep all live in the shared cache — one wire fetch per ASN regardless
         // of which mechanism asked.
-        => ToContract(await _ripeStatCache.GetPrefixesAsync(asn, ct));
+        => ToContract(await _ripeStatCache.GetPrefixesAsync(asn, ct, serveNegativeEntries: false));
 
     /// <summary>Bounds how many ASNs are resolved against RIPEstat concurrently on a cold cache
     /// (warm traffic is cache-flat). Keeps cold-start fan-out from tripping RIPEstat rate limits.</summary>
@@ -135,11 +142,15 @@ public sealed class PrefixService : IPrefixService
     /// whose whole ASN subscription was unreachable fell back to the full RU table.
     /// </para>
     /// </summary>
-    public async Task<List<(UInt128 Prefix, byte Length, bool IsIpv4, uint Asn)>> GetPrefixesForAsns(IEnumerable<uint> asns, CancellationToken ct = default)
+    public async Task<List<(UInt128 Prefix, byte Length, bool IsIpv4, uint Asn)>> GetPrefixesForAsns(IEnumerable<uint> asns, CancellationToken ct = default) =>
+        (await GetPrefixesForAsnsResultAsync(asns, ct)).Prefixes;
+
+    /// <inheritdoc cref="IPrefixService.GetPrefixesForAsnsResultAsync" />
+    public async Task<AsnPrefixResolution> GetPrefixesForAsnsResultAsync(IEnumerable<uint> asns, CancellationToken ct = default)
     {
         // Materialize once: we enumerate for fan-out and again for ordered assembly.
         var asnList = asns as IList<uint> ?? asns.ToList();
-        if (asnList.Count == 0) return [];
+        if (asnList.Count == 0) return new AsnPrefixResolution([], []);
 
         // Resolve each DISTINCT ASN concurrently (bounded) — latency is max, not sum, on cold
         // RIPEstat misses. Duplicates are coalesced for the fan-out so they cannot race the cold
@@ -186,7 +197,7 @@ public sealed class PrefixService : IPrefixService
             throw new InvalidOperationException(
                 $"All {failedAsns.Count} requested ASN(s) failed to resolve ({string.Join(", ", failedAsns.Select(a => "AS" + a))}).");
 
-        return result;
+        return new AsnPrefixResolution(result, failedAsns);
     }
 
     /// <summary>
@@ -198,6 +209,7 @@ public sealed class PrefixService : IPrefixService
         bool Ok,
         IReadOnlyList<(UInt128 Prefix, byte Length, bool IsIpv4)> Prefixes);
 
+    /// <summary>Resolves one ASN under the bounded fan-out gate, returning failures as values but propagating caller cancellation.</summary>
     private async Task<AsnResolution> ResolveAsnAsync(uint asn, SemaphoreSlim gate, CancellationToken ct)
     {
         try
@@ -241,6 +253,7 @@ public sealed class PrefixService : IPrefixService
         }
     }
 
+    /// <summary>Returns the resolved prefix count without converting lookup failures into a successful zero.</summary>
     public async Task<int> GetPrefixCountAsync(uint asn, CancellationToken ct = default)
     {
         var prefixes = await GetPrefixesAsync(asn, ct);
@@ -269,8 +282,16 @@ public sealed class PrefixService : IPrefixService
     /// </summary>
     private sealed record RuCacheEntry(List<(UInt128 Prefix, byte Length, bool IsIpv4, uint Asn)> Projected, long CachedAtTicks);
     private RuCacheEntry? _ruCache;
+    private long _ruGeneration;
+    private readonly object _ruPublicationSync = new();
+    internal Action? RuPublishProbe { get; set; }
+    internal Action? RuAfterGenerationCheckProbe { get; set; }
+    internal Action? RuInvalidationProbe { get; set; }
+    internal Action? RuInvalidationCriticalProbe { get; set; }
+    internal object RuPublicationSync => _ruPublicationSync;
     private readonly Func<string, Task>? _onSourceChanged;
 
+    /// <summary>Loads and caches the default RU projection, rejecting stale publication after a concurrent source commit.</summary>
     public async Task<List<(UInt128 Prefix, byte Length, bool IsIpv4, uint Asn)>> GetRuPrefixesAsync(CancellationToken ct = default)
     {
         // Fast path: fresh entry. A single Volatile.Read of the immutable entry reference gives a
@@ -291,6 +312,7 @@ public sealed class PrefixService : IPrefixService
             if (cached is not null && _timeProvider.GetUtcNow().UtcDateTime.Ticks - cached.CachedAtTicks < _ruCacheTtl.Ticks)
                 return cached.Projected;
 
+            var generation = Volatile.Read(ref _ruGeneration);
             try
             {
                 // Callback-free load: no onSourceChanged can fire while this frame holds
@@ -319,9 +341,19 @@ public sealed class PrefixService : IPrefixService
                 throw;
             }
 
-            // Swap the whole entry atomically — projection and timestamp move together, so a reader
-            // can never observe a mismatched (new projection, old timestamp) pair.
-            Interlocked.Exchange(ref _ruCache, new RuCacheEntry(projected, _timeProvider.GetUtcNow().UtcDateTime.Ticks));
+            // A source commit during the load invalidates this snapshot. Do not republish it over
+            // the invalidation; the next caller reloads the newer committed source content.
+            RuPublishProbe?.Invoke();
+            lock (_ruPublicationSync)
+            {
+                if (generation == Volatile.Read(ref _ruGeneration))
+                {
+                    RuAfterGenerationCheckProbe?.Invoke();
+                    Interlocked.Exchange(ref _ruCache, new RuCacheEntry(projected, _timeProvider.GetUtcNow().UtcDateTime.Ticks));
+                }
+                else
+                    _logger?.LogDebug("Discarded a stale RU/default projection after a concurrent source commit");
+            }
         }
         finally
         {

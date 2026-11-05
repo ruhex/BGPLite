@@ -26,14 +26,20 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
     // entries; keying by IP only made them clobber each other.
     private readonly ConcurrentDictionary<SessionKey, BgpSession> _sessions = new();
     private readonly CancellationTokenSource _cts = new();
+    private readonly CancellationTokenSource _acceptSocketCts;
     // Per-source-IP accept throttle: bounds inbound-connect floods from a single IP. Disabled
     // (always-allow) when Bgp.MaxAcceptsPerIpPerMinute <= 0.
     private readonly IpAcceptThrottle _acceptThrottle;
     private int _acceptingConnections = 1;
+    // Dispose test-and-set latch (0 = live, 1 = disposed) — see Dispose.
+    private int _disposed;
     private Socket? _listener;
     // Per-peer TCP-MD5 (RFC 2385) shared keys, keyed by the peer's source IP (TCP keys the
     // connection by address, not by (IP, ASN) — peers sharing one source IP share the key).
     private readonly ConcurrentDictionary<IPAddress, byte[]> _md5Keys = new();
+    private readonly object _md5Sync = new();
+    private int _md5ListenerReady;
+    internal Func<Socket?, IPAddress, byte[]?, bool>? Md5ApplyProbe { get; set; }
     private Task? _acceptTask;
     private PeriodicTimer? _statusTimer;
     private Task? _statusTask;
@@ -53,6 +59,7 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
     /// can force a throw exactly where the socket-must-never-leak invariant lives. Null (never
     /// invoked) in production.</summary>
     internal Action<Socket>? AcceptWindowProbe { get; set; }
+    internal Func<TimeSpan, CancellationToken, Task>? AcceptBackoffProbe { get; set; }
 
     public BgpServer(
         AppConfig config,
@@ -68,9 +75,11 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
         _metrics = metrics;
         _sessionFactory = sessionFactory;
         _logger = logger;
+        _acceptSocketCts = CancellationTokenSource.CreateLinkedTokenSource(_cts.Token);
         _acceptThrottle = new IpAcceptThrottle(config.Bgp.MaxAcceptsPerIpPerMinute);
     }
 
+    /// <summary>Binds the listener, arms persisted MD5 keys before Listen, and starts the accept and status loops.</summary>
     public Task StartAsync(CancellationToken cancellationToken)
     {
         // Prefer the dual-mode IPv6 listener — it accepts both IPv6 peers and IPv4 peers (the
@@ -93,6 +102,17 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
             _listener.Bind(new IPEndPoint(IPAddress.Any, ListenPort));
             _logger.LogWarning("IPv6 is not available on this host — serving IPv4 peers only");
         }
+        // Apply every pre-start key after Bind but before Listen, so no unauthenticated SYN can
+        // enter the accept queue. The ready flag is deliberately false until every key succeeded.
+        lock (_md5Sync)
+        {
+            foreach (var (peer, key) in _md5Keys)
+                if (!ApplyMd5(_listener, peer, key))
+                    throw new InvalidOperationException(
+                        $"TCP-MD5 could not arm the persisted key for peer {peer}; startup aborted.");
+            Volatile.Write(ref _md5ListenerReady, 1);
+        }
+
         // After a restart every peer reconnects at once; a backlog of 16 dropped SYNs and pushed
         // peers into their own retry backoff, stretching reconvergence for no benefit. A few
         // hundred pending accepts costs nothing on a route-server host.
@@ -109,6 +129,7 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
         return Task.CompletedTask;
     }
 
+    /// <summary>Stops accepts, applies the configured graceful-close policy, and releases sessions and background loops.</summary>
     public async Task StopAsync(CancellationToken cancellationToken)
     {
         _logger.LogInformation("BGP server shutting down");
@@ -117,6 +138,20 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
         // Otherwise a connection that sneaks in between the GR mark loop and _cts.Cancel()
         // can miss SilentClose and later emit a protocol-incorrect Cease.
         Volatile.Write(ref _acceptingConnections, 0);
+        Volatile.Write(ref _md5ListenerReady, 0);
+
+        // On macOS, interrupt and join the managed accept BEFORE closing its listener. Other
+        // platforms retain the native close-to-interrupt behavior.
+        if (OperatingSystem.IsMacOS())
+        {
+            _acceptSocketCts.Cancel();
+            if (_acceptTask is not null)
+            {
+                try { await _acceptTask.WaitAsync(cancellationToken); }
+                catch (OperationCanceledException) { /* host grace elapsed — proceed to force teardown */ }
+                catch { }
+            }
+        }
 
         if (_listener is not null)
         {
@@ -127,7 +162,7 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
         // window full → WriteAsync blocks on the send buffer) must not pin StopAsync past the host's
         // grace. WaitAsync propagates the cancellation as OperationCanceledException; on
         // cancel we abandon the pending step and move on to force-disposing the sessions below.
-        if (_acceptTask is not null)
+        if (!OperatingSystem.IsMacOS() && _acceptTask is not null)
         {
             try { await _acceptTask.WaitAsync(cancellationToken); }
             catch (OperationCanceledException) { /* host grace elapsed — proceed to force teardown */ }
@@ -193,46 +228,87 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
             return;
         }
 
-        if (string.IsNullOrEmpty(password))
+        // A key update is one synchronous dictionary + kernel transaction. The same lock also
+        // covers startup application before Listen, so a competing mutation cannot interleave.
+        lock (_md5Sync)
         {
-            _md5Keys.TryRemove(address, out _);
-            ApplyMd5(_listener, address, key: null);
-            return;
+            if (string.IsNullOrEmpty(password))
+            {
+                if (!_md5Keys.ContainsKey(address))
+                    return;
+                if (!ApplyMd5(_listener, address, key: null))
+                    throw new InvalidOperationException(
+                        $"TCP-MD5 could not clear the key for peer {peerIp}; the previous key remains configured.");
+                _md5Keys.TryRemove(address, out _);
+                return;
+            }
+
+            if (!TcpMd5.IsValidPassword(password))
+            {
+                _logger.LogWarning("TCP-MD5: rejecting a password with an invalid length (must be 1..{Max} UTF-8 bytes)", TcpMd5.PasswordMaxBytes);
+                return;
+            }
+
+            if (!TcpMd5.IsSupported)
+                throw new PlatformNotSupportedException(
+                    $"TCP-MD5 (RFC 2385) cannot be armed on this platform — it is Linux-only. " +
+                    $"Remove Md5Password for peer {peerIp} or run the server on Linux.");
+
+            var key = TcpMd5.KeyBytes(password);
+            if (!ApplyMd5(_listener, address, key))
+                throw new InvalidOperationException(
+                    $"TCP-MD5 (RFC 2385) could not be armed for peer {peerIp} — the kernel refused the key. " +
+                    $"Remove Md5Password for that peer or run on a kernel with TCP-MD5 support.");
+            _md5Keys[address] = key;
         }
-
-        if (!TcpMd5.IsValidPassword(password))
-        {
-            _logger.LogWarning("TCP-MD5: rejecting a password with an invalid length (must be 1..{Max} UTF-8 bytes)", TcpMd5.PasswordMaxBytes);
-            return;
-        }
-
-        if (!TcpMd5.IsSupported)
-            throw new PlatformNotSupportedException(
-                $"TCP-MD5 (RFC 2385) cannot be armed on this platform — it is Linux-only. " +
-                $"Remove Md5Password for peer {peerIp} or run the server on Linux.");
-
-        var key = TcpMd5.KeyBytes(password);
-        _md5Keys[address] = key;
-        ApplyMd5(_listener, address, key);
     }
 
-    private void ApplyMd5(Socket? socket, IPAddress peer, byte[]? key)
+    /// <inheritdoc cref="ISessionManager.IsPeerMd5Armed" />
+    public bool IsPeerMd5Armed(string peerIp, string? password)
     {
-        if (socket is null)
-            return;
-        var wire = Md5WireAddress(socket.AddressFamily, peer);
+        if (Volatile.Read(ref _md5ListenerReady) == 0 || string.IsNullOrEmpty(password)
+            || !IPAddress.TryParse(peerIp, out var address))
+            return false;
+        lock (_md5Sync)
+        {
+            return _md5Keys.TryGetValue(address, out var armed)
+                && armed.AsSpan().SequenceEqual(TcpMd5.KeyBytes(password));
+        }
+    }
+
+    /// <summary>
+    /// Arms or clears the kernel TCP-MD5 key for one peer on <paramref name="socket"/>.
+    /// Returns false when the kernel refused the operation so callers can preserve the previous
+    /// state. Clearing an already absent key (ENOENT) succeeds without changing kernel state.
+    /// </summary>
+    private bool ApplyMd5(Socket? socket, IPAddress peer, byte[]? key)
+    {
         try
         {
+            if (Md5ApplyProbe is { } probe)
+                return probe(socket, peer, key);
+            // Before StartAsync this records the desired key only; IsPeerMd5Armed stays false until
+            // StartAsync applies every key successfully before Listen.
+            if (socket is null)
+                return true;
+            var wire = Md5WireAddress(socket.AddressFamily, peer);
             if (key is null)
                 TcpMd5.Clear(socket, wire);
             else
                 TcpMd5.Apply(socket, wire, key);
+            return true;
+        }
+        catch (SocketException ex) when (key is null && ex.ErrorCode == 2)
+        {
+            // Linux reports ENOENT when the key is already absent: clearing is idempotent.
+            return true;
         }
         catch (Exception ex)
         {
             _logger.LogWarning(ex,
-                "TCP-MD5: could not {Verb} the key for {Peer} on this platform — the peer keeps {State} (kernel TCP-MD5 unavailable; RFC 2385 arming is Linux-only)",
-                key is null ? "clear" : "set", peer, key is null ? "unprotected" : "unprotected until supported");
+                "TCP-MD5: could not {Verb} the key for {Peer} on this platform — the previous key state remains unchanged (kernel TCP-MD5 unavailable; RFC 2385 arming is Linux-only)",
+                key is null ? "clear" : "set", peer);
+            return false;
         }
     }
 
@@ -260,20 +336,38 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
             ? peer.MapToIPv6()
             : peer;
 
+    /// <summary>Accepts connections with bounded listener retries, per-source throttling, and explicit socket ownership transfer.</summary>
     private async Task AcceptLoopAsync(CancellationToken cancellationToken)
     {
         while (!cancellationToken.IsCancellationRequested)
         {
-            // Hoisted out of the try so the finally below can always see the accepted socket.
-            // Until the session takes ownership, EVERY exit from this block (throw, cancellation,
-            // break, continue) must dispose the FD — the generic catch cannot dispose what it
-            // cannot see, and an orphaned accept socket waits for the finalizer. This is the
-            // loop whose entire purpose is bounding FD use under accept pressure.
-            Socket? socket = null;
+            Socket? socket;
+            try
+            {
+                socket = await AcceptSocketAsync(cancellationToken);
+            }
+            catch (OperationCanceledException) { break; }
+            catch (Exception ex)
+            {
+                if (Volatile.Read(ref _acceptingConnections) == 0)
+                    break;
+                _logger.LogError(ex, "Error accepting connection");
+                // Listener/resource failures such as EMFILE need a bounded retry rate.
+                try
+                {
+                    if (AcceptBackoffProbe is { } backoff)
+                        await backoff(AcceptFailureBackoff, cancellationToken);
+                    else
+                        await Task.Delay(AcceptFailureBackoff, cancellationToken);
+                }
+                catch (OperationCanceledException) { break; }
+                continue;
+            }
+
+            // Until the session takes ownership, EVERY exit from this block must dispose the FD.
             var sessionOwnsSocket = false;
             try
             {
-                socket = await _listener!.AcceptAsync(cancellationToken);
                 AcceptWindowProbe?.Invoke(socket);
                 var remoteEndpoint = (IPEndPoint)socket.RemoteEndPoint!;
                 // Normalize BEFORE anything keys on the address (session key, PeerStore, throttle
@@ -321,11 +415,6 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
                 // RunSessionAsync's finally all go through it), so the accept-window finally
                 // must not touch the socket again.
                 sessionOwnsSocket = true;
-                // The session's finally-block consults this before flipping the peer row to
-                // inactive — "still the registered session for your slot?" A replacement
-                // (TryUpdate below) removes this session from the registry, so its slow unwind
-                // cannot clobber the replacement's Status=active.
-                session.StillRegisteredProbe = s => _sessions.Values.Any(v => ReferenceEquals(v, s));
 
                 if (Volatile.Read(ref _acceptingConnections) == 0)
                 {
@@ -384,18 +473,14 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
                 if (sessionRegistered)
                     _ = RunSessionAsync(key, session, cancellationToken);
             }
-            catch (OperationCanceledException) { break; }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { break; }
             catch (Exception ex)
             {
                 if (Volatile.Read(ref _acceptingConnections) == 0)
                     break;
-                _logger.LogError(ex, "Error accepting connection");
-                // A persistent accept failure (fd exhaustion/EMFILE is the classic) used to spin
-                // this loop at full speed — log + immediate retry thousands of times a second,
-                // exactly when the host is already out of resources. Bound the retry rate; the
-                // shutdown token breaks the wait so shutdown latency is unaffected.
-                try { await Task.Delay(AcceptFailureBackoff, cancellationToken); }
-                catch (OperationCanceledException) { break; }
+                // A bad accepted socket/factory result is isolated to this connection. Unlike a
+                // listener/resource failure, it must not delay the next unrelated accept.
+                _logger.LogWarning(ex, "Error handling accepted connection; closing only this socket");
             }
             finally
             {
@@ -409,6 +494,29 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
         }
     }
 
+    /// <summary>Uses native async accept normally and a cancellation-aware managed accept loop on macOS.</summary>
+    private async Task<Socket> AcceptSocketAsync(CancellationToken cancellationToken)
+    {
+        // Darwin's async socket engine can materialize a zero-length RST endpoint on its callback
+        // thread. Polling and accepting on a managed task contains that failure and lets StopAsync
+        // interrupt the operation before closing the listener.
+        if (OperatingSystem.IsMacOS())
+            return await Task.Run(AcceptSocketOnMac, _acceptSocketCts.Token);
+        return await _listener!.AcceptAsync(cancellationToken);
+    }
+
+    /// <summary>Polls for a readable listener and accepts on a managed thread with cooperative shutdown cancellation.</summary>
+    private Socket AcceptSocketOnMac()
+    {
+        while (true)
+        {
+            _acceptSocketCts.Token.ThrowIfCancellationRequested();
+            if (_listener!.Poll(100_000, SelectMode.SelectRead))
+                return _listener.Accept();
+        }
+    }
+
+    /// <summary>Runs one session and removes only its own registration before deterministic disposal.</summary>
     private async Task RunSessionAsync(SessionKey key, BgpSession session, CancellationToken cancellationToken)
     {
         try
@@ -428,6 +536,14 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
             session.Dispose();
         }
     }
+
+    /// <summary>Reports whether a matching live session for the peer identity is currently Established.</summary>
+    public bool IsPeerEstablished(string peerIp, uint asn) =>
+        IPAddress.TryParse(peerIp, out var ip)
+        && _sessions.Any(kvp =>
+            kvp.Key.Address.Equals(ip)
+            && kvp.Value.IsEstablished
+            && kvp.Value.RemoteAsn == asn);
 
     /// <summary>
     /// Atomically removes <paramref name="session"/> from <see cref="_sessions"/> only if it is
@@ -598,11 +714,33 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
             _logger.LogWarning("Auto-refresh: {Failed}/{Total} sessions failed to refresh", failures, established.Count);
     }
 
+    /// <summary>
+    /// Idempotent — a second call is a no-op, not a double-release. The composition root registers
+    /// this one instance under three descriptors (the <c>BgpServer</c> singleton, the hosted
+    /// service, and <c>ISessionManager</c>), and <c>ServiceProviderEngineScope.CaptureDisposable</c>
+    /// does not de-duplicate, so MS.DI captures it once per descriptor and disposes it that many
+    /// times. <c>StopAsync</c> cancels but never disposes <c>_cts</c>, so the first call always
+    /// succeeded and the second threw <see cref="ObjectDisposedException"/> out of
+    /// <c>_cts.Cancel()</c>. The provider walks its disposables in reverse with no per-item
+    /// try/catch, so that throw skipped every disposable captured earlier — in this composition the
+    /// logging stack (the console logger provider, the <c>LoggerFactory</c>, the options monitors)
+    /// and the HTTP plumbing (the meter factory and the Polly resilience registries) — and escaped
+    /// <c>host.RunAsync()</c>. Every clean shutdown (SIGTERM in Docker, Ctrl-C locally) therefore
+    /// ended in a stack trace and a non-zero exit instead of a clean stop, losing the buffered
+    /// shutdown logs with it. Same guard, same reason as <c>ManagementApi.Dispose</c> (#141) and
+    /// <c>BgpSession.Dispose</c>.
+    /// </summary>
     public void Dispose()
     {
+        if (Interlocked.Exchange(ref _disposed, 1) == 1)
+            return;
+
         Volatile.Write(ref _acceptingConnections, 0);
+        Volatile.Write(ref _md5ListenerReady, 0);
+        _acceptSocketCts.Cancel();
         _listener?.Close();
         _cts.Cancel();
+        _acceptSocketCts.Dispose();
         _cts.Dispose();  // StopAsync's graceful path doesn't reach here — dispose explicitly
         _statusTimer?.Dispose();  // the abort path never runs StopAsync — don't leak the timer to GC
         foreach (var session in _sessions.Values)

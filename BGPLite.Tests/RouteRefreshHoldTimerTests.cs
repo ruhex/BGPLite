@@ -75,6 +75,7 @@ public class RouteRefreshHoldTimerTests
     }
 
     [Fact]
+    /// <summary>Verifies that a blocked refresh runs off the read loop and cannot starve KEEPALIVE/hold-timer handling.</summary>
     public async Task RouteRefresh_BlockedRefresh_DoesNotStarveHoldTimer()
     {
         using var listener = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
@@ -108,7 +109,7 @@ public class RouteRefreshHoldTimerTests
             Version = BgpConstants.BgpVersion,
             Asn = 65002,
             HoldTime = 3,
-            RouterId = 0x7F000002,
+            RouterId = 0x0A000002,
             Capabilities = [BgpCapabilityInfo.FourOctetAsn(65002), BgpCapabilityInfo.RouteRefresh()]
         };
         var openBuf = new byte[BgpMessageWriter.GetBufferSize(open)];

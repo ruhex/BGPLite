@@ -771,12 +771,12 @@ public class BgpMessageTests
     }
 
     [Theory]
+    [InlineData(0)]
     [InlineData(5)]
     [InlineData(7)]
     public void Communities_NonMultipleOf4Length_Rejected(int length)
     {
-        // RFC 1997 §3: every community is exactly 4 octets — mirrors the % 12 rule of
-        // ReadLargeCommunities.
+        // RFC 7606 §7.8 requires a non-zero multiple of 4 and treat-as-withdraw handling.
         var attr = new PathAttribute
         {
             Flags = BgpConstants.Attribute.FlagOptional | BgpConstants.Attribute.FlagTransitive,
@@ -1105,12 +1105,17 @@ public class BgpMessageTests
     }
 
     /// <summary>
-    /// RFC 4271 §4.3: flag bit 0x08 is reserved and MUST be zero. The reader rejects it, so
-    /// emitting it would make the writer produce a frame its own reader refuses — the same
-    /// round-trip break fixed for the Extended Length bit.
+    /// RFC 4271 §4.3: the lower-order four bits "MUST be zero when sent and MUST be ignored when
+    /// received". This pins the SEND half — a caller handing the writer a reserved bit is a local
+    /// bug and is refused. The receive half is the reader's, and it ignores these bits rather
+    /// than rejecting them (see ParseAttribute_ReservedFlagBits_AreIgnoredNotRejected).
     /// </summary>
     [Theory]
-    [InlineData((byte)0x08)]                      // reserved alone
+    [InlineData((byte)0x01)]
+    [InlineData((byte)0x02)]
+    [InlineData((byte)0x04)]
+    [InlineData((byte)0x08)]
+    [InlineData((byte)0x0F)]                      // every reserved bit
     [InlineData((byte)0xC8)]                      // optional | transitive | reserved
     [InlineData((byte)0xD8)]                      // ...also extended length
     public void WriteAttribute_ReservedFlagBitSet_Throws(byte flags)

@@ -74,6 +74,24 @@ public class BgpSessionShutdownTests
     }
 
     [Fact]
+    public async Task NotifyCease_EstablishedSession_StopsRunLoop_WithoutSecondNotification()
+    {
+        var (server, client) = ConnectedPair();
+        using var clientSock = client;
+        var config = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1", HoldTime = 0, KeepAlive = 0 };
+        using var session = NewSession(server);
+
+        var run = await EstablishSessionAsync(session, client, config);
+        await session.NotifyCeaseAsync();
+
+        await run.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.False(session.IsEstablished);
+        var sent = await DrainAsync(client, TimeSpan.FromMilliseconds(100));
+        var notification = Assert.Single(sent.OfType<BgpNotificationMessage>());
+        Assert.Equal(BgpConstants.Error.Cease, notification.ErrorCode);
+    }
+
+    [Fact]
     public async Task NotifyCease_SubcodeIs4_AdministrativeReset_PerRfc4486()
     {
         // The subcode value itself, asserted as a LITERAL so a wrong constant cannot pass.
@@ -238,7 +256,7 @@ public class BgpSessionShutdownTests
             Version = BgpConstants.BgpVersion,
             Asn = 65002,
             HoldTime = 3,
-            RouterId = 0x7F000002,
+            RouterId = 0x0A000002,
             Capabilities = [BgpCapabilityInfo.FourOctetAsn(65002)]
         };
         var openBuf = new byte[BgpMessageWriter.GetBufferSize(open)];
@@ -321,7 +339,7 @@ public class BgpSessionShutdownTests
             Version = BgpConstants.BgpVersion,
             Asn = 65002,
             HoldTime = (ushort)bgpConfig.HoldTime,
-            RouterId = 0x7F000002,
+            RouterId = 0x0A000002,
             Capabilities = [BgpCapabilityInfo.FourOctetAsn(65002)]
         };
         var openBuf = new byte[BgpMessageWriter.GetBufferSize(open)];

@@ -232,6 +232,48 @@ public static class UpdateCodec
     }
 
     /// <summary>
+    /// Segment-preserving RFC 6793 §4.2.3 reconstruction. Path lengths use RFC 4271 §9.1.2.2:
+    /// an AS_SET counts as one regardless of its membership. Leading AS_PATH segments are retained
+    /// whole where required; only AS_SEQUENCE may be split at the required ASN boundary.
+    /// </summary>
+    public static AsPathSegment[] MergeAsPathWithAs4Path(AsPathSegment[] asPath, AsPathSegment[] as4Path)
+    {
+        if (as4Path.Length == 0)
+            return asPath;
+
+        var asPathLength = asPath.Sum(segment => segment.PathLength);
+        var as4PathLength = as4Path.Sum(segment => segment.PathLength);
+        if (as4PathLength > asPathLength)
+            return asPath;
+        if (as4PathLength == asPathLength)
+            return as4Path;
+
+        var remaining = asPathLength - as4PathLength;
+        var leading = new List<AsPathSegment>();
+        foreach (var segment in asPath)
+        {
+            if (remaining == 0)
+                break;
+            var take = segment.Type == BgpConstants.AsPath.AsSet
+                ? 1
+                : Math.Min(remaining, segment.Asns.Length);
+            var retainedCount = segment.Type == BgpConstants.AsPath.AsSet ? segment.Asns.Length : take;
+            for (var i = 0; i < retainedCount; i++)
+            {
+                if (segment.Asns[i] == BgpConstants.AsPath.AsTrans)
+                    throw new BgpNotificationException(BgpConstants.Error.UpdateMessageError,
+                        BgpConstants.SubError.MalformedAsPath, "Unresolved AS_TRANS in AS_PATH");
+            }
+            leading.Add(segment.Type == BgpConstants.AsPath.AsSet || take == segment.Asns.Length
+                ? segment
+                : new AsPathSegment(segment.Type, segment.Asns[..take]));
+            remaining -= take;
+        }
+
+        return [.. leading, .. as4Path];
+    }
+
+    /// <summary>
     /// Reports RFC 6793 AGGREGATOR/AS4_AGGREGATOR pairing violations: AS_TRANS in AGGREGATOR
     /// without AS4_AGGREGATOR, and a lone AS4_AGGREGATOR without AGGREGATOR.
     /// <para>
@@ -271,7 +313,8 @@ public static class UpdateCodec
         uint NextHop,
         uint[] Communities,
         (uint Global, uint Local1, uint Local2)[] LargeCommunities,
-        IReadOnlyList<byte> DiscardedAttributes = null!);
+        IReadOnlyList<byte> DiscardedAttributes = null!,
+        IReadOnlyList<AsPathSegment> AsPathSegments = null!);
 
     /// <summary>
     /// Parses and validates the path attributes of an announcing UPDATE per RFC 4271 §6.3 /
@@ -291,10 +334,10 @@ public static class UpdateCodec
             var asPathSeen = false;
             var nextHopSeen = false;
             uint nextHop = 0;
-            uint[] asPath = [];
+            AsPathSegment[] asPath = [];
             uint[] communities = [];
             (uint Global, uint Local1, uint Local2)[] largeCommunities = [];
-            uint[] as4Path = [];
+            AsPathSegment[] as4Path = [];
             uint? aggregatorAsn = null;
             uint? as4AggregatorAsn = null;
             // (typeCode, reason) per RFC 7606 attribute-discard — surfaced for the session's log/metric.
@@ -364,7 +407,7 @@ public static class UpdateCodec
                             throw new BgpNotificationException(
                                 BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.MalformedAsPath,
                                 "Invalid AS_PATH: an empty path is only valid toward internal peers (RFC 4271 §5.1.2)");
-                        asPath = AttributeHelper.ReadAsPath(attr, fourByteAsnSession);
+                        asPath = AttributeHelper.ReadAsPathSegments(attr, fourByteAsnSession);
                         asPathSeen = true;
                         break;
                     case BgpConstants.Attribute.As4Path when !fourByteAsnSession:
@@ -376,7 +419,7 @@ public static class UpdateCodec
                         // to AS_PATH, which is the same outcome the RFC prescribes.
                         // The RFC prescribes discarding AS_CONFED_* path segments inside AS4_PATH
                         // too, so those land here as a parse failure and are dropped whole.
-                        try { as4Path = AttributeHelper.ReadAs4Path(attr); }
+                        try { as4Path = AttributeHelper.ReadAs4PathSegments(attr); }
                         catch (BgpParseException ex) { discarded.Add((attr.TypeCode, ex.Message)); }
                         break;
                     case BgpConstants.Attribute.NextHop:
@@ -443,8 +486,8 @@ public static class UpdateCodec
                 discarded.Add((typeCode, $"{violation} (attribute discarded per RFC 4271 §6.3)"));
             }
 
-            return new RouteAttributes(asPath, nextHop, communities, largeCommunities,
-                discarded.Select(d => d.TypeCode).ToArray());
+            return new RouteAttributes(AsPathSegment.Flatten(asPath), nextHop, communities, largeCommunities,
+                discarded.Select(d => d.TypeCode).ToArray(), asPath);
         }
         catch (BgpParseException ex)
         {
@@ -532,8 +575,9 @@ public static class UpdateCodec
         //
         // ONLY those two bits. The Partial bit is deliberately not checked: RFC 7606 narrows the
         // RFC 4271 §5 "MUST be 0 for well-known attributes" rule to Optional/Transitive, and
-        // rejecting on Partial would drop routes that conformant implementations accept. Bit 0x08
-        // (reserved) is already rejected at the wire level by BgpMessageReader.ParseAttribute.
+        // rejecting on Partial would drop routes that conformant implementations accept. The
+        // lower-order four bits (0x01/0x02/0x04/0x08) are not checked either: RFC 4271 §4.3 says
+        // they MUST be ignored when received.
         if (attr.Optional != expected.Optional || attr.Transitive != expected.Transitive)
             throw new BgpNotificationException(
                 BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.AttributeFlagsError,

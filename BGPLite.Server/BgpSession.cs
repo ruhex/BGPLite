@@ -40,15 +40,10 @@ public sealed class BgpSession : IDisposable
     private volatile bool _peerMpV6Disabled;
     // The EFFECTIVE per-peer prefix ceiling — the peer row's MaxPrefix override when the peer is
     // configured, else the global Bgp.MaxPrefixesPerPeer. Resolved once per establish/refresh
-    // cycle in SendAllRoutesAsync (never per UPDATE); read on the UPDATE path via Volatile.Read.
+    // cycle in ResolveOutboundRoutesAsync (never per UPDATE); read on the UPDATE path via Volatile.Read.
     // 0 = unlimited, > 0 = the cap.
     private int _effectiveMaxPrefix;
     private readonly IPeerStore? _peerStore;
-    // Set by BgpServer right after creation — "is this session still the registered one?" A false
-    // answer at teardown-time means a replacement took the slot and owns the (Ip, Asn) status now;
-    // this session must not overwrite it back to inactive.
-    private Func<BgpSession, bool>? _stillRegisteredProbe;
-    internal Func<BgpSession, bool>? StillRegisteredProbe { set => _stillRegisteredProbe = value; }
     private readonly IPrefixAggregator _prefixAggregator;
     // The outbound route-assembly policy lives in the assembler, not the session: the session
     // delegates to BuildOutboundRoutesAsync and keeps only the send/withdraw mirror
@@ -119,6 +114,7 @@ public sealed class BgpSession : IDisposable
     public int AdvertisedPrefixCount => Volatile.Read(ref _advertisedCount);
     public bool IsEstablished => _state == BgpFsmState.Established;
 
+    /// <summary>Schedules a coalesced route refresh, with at most one active and one pending cycle per session.</summary>
     public async Task RefreshRoutesAsync(CancellationToken ct = default)
     {
         // default(CancellationToken) is CancellationToken.None, NOT the session's own _cts —
@@ -183,6 +179,7 @@ public sealed class BgpSession : IDisposable
         }
     }
 
+    /// <summary>Resolves before withdrawing, then atomically refreshes the advertised set under the session's outbound lock.</summary>
     private async Task RefreshCycleAsync(CancellationToken ct)
     {
         // _sendLock is acquired inside SendMessageAsync, so each individual UPDATE is atomic on the
@@ -208,8 +205,15 @@ public sealed class BgpSession : IDisposable
         try
         {
             _logger.LogInformation("Refreshing routes for {Peer}", _peer);
+            // Resolve the new route set BEFORE withdrawing the old one. A recoverable store/source
+            // failure after WithdrawAllAsync would otherwise leave the session Established with no
+            // advertised routes until another refresh. Resolving first keeps the previous route set
+            // on failure; the wire order remains withdraw followed by re-announcement on success.
+            var routes = await ResolveOutboundRoutesAsync();
+            if (routes is null)
+                return;   // session disposed mid-resolve — nothing withdrawn, nothing to send
             await WithdrawAllAsync();
-            await SendAllRoutesAsync();
+            await SendResolvedRoutesAsync(routes);
         }
         catch (OperationCanceledException) { /* shutdown / caller cancel — best effort */ }
         catch (IOException ex)
@@ -255,6 +259,7 @@ public sealed class BgpSession : IDisposable
         catch (ObjectDisposedException) { /* session already disposed — nothing to unwind */ }
     }
 
+    /// <summary>Withdraws the currently advertised prefixes in bounded IPv4 or MP_UNREACH batches and clears the send mirror.</summary>
     private async Task WithdrawAllAsync()
     {
         var count = _advertisedPrefixes.Count;
@@ -348,6 +353,7 @@ public sealed class BgpSession : IDisposable
         _routeTable.EntryOwnershipLost += OnEntryOwnershipLost;
     }
 
+    /// <summary>Runs the passive session lifecycle and guarantees ownership cleanup and the selected teardown policy.</summary>
     public async Task RunAsync(CancellationToken cancellationToken = default)
     {
         using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _cts.Token);
@@ -531,6 +537,17 @@ public sealed class BgpSession : IDisposable
             TransitionTo(BgpFsmState.Established);
             _metrics.SessionEstablished();
             _logger.LogInformation("SessionEstablished with {Peer} ASN={Asn}", _peer, _remoteAsn);
+            // Record identity/history only after the session is actually Established. API status is
+            // projected from live sessions, so teardown needs no racy persisted active/inactive write.
+            if (_onPeerIdentified is not null)
+            {
+                try { await _onPeerIdentified(_peerConfig.Address, _remoteAsn, linkedCts.Token); }
+                catch (OperationCanceledException) when (linkedCts.IsCancellationRequested) { throw; }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Could not record peer identity/history for {Peer} — session continues", _peer);
+                }
+            }
 
             // Send initial routes. _sendLock is acquired inside SendMessageAsync for byte-level
             // ordering; _advertisedPrefixesLock guards the list against a RefreshRoutesAsync fired
@@ -669,44 +686,7 @@ public sealed class BgpSession : IDisposable
             }
 
             if (wasEstablished)
-            {
                 _metrics.SessionClosed();
-                // Best-effort, like SendNotificationAsync above: this sync DB write runs in the
-                // finally of a fire-and-forget task (RunSessionAsync has no catch), so a transient
-                // store failure (SQLite "database is locked" past busy_timeout) must not escape —
-                // it would fault RunAsync unobserved, skip PeerDisconnected() below, and leak
-                // PeerCount plus the row's Status=active forever.
-                // The write must also not clobber a REPLACEMENT session's Status=active. Two
-                // guards: (a) SilentClose teardowns (session replacement, GR-aware shutdown —
-                // RFC 4724 §4) skip the write outright; (b) when a registration probe is wired
-                // (BgpServer), a session no longer present in the registry was replaced mid-unwind
-                // and also skips. Covers the slow-unwind race (e.g. a sender waiting on _sendLock
-                // behind a budget-bounded send) whose finally runs after the new session's first
-                // LoadPeerRoutingView already wrote active.
-                var silent = (TeardownReason)Interlocked.CompareExchange(ref _teardownReason, 0, 0) == TeardownReason.SilentClose;
-                var stillRegistered = _stillRegisteredProbe?.Invoke(this) ?? true;
-                if (!silent && stillRegistered)
-                {
-                    if (_peerStore is not null)
-                        try { await _peerStore.UpdateSessionStatusAsync(_peerConfig.Address, _remoteAsn, false); }
-                        catch (Exception ex) { _logger.LogWarning(ex, "Failed to persist session status for {Peer}", _peer); }
-
-                    // A replacement can land between the probe and the write — re-probe and
-                    // REPAIR. A false second probe means the registry swapped us out mid-write and
-                    // the replacement owns the (Ip, Asn): restore the row to active.
-                    // Idempotent with the replacement's own LoadPeerRoutingView write, and
-                    // race-free in the other direction — the own-runner's registry removal happens
-                    // only AFTER RunAsync returns, so during this finally a false probe can only
-                    // mean replacement. Genuine teardowns (still registered) never repair.
-                    if (_stillRegisteredProbe?.Invoke(this) == false)
-                    {
-                        _logger.LogInformation("Replacement detected after status write for {Peer} — restoring active", _peer);
-                        if (_peerStore is not null)
-                            try { await _peerStore.UpdateSessionStatusAsync(_peerConfig.Address, _remoteAsn, true); }
-                            catch (Exception ex) { _logger.LogWarning(ex, "Failed to restore session status for {Peer}", _peer); }
-                    }
-                }
-            }
             _metrics.PeerDisconnected();
             _logger.LogInformation("SessionClosed with {Peer}", _peer);
         }
@@ -727,7 +707,7 @@ public sealed class BgpSession : IDisposable
     private volatile bool _refreshPending;
     // Test seam used by RefreshDebounceTests: parks the runner between the final
     // _refreshPending read and the _refreshRunning release — the debounce exit window.
-    // Null in production; the property mirrors StillRegisteredProbe's setter-only shape.
+    // Null in production; the property mirrors the other session test seams.
     private Action? _refreshExitWindowProbe;
     internal Action? RefreshExitWindowProbe { get => _refreshExitWindowProbe; set => _refreshExitWindowProbe = value; }
 
@@ -1094,6 +1074,7 @@ public sealed class BgpSession : IDisposable
         }
     }
 
+    /// <summary>Applies inbound UPDATE policy, route ownership, withdrawals, and prefix limits within the session lifecycle.</summary>
     private async Task HandleUpdateAsync(BgpUpdateMessage update)
     {
         // Per-UPDATE at Debug: a full-table dump sends hundreds-to-thousands of UPDATEs and a flap
@@ -1156,12 +1137,7 @@ public sealed class BgpSession : IDisposable
                 if (mpReachV4 is { } failedReach4)
                     foreach (var p in failedReach4.Prefixes)
                         WithdrawIfOwned(p, "Route withdrawn (treat-as-withdraw, MP_REACH IPv4)");
-                if (update.MpUnreachV6 is { Count: > 0 } failedUnreach)
-                    foreach (var p in failedUnreach)
-                        WithdrawIfOwned(p, "Route withdrawn (treat-as-withdraw, MP_UNREACH)");
-                if (update.MpUnreachV4 is { Count: > 0 } failedUnreach4)
-                    foreach (var p in failedUnreach4)
-                        WithdrawIfOwned(p, "Route withdrawn (treat-as-withdraw, MP_UNREACH IPv4)");
+                ApplyMpUnreachBeforeRethrow(update);
                 _metrics.SetRouteCount(_routeTable.Count);
                 throw;
             }
@@ -1231,6 +1207,10 @@ public sealed class BgpSession : IDisposable
                 // remove it. A route the filter dropped is never installed and therefore never
                 // owned, so a later withdrawal for it removes nothing.
                 _routeTable.AddOrUpdate(route, owner: this);
+                // A stale loss callback may have run after the initial TryAdd. Restore membership
+                // only if this session is still the current owner after the table mutation.
+                if (_routeTable.IsOwnedBy(nlri.Address, nlri.Length, nlri.IsIpv4, this))
+                    _installedPrefixes.TryAdd(nlri, 0);
 
                 // Warn AFTER the install with the actual count: the pre-install count logged
                 // "0/1" for the very first route under cap=1 (threshold floor 0).
@@ -1264,6 +1244,9 @@ public sealed class BgpSession : IDisposable
                 {
                     foreach (var p in reach4.Prefixes)
                         WithdrawIfOwned(p, "Route withdrawn (treat-as-withdraw, MP_REACH IPv4)");
+                    // The rethrow skips the MP_UNREACH pass at the end of this method, so apply it
+                    // here — same rule as the attribute-parse failure above (RFC 7606 §2).
+                    ApplyMpUnreachBeforeRethrow(update);
                     _metrics.SetRouteCount(_routeTable.Count);
                     throw;
                 }
@@ -1319,6 +1302,10 @@ public sealed class BgpSession : IDisposable
                                     $"Peer {_peer} exceeded the per-peer prefix limit ({cap}); session reset per RFC 4486");
                             _installedPrefixes.TryAdd(nlri, 0);
                             _routeTable.AddOrUpdate(route, owner: this);
+                            // A stale loss callback may have run after the initial TryAdd. Restore membership
+                            // only if this session is still the current owner after the table mutation.
+                            if (_routeTable.IsOwnedBy(nlri.Address, nlri.Length, nlri.IsIpv4, this))
+                                _installedPrefixes.TryAdd(nlri, 0);
 
                             if (cap > 0 && !_maxPrefixesWarned && _installedPrefixes.Count >= MaxPrefixWarningThreshold(cap))
                             {
@@ -1354,13 +1341,42 @@ public sealed class BgpSession : IDisposable
     }
 
     /// <summary>
-    /// Another session took over a key we installed — stop counting it. Runs on the REPLACING
-    /// session's thread (see RouteTable.EntryOwnershipLost); the concurrent set makes that safe,
-    /// and a late/duplicate notification only removes an entry already gone.
+    /// Applies the MP_UNREACH_NLRI halves of an UPDATE whose announcement half is being
+    /// treat-as-withdrawn and rethrown.
+    /// <para>
+    /// RFC 7606 §2: a withdrawal riding the same frame must not be lost because a sibling
+    /// attribute was malformed. Every rethrow inside <see cref="HandleUpdateAsync"/> skips the
+    /// normal MP_UNREACH pass at the end of that method, so each one has to apply it here first —
+    /// this method exists so the two rethrow sites cannot drift apart again (the MP_REACH IPv4
+    /// next-hop path was missing it while the attribute-parse path had it, and an UPDATE carrying
+    /// both a bad MP_REACH(AFI=1) and a valid MP_UNREACH(AFI=2) left the withdrawn route
+    /// installed indefinitely).
+    /// </para>
+    /// <para>
+    /// Reads the raw message rather than the <c>_peerMpV6Disabled</c>-gated locals: the gate exists
+    /// because the accepted IPv6 routes were already withdrawn when the family was disabled, and
+    /// <see cref="WithdrawIfOwned"/> removes only what this session installed, so applying it
+    /// unconditionally here is a no-op in that state.
+    /// </para>
+    /// </summary>
+    private void ApplyMpUnreachBeforeRethrow(BgpUpdateMessage update)
+    {
+        if (update.MpUnreachV6 is { Count: > 0 } unreachV6)
+            foreach (var p in unreachV6)
+                WithdrawIfOwned(p, "Route withdrawn (treat-as-withdraw, MP_UNREACH)");
+        if (update.MpUnreachV4 is { Count: > 0 } unreachV4)
+            foreach (var p in unreachV4)
+                WithdrawIfOwned(p, "Route withdrawn (treat-as-withdraw, MP_UNREACH IPv4)");
+    }
+
+    /// <summary>
+    /// Another session took over a key we installed — stop counting it unless this session has
+    /// already reacquired the key before this stale callback ran. Runs on the replacer's thread.
     /// </summary>
     private void OnEntryOwnershipLost(object previousOwner, (UInt128 Prefix, byte Length, bool IsIpv4) key)
     {
-        if (!ReferenceEquals(previousOwner, this))
+        if (!ReferenceEquals(previousOwner, this)
+            || _routeTable.IsOwnedBy(key.Prefix, key.Length, key.IsIpv4, this))
             return;
         _installedPrefixes.TryRemove(new IpPrefix(key.Prefix, key.Length, key.IsIpv4), out _);
     }
@@ -1426,6 +1442,7 @@ public sealed class BgpSession : IDisposable
         }
     }
 
+    /// <summary>Converts the protocol's UInt128 address to canonical IPv6 text for diagnostics.</summary>
     private static string RenderV6Address(UInt128 address)
     {
         var bytes = new byte[16];
@@ -1439,15 +1456,34 @@ public sealed class BgpSession : IDisposable
     /// the per-peer route set, then delegates the aggregate + batch + send to <see cref="SendRoutesAsync"/>.
     /// The decision tree (RU defaults / subscriptions / custom prefixes / custom AS / user sources) and
     /// the outgoing filter live in the assembler; the send/withdraw mirror stays here.
+    /// <para>
+    /// Split into <see cref="ResolveOutboundRoutesAsync"/> + <see cref="SendResolvedRoutesAsync"/>
+    /// so <see cref="RefreshCycleAsync"/> can resolve before it withdraws; this path (the initial
+    /// dump, which has nothing advertised yet) just runs the two in order.
+    /// </para>
     /// </summary>
     private async Task SendAllRoutesAsync()
+    {
+        var routes = await ResolveOutboundRoutesAsync();
+        if (routes is null)
+            return;   // session disposed mid-resolve
+        await SendResolvedRoutesAsync(routes);
+    }
+
+    /// <summary>
+    /// Resolves this peer's outbound route set — the per-peer MaxPrefix refresh plus the
+    /// assembler's decision tree — WITHOUT touching the wire, so a caller can fail here without
+    /// having changed anything the peer can see. Returns <c>null</c> when the session is already
+    /// disposed.
+    /// </summary>
+    private async Task<List<Route>?> ResolveOutboundRoutesAsync()
     {
         // _cts.Token throws ObjectDisposedException once Dispose has run, so a send cycle that
         // outlives its session would otherwise log a normal unwind as a MaxPrefix/refresh ERROR.
         // RefreshRoutesAsync guards the same read; capture the token once and bail quietly.
         CancellationToken sessionToken;
         try { sessionToken = _cts.Token; }
-        catch (ObjectDisposedException) { return; }
+        catch (ObjectDisposedException) { return null; }
 
         // Refresh the effective per-peer prefix ceiling once per cycle: the peer row's MaxPrefix
         // override when configured (operator edits apply on the next refresh), else the global
@@ -1455,9 +1491,11 @@ public sealed class BgpSession : IDisposable
         // their row exists.
         if (_peerStore is not null)
         {
-            // Best-effort: on the refresh path WithdrawAllAsync has ALREADY run, so a throw here
-            // (e.g. transient "database is locked") would leave the peer withdrawn until some
-            // later successful refresh — keep the last known cap instead.
+            // Best-effort: a transient store failure here (e.g. "database is locked") concerns a
+            // value we already hold, so keep the last known cap rather than failing the whole
+            // cycle over it. Since the refresh path now resolves BEFORE it withdraws, a throw here
+            // would no longer strand the peer withdrawn — but a refresh that re-advertises under
+            // the previous cap is still strictly better than one that does not run at all.
             try
             {
                 var overrideCap = await _peerStore.GetPeerMaxPrefixAsync(_peerConfig.Address, _remoteAsn, sessionToken);
@@ -1472,11 +1510,17 @@ public sealed class BgpSession : IDisposable
             }
         }
 
-        var nextHop = BgpConstants.IPAddressToUint(_bgpConfig.GetRouterIdAddress());
-        var routes = await _routeAssembler.BuildOutboundRoutesAsync(
+        return await _routeAssembler.BuildOutboundRoutesAsync(
             _peerConfig.Address, _remoteAsn, GetFilterPeerConfig(), _peer, sessionToken);
-        if (routes.Count > 0)
-            await SendRoutesAsync(nextHop, routes);
+    }
+
+    /// <summary>Puts an already-resolved route set on the wire (aggregate + batch + send).</summary>
+    private async Task SendResolvedRoutesAsync(List<Route> routes)
+    {
+        if (routes.Count == 0)
+            return;
+        var nextHop = BgpConstants.IPAddressToUint(_bgpConfig.GetRouterIdAddress());
+        await SendRoutesAsync(nextHop, routes);
     }
 
     /// <summary>The local global IPv6 next hop (Bgp.NextHopIpv6) or null when unset/invalid —
@@ -2004,6 +2048,12 @@ public sealed class BgpSession : IDisposable
         {
             _logger.LogDebug(ex, "Failed to send Cease to {Peer} on shutdown", _peer);
         }
+        finally
+        {
+            // Cease is terminal: stop reads/timers/keepalives even when the best-effort send failed.
+            try { _cts.Cancel(); }
+            catch (ObjectDisposedException) { /* already disposed — nothing to unwind */ }
+        }
     }
 
     /// <summary>
@@ -2031,6 +2081,7 @@ public sealed class BgpSession : IDisposable
 
     #region Validation
 
+    /// <summary>Applies negotiated OPEN state and performs registration and response I/O for the session.</summary>
     private async Task ValidateOpenAsync(BgpOpenMessage open, CancellationToken ct)
     {
         var localRouterId = BgpConstants.IPAddressToUint(_bgpConfig.GetRouterIdAddress());
@@ -2044,12 +2095,6 @@ public sealed class BgpSession : IDisposable
         _remoteRouteRefresh = negotiation.RemoteRouteRefresh;
         _negotiatedHoldTime = negotiation.NegotiatedHoldTime;
         _keepAliveInterval = negotiation.KeepAliveInterval;
-
-        // Announce/persist the peer only after the OPEN passes validation: the upsert used to fire
-        // before the expected-ASN check, upserting a configured peer that declared a mismatched ASN
-        // (BadPeerAs) just before the session was torn down. The session token bounds the upsert so
-        // a locked SQLite cannot out-wait shutdown or replacement.
-        if (_onPeerIdentified is not null) await _onPeerIdentified(_peerConfig.Address, _remoteAsn, ct);
 
         // The peer can send IPv6 routes via MP_REACH_NLRI (AFI=2/SAFI=1).
         _peerMpIpv6Unicast = CapabilityHelper.SupportsMultiprotocolIpv6Unicast(open);

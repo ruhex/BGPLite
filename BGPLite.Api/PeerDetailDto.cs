@@ -5,7 +5,8 @@ namespace BGPLite.Api;
 /// separate <c>DbContext</c> roundtrips <c>BuildPeerDetail</c>/<c>HandleGetPeer</c> used to issue
 /// (one each for the peer row, subscriptions, custom prefixes, custom ASNs, communities, and — for
 /// <c>HandleGetPeer</c> — custom sources). Field shapes match the prior standalone getters so the
-/// JSON response is byte-identical. <c>CustomSources</c> carries ALL sources (including inactive)
+/// JSON response is byte-identical. Lookup is by opaque peer ID; no caller scoping is applied.
+/// <c>CustomSources</c> carries ALL sources (including inactive)
 /// so the API can show a source's active toggle state; the send path uses <see cref="PeerRoutingView"/>
 /// which filters Active at the SQL level.
 /// </summary>

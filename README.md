@@ -144,7 +144,7 @@ DefaultPrefixSource: ru        # served to unconfigured/auto-registered peers
    - known peer — fetches prefixes for its subscriptions (cached) plus custom prefixes and advertises them;
      a custom prefix overrides the source prefixes it covers: covered more-specifics are not sent (#220);
    - unknown peer — auto-registers it and advertises the default prefix source.
-4. Peer status and session timestamps are updated in the store.
+4. Session history is stored; live peer status is projected from Established sessions.
 
 ## Management API
 
@@ -158,10 +158,10 @@ remote ASN, so two peers behind one source IP are distinct rows).
 | `GET`  | `/api/server` | Server identity and effective settings |
 | `GET`  | `/api/me` | The caller's IP plus the `peers` seen at it (all of them, or one with `?asn=`) |
 | `POST` | `/api/peers` | Register a peer |
-| `GET`  | `/api/peers/{id}` | Peer detail (own path only) |
+| `GET`  | `/api/peers/{id}` | Peer detail by ID; no caller scoping — use an authenticated reverse proxy |
 | `PUT`  | `/api/peers/{id}` | Partial update — an omitted field is left unchanged |
 | `DELETE` | `/api/peers/{id}` | Delete the peer and tear down its session |
-| `GET`  | `/api/peers/{id}/prefixes` | Prefixes advertised to the peer — plain text by default, `?format=json` for an array |
+| `GET`  | `/api/peers/{id}/prefixes` | Full outbound pipeline; plain text by default, `?format=json` for an array. Source failure/budget expiry returns 503 without a partial list |
 | `GET`  | `/api/peers/{id}/sources` | List the peer's own URL prefix sources |
 | `POST` | `/api/peers/{id}/sources` | Add a URL prefix source |
 | `DELETE` | `/api/peers/{id}/sources/{sourceId}` | Remove a source |
@@ -179,7 +179,7 @@ cross-origin callers out.
 ```bash
 curl -X POST http://localhost:5001/api/peers -H 'Content-Type: application/json' -d '{
   "ip": "10.0.0.2", "asn": 65001, "description": "customer-1",
-  "lists": ["cloudflare", "google"], "customPrefixes": ["203.0.113.0/24"]
+  "lists": ["ru"], "customPrefixes": ["203.0.113.0/24"]
 }'
 ```
 
@@ -195,14 +195,15 @@ A section-by-section audit lives in [`docs/RFC_COMPLIANCE.md`](docs/RFC_COMPLIAN
 | [1997](https://www.rfc-editor.org/rfc/rfc1997) | Communities | implemented |
 | [4724](https://www.rfc-editor.org/rfc/rfc4724) | Graceful Restart | not advertised; receiving-side retention open (#318, D6) |
 | [2918](https://www.rfc-editor.org/rfc/rfc2918) | Route Refresh | implemented |
-| [2385](https://www.rfc-editor.org/rfc/rfc2385) | TCP-MD5 auth | open (#36) |
-| [4760](https://www.rfc-editor.org/rfc/rfc4760) / [2545](https://www.rfc-editor.org/rfc/rfc2545) | MP-BGP / IPv6 | roadmap (#14/#15) |
+| [2385](https://www.rfc-editor.org/rfc/rfc2385) | TCP-MD5 auth | implemented on Linux; lifecycle follow-ups #555/#561 |
+| [4760](https://www.rfc-editor.org/rfc/rfc4760) / [2545](https://www.rfc-editor.org/rfc/rfc2545) | MP-BGP / IPv6 | IPv4/IPv6 unicast implemented; policy follow-up #566 |
 
 Known deliberate deviations are catalogued in [`docs/DESIGN_DECISIONS.md`](docs/DESIGN_DECISIONS.md).
 
 ## Roadmap
 
-Work is tracked in [issues](https://github.com/ruhex/BGPLite/issues). IPv6 / MP-BGP is the largest upcoming feature (#14/#15).
+Work is tracked in [issues](https://github.com/ruhex/BGPLite/issues), including protocol, provisioning,
+and lifecycle follow-ups linked from the status table above.
 
 ## Contributing
 

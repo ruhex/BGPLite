@@ -80,8 +80,9 @@ leaves).
   dependencies (audited 2026-08-27).
 - `BgpServer` is registered as a singleton first, then adopted by `AddHostedService`; `ISessionManager`
   resolves to that same instance (#231).
-- Hosted services, in start order: `RouteSeedingService` (background seeding, #251) → `BgpServer`
-  → `ManagementApi` → `ConfigReloader` (hot-reload of soft config) → `PrefixAutoRefreshService`.
+- Hosted services, in start order: `RouteSeedingService` (background seeding, #251) →
+  `PeerMd5BootstrapService` (loads persisted keys before the listener, #555) → `BgpServer` →
+  `ManagementApi` → `ConfigReloader` (hot-reload of soft config) → `PrefixAutoRefreshService`.
 
 ## Key seams (deliberate abstractions)
 
@@ -90,6 +91,8 @@ leaves).
 - `IBgpSessionFactory` — the accept loop carries none of the session's dependencies (#263).
 - `IRouteAssembler` — outbound policy. `RouteAssembler` (per-peer decision tree) vs
   `SharedTableRouteAssembler` (explicit, logged-once degraded mode serving only the startup seed, #307).
+- `IPrefixExportService` — Contracts-only API seam; Server's implementation reuses the assembler and
+  aggregator for complete canonical exports, returning an explicit degraded marker on source failure.
 - `TimeProvider` — injected clock for hold timers, debounces, TTLs (#96); tests inject fakes.
 - `IPrefixAggregator` — wire summarization policy (`ExactUnionPrefixAggregator`, swappable).
 
@@ -109,8 +112,10 @@ custom prefixes / custom ASNs / user URL sources, filtered by `IRouteFilter`) �
 
 SQLite via EF Core, owned entirely by `BGPLite.Api`: `BgpDbContext`, migrations (incl.
 `LegacyEnsureCreated` convergence for EnsureCreated-era databases), WAL/busy_timeout pragmas via
-interceptor. Schema changes go through EF migrations only (see AGENTS.md). Known gap: `PeerStore`
-is fully synchronous on async paths — tracked in #262.
+interceptor. Schema changes go through EF migrations only (see AGENTS.md). `PeerStore` is async
+over `IDbContextFactory`; connection open/close, including the raw ADO.NET upsert, uses async APIs,
+and externally owned connections stay open (#570). Live peer status is projected from Established
+sessions rather than mutated by route reads or teardown-time status writes.
 
 ## Related documents
 

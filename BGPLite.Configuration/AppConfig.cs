@@ -164,7 +164,7 @@ public sealed class AppConfig
                 "declare peers — it has never been read by any code path, and it is not an allow-list " +
                 $"(any peer that completes an OPEN is registered automatically, see D11). Found {Peers.Count} " +
                 "entry/entries. Remove the 'Peers:' block and register peers through the management API " +
-                "instead: POST http://127.0.0.1:5001/api/peers with {\"ip\":\"...\",\"asn\":N}.");
+                $"instead: POST http://127.0.0.1:{ApiPort}/api/peers with {{\"ip\":\"...\",\"asn\":N}}.");
 
         // Prefix-source errors otherwise surface only at load time, where LoadAllAsync absorbs
         // them into a Warning plus an empty prefix set — a config typo silently serves zero prefixes
@@ -174,7 +174,7 @@ public sealed class AppConfig
         // explicit YAML null ("PrefixSources:") meaning "none" — every runtime consumer treats it
         // that way, and Validate must reject with a message, never with an NRE.
         var prefixSources = PrefixSources ?? [];
-        var sourceNames = new HashSet<string>(StringComparer.Ordinal);
+        var sourceNames = new Dictionary<string, string>(StringComparer.Ordinal);
         for (var i = 0; i < prefixSources.Count; i++)
         {
             // Null elements are rejected by the structural pass at the top of Validate.
@@ -183,9 +183,10 @@ public sealed class AppConfig
 
             if (string.IsNullOrWhiteSpace(source.Name))
                 throw new InvalidOperationException($"Invalid configuration: {at} requires a Name.");
-            if (!sourceNames.Add(source.Name))
+            if (!sourceNames.TryAdd(source.Name, at))
                 throw new InvalidOperationException(
-                    $"Invalid configuration: duplicate prefix source name '{source.Name}' — sources are addressed by name (subscriptions, per-source cache).");
+                    $"Invalid configuration: duplicate prefix source name '{source.Name}' in the case-sensitive subscription namespace — " +
+                    $"entries {sourceNames[source.Name]} and {at} conflict.");
 
             switch (source.Kind)
             {
@@ -223,7 +224,7 @@ public sealed class AppConfig
             ValidateCommunity(source.Community, $"{at}: Community");
         }
 
-        if (!string.IsNullOrEmpty(DefaultPrefixSource) && !sourceNames.Contains(DefaultPrefixSource))
+        if (!string.IsNullOrEmpty(DefaultPrefixSource) && !sourceNames.ContainsKey(DefaultPrefixSource))
             throw new InvalidOperationException(
                 $"Invalid configuration: DefaultPrefixSource '{DefaultPrefixSource}' does not match any PrefixSources entry — unconfigured peers would silently get zero prefixes.");
 
@@ -235,6 +236,13 @@ public sealed class AppConfig
         for (var i = 0; i < asnLists.Count; i++)
         {
             var list = asnLists[i];
+            var at = $"RipeStat.AsnLists[{i}] ('{list.Name}')";
+            if (string.IsNullOrWhiteSpace(list.Name))
+                throw new InvalidOperationException($"Invalid configuration: {at} requires a Name.");
+            if (!sourceNames.TryAdd(list.Name, at))
+                throw new InvalidOperationException(
+                    $"Invalid configuration: duplicate subscription name '{list.Name}' in the case-sensitive namespace — " +
+                    $"entries {sourceNames[list.Name]} and {at} conflict.");
             // Null elements were already rejected by the structural pass above. A null Asns
             // COLLECTION ("Asns:" with no value) is different: every runtime consumer
             // dereferences it unconditionally, so accepting it as "none" would only move the
@@ -243,6 +251,9 @@ public sealed class AppConfig
             if (list.Asns is null)
                 throw new InvalidOperationException(
                     $"Invalid configuration: RipeStat.AsnLists[{i}].Asns is null — use [] (or omit the key) for a country-only list.");
+            if (list.Country is not null && !string.Equals(list.Country, "RU", StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException(
+                    $"Invalid configuration: RipeStat.AsnLists[{i}].Country is unsupported — only RU is implemented.");
             ValidateCommunity(list.Community, $"RipeStat.AsnLists[{i}] ('{list.Name}'): Community");
             for (var j = 0; j < list.Asns.Count; j++)
                 AsnValidation.RequirePositive(list.Asns[j], $"RipeStat.AsnLists[{i}].Asns[{j}]");
@@ -292,7 +303,7 @@ public sealed class AppConfig
 
         for (var i = 0; i < (CorsAllowedOrigins ?? []).Count; i++)
         {
-            var entry = CorsAllowedOrigins![i].Trim();
+            var entry = CorsAllowedOrigins![i];
             // Compared literally against the request Origin later, so it must be a real absolute
             // origin — a typo'd string is accepted at startup and then never matches anything.
             // The authority round-trip additionally rejects a path, query, fragment or trailing

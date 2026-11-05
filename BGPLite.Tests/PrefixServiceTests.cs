@@ -1,5 +1,6 @@
 using System.Net;
 using BGPLite.Configuration;
+using BGPLite.Contracts;
 using BGPLite.Providers;
 using BGPLite.Protocol;
 using Microsoft.Extensions.Http;
@@ -125,6 +126,17 @@ public class PrefixServiceTests
         Assert.Equal([100u, 300u], result.Select(r => r.Asn).ToArray());
         Assert.Equal(PrefixFor(100), result[0].Prefix);
         Assert.Equal(PrefixFor(300), result[1].Prefix);
+    }
+
+    [Fact]
+    public async Task GetPrefixesForAsnsResult_ReportsFailedAsns_AndKeepsSurvivingPrefixes()
+    {
+        var service = Service(new PerAsnHandler(200));
+
+        var result = await ((IPrefixService)service).GetPrefixesForAsnsResultAsync([100, 200, 300]);
+
+        Assert.Equal([100u, 300u], result.Prefixes.Select(r => r.Asn).ToArray());
+        Assert.Equal([200u], result.FailedAsns);
     }
 
     [Fact]
@@ -287,19 +299,29 @@ public class PrefixServiceTests
     [Fact]
     public async Task GetPrefixesAsync_ColdFailure_PropagatesAndNegativeCaches()
     {
-        // No cached copy yet: the failure propagates, AND a negative entry is recorded so the next
-        // call within the negative TTL returns [] without re-hitting RIPEstat.
-        // retryAttempts:0 → exactly one fetch attempt (no retries), so one handler call.
+        // No cached copy yet: the failure propagates and is negative-cached without another fetch.
         var handler = new PerAsnHandler(100);
         var service = Service(handler, negativeTtl: TimeSpan.FromSeconds(30), retryAttempts: 0);
 
         await Assert.ThrowsAsync<HttpRequestException>(() => service.GetPrefixesAsync(100));
         Assert.Equal(1, handler.Calls); // single attempt, no retries
 
-        // Second call within negative TTL: no fetch, returns [] (negative cache).
-        var second = await service.GetPrefixesAsync(100);
-        Assert.Empty(second);
-        Assert.Equal(1, handler.Calls); // still one fetch — negative cache served
+        // Second call within negative TTL preserves the failure without another upstream call.
+        await Assert.ThrowsAsync<InvalidOperationException>(() => service.GetPrefixesAsync(100));
+        Assert.Equal(1, handler.Calls); // still one fetch — negative-cache backoff served
+    }
+
+    [Fact]
+    public async Task GetPrefixCountAsync_CachedFailure_DoesNotReportZero()
+    {
+        // The management count endpoints call this exact method. A cached outage must surface
+        // as an error/503 there, never as a real zero-prefix response.
+        var handler = new PerAsnHandler(100);
+        var service = Service(handler, negativeTtl: TimeSpan.FromSeconds(30), retryAttempts: 0);
+
+        await Assert.ThrowsAsync<HttpRequestException>(() => service.GetPrefixCountAsync(100));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => service.GetPrefixCountAsync(100));
+        Assert.Equal(1, handler.Calls);
     }
 
     [Fact]
@@ -629,9 +651,9 @@ public class PrefixServiceTests
             () => service.GetUserSourcePrefixesAsync("slow", "https://example.com/slow.txt", null)
                 .WaitAsync(TimeSpan.FromSeconds(8)));
 
-        // The negative cache throttles the retry: no second HTTP attempt.
-        var second = await service.GetUserSourcePrefixesAsync("slow", "https://example.com/slow.txt", null);
-        Assert.Empty(second);
+        // The negative cache throttles the retry without turning the failure into success.
+        await Assert.ThrowsAsync<InvalidOperationException>(
+            () => service.GetUserSourcePrefixesAsync("slow", "https://example.com/slow.txt", null));
         Assert.Equal(1, handler.Calls);
     }
 

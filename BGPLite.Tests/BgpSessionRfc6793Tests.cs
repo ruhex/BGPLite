@@ -61,6 +61,84 @@ public class BgpSessionRfc6793Tests
     }
 
     [Fact]
+    public void SegmentMerge_AsSetCountsAsOne_SoLongerAs4PathIsIgnored()
+    {
+        AsPathSegment[] asPath = [new(BgpConstants.AsPath.AsSet, [65000u, 65001u])];
+        AsPathSegment[] as4Path = [new(BgpConstants.AsPath.AsSequence, [70000u, 80000u])];
+
+        var merged = UpdateCodec.MergeAsPathWithAs4Path(asPath, as4Path);
+
+        var segment = Assert.Single(merged);
+        Assert.Equal(BgpConstants.AsPath.AsSet, segment.Type);
+        Assert.Equal([65000u, 65001u], segment.Asns);
+        Assert.Equal(1, segment.PathLength);
+    }
+
+    [Fact]
+    public void SegmentMerge_ShorterAs4Path_PreservesLeadingAsSet()
+    {
+        AsPathSegment[] asPath =
+        [
+            new(BgpConstants.AsPath.AsSet, [65000u, 65001u]),
+            new(BgpConstants.AsPath.AsSequence, [65002u])
+        ];
+        AsPathSegment[] as4Path = [new(BgpConstants.AsPath.AsSequence, [70000u])];
+
+        var merged = UpdateCodec.MergeAsPathWithAs4Path(asPath, as4Path);
+
+        Assert.Equal(2, merged.Length);
+        Assert.Equal(BgpConstants.AsPath.AsSet, merged[0].Type);
+        Assert.Equal([65000u, 65001u, 70000u], AsPathSegment.Flatten(merged));
+    }
+
+    [Fact]
+    public void SegmentMerge_RetainedAsSet_RejectsAsTransAfterFirstMember()
+    {
+        // AS4_PATH shorter than AS_PATH retains the complete set. AS_TRANS in any retained
+        // member is unresolved even when it is not the first member.
+        AsPathSegment[] asPath =
+        [
+            new(BgpConstants.AsPath.AsSet, [65000u, BgpConstants.AsPath.AsTrans]),
+            new(BgpConstants.AsPath.AsSequence, [65002u])
+        ];
+        AsPathSegment[] as4Path = [new(BgpConstants.AsPath.AsSequence, [70000u])];
+
+        var ex = Assert.Throws<BgpNotificationException>(() =>
+            UpdateCodec.MergeAsPathWithAs4Path(asPath, as4Path));
+
+        Assert.Equal(BgpConstants.Error.UpdateMessageError, ex.ErrorCode);
+        Assert.Equal(BgpConstants.SubError.MalformedAsPath, ex.SubErrorCode);
+    }
+
+    [Fact]
+    public void SegmentMerge_PartialSequence_DoesNotValidateDiscardedTail()
+    {
+        AsPathSegment[] asPath =
+        [
+            new(BgpConstants.AsPath.AsSequence, [65000u, BgpConstants.AsPath.AsTrans]),
+            new(BgpConstants.AsPath.AsSequence, [65002u])
+        ];
+        AsPathSegment[] as4Path = [new(BgpConstants.AsPath.AsSequence, [70000u, 80000u])];
+
+        var merged = UpdateCodec.MergeAsPathWithAs4Path(asPath, as4Path);
+
+        Assert.Equal([65000u, 70000u, 80000u], AsPathSegment.Flatten(merged));
+    }
+
+    [Fact]
+    public void SegmentMerge_EqualPathLength_PreservesAs4SetType()
+    {
+        AsPathSegment[] asPath = [new(BgpConstants.AsPath.AsSequence, [BgpConstants.AsPath.AsTrans])];
+        AsPathSegment[] as4Path = [new(BgpConstants.AsPath.AsSet, [200000u, 300000u])];
+
+        var merged = UpdateCodec.MergeAsPathWithAs4Path(asPath, as4Path);
+
+        var segment = Assert.Single(merged);
+        Assert.Equal(BgpConstants.AsPath.AsSet, segment.Type);
+        Assert.Equal([200000u, 300000u], segment.Asns);
+    }
+
+    [Fact]
     public void ParseRouteAttributes_HappyPath_ParsesAndMerges()
     {
         // The inbound pipeline through the public protocol API — 2-byte session with

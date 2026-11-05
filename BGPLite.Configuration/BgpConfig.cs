@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Sockets;
+using BGPLite.Protocol;
 using YamlDotNet.Serialization;
 
 namespace BGPLite.Configuration;
@@ -33,7 +34,7 @@ public sealed class BgpConfig
         && v6.AddressFamily == AddressFamily.InterNetworkV6
         && !v6.IsIPv4MappedToIPv6
         && v6.ScopeId == 0
-        && (v6.GetAddressBytes()[0] & 0xE0) == 0x20; // 2000::/3
+        && MpReachCodec.IsGlobalUnicastNextHop(BgpConstants.ToUInt128(v6));
 
     [YamlMember(Alias = "KeepAlive")]
     public int KeepAlive { get; init; } = 60;
@@ -108,14 +109,13 @@ public sealed class BgpConfig
         // AS 0 goes through the single validation point (see AsnValidation).
         AsnValidation.RequirePositive(Asn, "Bgp.Asn");
 
-        // RFC 4271 §6.8: the BGP Identifier (RouterId) must be a non-zero IPv4 address. The peer-side
-        // OPEN validator already rejects 0.0.0.0; this catches the local side before it is advertised.
+        // The same unicast policy applies to local config and a peer's OPEN (RFC 4271 §6.2/§6.8).
         var routerIdValid = IPAddress.TryParse(RouterId, out var routerIdAddress)
             && routerIdAddress.AddressFamily == AddressFamily.InterNetwork
-            && !routerIdAddress.Equals(IPAddress.Any);
+            && OpenNegotiator.IsValidBgpIdentifier(BgpConstants.IPAddressToUint(routerIdAddress));
         if (!routerIdValid)
             throw new InvalidOperationException(
-                $"Invalid configuration: Bgp.RouterId must be a non-zero IPv4 address (got '{RouterId}').");
+                $"Invalid configuration: Bgp.RouterId must be a valid unicast IPv4 BGP Identifier (got '{RouterId}').");
 
         // RFC 4271 §4.2: a Hold Time of 0 disables KeepAlive processing; any other value must be >= 3s.
         if (HoldTime != 0 && HoldTime < 3)

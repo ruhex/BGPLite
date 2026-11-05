@@ -46,10 +46,15 @@ public sealed class RouteAssemblerPolicyTests
     private class StubPrefixService : IPrefixService
     {
         public Func<IEnumerable<uint>, CancellationToken, Task<List<(UInt128 Prefix, byte Length, bool IsIpv4, uint Asn)>>>? OnGetPrefixesForAsns { get; set; }
+        public Func<IEnumerable<uint>, CancellationToken, Task<AsnPrefixResolution>>? OnGetPrefixesForAsnsResult { get; set; }
         public Task<IReadOnlyList<(UInt128 Prefix, byte Length, bool IsIpv4)>> GetPrefixesAsync(uint asn, CancellationToken ct = default)
             => Task.FromResult<IReadOnlyList<(UInt128 Prefix, byte Length, bool IsIpv4)>>([]);
         public Task<List<(UInt128 Prefix, byte Length, bool IsIpv4, uint Asn)>> GetPrefixesForAsns(IEnumerable<uint> asns, CancellationToken ct = default)
             => OnGetPrefixesForAsns?.Invoke(asns, ct) ?? Task.FromResult(new List<(UInt128 Prefix, byte Length, bool IsIpv4, uint Asn)>());
+        public async Task<AsnPrefixResolution> GetPrefixesForAsnsResultAsync(IEnumerable<uint> asns, CancellationToken ct = default)
+            => OnGetPrefixesForAsnsResult is not null
+                ? await OnGetPrefixesForAsnsResult(asns, ct)
+                : new AsnPrefixResolution(await GetPrefixesForAsns(asns, ct), []);
         public Task<int> GetPrefixCountAsync(uint asn, CancellationToken ct = default) => Task.FromResult(0);
         public Task<List<(UInt128 Prefix, byte Length, bool IsIpv4, uint Asn)>> GetRuPrefixesAsync(CancellationToken ct = default)
             => Task.FromResult(new List<(UInt128 Prefix, byte Length, bool IsIpv4, uint Asn)> { (RuPrefix, 8, true, 0u) });
@@ -63,12 +68,14 @@ public sealed class RouteAssemblerPolicyTests
     /// <summary>An existing peer subscribed to "tier1" — the configured-peer branch.</summary>
     private sealed class ConfiguredPeerStore : IPeerStore
     {
-        public List<string> Subscriptions { get; set; } = ["tier1"]; public Task<string> CreatePeerAsync(string ip, uint asn, string? description, CancellationToken ct = default) => Task.FromResult("id");
+        public List<string> Subscriptions { get; set; } = ["tier1"];
+        public List<CustomSourceView> UserSources { get; set; } = [];
+        public Task<string> CreatePeerAsync(string ip, uint asn, string? description, CancellationToken ct = default) => Task.FromResult("id");
         public Task UpsertPeerAsync(string ip, uint asn, CancellationToken ct = default) => Task.CompletedTask;
         public Task UpdateSessionStatusAsync(string ip, uint asn, bool active, CancellationToken ct = default) => Task.CompletedTask;
         public Task<int?> GetPeerMaxPrefixAsync(string ip, uint asn, CancellationToken ct = default) => Task.FromResult<int?>(null);
         public Task<PeerRoutingView?> LoadPeerRoutingViewAsync(string ip, uint asn, CancellationToken ct = default)
-            => Task.FromResult<PeerRoutingView?>(new("id", Subscriptions, [], [], []));
+            => Task.FromResult<PeerRoutingView?>(new("id", Subscriptions, [], [], UserSources));
     }
 
     [Fact]
@@ -105,6 +112,7 @@ public sealed class RouteAssemblerPolicyTests
     }
 
     [Fact]
+    /// <summary>Verifies that mixed failure plus successful empty resolution retains the documented RU fallback.</summary>
     public async Task MixedFailureAndEmptyResolution_StillFallsBackToRu()
     {
         // D26 refinement: fail-closed is for TOTAL failure only. tier1 fails
@@ -131,6 +139,29 @@ public sealed class RouteAssemblerPolicyTests
     }
 
     [Fact]
+    public async Task PartialAsnFailure_MarksResultIncomplete_ButKeepsBgpSurvivingRoutes()
+    {
+        var service = new StubPrefixService
+        {
+            OnGetPrefixesForAsnsResult = (_, _) => Task.FromResult(new AsnPrefixResolution(
+                [(0xC0000200, 24, true, 65020u)], [65010u]))
+        };
+        var assembler = NewAssembler(service, Config());
+
+        var result = await assembler.BuildOutboundRouteResultAsync(
+            "203.0.113.7", 65002, new PeerConfig { Address = "203.0.113.7" }, "203.0.113.7", CancellationToken.None);
+        var bgpRoutes = await assembler.BuildOutboundRoutesAsync(
+            "203.0.113.7", 65002, new PeerConfig { Address = "203.0.113.7" }, "203.0.113.7", CancellationToken.None);
+
+        Assert.False(result.Complete);
+        var assembledRoute = Assert.Single(result.Routes);
+        var bgpRoute = Assert.Single(bgpRoutes);
+        Assert.Equal((0xC0000200, (byte)24), (assembledRoute.Prefix, assembledRoute.PrefixLength));
+        Assert.Equal((0xC0000200, (byte)24), (bgpRoute.Prefix, bgpRoute.PrefixLength));
+    }
+
+    [Fact]
+    /// <summary>Verifies that an unknown peer subscription produces an actionable warning instead of silent zero routes.</summary>
     public async Task UnknownSubscriptionName_IsWarned_NotSilentlyIgnored()
     {
         // A subscription matching no AsnLists entry and no PrefixSource is a config typo —
@@ -147,6 +178,59 @@ public sealed class RouteAssemblerPolicyTests
             "203.0.113.7", 65002, new PeerConfig { Address = "203.0.113.7" }, "203.0.113.7", CancellationToken.None);
 
         Assert.Contains(logger.Entries, e => e.Level == LogLevel.Warning && e.Message.Contains("no-such-list"));
+    }
+
+    [Fact]
+    public async Task MultipleCountrySubscriptions_KeepEachListsCommunity()
+    {
+        var config = new AppConfig
+        {
+            Bgp = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1" },
+            RipeStat = new RipeStatConfig
+            {
+                AsnLists =
+                [
+                    new AsnList { Name = "ru-a", Country = "RU", Community = "65001:200" },
+                    new AsnList { Name = "ru-b", Country = "RU", Community = "65001:201" }
+                ]
+            }
+        };
+        var store = new ConfiguredPeerStore { Subscriptions = ["ru-a", "ru-b"] };
+        var assembler = new RouteAssembler(
+            new StubPrefixService(), store,
+            new ConfigCommunityResolver(config, config.Bgp),
+            AllowAllFilter.Instance, config, config.Bgp, NullLogger<RouteAssembler>.Instance);
+
+        var routes = await assembler.BuildOutboundRoutesAsync(
+            "203.0.113.7", 65002, new PeerConfig { Address = "203.0.113.7" }, "203.0.113.7", CancellationToken.None);
+
+        Assert.Equal(2, routes.Count);
+        var communities = routes.SelectMany(r => r.Communities).ToArray();
+        Assert.Contains(CommunityCodec.Parse("65001:200"), communities);
+        Assert.Contains(CommunityCodec.Parse("65001:201"), communities);
+    }
+
+    [Fact]
+    /// <summary>Verifies that control characters in a user-source name cannot forge additional log lines.</summary>
+    public async Task UserSourceName_ControlCharacters_CannotForgeLogLines()
+    {
+        var logger = new CapturingLogger();
+        var store = new ConfiguredPeerStore
+        {
+            Subscriptions = [],
+            UserSources = [new CustomSourceView("evil\nFORGED", "https://example.com/nets.txt", null)]
+        };
+        var config = Config();
+        var assembler = new RouteAssembler(
+            new StubPrefixService(), store,
+            new ConfigCommunityResolver(config, config.Bgp),
+            AllowAllFilter.Instance, config, config.Bgp, logger);
+
+        await assembler.BuildOutboundRoutesAsync(
+            "203.0.113.7", 65002, new PeerConfig { Address = "203.0.113.7" }, "203.0.113.7", CancellationToken.None);
+
+        Assert.Contains(logger.Entries, e => e.Message.Contains("evil FORGED", StringComparison.Ordinal));
+        Assert.DoesNotContain(logger.Entries, e => e.Message.Contains('\n') || e.Message.Contains('\r'));
     }
 
     [Fact]

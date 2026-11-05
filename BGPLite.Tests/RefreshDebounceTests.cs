@@ -41,6 +41,7 @@ public class RefreshDebounceTests
         }
     }
 
+    /// <summary>Drives OPEN negotiation and waits for Established without assuming the initial route dump has finished.</summary>
     private static async Task<Task> EstablishAsync(BgpSession session, Socket client, BgpConfig cfg)
     {
         var runTask = Task.Run(() => session.RunAsync(CancellationToken.None));
@@ -49,7 +50,7 @@ public class RefreshDebounceTests
             Version = BgpConstants.BgpVersion,
             Asn = 65002,
             HoldTime = 0,
-            RouterId = 0x7F000002,
+            RouterId = 0x0A000002,
             Capabilities = [BgpCapabilityInfo.FourOctetAsn(65002)]
         };
         var openBuf = new byte[BgpMessageWriter.GetBufferSize(open)];

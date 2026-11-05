@@ -174,7 +174,7 @@ public class BgpSessionHoldTimerTests
             Version = BgpConstants.BgpVersion,
             Asn = bgpConfig.Asn == 65001 ? (ushort)65002 : (ushort)65001,
             HoldTime = (ushort)bgpConfig.HoldTime,
-            RouterId = 0x7F000002,
+            RouterId = 0x0A000002,
             Capabilities = [BgpCapabilityInfo.FourOctetAsn(65002)]
         };
         conn.Enqueue(Serialize(peerOpen));
@@ -293,7 +293,7 @@ public class BgpSessionHoldTimerTests
             Version = BgpConstants.BgpVersion,
             Asn = 65002,
             HoldTime = (ushort)bgpConfig.HoldTime,
-            RouterId = 0x7F000002,
+            RouterId = 0x0A000002,
             Capabilities = [BgpCapabilityInfo.FourOctetAsn(65002)]
         }));
 
@@ -356,7 +356,7 @@ public class BgpSessionHoldTimerTests
             Version = BgpConstants.BgpVersion,
             Asn = 65002,
             HoldTime = 0,
-            RouterId = 0x7F000002,
+            RouterId = 0x0A000002,
             Capabilities = [BgpCapabilityInfo.FourOctetAsn(65002)]
         }));
 
@@ -675,7 +675,7 @@ public class BgpSessionHoldTimerTests
             Version = BgpConstants.BgpVersion,
             Asn = 65002,
             HoldTime = (ushort)bgpConfig.HoldTime,
-            RouterId = 0x7F000002
+            RouterId = 0x0A000002
         }));
 
         var completed = await Task.WhenAny(runTask, Task.Delay(TimeSpan.FromSeconds(5)));

@@ -300,7 +300,8 @@ public sealed class PeerDeleteTeardownTests
         NullLogger<ManagementApi>.Instance,
         new InertPrefixService(),
         new InertPrefixSourceService(),
-        sessionManager);
+        sessionManager,
+        TestRouteAssembly.CreateExporter(store, new AppConfig(), new InertPrefixService()));
 
     private static RouteAssembler NewAssembler(PeerStore store)
     {
@@ -338,6 +339,9 @@ public sealed class PeerDeleteTeardownTests
             return Task.CompletedTask;
         }
         public void SetPeerMd5Key(string peerIp, string? password) => Md5Keys.Add((peerIp, password));
+        public bool IsPeerEstablished(string peerIp, uint asn) => false;
+        public bool IsPeerMd5Armed(string peerIp, string? password) =>
+            !string.IsNullOrEmpty(password) && Md5Keys.LastOrDefault(k => k.Ip == peerIp).Password == password;
     }
 
     private sealed class StaticOptionsFactory(DbContextOptions<BgpDbContext> options) : IDbContextFactory<BgpDbContext>

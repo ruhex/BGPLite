@@ -96,15 +96,32 @@ public sealed class RouteAssemblerFailClosedTests
         new(config, new PrefixSourceProviderFactory([new RuOkOthersFailProvider()]),
             NullLogger<PrefixSourceService>.Instance);
 
-    private static PrefixService RealPrefixService(AppConfig config, HttpMessageHandler handler, IPrefixSourceService sources)
+    private static PrefixService RealPrefixService(AppConfig config, HttpMessageHandler handler,
+        IPrefixSourceService sources, IPrefixSourceProvider? userSourceProvider = null)
     {
         var ripe = new RipeStatProvider(
             new StubHttpClientFactory(handler), NullLogger<RipeStatProvider>.Instance, config.RipeStat);
         var cache = new RipeStatPrefixCache(ripe, NullLogger<RipeStatPrefixCache>.Instance);
-        return new PrefixService(config, cache, sources, null!, logger: NullLogger<PrefixService>.Instance);
+        return new PrefixService(config, cache, sources, null!, logger: NullLogger<PrefixService>.Instance,
+            userSourceHttpProvider: userSourceProvider);
     }
 
-    private sealed class SubscribedPeerStore(List<string> subscriptions) : IPeerStore
+    private sealed class AlwaysFailingUserSourceProvider : IPrefixSourceProvider
+    {
+        public string Kind => "http";
+        public bool SupportsConditionalRequests => false;
+        public int Calls { get; private set; }
+
+        public Task<SourceLoadResult> LoadAsync(PrefixSourceConfig source, string? etag = null,
+            DateTimeOffset? lastModified = null, CancellationToken ct = default)
+        {
+            Calls++;
+            throw new HttpRequestException("simulated user-source outage");
+        }
+    }
+
+    private sealed class SubscribedPeerStore(
+        List<string> subscriptions, IReadOnlyList<CustomSourceView>? userSources = null) : IPeerStore
     {
         public Task<string> CreatePeerAsync(string ip, uint asn, string? description, CancellationToken ct = default)
             => Task.FromResult("id");
@@ -114,12 +131,12 @@ public sealed class RouteAssemblerFailClosedTests
         public Task<int?> GetPeerMaxPrefixAsync(string ip, uint asn, CancellationToken ct = default)
             => Task.FromResult<int?>(null);
         public Task<PeerRoutingView?> LoadPeerRoutingViewAsync(string ip, uint asn, CancellationToken ct = default)
-            => Task.FromResult<PeerRoutingView?>(new("id", subscriptions, [], [], []));
+            => Task.FromResult<PeerRoutingView?>(new("id", subscriptions, [], [], userSources?.ToList() ?? []));
     }
 
     private static RouteAssembler Assembler(IPrefixService prefixService, AppConfig config,
-        List<string> subscriptions, CapturingLogger logger)
-        => new(prefixService, new SubscribedPeerStore(subscriptions),
+        List<string> subscriptions, CapturingLogger logger, IReadOnlyList<CustomSourceView>? userSources = null)
+        => new(prefixService, new SubscribedPeerStore(subscriptions, userSources),
             new ConfigCommunityResolver(config, config.Bgp), AllowAllFilter.Instance,
             config, config.Bgp, logger);
 
@@ -128,6 +145,7 @@ public sealed class RouteAssemblerFailClosedTests
             new PeerConfig { Address = "203.0.113.7" }, "203.0.113.7", CancellationToken.None);
 
     [Fact]
+    /// <summary>Verifies that total RIPEstat failure suppresses the RU fallback instead of advertising unrelated routes.</summary>
     public async Task AsnSubscription_RipestatOutage_FailsClosed_NoRuDump()
     {
         // The peer asked for ONE ASN. RIPEstat is down. It must not be handed the RU table.
@@ -142,6 +160,46 @@ public sealed class RouteAssemblerFailClosedTests
         Assert.True(handler.Calls > 0, "the upstream was never actually contacted");
         Assert.True(log.FailedClosed, "the D26 fail-closed branch did not run");
         Assert.False(log.FellBackToRu, "the RU fallback fired on a total source failure");
+    }
+
+    [Fact]
+    /// <summary>Verifies repeated fail-closed builds during negative-cache backoff without duplicate upstream fetches.</summary>
+    public async Task AsnSubscription_RipestatOutage_StaysClosedWithinNegativeBackoffWindow()
+    {
+        var config = Config();
+        var handler = new AlwaysFailingHandler();
+        var log = new CapturingLogger();
+        var assembler = Assembler(RealPrefixService(config, handler, SourceService(config)), config, ["tier1"], log);
+
+        for (var cycle = 0; cycle < 3; cycle++)
+        {
+            var routes = await BuildAsync(assembler);
+            Assert.Empty(routes);
+            Assert.False(log.FellBackToRu, $"cycle {cycle}: the RU fallback fired");
+        }
+
+        Assert.Equal(1, handler.Calls);
+    }
+
+    [Fact]
+    /// <summary>Verifies that repeated user-source failures remain fail-closed throughout negative-cache backoff.</summary>
+    public async Task UserSource_Outage_StaysClosedWithinNegativeBackoffWindow()
+    {
+        var config = Config();
+        var provider = new AlwaysFailingUserSourceProvider();
+        var log = new CapturingLogger();
+        var service = RealPrefixService(config, new AlwaysFailingHandler(), SourceService(config), provider);
+        var assembler = Assembler(service, config, [], log,
+            [new CustomSourceView("broken", "https://example.com/prefixes.txt", null)]);
+
+        for (var cycle = 0; cycle < 3; cycle++)
+        {
+            var routes = await BuildAsync(assembler);
+            Assert.Empty(routes);
+            Assert.False(log.FellBackToRu, $"cycle {cycle}: the RU fallback fired");
+        }
+
+        Assert.Equal(1, provider.Calls);
     }
 
     [Fact]

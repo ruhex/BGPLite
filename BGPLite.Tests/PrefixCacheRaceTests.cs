@@ -184,10 +184,96 @@ public class PrefixCacheRaceTests
         Assert.Equal(2, pushes.Count);
     }
 
+    [Fact]
+    /// <summary>Commits during an old load and verifies that generation validation rejects its stale projection.</summary>
+    public async Task GetRuPrefixesAsync_CommitDuringOldLoad_DoesNotPublishStaleProjection()
+    {
+        var source = new CountingPrefixSource();
+        var service = Service(source, defaultSource: string.Empty);
+        var committed = false;
+        service.RuPublishProbe = () =>
+        {
+            if (committed) return;
+            committed = true;
+            source.Commit([new IpPrefix(0xCB000000u, 8)]); // 203.0.0.0/8
+        };
+
+        await service.GetRuPrefixesAsync();
+        var latest = await service.GetRuPrefixesAsync();
+
+        var prefix = Assert.Single(latest);
+        Assert.Equal(0xCB000000u, prefix.Prefix);
+        Assert.Equal(2, source.LoadCalls); // stale publication was rejected, so the new content reloads
+    }
+
+    /// <summary>Pauses publication after its generation check and commits at the invalidation-lock boundary; no timing delay decides the order.</summary>
+    [Fact]
+    public async Task GetRuPrefixesAsync_CommitAfterGenerationCheck_CannotRestoreStaleProjection()
+    {
+        var source = new CountingPrefixSource();
+        var service = Service(source, defaultSource: string.Empty);
+        using var generationChecked = new ManualResetEventSlim();
+        using var releasePublication = new ManualResetEventSlim();
+        using var invalidationStarted = new ManualResetEventSlim();
+        service.RuInvalidationProbe = invalidationStarted.Set;
+        service.RuAfterGenerationCheckProbe = () =>
+        {
+            generationChecked.Set();
+            releasePublication.Wait(TimeSpan.FromSeconds(5));
+        };
+
+        var oldLoad = Task.Run(() => service.GetRuPrefixesAsync());
+        Assert.True(generationChecked.Wait(TimeSpan.FromSeconds(5)));
+        var commit = Task.Run(() => source.Commit([new IpPrefix(0xCB000000u, 8)]));
+        Assert.True(invalidationStarted.Wait(TimeSpan.FromSeconds(5)));
+        AssertPublicationLockUnavailable(service);
+        releasePublication.Set();
+        await Task.WhenAll(oldLoad, commit);
+        var latest = await service.GetRuPrefixesAsync();
+
+        var prefix = Assert.Single(latest);
+        Assert.Equal(0xCB000000u, prefix.Prefix);
+        Assert.Equal(2, source.LoadCalls);
+    }
+
+    /// <summary>Proves that invalidation holds the same lock used by publication and never restores stale content.</summary>
+    [Fact]
+    public async Task SourceCommit_InvalidationCriticalSection_ExcludesPublicationLock()
+    {
+        var source = new CountingPrefixSource();
+        var service = Service(source, defaultSource: string.Empty);
+        using var invalidationHeld = new ManualResetEventSlim();
+        using var releaseInvalidation = new ManualResetEventSlim();
+        service.RuInvalidationCriticalProbe = () =>
+        {
+            invalidationHeld.Set();
+            releaseInvalidation.Wait(TimeSpan.FromSeconds(5));
+        };
+
+        var commit = Task.Run(() => source.Commit([new IpPrefix(0xCB000000u, 8)]));
+        Assert.True(invalidationHeld.Wait(TimeSpan.FromSeconds(5)));
+        AssertPublicationLockUnavailable(service);
+        releaseInvalidation.Set();
+        await commit;
+
+        var latest = await service.GetRuPrefixesAsync();
+        Assert.Equal(0xCB000000u, Assert.Single(latest).Prefix);
+    }
+
+    /// <summary>Asserts mutual exclusion without leaving the lock held when the assertion fails.</summary>
+    private static void AssertPublicationLockUnavailable(PrefixService service)
+    {
+        var entered = Monitor.TryEnter(service.RuPublicationSync);
+        if (entered)
+            Monitor.Exit(service.RuPublicationSync);
+        Assert.False(entered, "publication or invalidation must hold the shared lock at this checkpoint");
+    }
+
     // ---- helpers ----
 
-    private static PrefixService Service(CountingPrefixSource source, TimeSpan? cacheTtl = null, TimeProvider? timeProvider = null, Func<string, Task>? onSourceChanged = null) =>
-        new(new AppConfig(),
+    /// <summary>Composes only the dependencies used by the RU cache path, with explicit nulls for unreachable collaborators.</summary>
+    private static PrefixService Service(CountingPrefixSource source, TimeSpan? cacheTtl = null, TimeProvider? timeProvider = null, Func<string, Task>? onSourceChanged = null, string? defaultSource = null) =>
+        new(new AppConfig { DefaultPrefixSource = defaultSource },
             // Both are required in production; neither is on the GetRuPrefixesAsync path this
             // fixture exercises, so the fake composition states that explicitly rather than relying
             // on a nullable parameter that production code could also leave unset.
@@ -214,6 +300,15 @@ public class PrefixCacheRaceTests
         public bool FailNext { get; set; }
         /// <summary>Whether the next completed load reports a content change (the push trigger).</summary>
         public bool ChangedOnNextLoad { get; set; }
+        public IReadOnlyList<IpPrefix> Current { get; private set; } =
+            [new IpPrefix(0x0A000000u, 8), new IpPrefix(0xC0A80000u, 16)];
+
+        /// <summary>Changes source content and fires the same commit event used by production refresh.</summary>
+        public void Commit(IReadOnlyList<IpPrefix> prefixes)
+        {
+            Current = prefixes;
+            ContentCommitted?.Invoke(string.Empty);
+        }
 
         public Task<IReadOnlyList<(PrefixSourceConfig Source, IReadOnlyList<IpPrefix> Prefixes)>> LoadAllAsync(CancellationToken ct = default) =>
             throw new NotImplementedException();
@@ -221,6 +316,7 @@ public class PrefixCacheRaceTests
         public Task<IReadOnlyList<IpPrefix>> GetAsync(string name, CancellationToken ct = default) =>
             throw new NotImplementedException();
 
+        /// <summary>Counts default-source loads and provides controllable latency, failure, and change signals.</summary>
         public async Task<(IReadOnlyList<IpPrefix> Prefixes, bool Changed)> LoadDefaultAsync(CancellationToken ct = default)
         {
             Interlocked.Increment(ref _loadCalls);
@@ -229,12 +325,7 @@ public class PrefixCacheRaceTests
             if (FailNext) throw new InvalidOperationException("simulated default-source failure");
             var changed = ChangedOnNextLoad;
             ChangedOnNextLoad = false;
-            IReadOnlyList<IpPrefix> prefixes = new List<IpPrefix>
-            {
-                new(0x0A000000u, 8),
-                new(0xC0A80000u, 16),
-            };
-            return (prefixes, changed);
+            return (Current, changed);
         }
 
         public Task<IReadOnlyList<IpPrefix>> GetDefaultAsync(CancellationToken ct = default) =>

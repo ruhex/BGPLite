@@ -107,6 +107,8 @@ public static class BgpConstants
         public const byte FlagExtendedLength = 0x10;
         /// <summary>RFC 4271 §4.3: bit 0x08 is reserved and MUST be zero on the wire.</summary>
         public const byte FlagReserved = 0x08;
+        /// <summary>All four lower-order attribute flag bits, reserved for send-side validation.</summary>
+        public const byte FlagReservedMask = 0x0F;
     }
 
     public static class AsPath

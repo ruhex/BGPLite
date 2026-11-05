@@ -101,6 +101,8 @@ For section-by-section RFC conformance status, see `RFC_COMPLIANCE.md` (2026-07-
 ### D9. No global max-active session cap; per-source-IP accept throttle instead
 - **Decision:** there is deliberately no cap on concurrent sessions. Floods from one IP are bounded
   by `Bgp.MaxAcceptsPerIpPerMinute` (rolling 60 s window, socket closed before a session spawns).
+  Throttle bookkeeping is capped at 10,000 active/recent source IPs; at capacity, new sources are
+  rejected until a bounded stale sweep frees space rather than evicting/resetting existing limits.
 - **Context:** a route server is designed to hold many peers — session count is capacity/business
   logic, not a security control; the OS firewall is the primary gate.
 - **Consequence:** total session count is bounded only by OS resources; reintroducing a global cap is
@@ -372,3 +374,12 @@ For section-by-section RFC conformance status, see `RFC_COMPLIANCE.md` (2026-07-
   were withdrawn at refresh start anyway); an unknown subscription name now logs a Warning per build
   instead of being silently ignored.
 - **Tracker:** #488.
+
+### D27. MP IPv6 next-hop scope is 2000::/3
+- **Decision:** inbound and configured outbound MP_REACH next hops accept global unicast `2000::/3`
+  only. The RFC 2545 32-byte global+link-local form remains decodable and uses its first/global half.
+- **Context:** RFC 2545 §3 requires the global address; the implementation deliberately does not
+  accept ULA or IPv4-mapped values as a substitute. Lone link-local values are not adopted.
+- **Consequence:** peers sending ULA/mapped/non-global next hops have those routes excluded rather
+  than installed with an unsupported scope. No interoperability exception is claimed.
+- **Tracker:** #566.

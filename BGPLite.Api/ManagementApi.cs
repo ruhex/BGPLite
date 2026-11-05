@@ -48,6 +48,10 @@ public sealed class ManagementApi : IHostedService, IDisposable
     private readonly IPrefixService _prefixService;
     private readonly IPrefixSourceService _prefixSources;
     private readonly ISessionManager _sessionManager;
+    // Serializes each complete DB → credential-resolution → kernel mutation, including rollback.
+    // A single low-volume management gate avoids unbounded per-IP lock retention.
+    private readonly SemaphoreSlim _md5MutationGate = new(1, 1);
+    private readonly IPrefixExportService _prefixExport;
     private readonly ILogger<ManagementApi> _logger;
     private readonly int _port;
     private readonly string _listenAddress;  // bind address — loopback by default
@@ -76,9 +80,9 @@ public sealed class ManagementApi : IHostedService, IDisposable
     /// slot. The degradation contract lives with it: budget expiry surfaces as an
     /// OperationCanceledException while <c>_shutdownCts</c> is NOT cancelled (catch filters read
     /// <c>when (!_shutdownCts.IsCancellationRequested)</c>), and a shutdown OCE always propagates.
-    /// Each endpoint then degrades to whatever its response shape allows — a partial result
-    /// (peer prefixes, asn-lists) or a stable 503 (the AS prefix count, which has nothing
-    /// partial to serve). Hand-rolling a second linked source is exactly how this budget kept
+    /// Each endpoint then degrades to whatever its response shape allows — a stable 503 for
+    /// peer-prefix export (never a partial route filter) or an explicit partial-count result for
+    /// asn-lists. Hand-rolling a second linked source is exactly how this budget kept
     /// regressing endpoint-by-endpoint; a source-scan test pins the one call site.
     /// </summary>
     private CancellationTokenSource CreateExternalFetchBudget()
@@ -122,7 +126,8 @@ public sealed class ManagementApi : IHostedService, IDisposable
         ILogger<ManagementApi> logger,
         IPrefixService prefixService,
         IPrefixSourceService prefixSources,
-        ISessionManager sessionManager)
+        ISessionManager sessionManager,
+        IPrefixExportService prefixExport)
     {
         _store = store;
         _routeTable = routeTable;
@@ -131,6 +136,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
         _prefixService = prefixService;
         _prefixSources = prefixSources;
         _sessionManager = sessionManager;
+        _prefixExport = prefixExport;
         _logger = logger;
         _port = config.ApiPort;
         // Secure-by-default — bind to loopback unless the operator explicitly sets ApiListen.
@@ -232,7 +238,8 @@ public sealed class ManagementApi : IHostedService, IDisposable
     /// <summary>Whether a global concurrency limiter is currently active — exposed for hot-reload tests.</summary>
     internal bool IsConcurrencyLimitEnabled => Volatile.Read(ref _concurrencyLimiter) is not null;
 
-    public async Task StartAsync(CancellationToken cancellationToken)
+    /// <summary>Binds the configured management listener, logs exposure warnings, and starts the request loop.</summary>
+    public Task StartAsync(CancellationToken cancellationToken)
     {
         _listener = new HttpListener();
         // HttpListener prefix normalization:
@@ -270,26 +277,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
                 "the proxy overwrites it. A pass-through proxy lets clients spoof their IP");
         }
         _listenTask = ListenAsync(_cts.Token);
-
-        // Arm the listening socket with every peer's TCP-MD5 key. ManagementApi starts after
-        // BgpServer (registration order), so only the sub-second window before this loop is
-        // unprotected. A stored password on a platform without TCP-MD5 (Linux-only) cannot be
-        // armed: SetPeerMd5Key throws and startup aborts instead of running with a false
-        // tcpMd5=true indicator.
-        var md5Bootstrapped = 0;
-        // TCP keys by source IP: a DIFFERENT key on a sibling row would otherwise win
-        // non-deterministically — the resolver picks one deterministically and warns (values never
-        // logged), and the same resolver re-arms on delete/PATCH so runtime cannot drift from here.
-        foreach (var group in (await _store.GetPeerMd5CredentialsAsync(cancellationToken))
-                     .GroupBy(c => c.Ip).OrderBy(g => g.Key, StringComparer.Ordinal))
-        {
-            var key = ResolveSharedIpKey(group.Key, [.. group]);
-            if (key is null) continue;
-            _sessionManager.SetPeerMd5Key(group.Key, key);
-            md5Bootstrapped++;
-        }
-        if (md5Bootstrapped > 0)
-            _logger.LogInformation("TCP-MD5 armed for {Count} peer(s)", md5Bootstrapped);
+        return Task.CompletedTask;
     }
 
     /// <summary>
@@ -298,28 +286,44 @@ public sealed class ManagementApi : IHostedService, IDisposable
     /// warning the startup bootstrap emits when siblings declare DIFFERENT keys; null when no
     /// surviving row carries a key.
     /// </summary>
-    private string? ResolveSharedIpKey(string ip, IReadOnlyList<(string Ip, string Md5Password)> rows)
+    internal static string? ResolveSharedIpKey(
+        string ip, IReadOnlyList<(string Ip, string Md5Password)> rows, ILogger logger)
     {
         if (rows.Count == 0) return null;
         var creds = rows.OrderBy(c => c.Md5Password, StringComparer.Ordinal).ToList();
         if (creds.Select(c => c.Md5Password).Distinct().Count() > 1)
-            _logger.LogWarning(
+            logger.LogWarning(
                 "TCP-MD5: {Count} peer rows on source IP {Ip} configure DIFFERENT keys — TCP-MD5 keys by IP, so one key applies to all of them (peers: {Peers})",
                 creds.Count, ip, string.Join(", ", creds.Select(c => c.Ip)));
         return creds[0].Md5Password;
     }
 
+    internal Func<string, Task>? Md5MutationGateProbe { get; set; }
+    internal Func<string, Task>? Md5RearmProbe { get; set; }
+
     /// <summary>
-    /// Re-arms the per-IP TCP-MD5 key from the SURVIVING peer rows: deleting a peer or
-    /// clearing its password must fall back to a sibling's key on the same source IP, and setting
-    /// a new one must leave the whole-IP state consistent with the store. The previous behavior
-    /// armed/unarmed from the single edited row, silently disarming (or overriding) siblings.
+    /// Re-arms the per-IP TCP-MD5 key from the SURVIVING peer rows under the caller's mutation gate:
+    /// deleting or clearing one row falls back to a sibling key, and setting a key leaves whole-IP
+    /// state consistent with the store.
     /// </summary>
     internal async Task RearmPeerIpMd5KeyAsync(string ip)
     {
         var remaining = await _store.GetPeerMd5CredentialsForIpAsync(ip);
-        _sessionManager.SetPeerMd5Key(ip, ResolveSharedIpKey(ip, remaining));
+        if (Md5RearmProbe is not null)
+            await Md5RearmProbe(ip);
+        _sessionManager.SetPeerMd5Key(ip, ResolveSharedIpKey(ip, remaining, _logger));
     }
+
+    /// <summary>
+    /// The <c>tcpMd5</c> indicator for one peer row: true only when a password is stored AND the
+    /// kernel actually armed it for that source IP. Derived from the session manager rather than
+    /// from the stored password alone — a row whose arming failed (unsupported platform, kernel
+    /// without CONFIG_TCP_MD5SIG, setsockopt EINVAL) is NOT protected, and reporting it as
+    /// protected told the operator the session was authenticated while any host reaching port 179
+    /// from that address could complete the handshake unsigned.
+    /// </summary>
+    private bool IsMd5Armed(string ip, string? storedPassword) =>
+        TcpMd5.IsSupported && !string.IsNullOrEmpty(storedPassword) && _sessionManager.IsPeerMd5Armed(ip, storedPassword);
 
     public async Task StopAsync(CancellationToken cancellationToken)
     {
@@ -959,6 +963,10 @@ public sealed class ManagementApi : IHostedService, IDisposable
         return ApiResponse.Ok(new { ip = clientIp, peers = details });
     }
 
+    /// <summary>Maps the live Established lookup to the public active/inactive peer status.</summary>
+    private string PeerStatus(string ip, uint? asn) =>
+        asn.HasValue && _sessionManager.IsPeerEstablished(ip, asn.Value) ? "active" : "inactive";
+
     /// <summary>Builds the peer-detail anonymous object for /api/me. Returns null if the peer vanished.</summary>
     private async Task<object?> BuildPeerDetail(string peerId)
     {
@@ -978,10 +986,10 @@ public sealed class ManagementApi : IHostedService, IDisposable
             ip = peer.Ip,
             asn = peer.Asn,
             description = peer.Description,
-            status = peer.Status,
+            status = PeerStatus(peer.Ip, peer.Asn),
             createdAt = peer.CreatedAt,
             maxPrefix = peer.MaxPrefix,
-            tcpMd5 = TcpMd5.IsSupported && !string.IsNullOrEmpty(peer.Md5Password),
+            tcpMd5 = IsMd5Armed(peer.Ip, peer.Md5Password),
             lastSessionAt = peer.LastSessionAt,
             lists = peer.Subscriptions,
             customPrefixes = peer.CustomPrefixes,
@@ -1024,6 +1032,10 @@ public sealed class ManagementApi : IHostedService, IDisposable
 
         var asnLists = data.AsnLists ?? [];
         var customPrefixes = new List<(string Prefix, byte Length)>();
+        if (FindDuplicateError(asnLists, "lists", value => value) is { } duplicateLists)
+            return duplicateLists;
+        if (FindDuplicateError(data.CustomAsns, "customAsns", value => value.ToString()) is { } duplicateAsns)
+            return duplicateAsns;
 
         // Reject unknown subscription names at the boundary — a stored typo silently
         // served zero prefixes from that list forever, with no signal on either side.
@@ -1062,23 +1074,55 @@ public sealed class ManagementApi : IHostedService, IDisposable
                 customPrefixes.Add(parsed.Value);
             }
         }
+        if (FindDuplicateError(customPrefixes, "customPrefixes", value => $"{value.Prefix}/{value.Length}") is { } duplicatePrefixes)
+            return duplicatePrefixes;
 
         // One transaction for the whole create. The previous CreatePeer + three Set* calls
-        // each committed separately, so a duplicate CIDR — which violates the
-        // (PeerId, Prefix, PrefixLength) key — returned 500 over an already-committed peer row and
-        // left the user with a half-configured peer. Duplicates are now deduplicated inside the
-        // store: a set of prefixes means the same thing whether a value appears once or twice.
+        // each committed separately, so a duplicate CIDR returned 500 over an already-committed
+        // peer row. The API now rejects UI duplicates; store-level dedup remains defense in depth.
         // The upsert returns (Id, Status, CreatedAt) from its RETURNING clause — no
         // follow-up GetDbPeerById roundtrip for fields the caller already knows.
-        var saved = await _store.SavePeerConfigurationAsync(
-            normalizedIp, data.Asn, data.Description, asnLists, customPrefixes, data.CustomAsns ?? [], data.MaxPrefix,
-            md5Password: string.IsNullOrEmpty(data.Md5Password) ? null : data.Md5Password);
-        if (!string.IsNullOrEmpty(data.Md5Password))
+        var gateMd5 = !string.IsNullOrEmpty(data.Md5Password);
+        if (gateMd5)
+            await _md5MutationGate.WaitAsync();
+        SavedPeer saved;
+        try
         {
-            // Resolve through the SAME shared-IP re-arm the delete/PATCH/bootstrap paths use —
-            // TCP keys by address, so arming the new row's key directly silently overrode a
-            // sibling's key on the same IP (last-writer-wins, no disagreement warning).
-            await RearmPeerIpMd5KeyAsync(normalizedIp);
+            var existingPeer = string.IsNullOrEmpty(data.Md5Password)
+                ? null
+                : await _store.GetPeerAsync(normalizedIp, data.Asn);
+            var previousMd5Password = existingPeer is null
+                ? null
+                : (await _store.GetDbPeerByIdAsync(existingPeer.Id))?.Md5Password;
+            saved = await _store.SavePeerConfigurationAsync(
+                normalizedIp, data.Asn, data.Description, asnLists, customPrefixes, data.CustomAsns ?? [], data.MaxPrefix,
+                md5Password: string.IsNullOrEmpty(data.Md5Password) ? null : data.Md5Password);
+            if (gateMd5)
+            {
+                // Resolve through the SAME shared-IP re-arm the delete/PATCH/bootstrap paths use.
+                // If the kernel refuses the selected key, restore the password state from before this
+                // request so startup cannot retry an unarmable key, and make the partial commit explicit.
+                try { await RearmPeerIpMd5KeyAsync(normalizedIp); }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "TCP-MD5 arming failed after saving peer {Ip}; attempting a conditional password rollback", normalizedIp);
+                    var restored = await _store.RestorePeerMd5PasswordIfCurrentAsync(
+                        saved.Id, data.Md5Password, existingPeer is null ? null : previousMd5Password);
+                    var error = !restored
+                        ? ApiResponse.Error(
+                            "The peer changes were saved, but TCP-MD5 could not be armed; a newer concurrent password change was left intact.", 500)
+                        : ApiResponse.Error(existingPeer is null
+                            ? "The peer was created, but TCP-MD5 could not be armed; its stored password was removed."
+                            : "The peer configuration was saved, but TCP-MD5 could not be armed; the previous stored password was restored.", 500);
+                    _ = _sessionManager.RefreshPeerAsync(normalizedIp, data.Asn);
+                    return error;
+                }
+            }
+        }
+        finally
+        {
+            if (gateMd5)
+                _md5MutationGate.Release();
         }
 
         _logger.LogInformation("Created peer {Ip} AS{Asn} ({Id}): {Subs} lists, {Prefixes} custom prefixes, {Asns} custom AS",
@@ -1092,16 +1136,17 @@ public sealed class ManagementApi : IHostedService, IDisposable
             ip = normalizedIp,
             asn = data.Asn,
             description = data.Description,
-            status = saved.Status,
+            status = PeerStatus(normalizedIp, data.Asn),
             createdAt = saved.CreatedAt,
             maxPrefix = saved.MaxPrefix,
-            tcpMd5 = TcpMd5.IsSupported && !string.IsNullOrEmpty(data.Md5Password),
+            tcpMd5 = IsMd5Armed(normalizedIp, data.Md5Password),
             lists = asnLists,
             customPrefixes = data.CustomPrefixes ?? [],
             customAsns = data.CustomAsns ?? []
         });
     }
 
+    /// <summary>Returns the current peer detail with live status and MD5 state, or 404 after deletion.</summary>
     private async Task<ApiResponse> HandleGetPeer(string peerId)
     {
         // Single DbContext roundtrip via PeerStore.GetPeerDetail (was 6 separate DbContexts).
@@ -1115,10 +1160,10 @@ public sealed class ManagementApi : IHostedService, IDisposable
             ip = peer.Ip,
             asn = peer.Asn,
             description = peer.Description,
-            status = peer.Status,
+            status = PeerStatus(peer.Ip, peer.Asn),
             createdAt = peer.CreatedAt,
             maxPrefix = peer.MaxPrefix,
-            tcpMd5 = TcpMd5.IsSupported && !string.IsNullOrEmpty(peer.Md5Password),
+            tcpMd5 = IsMd5Armed(peer.Ip, peer.Md5Password),
             lastSessionAt = peer.LastSessionAt,
             lists = peer.Subscriptions,
             customPrefixes = peer.CustomPrefixes,
@@ -1163,6 +1208,8 @@ public sealed class ManagementApi : IHostedService, IDisposable
                 parsedPrefixes.Add(parsed.Value);
             }
         }
+        if (FindDuplicateError(parsedPrefixes, "customPrefixes", value => $"{value.Prefix}/{value.Length}") is { } duplicatePrefixes)
+            return duplicatePrefixes;
 
         _logger.LogInformation("UpdatePeer {Id}: CustomPrefixes={Count}, CustomAsns={AsnCount}",
             SanitizeForLog(peerId), parsedPrefixes?.Count ?? 0, data.CustomAsns?.Count ?? 0);
@@ -1171,6 +1218,8 @@ public sealed class ManagementApi : IHostedService, IDisposable
         // the shared fields need checking — but they need it before anything is written.
         if (ValidatePeerFields(data.Description, data.CustomAsns) is { } updateError)
             return updateError;
+        if (FindDuplicateError(data.CustomAsns, "customAsns", value => value.ToString()) is { } duplicateAsns)
+            return duplicateAsns;
 
         // One transaction for the whole update, same reasoning as the create path. A null
         // argument means "leave this alone" — the PATCH semantics this endpoint already had, now
@@ -1179,6 +1228,8 @@ public sealed class ManagementApi : IHostedService, IDisposable
         // (a null Lists field means "leave the subscriptions alone" and has nothing to validate).
         if (data.Lists is not null)
         {
+            if (FindDuplicateError(data.Lists, "lists", value => value) is { } duplicateLists)
+                return duplicateLists;
             var unknown = FindUnknownSubscriptionNames(data.Lists, _config);
             if (unknown.Count > 0)
                 return ApiResponse.Error(
@@ -1200,20 +1251,49 @@ public sealed class ManagementApi : IHostedService, IDisposable
         if (!string.IsNullOrEmpty(data.Md5Password) && !TcpMd5.IsSupported)
             return ApiResponse.Error("TCP-MD5 (RFC 2385) is supported on Linux only — this host cannot arm an md5Password; remove it or run the server on Linux.", 400);
 
-        await _store.UpdatePeerConfigurationAsync(peerId, data.Description, data.Lists, parsedPrefixes, data.CustomAsns, data.MaxPrefix,
-            md5Password: data.Md5Password);
-        // A concurrent DELETE between the top-of-handler GET and this UPDATE left the
-        // ExecuteUpdates touching 0 rows while the handler still logged "Updated peer", answered
-        // 200 and fired a refresh — the follow-up GET then 404ed. Re-check the row and answer 404
-        // directly (the write itself is harmless: transaction-scoped, 0 rows affected).
-        var surviving = await _store.GetDbPeerByIdAsync(peerId);
-        if (surviving is null)
-            return ApiResponse.Error("Peer not found", 404);
-        if (data.Md5Password is not null)
+        var gateMd5 = data.Md5Password is not null;
+        if (gateMd5)
         {
-            // Re-arm from ALL surviving rows for this IP — clearing this peer's key must
-            // fall back to a sibling's, not silently disarm the address for every peer on it.
-            await RearmPeerIpMd5KeyAsync(surviving.Ip);
+            if (Md5MutationGateProbe is not null)
+                await Md5MutationGateProbe(peer.Ip);
+            await _md5MutationGate.WaitAsync();
+        }
+        try
+        {
+            var previousMd5Password = gateMd5
+                ? (await _store.GetDbPeerByIdAsync(peerId))?.Md5Password
+                : null;
+            await _store.UpdatePeerConfigurationAsync(peerId, data.Description, data.Lists, parsedPrefixes, data.CustomAsns, data.MaxPrefix,
+                md5Password: data.Md5Password);
+            // A concurrent DELETE between the top-of-handler GET and this UPDATE left the
+            // ExecuteUpdates touching 0 rows while the handler still logged "Updated peer", answered
+            // 200 and fired a refresh — the follow-up GET then 404ed. Re-check the row and answer 404
+            // directly (the write itself is harmless: transaction-scoped, 0 rows affected).
+            var surviving = await _store.GetDbPeerByIdAsync(peerId);
+            if (surviving is null)
+                return ApiResponse.Error("Peer not found", 404);
+            if (gateMd5)
+            {
+                // Re-arm from ALL surviving rows for this IP. On failure restore the previous stored
+                // password and make the partial commit explicit instead of returning a bare 500.
+                try { await RearmPeerIpMd5KeyAsync(surviving.Ip); }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "TCP-MD5 re-arming failed after updating peer {Id}; attempting a conditional password rollback",
+                        SanitizeForLog(peerId));
+                    var restored = await _store.RestorePeerMd5PasswordIfCurrentAsync(peerId,
+                        string.IsNullOrEmpty(data.Md5Password) ? null : data.Md5Password, previousMd5Password);
+                    RequestPeerRefresh(peerId, peer);
+                    return ApiResponse.Error(restored
+                        ? "The peer changes were saved, but TCP-MD5 re-arming failed; the previous stored password was restored."
+                        : "The peer changes were saved, but TCP-MD5 re-arming failed; a newer concurrent password change was left intact.", 500);
+                }
+            }
+        }
+        finally
+        {
+            if (gateMd5)
+                _md5MutationGate.Release();
         }
 
         _logger.LogInformation("Updated peer {Id}", SanitizeForLog(peerId));
@@ -1243,6 +1323,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
         }
     }
 
+    /// <summary>Terminates sessions, deletes the peer, and serializes shared-IP MD5 rearming with other mutations.</summary>
     internal async Task<ApiResponse> HandleDeletePeer(string peerId)
     {
         var peer = await _store.GetDbPeerByIdAsync(peerId);
@@ -1273,12 +1354,27 @@ public sealed class ManagementApi : IHostedService, IDisposable
             await _sessionManager.TerminatePeerByIpAsync(peer.Ip, bound.Token);
         }
 
-        await _store.DeletePeerAsync(peerId);
+        await _md5MutationGate.WaitAsync();
+        try
+        {
+            await _store.DeletePeerAsync(peerId);
 
-        // Re-arm the IP's TCP-MD5 key from the SURVIVING rows — deleting one sibling
-        // must not disarm TCP-MD5 for the other peers sharing the source IP. No key left on the
-        // IP resolves to null (disarm).
-        await RearmPeerIpMd5KeyAsync(peer.Ip);
+            // Re-arm the IP's TCP-MD5 key from the SURVIVING rows — deleting one sibling
+            // must not disarm TCP-MD5 for the other peers sharing the source IP. No key left on the
+            // IP resolves to null (disarm).
+            try { await RearmPeerIpMd5KeyAsync(peer.Ip); }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Peer {Id} was deleted, but TCP-MD5 re-arming failed for {Ip}",
+                    SanitizeForLog(peerId), peer.Ip);
+                return ApiResponse.Error(
+                    "The peer was deleted, but TCP-MD5 state for its shared source IP could not be updated.", 500);
+            }
+        }
+        finally
+        {
+            _md5MutationGate.Release();
+        }
         _logger.LogInformation("Deleted peer {Id} ({Ip})", SanitizeForLog(peerId), peer.Ip);
         return ApiResponse.Ok(new { id = peerId, deleted = true });
     }
@@ -1398,6 +1494,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
         return ApiResponse.Ok(new { id = sourceId, deleted = true });
     }
 
+    /// <summary>Validates and applies a user-source activation change, then schedules the owning peer's refresh.</summary>
     private async Task<ApiResponse> HandlePatchSource(string peerId, string sourceId, HttpListenerContext ctx)
     {
         var peer = await _store.GetDbPeerByIdAsync(peerId);
@@ -1425,82 +1522,48 @@ public sealed class ManagementApi : IHostedService, IDisposable
 
     #region /api/peers/{id}/prefixes
 
+    /// <summary>Exports the canonical peer projection as JSON or text, returning 503 instead of a partial route filter.</summary>
     private async Task<ApiResponse> HandleExportPrefixes(string peerId, HttpListenerContext ctx)
     {
         var peer = await _store.GetDbPeerByIdAsync(peerId);
         if (peer is null)
             return ApiResponse.Error("Peer not found", 404);
+        if (peer.Asn is not uint asn)
+            return ApiResponse.Error("Prefix export requires a peer with an identified ASN.", 409);
 
-        // Same wall-clock budget as /api/asn-lists — cold subscription fetches are
-        // minutes-scale and must not pin the request (and its in-flight slot) indefinitely.
         using var budget = CreateExternalFetchBudget();
-        List<string> prefixes;
+        PrefixExportResult export;
         try
         {
-            prefixes = await CollectPeerPrefixes(peerId, budget.Token);
+            export = await _prefixExport.ExportAsync(peer.Ip, asn, budget.Token);
         }
-        catch (OperationCanceledException) when (!_shutdownCts.IsCancellationRequested)
+        catch (OperationCanceledException) when (_shutdownCts.IsCancellationRequested) { throw; }
+        catch (OperationCanceledException)
         {
-            _logger.LogWarning(
-                "GET /api/peers/{Id}/prefixes exceeded the {Seconds:0}s external-fetch budget — serving a partial list",
+            _logger.LogWarning("GET /api/peers/{Id}/prefixes exceeded the {Seconds:0}s external-fetch budget",
                 SanitizeForLog(peerId), ExternalFetchBudget.TotalSeconds);
-            prefixes = [];
+            return ApiResponse.Error("Prefix export exceeded its fetch budget; no partial list was returned.", 503);
         }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "GET /api/peers/{Id}/prefixes failed", SanitizeForLog(peerId));
+            return ApiResponse.Error("Prefix export failed; no partial list was returned.", 503);
+        }
+        if (!export.Complete)
+            return ApiResponse.Error("Prefix export is incomplete because a configured source failed; no partial list was returned.", 503);
 
-        var format = ctx.Request.QueryString["format"] ?? "txt";
-        if (format == "json")
-            return ApiResponse.Ok(prefixes);
+        if ((ctx.Request.QueryString["format"] ?? "txt") == "json")
+            return ApiResponse.Ok(export.Prefixes);
 
         ctx.Response.ContentType = "text/plain";
-        return ApiResponse.Ok(string.Join("\n", prefixes));
-    }
-
-    private async Task<List<string>> CollectPeerPrefixes(string peerId, CancellationToken ct)
-    {
-        var prefixes = new List<string>();
-
-        // Custom prefixes
-        prefixes.AddRange(await _store.GetCustomPrefixesAsync(peerId, ct));
-
-        var subscriptions = await _store.GetSubscriptionsAsync(peerId, ct);
-        var subscribedLists = _config.RipeStat?.AsnLists
-            .Where(l => subscriptions.Contains(l.Name))
-            .ToList() ?? [];
-
-        // ASN-based lists
-        var asns = subscribedLists.Where(l => l.Asns.Count > 0).SelectMany(l => l.Asns).ToList();
-        if (asns.Count > 0)
-        {
-            try
-            {
-                var fetched = await _prefixService.GetPrefixesForAsns(asns, ct);
-                foreach (var p in fetched)
-                    prefixes.Add(new IpPrefix(p.Prefix, p.Length, p.IsIpv4).ToString());
-            }
-            catch (OperationCanceledException) when (_shutdownCts.IsCancellationRequested) { throw; }  // only SHUTDOWN propagates — fetch-budget expiry degrades to the partial list
-            catch (Exception ex) { _logger.LogWarning(ex, "CollectPeerPrefixes: ASN fetch failed"); }
-        }
-
-        // Country-based lists
-        if (subscribedLists.Any(l => l.Asns.Count == 0 && l.Country is not null))
-        {
-            try
-            {
-                var ruPrefixes = await _prefixService.GetRuPrefixesAsync(ct);
-                foreach (var p in ruPrefixes)
-                    prefixes.Add(new IpPrefix(p.Prefix, p.Length, p.IsIpv4).ToString());
-            }
-            catch (OperationCanceledException) when (_shutdownCts.IsCancellationRequested) { throw; }  // only SHUTDOWN propagates — see above
-            catch (Exception ex) { _logger.LogWarning(ex, "CollectPeerPrefixes: RU prefix fetch failed"); }
-        }
-
-        return prefixes.Distinct().OrderBy(p => p).ToList();
+        return ApiResponse.Ok(string.Join("\n", export.Prefixes));
     }
 
     #endregion
 
     #region GET /api/asn-lists
 
+    /// <summary>Returns ASN-list counts with explicit total/partial failure markers under the external-fetch budget.</summary>
     private async Task<ApiResponse> HandleGetAsnListsAsync()
     {
         // Bound the whole handler — see ExternalFetchBudget. Shutdown still propagates;
@@ -1513,23 +1576,37 @@ public sealed class ManagementApi : IHostedService, IDisposable
 
         foreach (var l in lists)
         {
-            int prefixCount = 0;
+            var prefixCount = 0;
+            var attempted = 0;
+            var failed = 0;
             if (l.Asns.Count > 0)
             {
                 foreach (var asn in l.Asns)
                 {
+                    attempted++;
                     try { prefixCount += await _prefixService.GetPrefixCountAsync(asn, ct); }
-                    catch (OperationCanceledException) when (_shutdownCts.IsCancellationRequested) { throw; }  // only SHUTDOWN propagates — a fetch-budget cancellation fires as OCE on a live shutdown token and degrades below
-                    catch (Exception ex) { _logger.LogWarning(ex, "Failed to get prefix count for AS{Asn}", asn); }
+                    catch (OperationCanceledException) when (_shutdownCts.IsCancellationRequested) { throw; }
+                    catch (Exception ex)
+                    {
+                        failed++;
+                        _logger.LogWarning(ex, "Failed to get prefix count for AS{Asn}", asn);
+                    }
                 }
             }
             else if (l.Country is not null)
             {
+                attempted = 1;
                 try { prefixCount = (await _prefixService.GetRuPrefixesAsync(ct)).Count; }
-                catch (OperationCanceledException) when (_shutdownCts.IsCancellationRequested) { throw; }  // see above
-                catch (Exception ex) { _logger.LogWarning(ex, "Failed to get RU prefix count"); }
+                catch (OperationCanceledException) when (_shutdownCts.IsCancellationRequested) { throw; }
+                catch (Exception ex)
+                {
+                    failed = 1;
+                    _logger.LogWarning(ex, "Failed to get RU prefix count");
+                }
             }
 
+            var allFailed = attempted > 0 && failed == attempted;
+            var partial = failed > 0 && !allFailed;
             result.Add(new
             {
                 id = l.Name,
@@ -1537,7 +1614,11 @@ public sealed class ManagementApi : IHostedService, IDisposable
                 l.Description,
                 l.Country,
                 Community = l.Community,
-                prefixCount,
+                prefixCount = allFailed ? (int?)null : prefixCount,
+                partial,
+                countError = allFailed
+                    ? "All configured sources failed; prefix count is unavailable."
+                    : partial ? "Some sources failed; the count includes only successful sources." : null,
                 type = l.Country is not null ? "country" : "asn"
             });
         }
@@ -1696,6 +1777,23 @@ public sealed class ManagementApi : IHostedService, IDisposable
         return sb.ToString();
     }
 
+    /// <summary>Returns a descriptive 400 with both indexes for the first duplicate key, or null when all values are distinct.</summary>
+    private static ApiResponse? FindDuplicateError<T>(
+        IReadOnlyList<T>? values, string field, Func<T, string> keySelector)
+    {
+        if (values is null) return null;
+        var seen = new Dictionary<string, int>(StringComparer.Ordinal);
+        for (var i = 0; i < values.Count; i++)
+        {
+            var key = keySelector(values[i]) ?? string.Empty;
+            if (seen.TryGetValue(key, out var first))
+                return ApiResponse.Error(
+                    $"{field} contains duplicate '{SanitizeForLog(key)}' at indexes {first} and {i}.", 400);
+            seen[key] = i;
+        }
+        return null;
+    }
+
     /// <summary>
     /// Parses a single user-supplied custom prefix CIDR ("<prefix>/<length>") into a validated
     /// (prefix, mask length) tuple, delegating to the canonical <see cref="PrefixCidr"/> parser.
@@ -1716,35 +1814,29 @@ public sealed class ManagementApi : IHostedService, IDisposable
     }
 
     /// <summary>
-    /// Validates a peer address and returns it in canonical dotted-quad form, or <c>null</c> if it
-    /// is not a usable peer address. Both families are accepted — a peer may be an IPv6 host.
-    /// <para>
-    /// Canonicalizing is the point, not a nicety. <c>BgpServer</c> keys an accepted session by
-    /// <c>remoteEndpoint.Address.ToString()</c>, so a peer row storing any other spelling of the same
-    /// address never binds to its session — the peer is configured, visible in the UI, and silently
-    /// never comes up. <see cref="IPAddress.TryParse"/> accepts several such spellings and rewrites
-    /// them: <c>01.02.03.04</c> and <c>0x1.2.3.4</c> both become <c>1.2.3.4</c>, and the three-part
-    /// form <c>1.2.3</c> becomes <c>1.2.0.3</c> — a different host than the one typed. Storing
-    /// <c>ToString()</c> collapses all of them onto the form the BGP path will look for.
-    /// </para>
-    /// <para>
-    /// Addresses no BGP session can ever originate from — unspecified, loopback, multicast, and the
-    /// IPv4 broadcast address — are rejected, the API-side parity of the YAML path's fail-loud
-    /// validation: such rows can never match a session, and a multicast row would even arm a kernel
-    /// TCP-MD5 entry.
-    /// </para>
+    /// Validates a peer address and returns its canonical form, or <c>null</c> for unusable input.
+    /// IPv4 must already use the canonical dotted quad shared with <see cref="PrefixCidr"/> — the
+    /// inet_aton forms accepted by <see cref="IPAddress.TryParse"/> are rejected, never rewritten
+    /// into a different target host. Valid IPv6 is accepted; mapped IPv6 normalizes to plain IPv4.
+    /// Unspecified, loopback, multicast, and broadcast identities are rejected.
     /// </summary>
     internal static string? NormalizePeerIp(string? ip)
     {
         if (string.IsNullOrWhiteSpace(ip)) return null;
         if (!IPAddress.TryParse(ip, out var address)) return null;
-        // IPv4-mapped IPv6 (::ffff:a.b.c.d) names the IPv4 address space — normalize to the
-        // plain IPv4 form so the row matches the address form the dual-mode listener reports.
+        if (address.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork
+            && !PrefixCidr.IsCanonicalIpv4(ip))
+            return null;
+        // Validate the embedded dotted quad too, then normalize mapped IPv6 to the listener's key.
         if (address.IsIPv4MappedToIPv6)
+        {
+            var lastColon = ip.LastIndexOf(':');
+            if (lastColon < 0 || !PrefixCidr.IsCanonicalIpv4(ip.AsSpan(lastColon + 1)))
+                return null;
             address = address.MapToIPv4();
+        }
         if (IsNonPeerAddress(address))
             return null;
-        // The canonical ToString form matches what the accept loop stores.
         return address.ToString();
     }
 
@@ -2052,6 +2144,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
 
     private bool _disposed;
 
+    /// <summary>Cancels request work and releases listeners, limiters, and mutation gates exactly once.</summary>
     public void Dispose()
     {
         if (_disposed) return;
@@ -2069,6 +2162,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
         Volatile.Read(ref _rateLimiter)?.Dispose();
         Volatile.Read(ref _concurrencyLimiter)?.Dispose();
         _inflightCap.Dispose();
+        _md5MutationGate.Dispose();
         _listener?.Close();
     }
 

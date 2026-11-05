@@ -179,6 +179,11 @@ public sealed class RouteTable
     public Route? Get(UInt128 prefix, byte length, bool isIpv4 = true) =>
         _routes.TryGetValue((prefix, length, isIpv4), out var entry) ? entry.Route : null;
 
+    /// <summary>Checks the current owner atomically at the read boundary without granting withdrawal rights.</summary>
+    internal bool IsOwnedBy(UInt128 prefix, byte length, bool isIpv4, object owner) =>
+        _routes.TryGetValue((prefix, length, isIpv4), out var entry)
+        && ReferenceEquals(entry.Owner, owner);
+
     /// <summary>
     /// Longest-prefix-match lookup: the stored route whose network most
     /// specifically contains <paramref name="address"/>, or null. Probes candidate prefix

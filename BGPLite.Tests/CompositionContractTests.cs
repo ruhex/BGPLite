@@ -46,6 +46,7 @@ public class CompositionContractTests
     [InlineData(typeof(ManagementApi), "prefixService")]
     [InlineData(typeof(ManagementApi), "prefixSources")]
     [InlineData(typeof(ManagementApi), "sessionManager")]
+    [InlineData(typeof(ManagementApi), "prefixExport")]
     // PrefixService.cs:14-15 — a null http provider made every per-peer user URL source resolve to
     // zero prefixes, and a null RIPEstat did the same for custom ASNs.
     [InlineData(typeof(PrefixService), "ripeStatCache")] // renamed when the per-ASN cache became a shared component

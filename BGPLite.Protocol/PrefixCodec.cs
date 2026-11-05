@@ -114,6 +114,7 @@ public static class PrefixCodec
         return (new IpPrefix(addr, length), 1 + byteCount);
     }
 
+    /// <summary>Encodes prefixes consecutively and returns the total byte count written.</summary>
     public static int EncodeList(ReadOnlySpan<IpPrefix> prefixes, Span<byte> buffer)
     {
         var offset = 0;
@@ -122,13 +123,21 @@ public static class PrefixCodec
         return offset;
     }
 
+    /// <summary>Decodes a declared NLRI section into the supplied bounded span, rejecting truncation and output overflow.</summary>
     public static int DecodeList(ReadOnlySpan<byte> buffer, int length, Span<IpPrefix> prefixes)
     {
+        if (length < 0 || length > buffer.Length)
+            throw new BgpParseException($"Invalid NLRI section length: {length} (buffer has {buffer.Length} bytes)",
+                BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.InvalidNetworkField);
+
         var offset = 0;
         var count = 0;
         while (offset < length)
         {
-            var (prefix, consumed) = Decode(buffer[offset..]);
+            if (count >= prefixes.Length)
+                throw new BgpParseException("NLRI destination capacity exceeded",
+                    BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.InvalidNetworkField);
+            var (prefix, consumed) = Decode(buffer.Slice(offset, length - offset));
             prefixes[count++] = prefix;
             offset += consumed;
         }

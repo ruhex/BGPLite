@@ -288,6 +288,7 @@ public class MpAttributeErrorPolicyTests
     }
 
     [Fact]
+    /// <summary>Verifies that treat-as-withdraw also applies MP_UNREACH carried by the same malformed UPDATE.</summary>
     public async Task TreatAsWithdraw_AppliesTheSameUpdatesMpUnreach()
     {
         // RFC 7606 §2: an UPDATE is treated as withdrawn AS A WHOLE. The classic WITHDRAWN
@@ -323,6 +324,42 @@ public class MpAttributeErrorPolicyTests
         await SettleAsync(conn, () => routeTable.Count == 0);
 
         Assert.Null(routeTable.Get(DocumentedPrefix, 32, isIpv4: false));   // RED pre-fix: stale route survived
+        Assert.True(session.IsEstablished, "treat-as-withdraw keeps the session up");
+
+        await TeardownAsync(session, run);
+    }
+
+    [Fact]
+    /// <summary>Verifies that invalid MP_REACH IPv4 next-hop handling still applies the UPDATE's MP_UNREACH withdrawals.</summary>
+    public async Task TreatAsWithdraw_AppliesMpUnreach_WhenMpReachV4NextHopIsInvalid()
+    {
+        // Sibling of TreatAsWithdraw_AppliesTheSameUpdatesMpUnreach, for the OTHER rethrow path.
+        // An invalid MP_REACH(AFI=1) next hop takes treat-as-withdraw for its own prefixes
+        // (RFC 7606 §7.3) and rethrows — and that rethrow skips the MP_UNREACH block at the end
+        // of HandleUpdateAsync exactly as the attribute-parse failure does. The parse path was
+        // fixed in #484; this one still dropped the withdrawal, so a route the peer explicitly
+        // withdrew stayed installed indefinitely (#546 item 1).
+        var routeTable = new RouteTable();
+        var (session, run, conn) = await EstablishAsync(routeTable);
+
+        // Install one IPv6 route via a valid MP_REACH announcement.
+        conn.EnqueueFrame(UpdateFrame(
+            OriginAsPathAttributes,
+            MpReachAttribute(MpOptionalNonTransitive, ReachValue(GlobalNextHop, 32, 0x20, 0x01, 0x0D, 0xB8))));
+        await SettleAsync(conn, () => routeTable.Count == 1);
+        Assert.NotNull(routeTable.Get(DocumentedPrefix, 32, isIpv4: false));
+
+        // One UPDATE carrying both halves: MP_REACH(AFI=1) with next hop 224.0.0.1 (multicast —
+        // rejected by ValidateNextHopSemantics) and MP_UNREACH(AFI=2) withdrawing the v6 prefix
+        // installed above. Both attributes in one frame is legal and the reader decodes both.
+        conn.EnqueueFrame(UpdateFrame(
+            OriginAsPathAttributes,
+            MpReachAttribute(MpOptionalNonTransitive, ReachValueV4(0xE0000001, 24, 0xC0, 0x00, 0x02)),
+            MpUnreachAttribute(MpOptionalNonTransitive, [0x00, 0x02, 0x01, 0x20, 0x20, 0x01, 0x0D, 0xB8])));
+        await SettleAsync(conn, () => routeTable.Count == 0);
+
+        Assert.Null(routeTable.Get(DocumentedPrefix, 32, isIpv4: false));   // RED pre-fix: withdrawal lost
+        Assert.Null(routeTable.Get(0xC0000200, 24, isIpv4: true));          // the bad-next-hop announcement never installs
         Assert.True(session.IsEstablished, "treat-as-withdraw keeps the session up");
 
         await TeardownAsync(session, run);

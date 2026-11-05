@@ -1,3 +1,4 @@
+using System.Net;
 using System.Threading.Channels;
 using BGPLite.Configuration;
 using BGPLite.Contracts;
@@ -384,6 +385,45 @@ public class BgpSessionRouteOwnershipTests
         Assert.Equal(0, routeTable.Count);
     }
 
+    [Fact]
+    public async Task IdentificationFailure_AfterEstablished_DoesNotResetSessionOrSkipInitialRoutes()
+    {
+        var routeTable = Seeded((TenSlashEight, 8));
+        var (session, run, conn) = await EstablishAsync(routeTable,
+            onPeerIdentified: (_, _, _) => Task.FromException(new InvalidOperationException("database locked")));
+
+        var advertised = await CollectAdvertisedNlriAsync(conn);
+
+        Assert.Contains((TenSlashEight, (byte)8), advertised);
+        Assert.True(session.IsEstablished);
+        Assert.False(run.IsCompleted);
+        Assert.DoesNotContain(conn.Sent, frame => BgpMessageReader.ReadMessage(frame) is BgpNotificationMessage);
+
+        await TeardownAsync(session, run);
+    }
+
+    [Fact]
+    public async Task LocalAsnInsideAsSet_RemainsVisibleWhenLongerAs4PathIsIgnored()
+    {
+        var routeTable = new RouteTable();
+        var (session, run, conn) = await EstablishAsync(routeTable, fourByteAsn: false);
+        var attributes = new byte[]
+        {
+            0x40, 0x01, 0x01, 0x00, // ORIGIN
+            0x40, 0x02, 0x06, 0x01, 0x02, 0xFD, 0xE8, 0xFD, 0xE9, // AS_SET {65000, 65001}
+            0x40, 0x03, 0x04, 0xC0, 0x00, 0x02, 0x01, // NEXT_HOP
+            0xC0, 0x11, 0x0A, 0x02, 0x02, // AS4_PATH sequence [70000, 80000]
+            0x00, 0x01, 0x11, 0x70, 0x00, 0x01, 0x38, 0x80
+        };
+
+        conn.EnqueueFrame(BuildAnnounce(attributes, 8, [0x0A]));
+        await SettleAsync(conn);
+
+        Assert.Equal(0, routeTable.Count);
+        Assert.True(session.IsEstablished);
+        await TeardownAsync(session, run);
+    }
+
     // ---- harness ----
 
     private static RouteTable Seeded(params (UInt128 Prefix, byte Length)[] routes)
@@ -394,8 +434,10 @@ public class BgpSessionRouteOwnershipTests
         return table;
     }
 
+    /// <summary>Creates a scripted established session with configurable route table, filters, and router identity.</summary>
     private static async Task<(BgpSession Session, Task Run, ScriptedConnection Conn)> EstablishAsync(
-        RouteTable routeTable, uint routerId = 0x0A000002, IRouteFilter? filter = null)
+        RouteTable routeTable, uint routerId = 0x0A000002, IRouteFilter? filter = null,
+        Func<string, uint, CancellationToken, Task>? onPeerIdentified = null, bool fourByteAsn = true)
     {
         var conn = new ScriptedConnection();
         var config = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1", HoldTime = 0, KeepAlive = 0 };
@@ -406,7 +448,8 @@ public class BgpSessionRouteOwnershipTests
             routeTable,
             filter ?? AllowAllFilter.Instance,
             new BgpMetrics(),
-            NullLogger<BgpSession>.Instance);
+            NullLogger<BgpSession>.Instance,
+            onPeerIdentified: onPeerIdentified);
 
         var run = session.RunAsync();
         conn.EnqueueMessage(new BgpOpenMessage
@@ -415,7 +458,7 @@ public class BgpSessionRouteOwnershipTests
             Asn = 65002,
             HoldTime = 0,
             RouterId = routerId,
-            Capabilities = [BgpCapabilityInfo.FourOctetAsn(65002)],
+            Capabilities = fourByteAsn ? [BgpCapabilityInfo.FourOctetAsn(65002)] : [],
         });
         conn.EnqueueMessage(BgpKeepaliveMessage.Instance);
 
@@ -496,129 +539,20 @@ public class BgpSessionRouteOwnershipTests
         await TeardownAsync(session, run);
     }
 
-    /// <summary>
-    /// a REPLACED session's slow finally must not flip the peer row back to
-    /// inactive after the replacement wrote active. Two guards: the SilentClose teardown reason
-    /// (replacement / GR-aware shutdown) skips the write, and the registration probe answers
-    /// false once the session is no longer the registered one. A genuine teardown still writes.
-    /// </summary>
     private sealed class RecordingPeerStore : IPeerStore
     {
-        public List<(string Ip, uint Asn, bool Active)> StatusWrites = [];
         /// <summary>the per-peer MaxPrefix override returned by GetPeerMaxPrefixAsync
         /// (null = no row / no override — the session falls back to the global cap).</summary>
         public int? MaxPrefixOverride;
         public Task<string> CreatePeerAsync(string ip, uint asn, string? description, CancellationToken ct = default) => Task.FromResult("id");
         public Task UpsertPeerAsync(string ip, uint asn, CancellationToken ct = default) => Task.CompletedTask;
-        public Task UpdateSessionStatusAsync(string ip, uint asn, bool active, CancellationToken ct = default)
-        {
-            StatusWrites.Add((ip, asn, active));
-            return Task.CompletedTask;
-        }
+        public Task UpdateSessionStatusAsync(string ip, uint asn, bool active, CancellationToken ct = default) => Task.CompletedTask;
         public Task<int?> GetPeerMaxPrefixAsync(string ip, uint asn, CancellationToken ct = default)
             => Task.FromResult(MaxPrefixOverride);
         public Task<PeerRoutingView?> LoadPeerRoutingViewAsync(string ip, uint asn, CancellationToken ct = default)
             => Task.FromResult<PeerRoutingView?>(new("id", [], [], [], []));
     }
 
-    private static async Task<(BgpSession Session, Task Run, RecordingPeerStore Store)> EstablishWithStoreAsync(
-        RouteTable routeTable, Func<BgpSession, bool>? probe = null)
-    {
-        var conn = new ScriptedConnection();
-        var store = new RecordingPeerStore();
-        var config = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1", HoldTime = 0, KeepAlive = 0 };
-        var session = new BgpSession(
-            conn,
-            new PeerConfig { Address = "127.0.0.1" },
-            config,
-            routeTable,
-            AllowAllFilter.Instance,
-            new BgpMetrics(),
-            NullLogger<BgpSession>.Instance,
-            peerStore: store);
-        session.StillRegisteredProbe = probe ?? (_ => true);
-        var run = session.RunAsync();
-        conn.EnqueueMessage(new BgpOpenMessage
-        {
-            Version = BgpConstants.BgpVersion,
-            Asn = 65002,
-            HoldTime = 0,
-            RouterId = 0x0A000002,
-            Capabilities = [BgpCapabilityInfo.FourOctetAsn(65002)],
-        });
-        conn.EnqueueMessage(BgpKeepaliveMessage.Instance);
-        for (var i = 0; i < 200 && !session.IsEstablished; i++)
-            await Task.Delay(TimeSpan.FromMilliseconds(10));
-        Assert.True(session.IsEstablished, "session must reach Established");
-        return (session, run, store);
-    }
-
-    [Fact]
-    public async Task ReplacedSession_Teardown_DoesNotOverwriteStatusInactive()
-    {
-        // The probe answers false — the registry no longer holds this session (TryUpdate
-        // swapped a replacement in). Its finally must not write inactive.
-        var (session, run, store) = await EstablishWithStoreAsync(new RouteTable(), probe: _ => false);
-
-        await TeardownAsync(session, run);   // SilentClose + probe-false — both guards skip
-
-        Assert.DoesNotContain(store.StatusWrites, w => !w.Active);
-    }
-
-    /// <summary>
-    /// TOCTOU in the replacement guard: a replacement can land in the registry in
-    /// the window between the probe and the inactive write. A probe that flips true→false across
-    /// those two calls models exactly that; the finally must REPAIR the row back to active — the
-    /// final write must be active, not the stale inactive.
-    /// </summary>
-    [Fact]
-    public async Task ReplacementLandingDuringStatusWrite_IsRepairedToActive()
-    {
-        // Non-silent teardown so the write path runs: peer NOTIFICATION.
-        var conn = new ScriptedConnection();
-        var store = new RecordingPeerStore();
-        var config = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1", HoldTime = 0, KeepAlive = 0 };
-        var session = new BgpSession(
-            conn, new PeerConfig { Address = "127.0.0.1" }, config, new RouteTable(),
-            AllowAllFilter.Instance, new BgpMetrics(), NullLogger<BgpSession>.Instance, peerStore: store);
-        var calls = 0;
-        session.StillRegisteredProbe = _ => Interlocked.Increment(ref calls) switch { 1 => true, _ => false };
-        var run = session.RunAsync();
-        conn.EnqueueMessage(new BgpOpenMessage
-        {
-            Version = BgpConstants.BgpVersion,
-            Asn = 65002,
-            HoldTime = 0,
-            RouterId = 0x0A000002,
-            Capabilities = [BgpCapabilityInfo.FourOctetAsn(65002)],
-        });
-        conn.EnqueueMessage(BgpKeepaliveMessage.Instance);
-        for (var i = 0; i < 200 && !session.IsEstablished; i++)
-            await Task.Delay(TimeSpan.FromMilliseconds(10));
-        Assert.True(session.IsEstablished, "session must reach Established");
-
-        conn.EnqueueMessage(new BgpNotificationMessage { ErrorCode = BgpConstants.Error.Cease, SubErrorCode = 0 });
-        try { await run.WaitAsync(TimeSpan.FromSeconds(5)); } catch { /* teardown unwinds */ }
-
-        Assert.NotEmpty(store.StatusWrites);
-        Assert.True(store.StatusWrites[^1].Active, "the replacement-during-write race must end with the row ACTIVE");
-        Assert.Contains(store.StatusWrites, w => !w.Active);   // the stale inactive write happened, then the repair
-    }
-
-    [Fact]
-    public async Task GenuineTeardown_StillWritesInactive()
-    {
-        // Registered + non-silent teardown: the write must still happen.
-        var (session, run, store) = await EstablishWithStoreAsync(new RouteTable());
-
-        // A peer NOTIFICATION tears down with RemoteNotification — not SilentClose, probe true.
-        var connField = typeof(BgpSession).GetField("_connection", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!;
-        var conn = (ScriptedConnection)connField.GetValue(session)!;
-        conn.EnqueueMessage(new BgpNotificationMessage { ErrorCode = BgpConstants.Error.Cease, SubErrorCode = 0 });
-        try { await run.WaitAsync(TimeSpan.FromSeconds(5)); } catch { /* teardown unwinds */ }
-
-        Assert.Contains(store.StatusWrites, w => !w.Active);
-    }
 
     /// <summary>
     /// exceeding Bgp.MaxPrefixesPerPeer tears the session down with NOTIFICATION
@@ -654,6 +588,7 @@ public class BgpSessionRouteOwnershipTests
     }
 
     [Fact]
+    /// <summary>Verifies that ownership takeover releases the previous session's prefix-cap budget.</summary>
     public async Task TakenOverPrefix_FreesTheOriginalOwnersCapBudget()
     {
         var routeTable = new RouteTable();
@@ -693,6 +628,71 @@ public class BgpSessionRouteOwnershipTests
 
         await TeardownAsync(a, aRun);
         await TeardownAsync(b, bRun);
+    }
+
+    [Fact]
+    /// <summary>Verifies that a delayed ownership-loss callback cannot remove membership after the session reacquires the route.</summary>
+    public async Task LateOwnershipLost_AfterReacquire_DoesNotUndercountPrefixCap()
+    {
+        var routeTable = new RouteTable();
+        BgpSession? aInstance = null;
+        BgpSession? bInstance = null;
+        var staleEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseStale = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var reacquired = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var staleFinished = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        void GateStale(object owner, (UInt128 Prefix, byte Length, bool IsIpv4) key)
+        {
+            if (ReferenceEquals(owner, aInstance) && key.Prefix == TenSlashEight)
+            {
+                staleEntered.TrySetResult();
+                releaseStale.Task.GetAwaiter().GetResult();
+            }
+            if (ReferenceEquals(owner, bInstance) && key.Prefix == TenSlashEight)
+                reacquired.TrySetResult();
+        }
+        void ObserveFinished(object owner, (UInt128 Prefix, byte Length, bool IsIpv4) key)
+        {
+            if (ReferenceEquals(owner, aInstance) && key.Prefix == TenSlashEight)
+                staleFinished.TrySetResult();
+        }
+        routeTable.EntryOwnershipLost += GateStale;
+        var (a, aRun, aConn) = await EstablishCappedAsync(routeTable, cap: 1, routerId: 0x0A000002);
+        aInstance = a;
+        var (b, bRun, bConn) = await EstablishCappedAsync(routeTable, cap: 0, routerId: 0x0A000003);
+        bInstance = b;
+        routeTable.EntryOwnershipLost += ObserveFinished;
+
+        try
+        {
+            aConn.EnqueueFrame(AnnounceFrame(8, 0x0A));
+            await SettleAsync(aConn, () => routeTable.Count == 1);
+            bConn.EnqueueFrame(AnnounceFrame(8, 0x0A));
+            await staleEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+            aConn.EnqueueFrame(AnnounceFrame(8, 0x0A));
+            await reacquired.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            releaseStale.TrySetResult();
+            await staleFinished.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+            // A really owns 10/8 again. A second distinct prefix must exceed cap=1; the stale
+            // callback must not delete 10/8 from A's bookkeeping and incorrectly leave budget.
+            aConn.EnqueueFrame(AnnounceFrame(24, 0xC0, 0x00, 0x02));
+            await aRun.WaitAsync(TimeSpan.FromSeconds(5));
+
+            Assert.False(a.IsEstablished);
+            var notification = aConn.Sent.Select(f => BgpMessageReader.ReadMessage(f))
+                .OfType<BgpNotificationMessage>().Single(n => n.ErrorCode == BgpConstants.Error.Cease);
+            Assert.Equal(BgpConstants.SubError.CeaseMaxPrefixes, notification.SubErrorCode);
+        }
+        finally
+        {
+            releaseStale.TrySetResult();
+            routeTable.EntryOwnershipLost -= GateStale;
+            routeTable.EntryOwnershipLost -= ObserveFinished;
+            await TeardownAsync(a, aRun);
+            await TeardownAsync(b, bRun);
+        }
     }
 
     private static async Task<(BgpSession Session, Task Run, ScriptedConnection Conn, RouteTable Table)> EstablishCappedAsync(int cap)

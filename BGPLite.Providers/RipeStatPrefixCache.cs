@@ -13,11 +13,9 @@ namespace BGPLite.Providers;
 /// Letting the two mechanisms fetch the same ASN independently with separate TTLs would
 /// double RIPEstat traffic for an ASN configured in both and could serve disagreeing snapshots.
 /// <para>
-/// The negative-entry fast path serves [] to callers that accept the
-/// "nothing this cycle" semantic (the RouteAssembler fan-out). A SOURCE provider must pass
-/// <c>serveNegativeEntries: false</c> — wrapping a cached failure into SourceLoadResult.Ok([])
-/// would store a positive empty list in the name-level cache and mark the source changed,
-/// withdrawing a previously-good advertisement over a transient RIPEstat blip.
+/// A negative entry represents a cached failure, not successful empty content. Production route
+/// assembly and source providers pass <c>serveNegativeEntries: false</c> and receive an exception
+/// during the negative TTL; the optional empty-list path is retained only for explicit callers.
 /// </para>
 /// <para>
 /// Shape: per-ASN TTL cache with stale-on-failure, a short negative TTL for failed fetches,
@@ -53,6 +51,10 @@ public sealed class RipeStatPrefixCache
     // Amortized expired-entry sweep state (see GetPrefixesAsync). Injectable for tests.
     private int _callsSinceSweep;
     private readonly int _sweepEvery;
+    // Compound gate lifecycle operations: registration/last-leaver accounting and eviction must
+    // not split the in-flight check from gate creation/removal. Never held across network awaits.
+    private readonly object _gateSync = new();
+    internal Action<uint>? EvictionProbe { get; set; }
 
     public RipeStatPrefixCache(
         RipeStatProvider ripe,
@@ -78,6 +80,7 @@ public sealed class RipeStatPrefixCache
     /// <summary>Entries currently tracked (test/observability of sweep coverage).</summary>
     internal int TrackedCount => _cache.Count;
 
+    /// <summary>Returns fresh, stale, or shared in-flight ASN data according to the cache policy, preserving negative failures unless explicitly allowed.</summary>
     public async Task<IReadOnlyList<IpPrefix>> GetPrefixesAsync(uint asn, CancellationToken ct = default, bool serveNegativeEntries = true)
     {
         // Amortized expired-entry sweep — expired entries would otherwise stay pinned until the entry
@@ -88,44 +91,53 @@ public sealed class RipeStatPrefixCache
             SweepExpired();
         }
 
-        // Fast path: fresh entry (positive, or negative within its TTL when the caller accepts
-        // the []-on-recent-failure semantic — the RouteAssembler fan-out does; a source provider
-        // must NOT, see the class doc).
-        if (TryGetFresh(asn, out var fresh, out var freshIsNegative) && (serveNegativeEntries || !freshIsNegative))
-            return fresh;
+        // A cached negative result stays a failure unless the caller explicitly opted into []
+        // so route assembly cannot mistake an outage for a successfully empty ASN.
+        if (TryGetFresh(asn, out var fresh, out var freshIsNegative))
+        {
+            if (!freshIsNegative || serveNegativeEntries)
+                return fresh;
+            throw new InvalidOperationException($"AS{asn}: RIPEstat fetch is in negative-cache backoff.");
+        }
 
-        // Register in-flight BEFORE the gate is taken (unregistered only after this
-        // caller's own turn is over) so the capacity sweep can never drop the gate this caller is
-        // about to wait on or holds — see the _inflight note. AddOrUpdate is atomic; the exit
-        // decrements and removes the key only while it still reads 0 (a concurrent re-enter wins
-        // the race: its increment lands between, and the conditional remove sees 1 and no-ops).
-        _inflight.AddOrUpdate(asn, 1, (_, count) => count + 1);
+        // Gate creation and caller registration are one atomic lifecycle operation with eviction.
+        SemaphoreSlim gate;
+        lock (_gateSync)
+        {
+            _inflight.AddOrUpdate(asn, 1, (_, count) => count + 1);
+            gate = _locks.GetOrAdd(asn, _ => new SemaphoreSlim(1, 1));
+        }
         try
         {
-            return await FetchThroughGateAsync(asn, ct, serveNegativeEntries);
+            return await FetchThroughGateAsync(asn, ct, serveNegativeEntries, gate);
         }
         finally
         {
-            _inflight.AddOrUpdate(asn, 0, (_, count) => count - 1);
-            _inflight.TryRemove(new KeyValuePair<uint, int>(asn, 0));
+            lock (_gateSync)
+            {
+                _inflight.AddOrUpdate(asn, 0, (_, count) => count - 1);
+                _inflight.TryRemove(new KeyValuePair<uint, int>(asn, 0));
+            }
         }
     }
 
     /// <summary>The gated fetch path of <see cref="GetPrefixesAsync"/> — runs under the caller's
     /// in-flight mark, sharing a single RIPEstat fetch per ASN.</summary>
-    private async Task<IReadOnlyList<IpPrefix>> FetchThroughGateAsync(uint asn, CancellationToken ct, bool serveNegativeEntries)
+    private async Task<IReadOnlyList<IpPrefix>> FetchThroughGateAsync(
+        uint asn, CancellationToken ct, bool serveNegativeEntries, SemaphoreSlim gate)
     {
-        // Serialize per-ASN so concurrent callers share a single RIPEstat fetch — no thundering herd
-        // on a cold or just-expired ASN.
-        var gate = _locks.GetOrAdd(asn, _ => new SemaphoreSlim(1, 1));
         await gate.WaitAsync(ct);
         try
         {
             // Re-check after acquiring the lock: another caller may have just populated the entry
             // (with the same negative-entry discriminator as the outer fast path —
             // forgetting it here re-introduces exactly the Ok([]) hole the provider opts out of).
-            if (TryGetFresh(asn, out var rechecked, out var recheckIsNegative) && (serveNegativeEntries || !recheckIsNegative))
-                return rechecked;
+            if (TryGetFresh(asn, out var rechecked, out var recheckIsNegative))
+            {
+                if (!recheckIsNegative || serveNegativeEntries)
+                    return rechecked;
+                throw new InvalidOperationException($"AS{asn}: RIPEstat fetch is in negative-cache backoff.");
+            }
 
             IReadOnlyList<IpPrefix> prefixes;
             try
@@ -191,62 +203,67 @@ public sealed class RipeStatPrefixCache
     /// the cap is hit, so steady-state memory is "every ASN fetched recently", not "live ASNs".
     /// In-flight ASNs are never touched; concurrent sweeps are idempotent.
     /// </summary>
-    private void SweepExpired()
+    internal void SweepExpired()
     {
-        var now = _timeProvider.GetUtcNow().UtcDateTime;
-        foreach (var (key, entry) in _cache)
+        lock (_gateSync)
         {
-            var ttl = entry.Negative ? _negativeTtl : _cacheTtl;
-            if (now - entry.CachedAt < ttl) continue;
-            if (_inflight.TryGetValue(key, out var active) && active > 0) continue;
-            if (_cache.TryRemove(key, out _))
-                _locks.TryRemove(key, out _);
+            var now = _timeProvider.GetUtcNow().UtcDateTime;
+            foreach (var (key, entry) in _cache)
+            {
+                var ttl = entry.Negative ? _negativeTtl : _cacheTtl;
+                if (now - entry.CachedAt < ttl) continue;
+                if (_inflight.TryGetValue(key, out var active) && active > 0) continue;
+                EvictionProbe?.Invoke(key);
+                if (_cache.TryRemove(key, out _))
+                    _locks.TryRemove(key, out _);
+            }
         }
     }
 
     /// <summary>Enforces the _maxCacheEntries bound. Called before inserting a NEW key,
     /// under the caller's per-ASN gate. Removes a few least-recently-cached entries (by CachedAt)
     /// plus any expired entries it encounters, and drops the corresponding _locks entries — never
-    /// for an in-flight ASN. Under the lock of the caller's per-ASN gate, so the
-    /// sweep is serialized against itself; ConcurrentDictionary enumeration is a snapshot and safe
-    /// against concurrent writers.</summary>
+    /// for an in-flight ASN. The caller's per-ASN gate is held, and _gateSync makes each
+    /// in-flight check plus cache/gate removal atomic with registration.</summary>
     private void EvictIfAtCapacity(uint insertingKey)
     {
-        if (_cache.Count < _maxCacheEntries) return;
-        if (_cache.ContainsKey(insertingKey)) return; // already present, no insert coming
+        lock (_gateSync)
+        {
+            if (_cache.Count < _maxCacheEntries) return;
+            if (_cache.ContainsKey(insertingKey)) return; // already present, no insert coming
 
-        // Snapshot, drop expired entries first (cheapest eviction), then by oldest CachedAt.
-        var now = _timeProvider.GetUtcNow().UtcDateTime;
-        var toEvict = new HashSet<uint>();
-        foreach (var (key, entry) in _cache)
-        {
-            var ttl = entry.Negative ? _negativeTtl : _cacheTtl;
-            if (now - entry.CachedAt >= ttl)
-                toEvict.Add(key);
-        }
-        // If still at/over capacity after dropping expired, evict the oldest until below the cap.
-        if (_cache.Count - toEvict.Count >= _maxCacheEntries)
-        {
-            var oldest = _cache
-                .Where(kvp => !toEvict.Contains(kvp.Key))
-                .OrderBy(kvp => kvp.Value.CachedAt)
-                .Select(kvp => kvp.Key);
-            foreach (var key in oldest)
+            // Snapshot, drop expired entries first (cheapest eviction), then by oldest CachedAt.
+            var now = _timeProvider.GetUtcNow().UtcDateTime;
+            var toEvict = new HashSet<uint>();
+            foreach (var (key, entry) in _cache)
             {
-                toEvict.Add(key);
-                if (_cache.Count - toEvict.Count < _maxCacheEntries) break;
+                var ttl = entry.Negative ? _negativeTtl : _cacheTtl;
+                if (now - entry.CachedAt >= ttl)
+                    toEvict.Add(key);
             }
-        }
+            // If still at/over capacity after dropping expired, evict the oldest until below the cap.
+            if (_cache.Count - toEvict.Count >= _maxCacheEntries)
+            {
+                var oldest = _cache
+                    .Where(kvp => !toEvict.Contains(kvp.Key))
+                    .OrderBy(kvp => kvp.Value.CachedAt)
+                    .Select(kvp => kvp.Key);
+                foreach (var key in oldest)
+                {
+                    toEvict.Add(key);
+                    if (_cache.Count - toEvict.Count < _maxCacheEntries) break;
+                }
+            }
 
-        foreach (var key in toEvict)
-        {
-            // An in-flight ASN's entry is re-populated by its fetch — evicting both
-            // while ANY of its callers holds/waits on the gate lets a later GetOrAdd mint a second
-            // semaphore and issue a duplicate concurrent fetch. Skipping keeps the gate
-            // intact; losing a transient eviction slot is acceptable, never losing correctness.
-            if (_inflight.TryGetValue(key, out var active) && active > 0) continue;
-            if (_cache.TryRemove(key, out _))
-                _locks.TryRemove(key, out _);
+            foreach (var key in toEvict)
+            {
+                // Never remove an active ASN's cache/gate; the gateSync lock makes the check
+                // and both removals atomic with gate registration and last-leaver accounting.
+                if (_inflight.TryGetValue(key, out var active) && active > 0) continue;
+                EvictionProbe?.Invoke(key);
+                if (_cache.TryRemove(key, out _))
+                    _locks.TryRemove(key, out _);
+            }
         }
     }
 }

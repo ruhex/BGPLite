@@ -50,10 +50,16 @@ public sealed class RouteAssembler : IRouteAssembler
 
     /// <inheritdoc />
     public async Task<List<Route>> BuildOutboundRoutesAsync(
+        string peerIp, uint remoteAsn, PeerConfig filterPeerConfig, string peerLabel, CancellationToken ct) =>
+        (await BuildOutboundRouteResultAsync(peerIp, remoteAsn, filterPeerConfig, peerLabel, ct)).Routes;
+
+    /// <inheritdoc />
+    public async Task<RouteAssemblyResult> BuildOutboundRouteResultAsync(
         string peerIp, uint remoteAsn, PeerConfig filterPeerConfig, string peerLabel, CancellationToken ct)
     {
         var nextHop = BgpConstants.IPAddressToUint(_bgpConfig.GetRouterIdAddress());
         var routes = new List<Route>();
+        var complete = true;
         var defaultComms = _communityResolver.Resolve(
             new CommunitySource(CommunitySourceKind.PrefixSource, _appConfig.DefaultPrefixSource));
 
@@ -81,13 +87,16 @@ public sealed class RouteAssembler : IRouteAssembler
                 catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }  // only CALLER cancellation — a per-source timeout OCE (HttpPrefixProvider's linked CTS, live ct) must stay a fetch failure below
                 catch (Exception ex)
                 {
+                    complete = false;
                     _logger.LogError(ex, "Failed to fetch RU prefixes for {Peer}", peerLabel);
                 }
 
-                return await FilterAndReturnAsync(routes, filterPeerConfig, ct);
+                return new RouteAssemblyResult(
+                    await FilterAndReturnAsync(routes, filterPeerConfig, ct), complete);
             }
 
-            _logger.LogInformation("Peer {Peer} subscriptions: [{Subs}]", peerLabel, string.Join(", ", subscriptionIds));
+            _logger.LogInformation("Peer {Peer} subscriptions: [{Subs}]", peerLabel,
+                SanitizeForLog(string.Join(", ", subscriptionIds)));
 
             // Fetch outcome counters — the RU fallback below is suppressed only on a TOTAL
             // failure (every attempted fetch failed). A mixed build (one source failed, another
@@ -125,8 +134,10 @@ public sealed class RouteAssembler : IRouteAssembler
                     {
                         var comms = _communityResolver.Resolve(
                             new CommunitySource(CommunitySourceKind.AsnList, list.Name));
-                        var prefixes = await _prefixService.GetPrefixesForAsns(list.Asns, ct);
-                        foreach (var p in prefixes)
+                        var resolution = await _prefixService.GetPrefixesForAsnsResultAsync(list.Asns, ct);
+                        if (resolution.FailedAsns.Count > 0)
+                            complete = false;
+                        foreach (var p in resolution.Prefixes)
                             // AsPath is overwritten by the local ASN in the outbound codec
                             // (BuildUpdateAttributes), so the per-prefix asn value is never used
                             // on the wire — pass null instead of allocating [asn] per prefix.
@@ -143,25 +154,27 @@ public sealed class RouteAssembler : IRouteAssembler
                     routes.Count - before, peerLabel);
             }
 
-            // Country-based lists (e.g. RU with no ASNs → use local nets.txt).
+            // Country-based lists currently support RU only (enforced by config validation).
+            // Resolve each list separately so its community is applied to its own RU projection.
             var countryLists = subscribedLists.Where(l => l.Asns.Count == 0 && l.Country is not null).ToList();
-            if (countryLists.Count > 0)
+            foreach (var list in countryLists)
             {
                 fetchAttempts++;
                 try
                 {
                     var comms = _communityResolver.Resolve(
-                        new CommunitySource(CommunitySourceKind.Country, countryLists[0].Name));
+                        new CommunitySource(CommunitySourceKind.Country, list.Name));
                     var ruPrefixes = await _prefixService.GetRuPrefixesAsync(ct);
                     foreach (var p in ruPrefixes)
                         routes.Add(MakeRoute(p.Prefix, p.Length, p.IsIpv4, nextHop, null, comms));
-                    _logger.LogInformation("Fetched {Count} RU prefixes for {Peer}", ruPrefixes.Count, peerLabel);
+                    _logger.LogInformation("Fetched {Count} RU prefixes for {Peer} (list '{List}')",
+                        ruPrefixes.Count, peerLabel, list.Name);
                 }
                 catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
                 catch (Exception ex)
                 {
                     fetchFailures++;
-                    _logger.LogError(ex, "Failed to fetch RU prefixes for {Peer}", peerLabel);
+                    _logger.LogError(ex, "Failed to fetch RU prefixes for {Peer} (list '{List}')", peerLabel, list.Name);
                 }
             }
 
@@ -179,7 +192,7 @@ public sealed class RouteAssembler : IRouteAssembler
                          !resolvedAsRipe.Contains(n) && !prefixSources.Any(s => s.Name == n)))
                 _logger.LogWarning(
                     "Subscription '{Name}' on {Peer} matches no RipeStat.AsnLists entry and no PrefixSource — ignored (fix the peer's subscription)",
-                    unknown, peerLabel);
+                    SanitizeForLog(unknown), peerLabel);
 
             foreach (var name in sourceNames)
             {
@@ -215,6 +228,7 @@ public sealed class RouteAssembler : IRouteAssembler
             {
                 if (!PrefixCidr.TryParse(cidr, out var prefix, out var length))
                 {
+                    complete = false;
                     _logger.LogWarning("Skipping malformed custom prefix '{Cidr}' for {Peer}", cidr, peerLabel);
                     continue;
                 }
@@ -229,11 +243,13 @@ public sealed class RouteAssembler : IRouteAssembler
                 try
                 {
                     var customAsnComms = _communityResolver.Resolve(new CommunitySource(CommunitySourceKind.CustomAsn));
-                    var asnPrefixes = await _prefixService.GetPrefixesForAsns(customAsns, ct);
-                    foreach (var p in asnPrefixes)
+                    var resolution = await _prefixService.GetPrefixesForAsnsResultAsync(customAsns, ct);
+                    if (resolution.FailedAsns.Count > 0)
+                        complete = false;
+                    foreach (var p in resolution.Prefixes)
                         routes.Add(MakeRoute(p.Prefix, p.Length, p.IsIpv4, nextHop, null, customAsnComms));
                     _logger.LogInformation("Peer {Peer} custom AS: {Asns} -> {Count} prefixes",
-                        peerLabel, string.Join(",", customAsns), asnPrefixes.Count);
+                        peerLabel, string.Join(",", customAsns), resolution.Prefixes.Count);
                 }
                 catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
                 catch (Exception ex)
@@ -291,11 +307,13 @@ public sealed class RouteAssembler : IRouteAssembler
                 catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
                 catch (Exception ex)
                 {
+                    complete = false;
                     _logger.LogError(ex, "Failed to fetch RU fallback for {Peer}", peerLabel);
                 }
             }
 
-            return await FilterAndReturnAsync(routes, filterPeerConfig, ct);
+            return new RouteAssemblyResult(
+                await FilterAndReturnAsync(routes, filterPeerConfig, ct), complete && fetchFailures == 0);
         }
         else
         {
@@ -306,7 +324,8 @@ public sealed class RouteAssembler : IRouteAssembler
             if (ct.IsCancellationRequested)
             {
                 _logger.LogInformation("Cancelled build for unknown peer {Ip} — not auto-registering", peerLabel);
-                return await FilterAndReturnAsync(routes, filterPeerConfig, ct);
+                return new RouteAssemblyResult(
+                    await FilterAndReturnAsync(routes, filterPeerConfig, ct), complete);
             }
 
             _logger.LogInformation("Unknown peer {Ip}, auto-registering with RU defaults", peerLabel);
@@ -323,10 +342,12 @@ public sealed class RouteAssembler : IRouteAssembler
             catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
             catch (Exception ex)
             {
+                complete = false;
                 _logger.LogError(ex, "Failed to fetch RU prefixes for {Peer}", peerLabel);
             }
 
-            return await FilterAndReturnAsync(routes, filterPeerConfig, ct);
+            return new RouteAssemblyResult(
+                await FilterAndReturnAsync(routes, filterPeerConfig, ct), complete);
         }
     }
 
@@ -432,15 +453,28 @@ public sealed class RouteAssembler : IRouteAssembler
             var prefixes = await prefixService.GetUserSourcePrefixesAsync(source.Name, source.Url, source.Community, ct);
             foreach (var p in prefixes)
                 routes.Add(MakeRoute(p.Prefix, p.Length, p.IsIpv4, nextHop, null, comms));
-            logger.LogInformation("User-source '{Name}': {Count} prefixes for {Peer}", source.Name, prefixes.Count, peerLabel);
+            logger.LogInformation("User-source '{Name}': {Count} prefixes for {Peer}", SanitizeForLog(source.Name), prefixes.Count, peerLabel);
             return true;
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }  // only CALLER cancellation — a per-source timeout OCE (the linked CTS inside HttpPrefixProvider, on the live token) must stay a fetch failure below
         catch (Exception ex)
         {
-            logger.LogWarning(ex, "User-source '{Name}' failed for {Peer}; skipped", source.Name, peerLabel);
+            logger.LogWarning(ex, "User-source '{Name}' failed for {Peer}; skipped", SanitizeForLog(source.Name), peerLabel);
             return false;
         }
+    }
+
+    /// <summary>Replaces control characters and bounds operator-controlled text before structured logging.</summary>
+    private static string SanitizeForLog(string? value)
+    {
+        if (string.IsNullOrEmpty(value)) return string.Empty;
+        var sanitized = new System.Text.StringBuilder(value.Length);
+        foreach (var ch in value)
+        {
+            sanitized.Append(char.IsControl(ch) ? ' ' : ch);
+            if (sanitized.Length >= 200) { sanitized.Append('…'); break; }
+        }
+        return sanitized.ToString();
     }
 
     /// <summary>
