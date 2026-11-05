@@ -101,6 +101,8 @@ For section-by-section RFC conformance status, see `RFC_COMPLIANCE.md` (2026-07-
 ### D9. No global max-active session cap; per-source-IP accept throttle instead
 - **Decision:** there is deliberately no cap on concurrent sessions. Floods from one IP are bounded
   by `Bgp.MaxAcceptsPerIpPerMinute` (rolling 60 s window, socket closed before a session spawns).
+  Throttle bookkeeping is capped at 10,000 active/recent source IPs; at capacity, new sources are
+  rejected until a bounded stale sweep frees space rather than evicting/resetting existing limits.
 - **Context:** a route server is designed to hold many peers — session count is capacity/business
   logic, not a security control; the OS firewall is the primary gate.
 - **Consequence:** total session count is bounded only by OS resources; reintroducing a global cap is
