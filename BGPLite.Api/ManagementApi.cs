@@ -1084,22 +1084,29 @@ public sealed class ManagementApi : IHostedService, IDisposable
         // store: a set of prefixes means the same thing whether a value appears once or twice.
         // The upsert returns (Id, Status, CreatedAt) from its RETURNING clause — no
         // follow-up GetDbPeerById roundtrip for fields the caller already knows.
+        var existingPeer = string.IsNullOrEmpty(data.Md5Password)
+            ? null
+            : await _store.GetPeerAsync(normalizedIp, data.Asn);
+        var previousMd5Password = existingPeer is null
+            ? null
+            : (await _store.GetDbPeerByIdAsync(existingPeer.Id))?.Md5Password;
         var saved = await _store.SavePeerConfigurationAsync(
             normalizedIp, data.Asn, data.Description, asnLists, customPrefixes, data.CustomAsns ?? [], data.MaxPrefix,
             md5Password: string.IsNullOrEmpty(data.Md5Password) ? null : data.Md5Password);
         if (!string.IsNullOrEmpty(data.Md5Password))
         {
             // Resolve through the SAME shared-IP re-arm the delete/PATCH/bootstrap paths use.
-            // If the kernel refuses the selected key, remove the newly stored password so startup
-            // cannot retry it later, and tell the caller that the non-MD5 peer row was committed.
+            // If the kernel refuses the selected key, restore the password state from before this
+            // request so startup cannot retry an unarmable key, and make the partial commit explicit.
             try { await RearmPeerIpMd5KeyAsync(normalizedIp); }
             catch (Exception ex)
             {
-                _logger.LogWarning(ex, "TCP-MD5 arming failed after creating peer {Ip}; removing its stored password", normalizedIp);
+                _logger.LogWarning(ex, "TCP-MD5 arming failed after saving peer {Ip}; restoring its previous password state", normalizedIp);
                 await _store.UpdatePeerConfigurationAsync(saved.Id, null, null, null, null,
-                    md5Password: "");
-                return ApiResponse.Error(
-                    "The peer was created, but TCP-MD5 could not be armed; its stored password was removed.", 500);
+                    md5Password: existingPeer is null ? "" : previousMd5Password ?? "");
+                return ApiResponse.Error(existingPeer is null
+                    ? "The peer was created, but TCP-MD5 could not be armed; its stored password was removed."
+                    : "The peer configuration was saved, but TCP-MD5 could not be armed; the previous stored password was restored.", 500);
             }
         }
 

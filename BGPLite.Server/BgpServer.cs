@@ -264,33 +264,36 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
 
     /// <summary>
     /// Arms or clears the kernel TCP-MD5 key for one peer on <paramref name="socket"/>.
-    /// Returns false when the kernel refused the operation — the caller decides whether that is
-    /// fatal (arming: yes, see <see cref="SetPeerMd5Key"/>) or best-effort (clearing, and the
-    /// per-accept re-apply, which must not take a session down).
+    /// Returns false when the kernel refused the operation so callers can preserve the previous
+    /// state. Clearing an already absent key (ENOENT) succeeds without changing kernel state.
     /// </summary>
     private bool ApplyMd5(Socket? socket, IPAddress peer, byte[]? key)
     {
-        if (Md5ApplyProbe is { } probe)
-            return probe(socket, peer, key);
-
-        // Before StartAsync this records the desired key only; IsPeerMd5Armed stays false until
-        // StartAsync applies every key successfully before Listen.
-        if (socket is null)
-            return true;
-        var wire = Md5WireAddress(socket.AddressFamily, peer);
         try
         {
+            if (Md5ApplyProbe is { } probe)
+                return probe(socket, peer, key);
+            // Before StartAsync this records the desired key only; IsPeerMd5Armed stays false until
+            // StartAsync applies every key successfully before Listen.
+            if (socket is null)
+                return true;
+            var wire = Md5WireAddress(socket.AddressFamily, peer);
             if (key is null)
                 TcpMd5.Clear(socket, wire);
             else
                 TcpMd5.Apply(socket, wire, key);
             return true;
         }
+        catch (SocketException ex) when (key is null && ex.ErrorCode == 2)
+        {
+            // Linux reports ENOENT when the key is already absent: clearing is idempotent.
+            return true;
+        }
         catch (Exception ex)
         {
             _logger.LogWarning(ex,
-                "TCP-MD5: could not {Verb} the key for {Peer} on this platform — the peer keeps {State} (kernel TCP-MD5 unavailable; RFC 2385 arming is Linux-only)",
-                key is null ? "clear" : "set", peer, key is null ? "unprotected" : "unprotected until supported");
+                "TCP-MD5: could not {Verb} the key for {Peer} on this platform — the previous key state remains unchanged (kernel TCP-MD5 unavailable; RFC 2385 arming is Linux-only)",
+                key is null ? "clear" : "set", peer);
             return false;
         }
     }
