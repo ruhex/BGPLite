@@ -40,6 +40,7 @@ public class PeerStoreConnectionLifecycleTests
     }
 
     [Fact]
+    /// <summary>Verifies that PeerStore never closes an externally owned SQLite connection.</summary>
     public async Task CreatePeer_ExternallyOpenedConnection_RemainsOpen()
     {
         using var connection = new SqliteConnection("DataSource=:memory:");

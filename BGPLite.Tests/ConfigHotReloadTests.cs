@@ -272,6 +272,7 @@ public class ConfigHotReloadTests
     }
 
     [Fact]
+    /// <summary>Verifies that a hot-reloaded subscription-name collision is rejected without changing live configuration.</summary>
     public void Reload_SubscriptionCollision_RejectsWithoutChangingLiveState()
     {
         var path = TempConfigPath();

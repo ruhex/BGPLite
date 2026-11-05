@@ -139,6 +139,7 @@ public class IpAcceptThrottleTests
     }
 
     [Fact]
+    /// <summary>Stress-checks per-IP sliding-window decisions under concurrent accept attempts.</summary>
     public async Task TryAccept_Is_ThreadSafe_Under_Concurrency()
     {
         // Hammer one IP from many threads: exactly `limit` accepts must be admitted, no more
@@ -158,6 +159,7 @@ public class IpAcceptThrottleTests
     }
 
     [Fact]
+    /// <summary>Verifies bounded state during a distinct-IP flood without resetting existing source windows.</summary>
     public void DistinctIpFlood_CapsActiveState_WithoutResettingExistingLimits()
     {
         const int capacity = 10_000;

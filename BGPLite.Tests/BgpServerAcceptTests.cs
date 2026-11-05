@@ -231,6 +231,7 @@ public class BgpServerAcceptTests
     }
 
     [Fact]
+    /// <summary>Verifies that a connection-local accept-window failure neither delays nor prevents the next healthy accept.</summary>
     public async Task AcceptWindow_PerConnectionFailure_DoesNotBackoffOrBlockNextAccept()
     {
         var server = new BgpServer(
@@ -278,6 +279,7 @@ public class BgpServerAcceptTests
     }
 
     [Fact]
+    /// <summary>Verifies that repeated RST connections neither stop the listener nor block a subsequent healthy peer.</summary>
     public async Task RstConnections_DoNotStopListener_OrBlockHealthyAccept()
     {
         var server = new BgpServer(

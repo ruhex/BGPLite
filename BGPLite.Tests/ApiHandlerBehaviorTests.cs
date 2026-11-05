@@ -399,6 +399,7 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
     }
 
     [Fact]
+    /// <summary>Verifies that legacy stored credentials cannot report MD5 protection on an unsupported host.</summary>
     public async Task TcpMd5Flag_FalseOnUnsupportedPlatform_EvenWhenRowCarriesPassword()
     {
         // A legacy row written before the platform truth was enforced must not report
@@ -421,6 +422,7 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
     }
 
     [Fact]
+    /// <summary>Verifies that a supported host with kernel refusal still reports the peer as unprotected.</summary>
     public async Task TcpMd5Flag_FalseWhenTheKernelRefusedTheKey_EvenOnASupportedPlatform()
     {
         // The platform half is covered above; this is the residual (#546 item 3). On a SUPPORTED

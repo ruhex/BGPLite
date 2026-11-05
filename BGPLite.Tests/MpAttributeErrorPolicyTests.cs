@@ -288,6 +288,7 @@ public class MpAttributeErrorPolicyTests
     }
 
     [Fact]
+    /// <summary>Verifies that treat-as-withdraw also applies MP_UNREACH carried by the same malformed UPDATE.</summary>
     public async Task TreatAsWithdraw_AppliesTheSameUpdatesMpUnreach()
     {
         // RFC 7606 §2: an UPDATE is treated as withdrawn AS A WHOLE. The classic WITHDRAWN
@@ -329,6 +330,7 @@ public class MpAttributeErrorPolicyTests
     }
 
     [Fact]
+    /// <summary>Verifies that invalid MP_REACH IPv4 next-hop handling still applies the UPDATE's MP_UNREACH withdrawals.</summary>
     public async Task TreatAsWithdraw_AppliesMpUnreach_WhenMpReachV4NextHopIsInvalid()
     {
         // Sibling of TreatAsWithdraw_AppliesTheSameUpdatesMpUnreach, for the OTHER rethrow path.

@@ -46,6 +46,7 @@ public class PeerMd5BootstrapTests
     }
 
     [Fact]
+    /// <summary>Verifies that persisted credentials are armed by bootstrap before the BGP listener accepts peers.</summary>
     public async Task PersistedKey_BootstrapThenServerStart_IsArmedBeforeAccepting()
     {
         if (!OperatingSystem.IsLinux()) return;

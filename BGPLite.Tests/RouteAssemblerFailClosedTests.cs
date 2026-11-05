@@ -145,6 +145,7 @@ public sealed class RouteAssemblerFailClosedTests
             new PeerConfig { Address = "203.0.113.7" }, "203.0.113.7", CancellationToken.None);
 
     [Fact]
+    /// <summary>Verifies that total RIPEstat failure suppresses the RU fallback instead of advertising unrelated routes.</summary>
     public async Task AsnSubscription_RipestatOutage_FailsClosed_NoRuDump()
     {
         // The peer asked for ONE ASN. RIPEstat is down. It must not be handed the RU table.
@@ -162,6 +163,7 @@ public sealed class RouteAssemblerFailClosedTests
     }
 
     [Fact]
+    /// <summary>Verifies repeated fail-closed builds during negative-cache backoff without duplicate upstream fetches.</summary>
     public async Task AsnSubscription_RipestatOutage_StaysClosedWithinNegativeBackoffWindow()
     {
         var config = Config();
@@ -180,6 +182,7 @@ public sealed class RouteAssemblerFailClosedTests
     }
 
     [Fact]
+    /// <summary>Verifies that repeated user-source failures remain fail-closed throughout negative-cache backoff.</summary>
     public async Task UserSource_Outage_StaysClosedWithinNegativeBackoffWindow()
     {
         var config = Config();

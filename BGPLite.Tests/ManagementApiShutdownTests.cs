@@ -46,6 +46,7 @@ public sealed class ManagementApiShutdownTests : IDisposable
     }
 
     [Fact]
+    /// <summary>Verifies that shutdown cancels provider work and drains in-flight HTTP handlers within the test bound.</summary>
     public async Task StopAsync_CancelsInFlightProviderFetch_AndDrainsWithinBound()
     {
         var provider = new BlockingRuPrefixService();
@@ -105,6 +106,7 @@ public sealed class ManagementApiShutdownTests : IDisposable
     }
 
     [Fact]
+    /// <summary>Verifies that cold ASN-list requests return bounded partial-count metadata instead of hanging on RIPEstat.</summary>
     public async Task AsnListsGet_ExternalFetchBudget_BoundsColdRequests()
     {
         // A cold /api/asn-lists fetches RIPEstat per ASN (minutes-scale per ASN); N such GETs
@@ -158,6 +160,7 @@ public sealed class ManagementApiShutdownTests : IDisposable
     }
 
     [Fact]
+    /// <summary>Verifies that cold prefix-export requests honor the external-fetch budget and return an explicit degraded response.</summary>
     public async Task ExportPrefixesGet_ExternalFetchBudget_BoundsColdRequests()
     {
         // /api/peers/{id}/prefixes has the same cold-fetch shape (subscription ASN/RU pulls).
