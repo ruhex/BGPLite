@@ -402,6 +402,28 @@ public class BgpSessionRouteOwnershipTests
         await TeardownAsync(session, run);
     }
 
+    [Fact]
+    public async Task LocalAsnInsideAsSet_RemainsVisibleWhenLongerAs4PathIsIgnored()
+    {
+        var routeTable = new RouteTable();
+        var (session, run, conn) = await EstablishAsync(routeTable, fourByteAsn: false);
+        var attributes = new byte[]
+        {
+            0x40, 0x01, 0x01, 0x00, // ORIGIN
+            0x40, 0x02, 0x06, 0x01, 0x02, 0xFD, 0xE8, 0xFD, 0xE9, // AS_SET {65000, 65001}
+            0x40, 0x03, 0x04, 0xC0, 0x00, 0x02, 0x01, // NEXT_HOP
+            0xC0, 0x11, 0x0A, 0x02, 0x02, // AS4_PATH sequence [70000, 80000]
+            0x00, 0x01, 0x11, 0x70, 0x00, 0x01, 0x38, 0x80
+        };
+
+        conn.EnqueueFrame(BuildAnnounce(attributes, 8, [0x0A]));
+        await SettleAsync(conn);
+
+        Assert.Equal(0, routeTable.Count);
+        Assert.True(session.IsEstablished);
+        await TeardownAsync(session, run);
+    }
+
     // ---- harness ----
 
     private static RouteTable Seeded(params (UInt128 Prefix, byte Length)[] routes)
@@ -414,7 +436,7 @@ public class BgpSessionRouteOwnershipTests
 
     private static async Task<(BgpSession Session, Task Run, ScriptedConnection Conn)> EstablishAsync(
         RouteTable routeTable, uint routerId = 0x0A000002, IRouteFilter? filter = null,
-        Func<string, uint, CancellationToken, Task>? onPeerIdentified = null)
+        Func<string, uint, CancellationToken, Task>? onPeerIdentified = null, bool fourByteAsn = true)
     {
         var conn = new ScriptedConnection();
         var config = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1", HoldTime = 0, KeepAlive = 0 };
@@ -435,7 +457,7 @@ public class BgpSessionRouteOwnershipTests
             Asn = 65002,
             HoldTime = 0,
             RouterId = routerId,
-            Capabilities = [BgpCapabilityInfo.FourOctetAsn(65002)],
+            Capabilities = fourByteAsn ? [BgpCapabilityInfo.FourOctetAsn(65002)] : [],
         });
         conn.EnqueueMessage(BgpKeepaliveMessage.Instance);
 

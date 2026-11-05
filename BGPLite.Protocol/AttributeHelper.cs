@@ -30,10 +30,12 @@ public static class AttributeHelper
         };
     }
 
-    public static uint[] ReadAsPath(PathAttribute attr, bool fourByteAsn)
-    {
-        return ReadPathData(attr.Data, fourByteAsn ? 4 : 2, "AS_PATH");
-    }
+    public static uint[] ReadAsPath(PathAttribute attr, bool fourByteAsn) =>
+        AsPathSegment.Flatten(ReadAsPathSegments(attr, fourByteAsn));
+
+    /// <summary>Decodes AS_PATH while retaining segment types and membership for RFC 6793 reconstruction.</summary>
+    public static AsPathSegment[] ReadAsPathSegments(PathAttribute attr, bool fourByteAsn) =>
+        ReadPathData(attr.Data, fourByteAsn ? 4 : 2, "AS_PATH");
 
     public static PathAttribute WriteAsPath(uint[] ases, bool fourByteAsn)
     {
@@ -60,21 +62,25 @@ public static class AttributeHelper
         };
     }
 
-    public static uint[] ReadAs4Path(PathAttribute attr)
+    public static uint[] ReadAs4Path(PathAttribute attr) =>
+        AsPathSegment.Flatten(ReadAs4PathSegments(attr));
+
+    /// <summary>Decodes AS4_PATH while retaining segment types and applying the existing AS_TRANS guard.</summary>
+    public static AsPathSegment[] ReadAs4PathSegments(PathAttribute attr)
     {
-        var ases = ReadPathData(attr.Data, 4, "AS4_PATH");
+        var segments = ReadPathData(attr.Data, 4, "AS4_PATH");
 
         // AS_TRANS (23456) is the 2-octet placeholder for a non-mappable 4-octet AS (RFC 6793 §3)
         // and is meaningless inside AS4_PATH, which is 4-octet-encoded by definition. Defensive
         // check: RFC 6793 contains no explicit prohibition of AS_TRANS in AS4_PATH.
-        foreach (var asn in ases)
+        foreach (var asn in segments.SelectMany(segment => segment.Asns))
         {
             if (asn == BgpConstants.AsPath.AsTrans)
                 throw new BgpParseException($"AS4_PATH must not carry AS_TRANS ({BgpConstants.AsPath.AsTrans})",
                     BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.MalformedAsPath);
         }
 
-        return ases;
+        return segments;
     }
 
     public static uint ReadNextHop(PathAttribute attr)
@@ -271,9 +277,9 @@ public static class AttributeHelper
         _ => false
     };
 
-    private static uint[] ReadPathData(ReadOnlySpan<byte> data, int asSize, string attributeName)
+    private static AsPathSegment[] ReadPathData(ReadOnlySpan<byte> data, int asSize, string attributeName)
     {
-        var ases = new List<uint>();
+        var segments = new List<AsPathSegment>();
         var offset = 0;
 
         while (offset + 2 <= data.Length)
@@ -297,6 +303,7 @@ public static class AttributeHelper
                 throw new BgpParseException($"Truncated {attributeName} segment",
                     BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.MalformedAsPath);
 
+            var asns = new uint[segmentLength];
             for (var i = 0; i < segmentLength; i++)
             {
                 var asn = asSize switch
@@ -306,25 +313,22 @@ public static class AttributeHelper
                     _ => throw new ArgumentOutOfRangeException(nameof(asSize))
                 };
 
-                // RFC 7607 §2: "An UPDATE message that contains the AS number of zero in the AS_PATH
-                // ... MUST be considered as malformed and be handled by the procedures specified in
-                // [RFC7606]" — i.e. treat-as-withdraw via Malformed AS_PATH, the remedy RFC 7606 §7.2
-                // prescribes for a malformed AS_PATH. The same applies to AS4_PATH through this
-                // shared reader. AS 0 is reserved and must never appear in a path.
+                // RFC 7607 §2: AS 0 is malformed in either path attribute and uses Malformed AS_PATH.
                 if (asn == 0)
                     throw new BgpParseException($"Invalid {attributeName}: AS 0 is reserved (RFC 7607)",
                         BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.MalformedAsPath);
 
-                ases.Add(asn);
+                asns[i] = asn;
                 offset += asSize;
             }
+            segments.Add(new AsPathSegment(segmentType, asns));
         }
 
         if (offset != data.Length)
             throw new BgpParseException($"Malformed {attributeName} attribute",
                 BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.MalformedAsPath);
 
-        return ases.ToArray();
+        return segments.ToArray();
     }
 
     private static byte[] WritePathData(uint[] ases, int asSize, string attributeName)
