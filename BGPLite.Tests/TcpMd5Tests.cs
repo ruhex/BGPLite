@@ -258,6 +258,44 @@ public class TcpMd5Tests
     }
 
     [Fact]
+    public async Task IsPeerMd5Armed_DoesNotObserveProvisionalReplacement()
+    {
+        if (!OperatingSystem.IsLinux()) return;
+        using var server = NewServer();
+        await server.StartAsync(CancellationToken.None);
+        server.SetPeerMd5Key("192.0.2.10", "old");
+        var applying = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        server.Md5ApplyProbe = (_, _, key) =>
+        {
+            if (key is not null && key.Length == 3 && key[0] == (byte)'n')
+            {
+                applying.TrySetResult();
+                release.Task.GetAwaiter().GetResult();
+            }
+            return true;
+        };
+
+        try
+        {
+            var mutation = Task.Run(() => server.SetPeerMd5Key("192.0.2.10", "new"));
+            await applying.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            var read = Task.Run(() => server.IsPeerMd5Armed("192.0.2.10", "new"));
+            await Task.Delay(100);
+            Assert.False(read.IsCompletedSuccessfully && read.Result,
+                "the provisional key must not be reported as armed before kernel success");
+            release.TrySetResult();
+            await mutation.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.True(await read.WaitAsync(TimeSpan.FromSeconds(5)));
+        }
+        finally
+        {
+            release.TrySetResult();
+            await server.StopAsync(CancellationToken.None);
+        }
+    }
+
+    [Fact]
     public async Task ConcurrentKeyMutations_AreSerialized()
     {
         if (!OperatingSystem.IsLinux()) return;

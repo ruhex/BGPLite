@@ -259,8 +259,11 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
         if (Volatile.Read(ref _md5ListenerReady) == 0 || string.IsNullOrEmpty(password)
             || !IPAddress.TryParse(peerIp, out var address))
             return false;
-        return _md5Keys.TryGetValue(address, out var armed)
-            && armed.AsSpan().SequenceEqual(TcpMd5.KeyBytes(password));
+        lock (_md5Sync)
+        {
+            return _md5Keys.TryGetValue(address, out var armed)
+                && armed.AsSpan().SequenceEqual(TcpMd5.KeyBytes(password));
+        }
     }
 
     /// <summary>

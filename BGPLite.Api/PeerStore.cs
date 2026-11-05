@@ -399,6 +399,20 @@ public sealed class PeerStore : IPeerStore
         await tx.CommitAsync(ct);
     }
 
+    /// <summary>
+    /// Restores a password only while the row still contains the failed request's value. A newer
+    /// concurrent password mutation is never overwritten by a stale rollback.
+    /// </summary>
+    public async Task<bool> RestorePeerMd5PasswordIfCurrentAsync(
+        string peerId, string? currentPassword, string? previousPassword, CancellationToken ct = default)
+    {
+        using var db = _dbFactory.CreateDbContext();
+        var updated = await db.Peers
+            .Where(peer => peer.Id == peerId && peer.Md5Password == currentPassword)
+            .ExecuteUpdateAsync(update => update.SetProperty(peer => peer.Md5Password, previousPassword), ct);
+        return updated > 0;
+    }
+
     // The Replace* helpers stage a delete + insert on the CALLER's DbContext without committing, so
     // the composite methods above can put every part of a save inside one transaction. The public
     // Set* methods keep their own DbContext + transaction for single-field callers.
