@@ -205,6 +205,32 @@ public class PrefixCacheRaceTests
         Assert.Equal(2, source.LoadCalls); // stale publication was rejected, so the new content reloads
     }
 
+    [Fact]
+    public async Task GetRuPrefixesAsync_CommitAfterGenerationCheck_CannotRestoreStaleProjection()
+    {
+        var source = new CountingPrefixSource();
+        var service = Service(source, defaultSource: string.Empty);
+        using var generationChecked = new ManualResetEventSlim();
+        using var releasePublication = new ManualResetEventSlim();
+        service.RuAfterGenerationCheckProbe = () =>
+        {
+            generationChecked.Set();
+            releasePublication.Wait(TimeSpan.FromSeconds(5));
+        };
+
+        var oldLoad = Task.Run(() => service.GetRuPrefixesAsync());
+        Assert.True(generationChecked.Wait(TimeSpan.FromSeconds(5)));
+        var commit = Task.Run(() => source.Commit([new IpPrefix(0xCB000000u, 8)]));
+        await Task.Delay(100); // pre-fix: invalidation lands inside the open window
+        releasePublication.Set();
+        await Task.WhenAll(oldLoad, commit);
+        var latest = await service.GetRuPrefixesAsync();
+
+        var prefix = Assert.Single(latest);
+        Assert.Equal(0xCB000000u, prefix.Prefix);
+        Assert.Equal(2, source.LoadCalls);
+    }
+
     // ---- helpers ----
 
     private static PrefixService Service(CountingPrefixSource source, TimeSpan? cacheTtl = null, TimeProvider? timeProvider = null, Func<string, Task>? onSourceChanged = null, string? defaultSource = null) =>
