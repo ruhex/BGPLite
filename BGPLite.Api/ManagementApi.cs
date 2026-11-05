@@ -1020,6 +1020,10 @@ public sealed class ManagementApi : IHostedService, IDisposable
 
         var asnLists = data.AsnLists ?? [];
         var customPrefixes = new List<(string Prefix, byte Length)>();
+        if (FindDuplicateError(asnLists, "lists", value => value) is { } duplicateLists)
+            return duplicateLists;
+        if (FindDuplicateError(data.CustomAsns, "customAsns", value => value.ToString()) is { } duplicateAsns)
+            return duplicateAsns;
 
         // Reject unknown subscription names at the boundary — a stored typo silently
         // served zero prefixes from that list forever, with no signal on either side.
@@ -1058,12 +1062,12 @@ public sealed class ManagementApi : IHostedService, IDisposable
                 customPrefixes.Add(parsed.Value);
             }
         }
+        if (FindDuplicateError(customPrefixes, "customPrefixes", value => $"{value.Prefix}/{value.Length}") is { } duplicatePrefixes)
+            return duplicatePrefixes;
 
         // One transaction for the whole create. The previous CreatePeer + three Set* calls
-        // each committed separately, so a duplicate CIDR — which violates the
-        // (PeerId, Prefix, PrefixLength) key — returned 500 over an already-committed peer row and
-        // left the user with a half-configured peer. Duplicates are now deduplicated inside the
-        // store: a set of prefixes means the same thing whether a value appears once or twice.
+        // each committed separately, so a duplicate CIDR returned 500 over an already-committed
+        // peer row. The API now rejects UI duplicates; store-level dedup remains defense in depth.
         // The upsert returns (Id, Status, CreatedAt) from its RETURNING clause — no
         // follow-up GetDbPeerById roundtrip for fields the caller already knows.
         var existingPeer = string.IsNullOrEmpty(data.Md5Password)
@@ -1174,6 +1178,8 @@ public sealed class ManagementApi : IHostedService, IDisposable
                 parsedPrefixes.Add(parsed.Value);
             }
         }
+        if (FindDuplicateError(parsedPrefixes, "customPrefixes", value => $"{value.Prefix}/{value.Length}") is { } duplicatePrefixes)
+            return duplicatePrefixes;
 
         _logger.LogInformation("UpdatePeer {Id}: CustomPrefixes={Count}, CustomAsns={AsnCount}",
             SanitizeForLog(peerId), parsedPrefixes?.Count ?? 0, data.CustomAsns?.Count ?? 0);
@@ -1182,6 +1188,8 @@ public sealed class ManagementApi : IHostedService, IDisposable
         // the shared fields need checking — but they need it before anything is written.
         if (ValidatePeerFields(data.Description, data.CustomAsns) is { } updateError)
             return updateError;
+        if (FindDuplicateError(data.CustomAsns, "customAsns", value => value.ToString()) is { } duplicateAsns)
+            return duplicateAsns;
 
         // One transaction for the whole update, same reasoning as the create path. A null
         // argument means "leave this alone" — the PATCH semantics this endpoint already had, now
@@ -1190,6 +1198,8 @@ public sealed class ManagementApi : IHostedService, IDisposable
         // (a null Lists field means "leave the subscriptions alone" and has nothing to validate).
         if (data.Lists is not null)
         {
+            if (FindDuplicateError(data.Lists, "lists", value => value) is { } duplicateLists)
+                return duplicateLists;
             var unknown = FindUnknownSubscriptionNames(data.Lists, _config);
             if (unknown.Count > 0)
                 return ApiResponse.Error(
@@ -1721,6 +1731,22 @@ public sealed class ManagementApi : IHostedService, IDisposable
             if (sb.Length >= maxLength) { sb.Append('…'); break; }
         }
         return sb.ToString();
+    }
+
+    private static ApiResponse? FindDuplicateError<T>(
+        IReadOnlyList<T>? values, string field, Func<T, string> keySelector)
+    {
+        if (values is null) return null;
+        var seen = new Dictionary<string, int>(StringComparer.Ordinal);
+        for (var i = 0; i < values.Count; i++)
+        {
+            var key = keySelector(values[i]) ?? string.Empty;
+            if (seen.TryGetValue(key, out var first))
+                return ApiResponse.Error(
+                    $"{field} contains duplicate '{SanitizeForLog(key)}' at indexes {first} and {i}.", 400);
+            seen[key] = i;
+        }
+        return null;
     }
 
     /// <summary>
