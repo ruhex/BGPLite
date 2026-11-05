@@ -124,11 +124,18 @@ public static class PrefixCodec
 
     public static int DecodeList(ReadOnlySpan<byte> buffer, int length, Span<IpPrefix> prefixes)
     {
+        if (length < 0 || length > buffer.Length)
+            throw new BgpParseException($"Invalid NLRI section length: {length} (buffer has {buffer.Length} bytes)",
+                BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.InvalidNetworkField);
+
         var offset = 0;
         var count = 0;
         while (offset < length)
         {
-            var (prefix, consumed) = Decode(buffer[offset..]);
+            if (count >= prefixes.Length)
+                throw new BgpParseException("NLRI destination capacity exceeded",
+                    BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.InvalidNetworkField);
+            var (prefix, consumed) = Decode(buffer.Slice(offset, length - offset));
             prefixes[count++] = prefix;
             offset += consumed;
         }

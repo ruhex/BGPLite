@@ -153,6 +153,49 @@ public class PrefixCodecTests
         Assert.False(decoded.IsIpv4);
     }
 
+    [Fact]
+    public void DecodeList_DoesNotReadPastDeclaredLength()
+    {
+        var encoded = new byte[] { 8, 10, 24, 192, 168, 0 };
+        var destination = new IpPrefix[2];
+
+        var count = PrefixCodec.DecodeList(encoded, length: 2, destination);
+
+        Assert.Equal(1, count);
+        Assert.Equal(new IpPrefix(0x0A000000, 8), destination[0]);
+        Assert.Equal(default, destination[1]);
+
+        // The next /24 crosses a three-byte declared bound: its data must not be read from the
+        // following field even though the backing span contains enough bytes.
+        Assert.Throws<BgpParseException>(() => PrefixCodec.DecodeList(encoded, length: 3, destination));
+    }
+
+    [Fact]
+    public void DecodeList_DestinationTooSmall_ThrowsProtocolError()
+    {
+        var encoded = new byte[] { 8, 10 };
+
+        var ex = Assert.Throws<BgpParseException>(() =>
+            PrefixCodec.DecodeList(encoded, encoded.Length, Span<IpPrefix>.Empty));
+
+        Assert.Equal(BgpConstants.Error.UpdateMessageError, ex.ErrorCode);
+        Assert.Equal(BgpConstants.SubError.InvalidNetworkField, ex.SubErrorCode);
+    }
+
+    [Theory]
+    [InlineData(-1)]
+    [InlineData(3)]
+    public void DecodeList_InvalidDeclaredLength_ThrowsProtocolError(int length)
+    {
+        var encoded = new byte[] { 8, 10 };
+
+        var ex = Assert.Throws<BgpParseException>(() =>
+            PrefixCodec.DecodeList(encoded, length, new IpPrefix[1]));
+
+        Assert.Equal(BgpConstants.Error.UpdateMessageError, ex.ErrorCode);
+        Assert.Equal(BgpConstants.SubError.InvalidNetworkField, ex.SubErrorCode);
+    }
+
     [Theory]
     [InlineData(33)]
     [InlineData(64)]
