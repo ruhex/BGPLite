@@ -271,6 +271,7 @@ public class PrefixCacheRaceTests
 
     // ---- helpers ----
 
+    /// <summary>Composes only the dependencies used by the RU cache path, with explicit nulls for unreachable collaborators.</summary>
     private static PrefixService Service(CountingPrefixSource source, TimeSpan? cacheTtl = null, TimeProvider? timeProvider = null, Func<string, Task>? onSourceChanged = null, string? defaultSource = null) =>
         new(new AppConfig { DefaultPrefixSource = defaultSource },
             // Both are required in production; neither is on the GetRuPrefixesAsync path this
@@ -302,6 +303,7 @@ public class PrefixCacheRaceTests
         public IReadOnlyList<IpPrefix> Current { get; private set; } =
             [new IpPrefix(0x0A000000u, 8), new IpPrefix(0xC0A80000u, 16)];
 
+        /// <summary>Changes source content and fires the same commit event used by production refresh.</summary>
         public void Commit(IReadOnlyList<IpPrefix> prefixes)
         {
             Current = prefixes;
@@ -314,6 +316,7 @@ public class PrefixCacheRaceTests
         public Task<IReadOnlyList<IpPrefix>> GetAsync(string name, CancellationToken ct = default) =>
             throw new NotImplementedException();
 
+        /// <summary>Counts default-source loads and provides controllable latency, failure, and change signals.</summary>
         public async Task<(IReadOnlyList<IpPrefix> Prefixes, bool Changed)> LoadDefaultAsync(CancellationToken ct = default)
         {
             Interlocked.Increment(ref _loadCalls);

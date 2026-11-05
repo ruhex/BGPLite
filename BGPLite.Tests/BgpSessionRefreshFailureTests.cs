@@ -31,6 +31,7 @@ public class BgpSessionRefreshFailureTests
         NextHop = 0x7F000001
     };
 
+    /// <summary>Creates an established scripted session with the supplied assembler for refresh-failure scenarios.</summary>
     private static async Task<(BgpSession Session, Task Run, ScriptedConnection Conn)> EstablishAsync(
         IRouteAssembler assembler)
     {
@@ -111,12 +112,14 @@ public class BgpSessionRefreshFailureTests
         await TeardownAsync(session, run);
     }
 
+    /// <summary>Decodes sent frames and selects both classic and MP withdrawal messages.</summary>
     private static List<BgpUpdateMessage> Withdrawals(ScriptedConnection conn) =>
         conn.Sent.Select(f => BgpMessageReader.ReadMessage(f))
             .OfType<BgpUpdateMessage>()
             .Where(u => u.WithdrawnRoutes.Count > 0 || u.MpUnreachV6 is not null)
             .ToList();
 
+    /// <summary>Disposes the scripted session and waits for its run loop with a bounded test timeout.</summary>
     private static async Task TeardownAsync(BgpSession session, Task run)
     {
         session.Dispose();

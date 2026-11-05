@@ -41,6 +41,7 @@ public class RefreshDebounceTests
         }
     }
 
+    /// <summary>Drives OPEN negotiation and waits for Established without assuming the initial route dump has finished.</summary>
     private static async Task<Task> EstablishAsync(BgpSession session, Socket client, BgpConfig cfg)
     {
         var runTask = Task.Run(() => session.RunAsync(CancellationToken.None));

@@ -44,6 +44,7 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
         _connection.Dispose();
     }
 
+    /// <summary>Starts an isolated real HTTP/SQLite fixture with optional dependency and independent-connection overrides.</summary>
     private async Task<int> StartAsync(AppConfig template, ISessionManager? sessions = null, ILogger<ManagementApi>? logger = null, IPrefixSourceService? prefixSources = null, IPrefixService? prefixService = null, DbContextOptions<BgpDbContext>? dbOptions = null)
     {
         for (var attempt = 0; ; attempt++)

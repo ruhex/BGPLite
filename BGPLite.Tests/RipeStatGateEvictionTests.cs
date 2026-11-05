@@ -115,6 +115,7 @@ public class RipeStatGateEvictionTests
         public TaskCompletionSource SecondRefetchEntered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource Release { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
+        /// <summary>Controls concurrent RIPEstat responses to exercise gate eviction at deterministic checkpoints.</summary>
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
         {
             var call = Interlocked.Increment(ref _calls);
