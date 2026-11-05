@@ -56,7 +56,7 @@ public sealed class PeerStore : IPeerStore
         {
             if (connection.State != System.Data.ConnectionState.Open)
             {
-                db.Database.OpenConnection();
+                await db.Database.OpenConnectionAsync(ct);
                 closeAfter = true;
             }
             using var cmd = connection.CreateCommand();
@@ -82,7 +82,7 @@ public sealed class PeerStore : IPeerStore
         }
         finally
         {
-            if (closeAfter) db.Database.CloseConnection();
+            if (closeAfter) await db.Database.CloseConnectionAsync();
         }
     }
 
