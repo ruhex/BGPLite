@@ -225,6 +225,7 @@ public class PrefixCacheRaceTests
         Assert.True(generationChecked.Wait(TimeSpan.FromSeconds(5)));
         var commit = Task.Run(() => source.Commit([new IpPrefix(0xCB000000u, 8)]));
         Assert.True(invalidationStarted.Wait(TimeSpan.FromSeconds(5)));
+        AssertPublicationLockUnavailable(service);
         releasePublication.Set();
         await Task.WhenAll(oldLoad, commit);
         var latest = await service.GetRuPrefixesAsync();
@@ -232,6 +233,39 @@ public class PrefixCacheRaceTests
         var prefix = Assert.Single(latest);
         Assert.Equal(0xCB000000u, prefix.Prefix);
         Assert.Equal(2, source.LoadCalls);
+    }
+
+    /// <summary>Proves that invalidation holds the same lock used by publication and never restores stale content.</summary>
+    [Fact]
+    public async Task SourceCommit_InvalidationCriticalSection_ExcludesPublicationLock()
+    {
+        var source = new CountingPrefixSource();
+        var service = Service(source, defaultSource: string.Empty);
+        using var invalidationHeld = new ManualResetEventSlim();
+        using var releaseInvalidation = new ManualResetEventSlim();
+        service.RuInvalidationCriticalProbe = () =>
+        {
+            invalidationHeld.Set();
+            releaseInvalidation.Wait(TimeSpan.FromSeconds(5));
+        };
+
+        var commit = Task.Run(() => source.Commit([new IpPrefix(0xCB000000u, 8)]));
+        Assert.True(invalidationHeld.Wait(TimeSpan.FromSeconds(5)));
+        AssertPublicationLockUnavailable(service);
+        releaseInvalidation.Set();
+        await commit;
+
+        var latest = await service.GetRuPrefixesAsync();
+        Assert.Equal(0xCB000000u, Assert.Single(latest).Prefix);
+    }
+
+    /// <summary>Asserts mutual exclusion without leaving the lock held when the assertion fails.</summary>
+    private static void AssertPublicationLockUnavailable(PrefixService service)
+    {
+        var entered = Monitor.TryEnter(service.RuPublicationSync);
+        if (entered)
+            Monitor.Exit(service.RuPublicationSync);
+        Assert.False(entered, "publication or invalidation must hold the shared lock at this checkpoint");
     }
 
     // ---- helpers ----

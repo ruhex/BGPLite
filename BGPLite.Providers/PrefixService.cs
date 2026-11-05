@@ -73,6 +73,7 @@ public sealed class PrefixService : IPrefixService
         RuInvalidationProbe?.Invoke();
         lock (_ruPublicationSync)
         {
+            RuInvalidationCriticalProbe?.Invoke();
             Interlocked.Increment(ref _ruGeneration);
             Volatile.Write(ref _ruCache, null);
         }
@@ -286,6 +287,8 @@ public sealed class PrefixService : IPrefixService
     internal Action? RuPublishProbe { get; set; }
     internal Action? RuAfterGenerationCheckProbe { get; set; }
     internal Action? RuInvalidationProbe { get; set; }
+    internal Action? RuInvalidationCriticalProbe { get; set; }
+    internal object RuPublicationSync => _ruPublicationSync;
     private readonly Func<string, Task>? _onSourceChanged;
 
     /// <summary>Loads and caches the default RU projection, rejecting stale publication after a concurrent source commit.</summary>
