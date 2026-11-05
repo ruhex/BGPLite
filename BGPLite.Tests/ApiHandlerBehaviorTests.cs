@@ -699,7 +699,7 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
         Assert.True(replaced.IsSuccessStatusCode, await replaced.Content.ReadAsStringAsync());
 
         Assert.Null((await store.GetPeerDetailAsync(saved.Id))!.Md5Password);
-        Assert.False(sessions.IsPeerMd5Armed(saved.Ip, "new-secret"));
+        Assert.False(sessions.IsPeerMd5Armed("198.51.100.23", "new-secret"));
         Assert.Null(sessions.Md5Keys.Last().Password);
     }
 
