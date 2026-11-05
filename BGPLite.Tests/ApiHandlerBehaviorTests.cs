@@ -596,14 +596,15 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
         Assert.Empty(await store.GetPeersByIpAsync("8.1.1.1"));
     }
 
+    /// <summary>Verifies explicit partial-commit reporting, password removal, and refresh after failed initial arming.</summary>
     [Fact]
-    /// <summary>Verifies explicit partial-commit reporting and password removal when initial kernel arming fails.</summary>
     public async Task Md5Create_KernelFailure_RemovesStoredPassword_AndReportsCommittedPeer()
     {
         if (!OperatingSystem.IsLinux()) return;
+        var sessions = new ThrowingMd5Sessions();
         _port = await StartAsync(
             new AppConfig { Bgp = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1" } },
-            sessions: new ThrowingMd5Sessions());
+            sessions);
         _client = new HttpClient();
 
         using var response = await _client.PostAsync($"http://127.0.0.1:{_port}/api/peers",
@@ -619,6 +620,7 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
         var detail = await store.GetPeerDetailAsync(peer.Id);
         Assert.NotNull(detail);
         Assert.Null(detail.Md5Password);
+        Assert.Equal(1, sessions.RefreshCalls);
     }
 
     [Fact]
@@ -646,14 +648,15 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
         Assert.Single(await store.GetPeersByIpAsync("198.51.100.22"));
     }
 
+    /// <summary>Verifies rollback, secret non-disclosure, and refresh scheduling after failed update rearming.</summary>
     [Fact]
-    /// <summary>Verifies that failed update rearming restores the old password without exposing either secret.</summary>
     public async Task Md5Update_KernelFailure_RestoresPreviousStoredPassword()
     {
         if (!OperatingSystem.IsLinux()) return;
+        var sessions = new ThrowingMd5Sessions();
         _port = await StartAsync(
             new AppConfig { Bgp = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1" } },
-            sessions: new ThrowingMd5Sessions());
+            sessions);
         _client = new HttpClient();
         var store = new PeerStore(new StaticOptionsFactory(new DbContextOptionsBuilder<BgpDbContext>().UseSqlite(_connection).Options));
         var saved = await store.SavePeerConfigurationAsync(
@@ -671,10 +674,55 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
         Assert.DoesNotContain("new-secret", body);
         Assert.DoesNotContain("old-secret", body);
         Assert.Equal("old-secret", (await store.GetPeerDetailAsync(saved.Id))!.Md5Password);
+        Assert.Equal(1, sessions.RefreshCalls);
     }
 
+    /// <summary>Overlaps two replacements and verifies that failed rollback restores the newer committed password.</summary>
     [Fact]
+    public async Task Md5Update_ConcurrentSuccessBeforeFailure_RestoresNewestPassword()
+    {
+        if (!OperatingSystem.IsLinux()) return;
+        var sessions = new RecordingSessions { ThrowOnPassword = "x-secret" };
+        var connectionString = $"Data Source={Guid.NewGuid():N};Mode=Memory;Cache=Shared";
+        using var keepAlive = new SqliteConnection(connectionString);
+        keepAlive.Open();
+        var dbOptions = new DbContextOptionsBuilder<BgpDbContext>().UseSqlite(connectionString).Options;
+        using (var boot = new BgpDbContext(dbOptions))
+            BgpDbContext.Initialize(boot);
+        _port = await StartAsync(
+            new AppConfig { Bgp = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1" } },
+            sessions, dbOptions: dbOptions);
+        _client = new HttpClient();
+        var store = new PeerStore(new StaticOptionsFactory(dbOptions));
+        var saved = await store.SavePeerConfigurationAsync(
+            "198.51.100.24", 65024, null, [], [], [], md5Password: "old-secret");
+        var firstAtGate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseFirst = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var probeCalls = 0;
+        _api!.Md5MutationGateProbe = async _ =>
+        {
+            if (Interlocked.Increment(ref probeCalls) == 1)
+            {
+                firstAtGate.SetResult();
+                await releaseFirst.Task;
+            }
+        };
+
+        var failing = _client.PutAsync($"http://127.0.0.1:{_port}/api/peers/{saved.Id}",
+            new StringContent("""{"md5Password":"x-secret"}""", Encoding.UTF8, "application/json"));
+        await firstAtGate.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        using var newer = await _client.PutAsync($"http://127.0.0.1:{_port}/api/peers/{saved.Id}",
+            new StringContent("""{"md5Password":"y-secret"}""", Encoding.UTF8, "application/json"));
+        Assert.True(newer.IsSuccessStatusCode, await newer.Content.ReadAsStringAsync());
+        releaseFirst.SetResult();
+        using var failed = await failing;
+        Assert.Equal(HttpStatusCode.InternalServerError, failed.StatusCode);
+
+        Assert.Equal("y-secret", (await store.GetPeerDetailAsync(saved.Id))!.Md5Password);
+    }
+
     /// <summary>Overlaps replacement and clear through real HTTP/SQLite, requiring stored and armed state to finish cleared.</summary>
+    [Fact]
     public async Task Md5Updates_SharedIp_CannotApplyCredentialsReadBeforeNewerClear()
     {
         if (!OperatingSystem.IsLinux()) return;
@@ -696,7 +744,15 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
         var firstRead = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var releaseFirst = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var probeCalls = 0;
-        _api!.Md5RearmProbe = async _ =>
+        var gateCalls = 0;
+        var clearAtGate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        _api!.Md5MutationGateProbe = _ =>
+        {
+            if (Interlocked.Increment(ref gateCalls) == 2)
+                clearAtGate.SetResult();
+            return Task.CompletedTask;
+        };
+        _api.Md5RearmProbe = async _ =>
         {
             if (Interlocked.Increment(ref probeCalls) == 1)
             {
@@ -710,6 +766,7 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
         await firstRead.Task.WaitAsync(TimeSpan.FromSeconds(5));
         var clearTask = _client.PutAsync($"http://127.0.0.1:{_port}/api/peers/{saved.Id}",
             new StringContent("""{"md5Password":""}""", Encoding.UTF8, "application/json"));
+        await clearAtGate.Task.WaitAsync(TimeSpan.FromSeconds(5));
         releaseFirst.SetResult();
         using var clear = await clearTask;
         using var replaced = await replace;
@@ -870,7 +927,12 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
 
     private sealed class ThrowingMd5Sessions : ISessionManager
     {
-        public Task RefreshPeerAsync(string peerIp, uint asn) => Task.CompletedTask;
+        public int RefreshCalls { get; private set; }
+        public Task RefreshPeerAsync(string peerIp, uint asn)
+        {
+            RefreshCalls++;
+            return Task.CompletedTask;
+        }
         public List<string> GetActivePeerIps() => [];
         public Task TerminatePeerAsync(string peerIp, uint asn, CancellationToken ct = default) => Task.CompletedTask;
         public Task TerminatePeerByIpAsync(string peerIp, CancellationToken ct = default) => Task.CompletedTask;
@@ -887,6 +949,7 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
     {
         private readonly object _md5Sync = new();
         public List<(string Ip, string? Password)> Md5Keys { get; } = [];
+        public string? ThrowOnPassword { get; set; }
         public bool Established { get; set; }
         public Task RefreshPeerAsync(string peerIp, uint asn) => Task.CompletedTask;
         public List<string> GetActivePeerIps() => [];
@@ -895,7 +958,11 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
         public void SetPeerMd5Key(string peerIp, string? password)
         {
             lock (_md5Sync)
+            {
+                if (password == ThrowOnPassword)
+                    throw new InvalidOperationException("simulated kernel refusal");
                 Md5Keys.Add((peerIp, password));
+            }
         }
         public bool IsPeerEstablished(string peerIp, uint asn) => Established;
         public bool IsPeerMd5Armed(string peerIp, string? password)

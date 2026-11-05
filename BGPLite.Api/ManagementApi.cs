@@ -298,6 +298,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
         return creds[0].Md5Password;
     }
 
+    internal Func<string, Task>? Md5MutationGateProbe { get; set; }
     internal Func<string, Task>? Md5RearmProbe { get; set; }
 
     /// <summary>
@@ -1250,7 +1251,11 @@ public sealed class ManagementApi : IHostedService, IDisposable
 
         var gateMd5 = data.Md5Password is not null;
         if (gateMd5)
+        {
+            if (Md5MutationGateProbe is not null)
+                await Md5MutationGateProbe(peer.Ip);
             await _md5MutationGate.WaitAsync();
+        }
         try
         {
             await _store.UpdatePeerConfigurationAsync(peerId, data.Description, data.Lists, parsedPrefixes, data.CustomAsns, data.MaxPrefix,
