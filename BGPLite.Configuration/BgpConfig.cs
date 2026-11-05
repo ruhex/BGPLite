@@ -34,7 +34,7 @@ public sealed class BgpConfig
         && v6.AddressFamily == AddressFamily.InterNetworkV6
         && !v6.IsIPv4MappedToIPv6
         && v6.ScopeId == 0
-        && (v6.GetAddressBytes()[0] & 0xE0) == 0x20; // 2000::/3
+        && MpReachCodec.IsGlobalUnicastNextHop(BgpConstants.ToUInt128(v6));
 
     [YamlMember(Alias = "KeepAlive")]
     public int KeepAlive { get; init; } = 60;

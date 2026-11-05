@@ -374,3 +374,12 @@ For section-by-section RFC conformance status, see `RFC_COMPLIANCE.md` (2026-07-
   were withdrawn at refresh start anyway); an unknown subscription name now logs a Warning per build
   instead of being silently ignored.
 - **Tracker:** #488.
+
+### D27. MP IPv6 next-hop scope is 2000::/3
+- **Decision:** inbound and configured outbound MP_REACH next hops accept global unicast `2000::/3`
+  only. The RFC 2545 32-byte global+link-local form remains decodable and uses its first/global half.
+- **Context:** RFC 2545 §3 requires the global address; the implementation deliberately does not
+  accept ULA or IPv4-mapped values as a substitute. Lone link-local values are not adopted.
+- **Consequence:** peers sending ULA/mapped/non-global next hops have those routes excluded rather
+  than installed with an unsupported scope. No interoperability exception is claimed.
+- **Tracker:** #566.

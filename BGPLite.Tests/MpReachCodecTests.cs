@@ -161,18 +161,20 @@ public class MpReachCodecTests
     }
 
     /// <summary>
-    /// RFC 2545 §3: the MP_REACH next hop must be a GLOBAL IPv6 address — ::, ::1,
-    /// ff00::/8 (multicast) and fe80::/10 (link-local) are rejected; global unicast and
-    /// IPv4-mapped representations are accepted.
+    /// The supported MP_REACH scope is 2000::/3 on both receive and configured transmit paths.
+    /// ULA, mapped, unspecified, loopback, multicast, and lone-link-local values are rejected.
     /// </summary>
     [Theory]
     [InlineData("00000000000000000000000000000000", false)] // ::
     [InlineData("00000000000000000000000000000001", false)] // ::1 loopback
     [InlineData("ff020000000000000000000000000001", false)] // ff02::1 multicast
     [InlineData("fe800000000000000000000000000001", false)] // fe80::1 link-local
+    [InlineData("fc000000000000000000000000000001", false)] // ULA
+    [InlineData("fd010000000000000000000000000001", false)] // ULA
+    [InlineData("00000000000000000000ffffc0000201", false)] // IPv4-mapped
+    [InlineData("40000000000000000000000000000001", false)] // outside 2000::/3
     [InlineData("20010db8000000000000000000000001", true)]  // 2001:db8::1 global
     [InlineData("26060670000000000000000000001111", true)]  // global unicast
-    [InlineData("00000000000000000000ffffc0000201", true)]  // ::ffff:192.0.2.1 (mapped, global scope)
     public void IsGlobalUnicastNextHop_FollowsRfc2545(string hex, bool expected)
     {
         Assert.Equal(expected, MpReachCodec.IsGlobalUnicastNextHop(ToV6(hex)));
