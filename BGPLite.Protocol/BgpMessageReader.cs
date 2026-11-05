@@ -408,6 +408,7 @@ public static class BgpMessageReader
             BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.InvalidNetworkField);
     }
 
+    /// <summary>Decodes one bounded attribute TLV, ignoring reserved flag bits and rejecting truncated or inconsistent lengths.</summary>
     private static (PathAttribute attr, int consumed) ParseAttribute(ReadOnlySpan<byte> data)
     {
         // Bounds-check before every indexed read. Previously a truncated TLV (declared length

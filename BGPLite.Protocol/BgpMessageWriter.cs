@@ -207,6 +207,7 @@ public static class BgpMessageWriter
         return len;
     }
 
+    /// <summary>Encodes one path-attribute TLV, rejecting reserved flag bits and lengths that exceed the selected header form.</summary>
     private static int WriteAttribute(PathAttribute attr, Span<byte> buffer)
     {
         // RFC 4271 §4.3: the lower-order four bits "MUST be zero when sent and MUST be ignored

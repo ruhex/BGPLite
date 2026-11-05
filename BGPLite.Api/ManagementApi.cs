@@ -1469,6 +1469,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
 
     #region /api/peers/{id}/prefixes
 
+    /// <summary>Exports the canonical peer projection as JSON or text, returning 503 instead of a partial route filter.</summary>
     private async Task<ApiResponse> HandleExportPrefixes(string peerId, HttpListenerContext ctx)
     {
         var peer = await _store.GetDbPeerByIdAsync(peerId);

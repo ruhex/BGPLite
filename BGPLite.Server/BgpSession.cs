@@ -178,6 +178,7 @@ public sealed class BgpSession : IDisposable
         }
     }
 
+    /// <summary>Resolves before withdrawing, then atomically refreshes the advertised set under the session's outbound lock.</summary>
     private async Task RefreshCycleAsync(CancellationToken ct)
     {
         // _sendLock is acquired inside SendMessageAsync, so each individual UPDATE is atomic on the
@@ -257,6 +258,7 @@ public sealed class BgpSession : IDisposable
         catch (ObjectDisposedException) { /* session already disposed — nothing to unwind */ }
     }
 
+    /// <summary>Withdraws the currently advertised prefixes in bounded IPv4 or MP_UNREACH batches and clears the send mirror.</summary>
     private async Task WithdrawAllAsync()
     {
         var count = _advertisedPrefixes.Count;

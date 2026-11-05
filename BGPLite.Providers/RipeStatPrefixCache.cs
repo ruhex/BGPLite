@@ -80,6 +80,7 @@ public sealed class RipeStatPrefixCache
     /// <summary>Entries currently tracked (test/observability of sweep coverage).</summary>
     internal int TrackedCount => _cache.Count;
 
+    /// <summary>Returns fresh, stale, or shared in-flight ASN data according to the cache policy, preserving negative failures unless explicitly allowed.</summary>
     public async Task<IReadOnlyList<IpPrefix>> GetPrefixesAsync(uint asn, CancellationToken ct = default, bool serveNegativeEntries = true)
     {
         // Amortized expired-entry sweep — expired entries would otherwise stay pinned until the entry

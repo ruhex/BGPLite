@@ -127,6 +127,7 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
         return Task.CompletedTask;
     }
 
+    /// <summary>Stops accepts, applies the configured graceful-close policy, and releases sessions and background loops.</summary>
     public async Task StopAsync(CancellationToken cancellationToken)
     {
         _logger.LogInformation("BGP server shutting down");
@@ -320,6 +321,7 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
             ? peer.MapToIPv6()
             : peer;
 
+    /// <summary>Accepts connections with bounded listener retries, per-source throttling, and explicit socket ownership transfer.</summary>
     private async Task AcceptLoopAsync(CancellationToken cancellationToken)
     {
         while (!cancellationToken.IsCancellationRequested)
@@ -508,6 +510,7 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
         }
     }
 
+    /// <summary>Reports whether a matching live session for the peer identity is currently Established.</summary>
     public bool IsPeerEstablished(string peerIp, uint asn) =>
         IPAddress.TryParse(peerIp, out var ip)
         && _sessions.Any(kvp =>

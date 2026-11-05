@@ -206,6 +206,7 @@ public sealed class PrefixService : IPrefixService
         bool Ok,
         IReadOnlyList<(UInt128 Prefix, byte Length, bool IsIpv4)> Prefixes);
 
+    /// <summary>Resolves one ASN under the bounded fan-out gate, returning failures as values but propagating caller cancellation.</summary>
     private async Task<AsnResolution> ResolveAsnAsync(uint asn, SemaphoreSlim gate, CancellationToken ct)
     {
         try
@@ -249,6 +250,7 @@ public sealed class PrefixService : IPrefixService
         }
     }
 
+    /// <summary>Returns the resolved prefix count without converting lookup failures into a successful zero.</summary>
     public async Task<int> GetPrefixCountAsync(uint asn, CancellationToken ct = default)
     {
         var prefixes = await GetPrefixesAsync(asn, ct);
@@ -283,6 +285,7 @@ public sealed class PrefixService : IPrefixService
     internal Action? RuAfterGenerationCheckProbe { get; set; }
     private readonly Func<string, Task>? _onSourceChanged;
 
+    /// <summary>Loads and caches the default RU projection, rejecting stale publication after a concurrent source commit.</summary>
     public async Task<List<(UInt128 Prefix, byte Length, bool IsIpv4, uint Asn)>> GetRuPrefixesAsync(CancellationToken ct = default)
     {
         // Fast path: fresh entry. A single Volatile.Read of the immutable entry reference gives a
