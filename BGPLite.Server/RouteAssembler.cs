@@ -87,7 +87,8 @@ public sealed class RouteAssembler : IRouteAssembler
                 return await FilterAndReturnAsync(routes, filterPeerConfig, ct);
             }
 
-            _logger.LogInformation("Peer {Peer} subscriptions: [{Subs}]", peerLabel, string.Join(", ", subscriptionIds));
+            _logger.LogInformation("Peer {Peer} subscriptions: [{Subs}]", peerLabel,
+                SanitizeForLog(string.Join(", ", subscriptionIds)));
 
             // Fetch outcome counters — the RU fallback below is suppressed only on a TOTAL
             // failure (every attempted fetch failed). A mixed build (one source failed, another
@@ -181,7 +182,7 @@ public sealed class RouteAssembler : IRouteAssembler
                          !resolvedAsRipe.Contains(n) && !prefixSources.Any(s => s.Name == n)))
                 _logger.LogWarning(
                     "Subscription '{Name}' on {Peer} matches no RipeStat.AsnLists entry and no PrefixSource — ignored (fix the peer's subscription)",
-                    unknown, peerLabel);
+                    SanitizeForLog(unknown), peerLabel);
 
             foreach (var name in sourceNames)
             {
@@ -434,15 +435,27 @@ public sealed class RouteAssembler : IRouteAssembler
             var prefixes = await prefixService.GetUserSourcePrefixesAsync(source.Name, source.Url, source.Community, ct);
             foreach (var p in prefixes)
                 routes.Add(MakeRoute(p.Prefix, p.Length, p.IsIpv4, nextHop, null, comms));
-            logger.LogInformation("User-source '{Name}': {Count} prefixes for {Peer}", source.Name, prefixes.Count, peerLabel);
+            logger.LogInformation("User-source '{Name}': {Count} prefixes for {Peer}", SanitizeForLog(source.Name), prefixes.Count, peerLabel);
             return true;
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }  // only CALLER cancellation — a per-source timeout OCE (the linked CTS inside HttpPrefixProvider, on the live token) must stay a fetch failure below
         catch (Exception ex)
         {
-            logger.LogWarning(ex, "User-source '{Name}' failed for {Peer}; skipped", source.Name, peerLabel);
+            logger.LogWarning(ex, "User-source '{Name}' failed for {Peer}; skipped", SanitizeForLog(source.Name), peerLabel);
             return false;
         }
+    }
+
+    private static string SanitizeForLog(string? value)
+    {
+        if (string.IsNullOrEmpty(value)) return string.Empty;
+        var sanitized = new System.Text.StringBuilder(value.Length);
+        foreach (var ch in value)
+        {
+            sanitized.Append(char.IsControl(ch) ? ' ' : ch);
+            if (sanitized.Length >= 200) { sanitized.Append('…'); break; }
+        }
+        return sanitized.ToString();
     }
 
     /// <summary>

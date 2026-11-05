@@ -63,12 +63,14 @@ public sealed class RouteAssemblerPolicyTests
     /// <summary>An existing peer subscribed to "tier1" — the configured-peer branch.</summary>
     private sealed class ConfiguredPeerStore : IPeerStore
     {
-        public List<string> Subscriptions { get; set; } = ["tier1"]; public Task<string> CreatePeerAsync(string ip, uint asn, string? description, CancellationToken ct = default) => Task.FromResult("id");
+        public List<string> Subscriptions { get; set; } = ["tier1"];
+        public List<CustomSourceView> UserSources { get; set; } = [];
+        public Task<string> CreatePeerAsync(string ip, uint asn, string? description, CancellationToken ct = default) => Task.FromResult("id");
         public Task UpsertPeerAsync(string ip, uint asn, CancellationToken ct = default) => Task.CompletedTask;
         public Task UpdateSessionStatusAsync(string ip, uint asn, bool active, CancellationToken ct = default) => Task.CompletedTask;
         public Task<int?> GetPeerMaxPrefixAsync(string ip, uint asn, CancellationToken ct = default) => Task.FromResult<int?>(null);
         public Task<PeerRoutingView?> LoadPeerRoutingViewAsync(string ip, uint asn, CancellationToken ct = default)
-            => Task.FromResult<PeerRoutingView?>(new("id", Subscriptions, [], [], []));
+            => Task.FromResult<PeerRoutingView?>(new("id", Subscriptions, [], [], UserSources));
     }
 
     [Fact]
@@ -177,6 +179,28 @@ public sealed class RouteAssemblerPolicyTests
         var communities = routes.SelectMany(r => r.Communities).ToArray();
         Assert.Contains(CommunityCodec.Parse("65001:200"), communities);
         Assert.Contains(CommunityCodec.Parse("65001:201"), communities);
+    }
+
+    [Fact]
+    public async Task UserSourceName_ControlCharacters_CannotForgeLogLines()
+    {
+        var logger = new CapturingLogger();
+        var store = new ConfiguredPeerStore
+        {
+            Subscriptions = [],
+            UserSources = [new CustomSourceView("evil\nFORGED", "https://example.com/nets.txt", null)]
+        };
+        var config = Config();
+        var assembler = new RouteAssembler(
+            new StubPrefixService(), store,
+            new ConfigCommunityResolver(config, config.Bgp),
+            AllowAllFilter.Instance, config, config.Bgp, logger);
+
+        await assembler.BuildOutboundRoutesAsync(
+            "203.0.113.7", 65002, new PeerConfig { Address = "203.0.113.7" }, "203.0.113.7", CancellationToken.None);
+
+        Assert.Contains(logger.Entries, e => e.Message.Contains("evil FORGED", StringComparison.Ordinal));
+        Assert.DoesNotContain(logger.Entries, e => e.Message.Contains('\n') || e.Message.Contains('\r'));
     }
 
     [Fact]
