@@ -154,7 +154,7 @@ public static class PrefixCidr
     /// the four input paths.
     /// </para>
     /// </summary>
-    private static bool IsCanonicalIpv4(ReadOnlySpan<char> text)
+    public static bool IsCanonicalIpv4(ReadOnlySpan<char> text)
     {
         var octets = 0;
         while (true)

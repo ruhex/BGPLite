@@ -1769,35 +1769,29 @@ public sealed class ManagementApi : IHostedService, IDisposable
     }
 
     /// <summary>
-    /// Validates a peer address and returns it in canonical dotted-quad form, or <c>null</c> if it
-    /// is not a usable peer address. Both families are accepted — a peer may be an IPv6 host.
-    /// <para>
-    /// Canonicalizing is the point, not a nicety. <c>BgpServer</c> keys an accepted session by
-    /// <c>remoteEndpoint.Address.ToString()</c>, so a peer row storing any other spelling of the same
-    /// address never binds to its session — the peer is configured, visible in the UI, and silently
-    /// never comes up. <see cref="IPAddress.TryParse"/> accepts several such spellings and rewrites
-    /// them: <c>01.02.03.04</c> and <c>0x1.2.3.4</c> both become <c>1.2.3.4</c>, and the three-part
-    /// form <c>1.2.3</c> becomes <c>1.2.0.3</c> — a different host than the one typed. Storing
-    /// <c>ToString()</c> collapses all of them onto the form the BGP path will look for.
-    /// </para>
-    /// <para>
-    /// Addresses no BGP session can ever originate from — unspecified, loopback, multicast, and the
-    /// IPv4 broadcast address — are rejected, the API-side parity of the YAML path's fail-loud
-    /// validation: such rows can never match a session, and a multicast row would even arm a kernel
-    /// TCP-MD5 entry.
-    /// </para>
+    /// Validates a peer address and returns its canonical form, or <c>null</c> for unusable input.
+    /// IPv4 must already use the canonical dotted quad shared with <see cref="PrefixCidr"/> — the
+    /// inet_aton forms accepted by <see cref="IPAddress.TryParse"/> are rejected, never rewritten
+    /// into a different target host. Valid IPv6 is accepted; mapped IPv6 normalizes to plain IPv4.
+    /// Unspecified, loopback, multicast, and broadcast identities are rejected.
     /// </summary>
     internal static string? NormalizePeerIp(string? ip)
     {
         if (string.IsNullOrWhiteSpace(ip)) return null;
         if (!IPAddress.TryParse(ip, out var address)) return null;
-        // IPv4-mapped IPv6 (::ffff:a.b.c.d) names the IPv4 address space — normalize to the
-        // plain IPv4 form so the row matches the address form the dual-mode listener reports.
+        if (address.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork
+            && !PrefixCidr.IsCanonicalIpv4(ip))
+            return null;
+        // Validate the embedded dotted quad too, then normalize mapped IPv6 to the listener's key.
         if (address.IsIPv4MappedToIPv6)
+        {
+            var lastColon = ip.LastIndexOf(':');
+            if (lastColon < 0 || !PrefixCidr.IsCanonicalIpv4(ip.AsSpan(lastColon + 1)))
+                return null;
             address = address.MapToIPv4();
+        }
         if (IsNonPeerAddress(address))
             return null;
-        // The canonical ToString form matches what the accept loop stores.
         return address.ToString();
     }
 
