@@ -70,6 +70,7 @@ public sealed class PrefixService : IPrefixService
     {
         if (!string.Equals(sourceName, _config.DefaultPrefixSource, StringComparison.Ordinal))
             return;
+        RuInvalidationProbe?.Invoke();
         lock (_ruPublicationSync)
         {
             Interlocked.Increment(ref _ruGeneration);
@@ -283,6 +284,7 @@ public sealed class PrefixService : IPrefixService
     private readonly object _ruPublicationSync = new();
     internal Action? RuPublishProbe { get; set; }
     internal Action? RuAfterGenerationCheckProbe { get; set; }
+    internal Action? RuInvalidationProbe { get; set; }
     private readonly Func<string, Task>? _onSourceChanged;
 
     /// <summary>Loads and caches the default RU projection, rejecting stale publication after a concurrent source commit.</summary>

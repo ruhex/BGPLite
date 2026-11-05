@@ -205,6 +205,7 @@ public class PrefixCacheRaceTests
         Assert.Equal(2, source.LoadCalls); // stale publication was rejected, so the new content reloads
     }
 
+    /// <summary>Pauses publication after its generation check and commits at the invalidation-lock boundary; no timing delay decides the order.</summary>
     [Fact]
     public async Task GetRuPrefixesAsync_CommitAfterGenerationCheck_CannotRestoreStaleProjection()
     {
@@ -212,6 +213,8 @@ public class PrefixCacheRaceTests
         var service = Service(source, defaultSource: string.Empty);
         using var generationChecked = new ManualResetEventSlim();
         using var releasePublication = new ManualResetEventSlim();
+        using var invalidationStarted = new ManualResetEventSlim();
+        service.RuInvalidationProbe = invalidationStarted.Set;
         service.RuAfterGenerationCheckProbe = () =>
         {
             generationChecked.Set();
@@ -221,7 +224,7 @@ public class PrefixCacheRaceTests
         var oldLoad = Task.Run(() => service.GetRuPrefixesAsync());
         Assert.True(generationChecked.Wait(TimeSpan.FromSeconds(5)));
         var commit = Task.Run(() => source.Commit([new IpPrefix(0xCB000000u, 8)]));
-        await Task.Delay(100); // pre-fix: invalidation lands inside the open window
+        Assert.True(invalidationStarted.Wait(TimeSpan.FromSeconds(5)));
         releasePublication.Set();
         await Task.WhenAll(oldLoad, commit);
         var latest = await service.GetRuPrefixesAsync();
