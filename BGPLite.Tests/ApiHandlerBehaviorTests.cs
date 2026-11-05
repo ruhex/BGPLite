@@ -85,8 +85,8 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
         }
     }
 
-    [Fact]
     /// <summary>Verifies that text export returns raw newline-delimited CIDRs rather than JSON-encoded strings.</summary>
+    [Fact]
     public async Task ExportTxt_PlaintextBody_NotJsonQuoted()
     {
         var store = new PeerStore(new StaticOptionsFactory(new DbContextOptionsBuilder<BgpDbContext>().UseSqlite(_connection).Options));
@@ -102,8 +102,8 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
         Assert.Equal("10.0.0.0/8", body.TrimEnd());   // pre-fix: "\"10.0.0.0/8\\n\"" with application/json
     }
 
-    [Fact]
     /// <summary>Compares JSON export with the production assembler across subscriptions, custom values, and active user sources.</summary>
+    [Fact]
     public async Task ExportJson_UsesCompleteOutboundPipeline()
     {
         var store = new PeerStore(new StaticOptionsFactory(new DbContextOptionsBuilder<BgpDbContext>().UseSqlite(_connection).Options));
@@ -131,8 +131,8 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
         ], exported!.OrderBy(p => p, StringComparer.Ordinal));
     }
 
-    [Fact]
     /// <summary>Verifies that source failure returns 503 without leaking custom or otherwise surviving prefixes.</summary>
+    [Fact]
     public async Task ExportJson_SourceFailure_Returns503WithoutPartialPrefixes()
     {
         var store = new PeerStore(new StaticOptionsFactory(new DbContextOptionsBuilder<BgpDbContext>().UseSqlite(_connection).Options));
@@ -154,8 +154,8 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
         Assert.DoesNotContain("198.51.100.0", body);
     }
 
-    [Fact]
     /// <summary>Verifies that a mixed ASN result is rejected without exposing surviving prefixes or failure details.</summary>
+    [Fact]
     public async Task ExportJson_PartialAsnFailure_Returns503WithoutSurvivingPrefixes()
     {
         var store = new PeerStore(new StaticOptionsFactory(new DbContextOptionsBuilder<BgpDbContext>().UseSqlite(_connection).Options));
@@ -337,8 +337,8 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
         }
     }
 
-    [Fact]
     /// <summary>Verifies that sibling credentials use the deterministic shared-IP key rather than last-writer-wins.</summary>
+    [Fact]
     public async Task CreatePeer_SecondKeyOnSharedIp_ArmsTheDeterministicResolverKey()
     {
         // Pre-fix the create path armed the NEW row's key directly (last-writer-wins across
@@ -449,6 +449,7 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
         Assert.DoesNotContain("unarmed-secret", json);
     }
 
+    /// <summary>Exercises duplicate lists, ASNs, and normalized CIDRs on create/update, requiring 400 and no DB mutation.</summary>
     [Theory]
     [InlineData(false, "lists", "[\"ru\",\"ru\"]", "ru")]
     [InlineData(true, "lists", "[\"ru\",\"ru\"]", "ru")]
@@ -458,7 +459,6 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
     [InlineData(true, "customPrefixes", "[\"10.0.0.0/24\",\"10.0.0.0/24\"]", "10.0.0.0/24")]
     [InlineData(false, "customPrefixes", "[\"10.0.0.1/24\",\"10.0.0.0/24\"]", "10.0.0.0/24")]
     [InlineData(true, "customPrefixes", "[\"10.0.0.1/24\",\"10.0.0.0/24\"]", "10.0.0.0/24")]
-    /// <summary>Exercises duplicate lists, ASNs, and normalized CIDRs on create/update, requiring 400 and no DB mutation.</summary>
     public async Task DuplicatePeerValues_Return400WithFieldValueIndexes_AndDoNotMutateStore(
         bool update, string field, string values, string duplicate)
     {
@@ -623,8 +623,8 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
         Assert.Equal(1, sessions.RefreshCalls);
     }
 
-    [Fact]
     /// <summary>Verifies conditional restoration of an existing peer's previous password after failed replacement.</summary>
+    [Fact]
     public async Task Md5Create_ExistingPeerKernelFailure_RestoresPreviousStoredPassword()
     {
         if (!OperatingSystem.IsLinux()) return;
@@ -959,7 +959,7 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
         {
             lock (_md5Sync)
             {
-                if (password == ThrowOnPassword)
+                if (ThrowOnPassword is not null && password == ThrowOnPassword)
                     throw new InvalidOperationException("simulated kernel refusal");
                 Md5Keys.Add((peerIp, password));
             }
