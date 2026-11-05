@@ -48,6 +48,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
     private readonly IPrefixService _prefixService;
     private readonly IPrefixSourceService _prefixSources;
     private readonly ISessionManager _sessionManager;
+    private readonly IPrefixExportService _prefixExport;
     private readonly ILogger<ManagementApi> _logger;
     private readonly int _port;
     private readonly string _listenAddress;  // bind address — loopback by default
@@ -76,9 +77,9 @@ public sealed class ManagementApi : IHostedService, IDisposable
     /// slot. The degradation contract lives with it: budget expiry surfaces as an
     /// OperationCanceledException while <c>_shutdownCts</c> is NOT cancelled (catch filters read
     /// <c>when (!_shutdownCts.IsCancellationRequested)</c>), and a shutdown OCE always propagates.
-    /// Each endpoint then degrades to whatever its response shape allows — a partial result
-    /// (peer prefixes, asn-lists) or a stable 503 (the AS prefix count, which has nothing
-    /// partial to serve). Hand-rolling a second linked source is exactly how this budget kept
+    /// Each endpoint then degrades to whatever its response shape allows — a stable 503 for
+    /// peer-prefix export (never a partial route filter) or an explicit partial-count result for
+    /// asn-lists. Hand-rolling a second linked source is exactly how this budget kept
     /// regressing endpoint-by-endpoint; a source-scan test pins the one call site.
     /// </summary>
     private CancellationTokenSource CreateExternalFetchBudget()
@@ -122,7 +123,8 @@ public sealed class ManagementApi : IHostedService, IDisposable
         ILogger<ManagementApi> logger,
         IPrefixService prefixService,
         IPrefixSourceService prefixSources,
-        ISessionManager sessionManager)
+        ISessionManager sessionManager,
+        IPrefixExportService prefixExport)
     {
         _store = store;
         _routeTable = routeTable;
@@ -131,6 +133,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
         _prefixService = prefixService;
         _prefixSources = prefixSources;
         _sessionManager = sessionManager;
+        _prefixExport = prefixExport;
         _logger = logger;
         _port = config.ApiPort;
         // Secure-by-default — bind to loopback unless the operator explicitly sets ApiListen.
@@ -1467,71 +1470,35 @@ public sealed class ManagementApi : IHostedService, IDisposable
         var peer = await _store.GetDbPeerByIdAsync(peerId);
         if (peer is null)
             return ApiResponse.Error("Peer not found", 404);
+        if (peer.Asn is not uint asn)
+            return ApiResponse.Error("Prefix export requires a peer with an identified ASN.", 409);
 
-        // Same wall-clock budget as /api/asn-lists — cold subscription fetches are
-        // minutes-scale and must not pin the request (and its in-flight slot) indefinitely.
         using var budget = CreateExternalFetchBudget();
-        List<string> prefixes;
+        PrefixExportResult export;
         try
         {
-            prefixes = await CollectPeerPrefixes(peerId, budget.Token);
+            export = await _prefixExport.ExportAsync(peer.Ip, asn, budget.Token);
         }
-        catch (OperationCanceledException) when (!_shutdownCts.IsCancellationRequested)
+        catch (OperationCanceledException) when (_shutdownCts.IsCancellationRequested) { throw; }
+        catch (OperationCanceledException)
         {
-            _logger.LogWarning(
-                "GET /api/peers/{Id}/prefixes exceeded the {Seconds:0}s external-fetch budget — serving a partial list",
+            _logger.LogWarning("GET /api/peers/{Id}/prefixes exceeded the {Seconds:0}s external-fetch budget",
                 SanitizeForLog(peerId), ExternalFetchBudget.TotalSeconds);
-            prefixes = [];
+            return ApiResponse.Error("Prefix export exceeded its fetch budget; no partial list was returned.", 503);
         }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "GET /api/peers/{Id}/prefixes failed", SanitizeForLog(peerId));
+            return ApiResponse.Error("Prefix export failed; no partial list was returned.", 503);
+        }
+        if (!export.Complete)
+            return ApiResponse.Error("Prefix export is incomplete because a configured source failed; no partial list was returned.", 503);
 
-        var format = ctx.Request.QueryString["format"] ?? "txt";
-        if (format == "json")
-            return ApiResponse.Ok(prefixes);
+        if ((ctx.Request.QueryString["format"] ?? "txt") == "json")
+            return ApiResponse.Ok(export.Prefixes);
 
         ctx.Response.ContentType = "text/plain";
-        return ApiResponse.Ok(string.Join("\n", prefixes));
-    }
-
-    private async Task<List<string>> CollectPeerPrefixes(string peerId, CancellationToken ct)
-    {
-        var prefixes = new List<string>();
-
-        // Custom prefixes
-        prefixes.AddRange(await _store.GetCustomPrefixesAsync(peerId, ct));
-
-        var subscriptions = await _store.GetSubscriptionsAsync(peerId, ct);
-        var subscribedLists = _config.RipeStat?.AsnLists
-            .Where(l => subscriptions.Contains(l.Name))
-            .ToList() ?? [];
-
-        // ASN-based lists
-        var asns = subscribedLists.Where(l => l.Asns.Count > 0).SelectMany(l => l.Asns).ToList();
-        if (asns.Count > 0)
-        {
-            try
-            {
-                var fetched = await _prefixService.GetPrefixesForAsns(asns, ct);
-                foreach (var p in fetched)
-                    prefixes.Add(new IpPrefix(p.Prefix, p.Length, p.IsIpv4).ToString());
-            }
-            catch (OperationCanceledException) when (_shutdownCts.IsCancellationRequested) { throw; }  // only SHUTDOWN propagates — fetch-budget expiry degrades to the partial list
-            catch (Exception ex) { _logger.LogWarning(ex, "CollectPeerPrefixes: ASN fetch failed"); }
-        }
-
-        // Country-based lists
-        if (subscribedLists.Any(l => l.Asns.Count == 0 && l.Country is not null))
-        {
-            try
-            {
-                var ruPrefixes = await _prefixService.GetRuPrefixesAsync(ct);
-                foreach (var p in ruPrefixes)
-                    prefixes.Add(new IpPrefix(p.Prefix, p.Length, p.IsIpv4).ToString());
-            }
-            catch (OperationCanceledException) when (_shutdownCts.IsCancellationRequested) { throw; }  // only SHUTDOWN propagates — see above
-            catch (Exception ex) { _logger.LogWarning(ex, "CollectPeerPrefixes: RU prefix fetch failed"); }
-        }
-
-        return prefixes.Distinct().OrderBy(p => p).ToList();
+        return ApiResponse.Ok(string.Join("\n", export.Prefixes));
     }
 
     #endregion

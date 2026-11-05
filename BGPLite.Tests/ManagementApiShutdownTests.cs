@@ -69,7 +69,8 @@ public sealed class ManagementApiShutdownTests : IDisposable
                 NullLogger<ManagementApi>.Instance,
                 provider,
                 new InertPrefixSourceService(),
-                new InertSessionManager());
+                new InertSessionManager(),
+                Exporter(config, provider));
             try
             {
                 await _api.StartAsync(CancellationToken.None);
@@ -129,7 +130,8 @@ public sealed class ManagementApiShutdownTests : IDisposable
                 NullLogger<ManagementApi>.Instance,
                 provider,
                 new InertPrefixSourceService(),
-                new InertSessionManager());
+                new InertSessionManager(),
+                Exporter(config, provider));
             _api.ExternalFetchBudget = TimeSpan.FromMilliseconds(250);
             try
             {
@@ -182,7 +184,8 @@ public sealed class ManagementApiShutdownTests : IDisposable
                 NullLogger<ManagementApi>.Instance,
                 provider,
                 new InertPrefixSourceService(),
-                new InertSessionManager());
+                new InertSessionManager(),
+                Exporter(config, provider));
             _api.ExternalFetchBudget = TimeSpan.FromMilliseconds(250);
             try
             {
@@ -205,7 +208,8 @@ public sealed class ManagementApiShutdownTests : IDisposable
         await provider.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
         Assert.True(watch.Elapsed < TimeSpan.FromSeconds(5),
             $"the fetch budget must bound the request, took {watch.Elapsed}");
-        Assert.True(response.IsSuccessStatusCode, "budget expiry must degrade to a partial 200, not an error");
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
+        Assert.Contains("no partial list", await response.Content.ReadAsStringAsync());
     }
 
     [Fact]
@@ -230,7 +234,8 @@ public sealed class ManagementApiShutdownTests : IDisposable
             NullLogger<ManagementApi>.Instance,
             new BlockingRuPrefixService(),
             new InertPrefixSourceService(),
-            new InertSessionManager());
+            new InertSessionManager(),
+            Exporter(config, new BlockingRuPrefixService()));
 
         await Assert.ThrowsAnyAsync<HttpListenerException>(() => _api.StartAsync(CancellationToken.None));
 
@@ -263,7 +268,8 @@ public sealed class ManagementApiShutdownTests : IDisposable
                 NullLogger<ManagementApi>.Instance,
                 new BlockingRuPrefixService(),
                 new InertPrefixSourceService(),
-                new InertSessionManager());
+                new InertSessionManager(),
+                Exporter(config, new BlockingRuPrefixService()));
             try
             {
                 await _api.StartAsync(CancellationToken.None);
@@ -292,6 +298,11 @@ public sealed class ManagementApiShutdownTests : IDisposable
 
         Assert.Equal(0, _api.InflightRequestCount);
     }
+
+    private IPrefixExportService Exporter(AppConfig config, IPrefixService prefixes) =>
+        TestRouteAssembly.CreateExporter(
+            new PeerStore(new StaticOptionsFactory(new DbContextOptionsBuilder<BgpDbContext>().UseSqlite(_connection).Options)),
+            config, prefixes);
 
     private static int FreeTcpPort()
     {

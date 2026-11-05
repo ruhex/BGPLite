@@ -300,7 +300,8 @@ public sealed class PeerDeleteTeardownTests
         NullLogger<ManagementApi>.Instance,
         new InertPrefixService(),
         new InertPrefixSourceService(),
-        sessionManager);
+        sessionManager,
+        TestRouteAssembly.CreateExporter(store, new AppConfig(), new InertPrefixService()));
 
     private static RouteAssembler NewAssembler(PeerStore store)
     {

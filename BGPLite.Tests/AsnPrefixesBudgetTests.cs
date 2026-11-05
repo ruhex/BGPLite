@@ -49,15 +49,18 @@ public sealed class AsnPrefixesBudgetTests : IDisposable
             ApiListen = "127.0.0.1",
             ApiPort = port,
         };
+        var store = new PeerStore(new StaticOptionsFactory(new DbContextOptionsBuilder<BgpDbContext>().UseSqlite(_connection).Options));
+        var prefixes = new HangingPrefixService();
         _api = new ManagementApi(
-            new PeerStore(new StaticOptionsFactory(new DbContextOptionsBuilder<BgpDbContext>().UseSqlite(_connection).Options)),
+            store,
             new RouteTable(),
             config,
             new BgpMetrics(),
             NullLogger<ManagementApi>.Instance,
-            new HangingPrefixService(),
+            prefixes,
             new InertSources(),
-            new InertSessions());
+            new InertSessions(),
+            TestRouteAssembly.CreateExporter(store, config, prefixes));
         await _api.StartAsync(CancellationToken.None);
         _api.ExternalFetchBudget = TimeSpan.FromMilliseconds(300);
 

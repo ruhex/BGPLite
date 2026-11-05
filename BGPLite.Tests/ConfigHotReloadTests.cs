@@ -399,7 +399,8 @@ public class ConfigHotReloadTests
             // omitted — the API can no longer be built in a half-wired state by accident.
             new InertPrefixService(),
             new InertPrefixSourceService(),
-            new InertSessionManager());
+            new InertSessionManager(),
+            TestRouteAssembly.CreateExporter(store, config, new InertPrefixService()));
         return new ApiHarness(api, connection);
     }
 

@@ -161,7 +161,7 @@ remote ASN, so two peers behind one source IP are distinct rows).
 | `GET`  | `/api/peers/{id}` | Peer detail by ID; no caller scoping — use an authenticated reverse proxy |
 | `PUT`  | `/api/peers/{id}` | Partial update — an omitted field is left unchanged |
 | `DELETE` | `/api/peers/{id}` | Delete the peer and tear down its session |
-| `GET`  | `/api/peers/{id}/prefixes` | Prefixes advertised to the peer — plain text by default, `?format=json` for an array |
+| `GET`  | `/api/peers/{id}/prefixes` | Full outbound pipeline; plain text by default, `?format=json` for an array. Source failure/budget expiry returns 503 without a partial list |
 | `GET`  | `/api/peers/{id}/sources` | List the peer's own URL prefix sources |
 | `POST` | `/api/peers/{id}/sources` | Add a URL prefix source |
 | `DELETE` | `/api/peers/{id}/sources/{sourceId}` | Remove a source |

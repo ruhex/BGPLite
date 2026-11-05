@@ -91,6 +91,8 @@ leaves).
 - `IBgpSessionFactory` — the accept loop carries none of the session's dependencies (#263).
 - `IRouteAssembler` — outbound policy. `RouteAssembler` (per-peer decision tree) vs
   `SharedTableRouteAssembler` (explicit, logged-once degraded mode serving only the startup seed, #307).
+- `IPrefixExportService` — Contracts-only API seam; Server's implementation reuses the assembler and
+  aggregator for complete canonical exports, returning an explicit degraded marker on source failure.
 - `TimeProvider` — injected clock for hold timers, debounces, TTLs (#96); tests inject fakes.
 - `IPrefixAggregator` — wire summarization policy (`ExactUnionPrefixAggregator`, swappable).
 
