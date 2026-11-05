@@ -13,6 +13,7 @@ public sealed class PeerMd5BootstrapService(
     ISessionManager sessionManager,
     ILogger<PeerMd5BootstrapService> logger) : IHostedService
 {
+    /// <summary>Groups persisted credentials by source address, resolves shared-IP conflicts, and arms each key.</summary>
     public async Task StartAsync(CancellationToken cancellationToken)
     {
         var armed = 0;
@@ -28,5 +29,6 @@ public sealed class PeerMd5BootstrapService(
             logger.LogInformation("TCP-MD5 armed for {Count} peer source address(es)", armed);
     }
 
+    /// <summary>Leaves key teardown to BgpServer, which owns the listener and armed-key state.</summary>
     public Task StopAsync(CancellationToken cancellationToken) => Task.CompletedTask;
 }

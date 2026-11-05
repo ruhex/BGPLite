@@ -127,6 +127,7 @@ internal sealed class IpAcceptThrottle
             SweepStaleLocked(nowTicks);
     }
 
+    /// <summary>Evicts idle windows while the caller holds the dictionary lock shared with accept updates.</summary>
     private void SweepStaleLocked(long nowTicks)
     {
         var cutoff = nowTicks - _windowTicks;
