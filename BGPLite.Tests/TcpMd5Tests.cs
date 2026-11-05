@@ -223,6 +223,29 @@ public class TcpMd5Tests
     }
 
     [Fact]
+    public async Task Linux_ClearAlreadyMissingKey_TreatsEnoentAsSuccess()
+    {
+        if (!OperatingSystem.IsLinux()) return;
+        using var server = NewServer();
+        await server.StartAsync(CancellationToken.None);
+        server.Md5ApplyProbe = (_, _, key) => key is not null
+            ? true
+            : throw new SocketException(2);
+
+        try
+        {
+            server.SetPeerMd5Key("192.0.2.10", "old");
+            server.SetPeerMd5Key("192.0.2.10", null);
+
+            Assert.False(server.IsPeerMd5Armed("192.0.2.10", "old"));
+        }
+        finally
+        {
+            await server.StopAsync(CancellationToken.None);
+        }
+    }
+
+    [Fact]
     public void ClearWithoutConfiguredKey_DoesNotTouchKernel()
     {
         using var server = NewServer();
