@@ -232,7 +232,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
     /// <summary>Whether a global concurrency limiter is currently active — exposed for hot-reload tests.</summary>
     internal bool IsConcurrencyLimitEnabled => Volatile.Read(ref _concurrencyLimiter) is not null;
 
-    public async Task StartAsync(CancellationToken cancellationToken)
+    public Task StartAsync(CancellationToken cancellationToken)
     {
         _listener = new HttpListener();
         // HttpListener prefix normalization:
@@ -270,26 +270,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
                 "the proxy overwrites it. A pass-through proxy lets clients spoof their IP");
         }
         _listenTask = ListenAsync(_cts.Token);
-
-        // Arm the listening socket with every peer's TCP-MD5 key. ManagementApi starts after
-        // BgpServer (registration order), so only the sub-second window before this loop is
-        // unprotected. A stored password on a platform without TCP-MD5 (Linux-only) cannot be
-        // armed: SetPeerMd5Key throws and startup aborts instead of running with a false
-        // tcpMd5=true indicator.
-        var md5Bootstrapped = 0;
-        // TCP keys by source IP: a DIFFERENT key on a sibling row would otherwise win
-        // non-deterministically — the resolver picks one deterministically and warns (values never
-        // logged), and the same resolver re-arms on delete/PATCH so runtime cannot drift from here.
-        foreach (var group in (await _store.GetPeerMd5CredentialsAsync(cancellationToken))
-                     .GroupBy(c => c.Ip).OrderBy(g => g.Key, StringComparer.Ordinal))
-        {
-            var key = ResolveSharedIpKey(group.Key, [.. group]);
-            if (key is null) continue;
-            _sessionManager.SetPeerMd5Key(group.Key, key);
-            md5Bootstrapped++;
-        }
-        if (md5Bootstrapped > 0)
-            _logger.LogInformation("TCP-MD5 armed for {Count} peer(s)", md5Bootstrapped);
+        return Task.CompletedTask;
     }
 
     /// <summary>
@@ -298,12 +279,13 @@ public sealed class ManagementApi : IHostedService, IDisposable
     /// warning the startup bootstrap emits when siblings declare DIFFERENT keys; null when no
     /// surviving row carries a key.
     /// </summary>
-    private string? ResolveSharedIpKey(string ip, IReadOnlyList<(string Ip, string Md5Password)> rows)
+    internal static string? ResolveSharedIpKey(
+        string ip, IReadOnlyList<(string Ip, string Md5Password)> rows, ILogger logger)
     {
         if (rows.Count == 0) return null;
         var creds = rows.OrderBy(c => c.Md5Password, StringComparer.Ordinal).ToList();
         if (creds.Select(c => c.Md5Password).Distinct().Count() > 1)
-            _logger.LogWarning(
+            logger.LogWarning(
                 "TCP-MD5: {Count} peer rows on source IP {Ip} configure DIFFERENT keys — TCP-MD5 keys by IP, so one key applies to all of them (peers: {Peers})",
                 creds.Count, ip, string.Join(", ", creds.Select(c => c.Ip)));
         return creds[0].Md5Password;
@@ -318,7 +300,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
     internal async Task RearmPeerIpMd5KeyAsync(string ip)
     {
         var remaining = await _store.GetPeerMd5CredentialsForIpAsync(ip);
-        _sessionManager.SetPeerMd5Key(ip, ResolveSharedIpKey(ip, remaining));
+        _sessionManager.SetPeerMd5Key(ip, ResolveSharedIpKey(ip, remaining, _logger));
     }
 
     /// <summary>
