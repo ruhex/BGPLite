@@ -176,8 +176,8 @@ public class PeerStoreAtomicityTests
     }
 
     /// <summary>
-    /// UpsertPeer records identity during OPEN without claiming that the session is Established.
-    /// Activation and LastSessionAt belong to the subsequent Established route-build path.
+    /// UpsertPeer records identity/history on Established without making the persisted status
+    /// column the authority for live API status.
     /// </summary>
     [Fact]
     public async Task UpsertPeer_DoesNotMarkActiveBeforeEstablished()
@@ -189,18 +189,18 @@ public class PeerStoreAtomicityTests
         var peer = await store.GetPeerAsync(Ip, Asn);
         Assert.NotNull(peer);
         Assert.Equal("inactive", peer!.Status);
-        Assert.Null(peer.LastSessionAt);
+        Assert.NotNull(peer.LastSessionAt);
 
         await store.UpdateSessionStatusAsync(Ip, Asn, active: true);
         var established = await store.GetPeerAsync(Ip, Asn);
         Assert.Equal("active", established!.Status);
         Assert.NotNull(established.LastSessionAt);
 
-        // A pre-Established reconnect must not change the existing session's status or history.
+        // Re-identification refreshes history but does not perform a competing status write.
         await store.UpsertPeerAsync(Ip, Asn);
         var reidentified = await store.GetPeerAsync(Ip, Asn);
         Assert.Equal("active", reidentified!.Status);
-        Assert.Equal(established.LastSessionAt, reidentified.LastSessionAt);
+        Assert.True(string.CompareOrdinal(reidentified.LastSessionAt, established.LastSessionAt) >= 0);
     }
 
     /// <summary>

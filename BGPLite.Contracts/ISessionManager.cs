@@ -8,6 +8,8 @@ public interface ISessionManager
     /// </summary>
     Task RefreshPeerAsync(string peerIp, uint asn);
     List<string> GetActivePeerIps();
+    /// <summary>Whether any live Established session matches the peer's source IP and remote ASN.</summary>
+    bool IsPeerEstablished(string peerIp, uint asn);
     /// <summary>Actual advertised prefix count (post-aggregation, post-dedup), or 0.</summary>
     int GetAdvertisedPrefixCount(string peerIp, uint asn);
     /// <summary>Refresh ALL established sessions (unsolicited UPDATE to every peer).</summary>

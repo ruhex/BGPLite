@@ -44,11 +44,6 @@ public sealed class BgpSession : IDisposable
     // 0 = unlimited, > 0 = the cap.
     private int _effectiveMaxPrefix;
     private readonly IPeerStore? _peerStore;
-    // Set by BgpServer right after creation. A peer row stays active while any Established
-    // sibling with the same source IP and remote ASN exists; no pre-Established ownership claim
-    // can leave a stale status behind.
-    private Func<BgpSession, bool>? _hasEstablishedSiblingProbe;
-    internal Func<BgpSession, bool>? HasEstablishedSiblingProbe { set => _hasEstablishedSiblingProbe = value; }
     private readonly IPrefixAggregator _prefixAggregator;
     // The outbound route-assembly policy lives in the assembler, not the session: the session
     // delegates to BuildOutboundRoutesAsync and keeps only the send/withdraw mirror
@@ -546,6 +541,10 @@ public sealed class BgpSession : IDisposable
             TransitionTo(BgpFsmState.Established);
             _metrics.SessionEstablished();
             _logger.LogInformation("SessionEstablished with {Peer} ASN={Asn}", _peer, _remoteAsn);
+            // Record identity/history only after the session is actually Established. API status is
+            // projected from live sessions, so teardown needs no racy persisted active/inactive write.
+            if (_onPeerIdentified is not null)
+                await _onPeerIdentified(_peerConfig.Address, _remoteAsn, linkedCts.Token);
 
             // Send initial routes. _sendLock is acquired inside SendMessageAsync for byte-level
             // ordering; _advertisedPrefixesLock guards the list against a RefreshRoutesAsync fired
@@ -684,33 +683,7 @@ public sealed class BgpSession : IDisposable
             }
 
             if (wasEstablished)
-            {
                 _metrics.SessionClosed();
-                // Best-effort, like SendNotificationAsync above: this sync DB write runs in the
-                // finally of a fire-and-forget task (RunSessionAsync has no catch), so a transient
-                // store failure (SQLite "database is locked" past busy_timeout) must not escape —
-                // it would fault RunAsync unobserved, skip PeerDisconnected() below, and leak
-                // PeerCount plus the row's Status=active forever.
-                // SilentClose skips persistence. Otherwise the row becomes inactive only when no
-                // Established sibling for the same (Ip, Asn) remains. A sibling can establish between
-                // the probe and the write, so re-probe and repair only while that sibling is still live.
-                var silent = (TeardownReason)Interlocked.CompareExchange(ref _teardownReason, 0, 0) == TeardownReason.SilentClose;
-                var hasEstablishedSibling = _hasEstablishedSiblingProbe?.Invoke(this) ?? false;
-                if (!silent && !hasEstablishedSibling)
-                {
-                    if (_peerStore is not null)
-                        try { await _peerStore.UpdateSessionStatusAsync(_peerConfig.Address, _remoteAsn, false); }
-                        catch (Exception ex) { _logger.LogWarning(ex, "Failed to persist session status for {Peer}", _peer); }
-
-                    if (_hasEstablishedSiblingProbe?.Invoke(this) == true)
-                    {
-                        _logger.LogInformation("Established sibling appeared after status write for {Peer} — restoring active", _peer);
-                        if (_peerStore is not null)
-                            try { await _peerStore.UpdateSessionStatusAsync(_peerConfig.Address, _remoteAsn, true); }
-                            catch (Exception ex) { _logger.LogWarning(ex, "Failed to restore session status for {Peer}", _peer); }
-                    }
-                }
-            }
             _metrics.PeerDisconnected();
             _logger.LogInformation("SessionClosed with {Peer}", _peer);
         }
@@ -2102,12 +2075,6 @@ public sealed class BgpSession : IDisposable
         _remoteRouteRefresh = negotiation.RemoteRouteRefresh;
         _negotiatedHoldTime = negotiation.NegotiatedHoldTime;
         _keepAliveInterval = negotiation.KeepAliveInterval;
-
-        // Announce/persist the peer only after the OPEN passes validation: the upsert used to fire
-        // before the expected-ASN check, upserting a configured peer that declared a mismatched ASN
-        // (BadPeerAs) just before the session was torn down. The session token bounds the upsert so
-        // a locked SQLite cannot out-wait shutdown or replacement.
-        if (_onPeerIdentified is not null) await _onPeerIdentified(_peerConfig.Address, _remoteAsn, ct);
 
         // The peer can send IPv6 routes via MP_REACH_NLRI (AFI=2/SAFI=1).
         _peerMpIpv6Unicast = CapabilityHelper.SupportsMultiprotocolIpv6Unicast(open);

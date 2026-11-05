@@ -103,15 +103,12 @@ public class PeerStoreKeyingTests
     }
 
     /// <summary>
-    /// Regression: <see cref="PeerStore.LoadPeerRoutingView"/> must return the SAME
-    /// data the five standalone calls used to produce (GetPeer + GetSubscriptions + GetCustomPrefixes
-    /// + GetCustomAsns) AND fold the session-status update into the same DbContext
-    /// (<see cref="PeerStore.UpdateSessionStatus"/>(active:true)). Asserts both equivalence of shape
-    /// and the side effect (Status="active", LastSessionAt set) so a future refactor cannot silently
-    /// drop either the read or the folded write.
+    /// <see cref="PeerStore.LoadPeerRoutingView"/> returns the same data as the standalone calls
+    /// without mutating peer status or session history. Live status is projected by the API from
+    /// the session manager, not written by a route read.
     /// </summary>
     [Fact]
-    public async Task LoadPeerRoutingView_Matches_Standalone_Calls_And_Folds_Status_Update()
+    public async Task LoadPeerRoutingView_Matches_Standalone_Calls_Without_Mutating_Session_State()
     {
         var (store, connection) = NewStore();
         using var conn = connection;
@@ -121,7 +118,7 @@ public class PeerStoreKeyingTests
         await store.SetCustomPrefixesAsync(id, [("203.0.113.0", 24), ("198.51.100.0", 25)]);
         await store.SetCustomAsnsAsync(id, [65001, 65002]);
 
-        var before = DateTime.UtcNow;
+        var before = await store.GetDbPeerByIdAsync(id);
         var view = await store.LoadPeerRoutingViewAsync(SharedIp, 64512);
 
         Assert.NotNull(view);
@@ -142,12 +139,9 @@ public class PeerStoreKeyingTests
         Assert.Equal(new[] { "198.51.100.0/25", "203.0.113.0/24" }, view.CustomPrefixes.Order().ToArray());
         Assert.Equal(new uint[] { 65001, 65002 }, view.CustomAsns.Order().ToArray());
 
-        // The folded status write took effect: Status="active" and LastSessionAt stamped at/after
-        // the call (it used to be a separate UpdateSessionStatus call on its own DbContext).
-        var peer = (await store.GetDbPeerByIdAsync(id))!;
-        Assert.Equal("active", peer.Status);
-        Assert.NotNull(peer.LastSessionAt);
-        Assert.True(peer.LastSessionAt >= before);
+        var after = await store.GetDbPeerByIdAsync(id);
+        Assert.Equal(before!.Status, after!.Status);
+        Assert.Equal(before.LastSessionAt, after.LastSessionAt);
     }
 
     [Fact]

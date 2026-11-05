@@ -970,6 +970,9 @@ public sealed class ManagementApi : IHostedService, IDisposable
         return ApiResponse.Ok(new { ip = clientIp, peers = details });
     }
 
+    private string PeerStatus(string ip, uint? asn) =>
+        asn.HasValue && _sessionManager.IsPeerEstablished(ip, asn.Value) ? "active" : "inactive";
+
     /// <summary>Builds the peer-detail anonymous object for /api/me. Returns null if the peer vanished.</summary>
     private async Task<object?> BuildPeerDetail(string peerId)
     {
@@ -989,7 +992,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
             ip = peer.Ip,
             asn = peer.Asn,
             description = peer.Description,
-            status = peer.Status,
+            status = PeerStatus(peer.Ip, peer.Asn),
             createdAt = peer.CreatedAt,
             maxPrefix = peer.MaxPrefix,
             tcpMd5 = IsMd5Armed(peer.Ip, peer.Md5Password),
@@ -1111,7 +1114,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
             ip = normalizedIp,
             asn = data.Asn,
             description = data.Description,
-            status = saved.Status,
+            status = PeerStatus(normalizedIp, data.Asn),
             createdAt = saved.CreatedAt,
             maxPrefix = saved.MaxPrefix,
             tcpMd5 = IsMd5Armed(normalizedIp, data.Md5Password),
@@ -1134,7 +1137,7 @@ public sealed class ManagementApi : IHostedService, IDisposable
             ip = peer.Ip,
             asn = peer.Asn,
             description = peer.Description,
-            status = peer.Status,
+            status = PeerStatus(peer.Ip, peer.Asn),
             createdAt = peer.CreatedAt,
             maxPrefix = peer.MaxPrefix,
             tcpMd5 = IsMd5Armed(peer.Ip, peer.Md5Password),

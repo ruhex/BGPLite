@@ -111,7 +111,8 @@ SQLite via EF Core, owned entirely by `BGPLite.Api`: `BgpDbContext`, migrations 
 `LegacyEnsureCreated` convergence for EnsureCreated-era databases), WAL/busy_timeout pragmas via
 interceptor. Schema changes go through EF migrations only (see AGENTS.md). `PeerStore` is async
 over `IDbContextFactory`; the remaining synchronous connection open/close fallback in the raw
-ADO.NET upsert is tracked in #570.
+ADO.NET upsert is tracked in #570. Live peer status is projected from Established sessions rather
+than mutated by route reads or teardown-time status writes.
 
 ## Related documents
 

@@ -497,193 +497,20 @@ public class BgpSessionRouteOwnershipTests
         await TeardownAsync(session, run);
     }
 
-    /// <summary>
-    /// A replaced session's slow finally must not flip the peer row back to inactive after a
-    /// replacement wrote active. SilentClose skips the write; otherwise a live Established sibling
-    /// keeps the row active. The last genuine teardown writes inactive.
-    /// </summary>
     private sealed class RecordingPeerStore : IPeerStore
     {
-        public List<(string Ip, uint Asn, bool Active)> StatusWrites = [];
         /// <summary>the per-peer MaxPrefix override returned by GetPeerMaxPrefixAsync
         /// (null = no row / no override — the session falls back to the global cap).</summary>
         public int? MaxPrefixOverride;
         public Task<string> CreatePeerAsync(string ip, uint asn, string? description, CancellationToken ct = default) => Task.FromResult("id");
         public Task UpsertPeerAsync(string ip, uint asn, CancellationToken ct = default) => Task.CompletedTask;
-        public Task UpdateSessionStatusAsync(string ip, uint asn, bool active, CancellationToken ct = default)
-        {
-            StatusWrites.Add((ip, asn, active));
-            return Task.CompletedTask;
-        }
+        public Task UpdateSessionStatusAsync(string ip, uint asn, bool active, CancellationToken ct = default) => Task.CompletedTask;
         public Task<int?> GetPeerMaxPrefixAsync(string ip, uint asn, CancellationToken ct = default)
             => Task.FromResult(MaxPrefixOverride);
         public Task<PeerRoutingView?> LoadPeerRoutingViewAsync(string ip, uint asn, CancellationToken ct = default)
             => Task.FromResult<PeerRoutingView?>(new("id", [], [], [], []));
     }
 
-    private static async Task<(BgpSession Session, Task Run, RecordingPeerStore Store)> EstablishWithStoreAsync(
-        RouteTable routeTable, Func<BgpSession, bool>? siblingProbe = null,
-        ScriptedConnection? connection = null)
-    {
-        var conn = connection ?? new ScriptedConnection();
-        var store = new RecordingPeerStore();
-        var config = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1", HoldTime = 0, KeepAlive = 0 };
-        var session = new BgpSession(
-            conn,
-            new PeerConfig { Address = "127.0.0.1" },
-            config,
-            routeTable,
-            AllowAllFilter.Instance,
-            new BgpMetrics(),
-            NullLogger<BgpSession>.Instance,
-            peerStore: store);
-        session.HasEstablishedSiblingProbe = siblingProbe ?? (_ => false);
-        var run = session.RunAsync();
-        conn.EnqueueMessage(new BgpOpenMessage
-        {
-            Version = BgpConstants.BgpVersion,
-            Asn = 65002,
-            HoldTime = 0,
-            RouterId = 0x0A000002,
-            Capabilities = [BgpCapabilityInfo.FourOctetAsn(65002)],
-        });
-        conn.EnqueueMessage(BgpKeepaliveMessage.Instance);
-        for (var i = 0; i < 200 && !session.IsEstablished; i++)
-            await Task.Delay(TimeSpan.FromMilliseconds(10));
-        Assert.True(session.IsEstablished, "session must reach Established");
-        return (session, run, store);
-    }
-
-    [Fact]
-    public async Task StaleSessionForSamePeer_Teardown_DoesNotReportTheLiveSessionInactive()
-    {
-        var connA = new ScriptedConnection();
-        var (sessionA, runA, storeA) = await EstablishWithStoreAsync(new RouteTable(), connection: connA);
-        var (sessionB, runB, _) = await EstablishWithStoreAsync(new RouteTable());
-        sessionA.HasEstablishedSiblingProbe = _ => sessionB.IsEstablished;
-
-        connA.EnqueueMessage(new BgpNotificationMessage { ErrorCode = BgpConstants.Error.Cease, SubErrorCode = 0 });
-        await runA.WaitAsync(TimeSpan.FromSeconds(5));
-
-        Assert.DoesNotContain(storeA.StatusWrites, w => !w.Active);
-        sessionA.Dispose();
-        await TeardownAsync(sessionB, runB);
-    }
-
-    [Fact]
-    public async Task SoleSession_Teardown_StillReportsInactive()
-    {
-        var conn = new ScriptedConnection();
-        var (session, run, store) = await EstablishWithStoreAsync(new RouteTable(), connection: conn);
-
-        conn.EnqueueMessage(new BgpNotificationMessage { ErrorCode = BgpConstants.Error.Cease, SubErrorCode = 0 });
-        await run.WaitAsync(TimeSpan.FromSeconds(5));
-
-        Assert.Contains(store.StatusWrites, w => !w.Active);
-        session.Dispose();
-    }
-
-    [Fact]
-    public async Task LastSessionTeardown_AfterSiblingCloses_WritesInactive()
-    {
-        var connA = new ScriptedConnection();
-        var connB = new ScriptedConnection();
-        var (sessionA, runA, storeA) = await EstablishWithStoreAsync(new RouteTable(), connection: connA);
-        var (sessionB, runB, storeB) = await EstablishWithStoreAsync(new RouteTable(), connection: connB);
-        sessionA.HasEstablishedSiblingProbe = _ => sessionB.IsEstablished;
-        sessionB.HasEstablishedSiblingProbe = _ => sessionA.IsEstablished;
-
-        connB.EnqueueMessage(new BgpNotificationMessage { ErrorCode = BgpConstants.Error.Cease, SubErrorCode = 0 });
-        await runB.WaitAsync(TimeSpan.FromSeconds(5));
-        Assert.DoesNotContain(storeB.StatusWrites, w => !w.Active);
-
-        connA.EnqueueMessage(new BgpNotificationMessage { ErrorCode = BgpConstants.Error.Cease, SubErrorCode = 0 });
-        await runA.WaitAsync(TimeSpan.FromSeconds(5));
-        Assert.Contains(storeA.StatusWrites, w => !w.Active);
-
-        sessionA.Dispose();
-        sessionB.Dispose();
-    }
-
-    [Fact]
-    public async Task ReplacedSession_Teardown_DoesNotOverwriteStatusInactive()
-    {
-        var (session, run, store) = await EstablishWithStoreAsync(new RouteTable());
-
-        await TeardownAsync(session, run);   // SilentClose skips the inactive write
-
-        Assert.DoesNotContain(store.StatusWrites, w => !w.Active);
-    }
-
-    /// <summary>
-    /// TOCTOU in the replacement guard: a replacement can land in the registry in
-    /// the window between the probe and the inactive write. A probe that flips true→false across
-    /// those two calls models exactly that; the finally must REPAIR the row back to active — the
-    /// final write must be active, not the stale inactive.
-    /// </summary>
-    [Fact]
-    public async Task ReplacementLandingDuringStatusWrite_IsRepairedToActive()
-    {
-        // Non-silent teardown so the write path runs: peer NOTIFICATION.
-        var conn = new ScriptedConnection();
-        var store = new RecordingPeerStore();
-        var config = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1", HoldTime = 0, KeepAlive = 0 };
-        var session = new BgpSession(
-            conn, new PeerConfig { Address = "127.0.0.1" }, config, new RouteTable(),
-            AllowAllFilter.Instance, new BgpMetrics(), NullLogger<BgpSession>.Instance, peerStore: store);
-        var calls = 0;
-        session.HasEstablishedSiblingProbe = _ => Interlocked.Increment(ref calls) > 1;
-        var run = session.RunAsync();
-        conn.EnqueueMessage(new BgpOpenMessage
-        {
-            Version = BgpConstants.BgpVersion,
-            Asn = 65002,
-            HoldTime = 0,
-            RouterId = 0x0A000002,
-            Capabilities = [BgpCapabilityInfo.FourOctetAsn(65002)],
-        });
-        conn.EnqueueMessage(BgpKeepaliveMessage.Instance);
-        for (var i = 0; i < 200 && !session.IsEstablished; i++)
-            await Task.Delay(TimeSpan.FromMilliseconds(10));
-        Assert.True(session.IsEstablished, "session must reach Established");
-
-        conn.EnqueueMessage(new BgpNotificationMessage { ErrorCode = BgpConstants.Error.Cease, SubErrorCode = 0 });
-        try { await run.WaitAsync(TimeSpan.FromSeconds(5)); } catch { /* teardown unwinds */ }
-
-        Assert.NotEmpty(store.StatusWrites);
-        Assert.True(store.StatusWrites[^1].Active, "the replacement-during-write race must end with the row ACTIVE");
-        Assert.Contains(store.StatusWrites, w => !w.Active);   // the stale inactive write happened, then the repair
-    }
-
-    [Fact]
-    public async Task ReleasedReplacement_DoesNotRestoreActive()
-    {
-        var conn = new ScriptedConnection();
-        var (session, run, store) = await EstablishWithStoreAsync(
-            new RouteTable(), siblingProbe: _ => false, connection: conn);
-
-        conn.EnqueueMessage(new BgpNotificationMessage { ErrorCode = BgpConstants.Error.Cease, SubErrorCode = 0 });
-        await run.WaitAsync(TimeSpan.FromSeconds(5));
-
-        Assert.Contains(store.StatusWrites, w => !w.Active);
-        Assert.DoesNotContain(store.StatusWrites, w => w.Active);
-        session.Dispose();
-    }
-
-    [Fact]
-    public async Task GenuineTeardown_StillWritesInactive()
-    {
-        // Registered + non-silent teardown: the write must still happen.
-        var (session, run, store) = await EstablishWithStoreAsync(new RouteTable());
-
-        // A peer NOTIFICATION tears down with RemoteNotification — not SilentClose, probe true.
-        var connField = typeof(BgpSession).GetField("_connection", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!;
-        var conn = (ScriptedConnection)connField.GetValue(session)!;
-        conn.EnqueueMessage(new BgpNotificationMessage { ErrorCode = BgpConstants.Error.Cease, SubErrorCode = 0 });
-        try { await run.WaitAsync(TimeSpan.FromSeconds(5)); } catch { /* teardown unwinds */ }
-
-        Assert.Contains(store.StatusWrites, w => !w.Active);
-    }
 
     /// <summary>
     /// exceeding Bgp.MaxPrefixesPerPeer tears the session down with NOTIFICATION
