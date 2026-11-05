@@ -134,8 +134,10 @@ public sealed class RouteAssembler : IRouteAssembler
                     {
                         var comms = _communityResolver.Resolve(
                             new CommunitySource(CommunitySourceKind.AsnList, list.Name));
-                        var prefixes = await _prefixService.GetPrefixesForAsns(list.Asns, ct);
-                        foreach (var p in prefixes)
+                        var resolution = await _prefixService.GetPrefixesForAsnsResultAsync(list.Asns, ct);
+                        if (resolution.FailedAsns.Count > 0)
+                            complete = false;
+                        foreach (var p in resolution.Prefixes)
                             // AsPath is overwritten by the local ASN in the outbound codec
                             // (BuildUpdateAttributes), so the per-prefix asn value is never used
                             // on the wire — pass null instead of allocating [asn] per prefix.
@@ -241,11 +243,13 @@ public sealed class RouteAssembler : IRouteAssembler
                 try
                 {
                     var customAsnComms = _communityResolver.Resolve(new CommunitySource(CommunitySourceKind.CustomAsn));
-                    var asnPrefixes = await _prefixService.GetPrefixesForAsns(customAsns, ct);
-                    foreach (var p in asnPrefixes)
+                    var resolution = await _prefixService.GetPrefixesForAsnsResultAsync(customAsns, ct);
+                    if (resolution.FailedAsns.Count > 0)
+                        complete = false;
+                    foreach (var p in resolution.Prefixes)
                         routes.Add(MakeRoute(p.Prefix, p.Length, p.IsIpv4, nextHop, null, customAsnComms));
                     _logger.LogInformation("Peer {Peer} custom AS: {Asns} -> {Count} prefixes",
-                        peerLabel, string.Join(",", customAsns), asnPrefixes.Count);
+                        peerLabel, string.Join(",", customAsns), resolution.Prefixes.Count);
                 }
                 catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
                 catch (Exception ex)

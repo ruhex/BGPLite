@@ -13,10 +13,22 @@ namespace BGPLite.Contracts;
 /// dependency-free leaf.)
 /// </para>
 /// </summary>
+/// <summary>Ordered ASN prefix results together with the ASNs whose resolution failed.</summary>
+public sealed record AsnPrefixResolution(
+    List<(UInt128 Prefix, byte Length, bool IsIpv4, uint Asn)> Prefixes,
+    IReadOnlyList<uint> FailedAsns);
+
 public interface IPrefixService
 {
     Task<IReadOnlyList<(UInt128 Prefix, byte Length, bool IsIpv4)>> GetPrefixesAsync(uint asn, CancellationToken ct = default);
     Task<List<(UInt128 Prefix, byte Length, bool IsIpv4, uint Asn)>> GetPrefixesForAsns(IEnumerable<uint> asns, CancellationToken ct = default);
+    /// <summary>
+    /// Resolves ASN prefixes and preserves partial-failure information for callers that export
+    /// control-plane data. The default adapts the legacy result as complete for implementations
+    /// that do not expose per-ASN outcomes.
+    /// </summary>
+    async Task<AsnPrefixResolution> GetPrefixesForAsnsResultAsync(IEnumerable<uint> asns, CancellationToken ct = default) =>
+        new(await GetPrefixesForAsns(asns, ct), []);
     Task<int> GetPrefixCountAsync(uint asn, CancellationToken ct = default);
     Task<List<(UInt128 Prefix, byte Length, bool IsIpv4, uint Asn)>> GetRuPrefixesAsync(CancellationToken ct = default);
     Task<IReadOnlyList<(UInt128 Prefix, byte Length, bool IsIpv4)>> GetSourcePrefixesAsync(string name, CancellationToken ct = default);
