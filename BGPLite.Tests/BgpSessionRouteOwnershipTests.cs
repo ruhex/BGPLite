@@ -434,6 +434,7 @@ public class BgpSessionRouteOwnershipTests
         return table;
     }
 
+    /// <summary>Creates a scripted established session with configurable route table, filters, and router identity.</summary>
     private static async Task<(BgpSession Session, Task Run, ScriptedConnection Conn)> EstablishAsync(
         RouteTable routeTable, uint routerId = 0x0A000002, IRouteFilter? filter = null,
         Func<string, uint, CancellationToken, Task>? onPeerIdentified = null, bool fourByteAsn = true)

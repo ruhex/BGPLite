@@ -505,6 +505,7 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
         return await _listener!.AcceptAsync(cancellationToken);
     }
 
+    /// <summary>Polls for a readable listener and accepts on a managed thread with cooperative shutdown cancellation.</summary>
     private Socket AcceptSocketOnMac()
     {
         while (true)
