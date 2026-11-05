@@ -144,6 +144,7 @@ public class TcpMd5Tests
     }
 
     [Fact]
+    /// <summary>Verifies that unsupported platforms reject MD5 configuration instead of reporting unarmed protection.</summary>
     public void SetPeerMd5Key_FailsLoud_WhenPlatformCannotArmTheKey()
     {
         var server = new BgpServer(
@@ -174,6 +175,7 @@ public class TcpMd5Tests
     }
 
     [Fact]
+    /// <summary>Verifies that persisted pre-start keys become armed during listener startup and disarm on shutdown.</summary>
     public async Task PrestartKey_IsArmedDuringStart_BeforeAccepting()
     {
         if (!OperatingSystem.IsLinux()) return;
@@ -195,6 +197,7 @@ public class TcpMd5Tests
     }
 
     [Fact]
+    /// <summary>Injects kernel failures and verifies that replacement and clear preserve the previous armed key.</summary>
     public async Task FailedReplacementOrClear_PreservesPreviousKey()
     {
         if (!OperatingSystem.IsLinux()) return;
@@ -223,6 +226,7 @@ public class TcpMd5Tests
     }
 
     [Fact]
+    /// <summary>Verifies idempotent MD5 clear when Linux reports that no per-peer key exists.</summary>
     public async Task Linux_ClearAlreadyMissingKey_TreatsEnoentAsSuccess()
     {
         if (!OperatingSystem.IsLinux()) return;
@@ -258,6 +262,7 @@ public class TcpMd5Tests
     }
 
     [Fact]
+    /// <summary>Observes a failed replacement during kernel application and verifies that only the old key is visible.</summary>
     public async Task FailedReplacement_DoesNotPublishNewKeyBeforeKernelApply()
     {
         if (!OperatingSystem.IsLinux()) return;
@@ -293,6 +298,7 @@ public class TcpMd5Tests
     }
 
     [Fact]
+    /// <summary>Blocks a concurrent replacement and proves readers see old state until the kernel operation succeeds.</summary>
     public async Task IsPeerMd5Armed_DoesNotObserveProvisionalReplacement()
     {
         if (!OperatingSystem.IsLinux()) return;
@@ -331,6 +337,7 @@ public class TcpMd5Tests
     }
 
     [Fact]
+    /// <summary>Uses competing mutation threads to verify that dictionary and kernel changes share one serialization boundary.</summary>
     public async Task ConcurrentKeyMutations_AreSerialized()
     {
         if (!OperatingSystem.IsLinux()) return;

@@ -114,6 +114,7 @@ public sealed class BgpSession : IDisposable
     public int AdvertisedPrefixCount => Volatile.Read(ref _advertisedCount);
     public bool IsEstablished => _state == BgpFsmState.Established;
 
+    /// <summary>Schedules a coalesced route refresh, with at most one active and one pending cycle per session.</summary>
     public async Task RefreshRoutesAsync(CancellationToken ct = default)
     {
         // default(CancellationToken) is CancellationToken.None, NOT the session's own _cts —
@@ -352,6 +353,7 @@ public sealed class BgpSession : IDisposable
         _routeTable.EntryOwnershipLost += OnEntryOwnershipLost;
     }
 
+    /// <summary>Runs the passive session lifecycle and guarantees ownership cleanup and the selected teardown policy.</summary>
     public async Task RunAsync(CancellationToken cancellationToken = default)
     {
         using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _cts.Token);
@@ -1072,6 +1074,7 @@ public sealed class BgpSession : IDisposable
         }
     }
 
+    /// <summary>Applies inbound UPDATE policy, route ownership, withdrawals, and prefix limits within the session lifecycle.</summary>
     private async Task HandleUpdateAsync(BgpUpdateMessage update)
     {
         // Per-UPDATE at Debug: a full-table dump sends hundreds-to-thousands of UPDATEs and a flap
@@ -1439,6 +1442,7 @@ public sealed class BgpSession : IDisposable
         }
     }
 
+    /// <summary>Converts the protocol's UInt128 address to canonical IPv6 text for diagnostics.</summary>
     private static string RenderV6Address(UInt128 address)
     {
         var bytes = new byte[16];
@@ -2077,6 +2081,7 @@ public sealed class BgpSession : IDisposable
 
     #region Validation
 
+    /// <summary>Applies negotiated OPEN state and performs registration and response I/O for the session.</summary>
     private async Task ValidateOpenAsync(BgpOpenMessage open, CancellationToken ct)
     {
         var localRouterId = BgpConstants.IPAddressToUint(_bgpConfig.GetRouterIdAddress());

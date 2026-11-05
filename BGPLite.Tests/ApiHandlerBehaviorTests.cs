@@ -86,6 +86,7 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
     }
 
     [Fact]
+    /// <summary>Verifies that text export returns raw newline-delimited CIDRs rather than JSON-encoded strings.</summary>
     public async Task ExportTxt_PlaintextBody_NotJsonQuoted()
     {
         var store = new PeerStore(new StaticOptionsFactory(new DbContextOptionsBuilder<BgpDbContext>().UseSqlite(_connection).Options));
@@ -102,6 +103,7 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
     }
 
     [Fact]
+    /// <summary>Compares JSON export with the production assembler across subscriptions, custom values, and active user sources.</summary>
     public async Task ExportJson_UsesCompleteOutboundPipeline()
     {
         var store = new PeerStore(new StaticOptionsFactory(new DbContextOptionsBuilder<BgpDbContext>().UseSqlite(_connection).Options));
@@ -130,6 +132,7 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
     }
 
     [Fact]
+    /// <summary>Verifies that source failure returns 503 without leaking custom or otherwise surviving prefixes.</summary>
     public async Task ExportJson_SourceFailure_Returns503WithoutPartialPrefixes()
     {
         var store = new PeerStore(new StaticOptionsFactory(new DbContextOptionsBuilder<BgpDbContext>().UseSqlite(_connection).Options));
@@ -152,6 +155,7 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
     }
 
     [Fact]
+    /// <summary>Verifies that a mixed ASN result is rejected without exposing surviving prefixes or failure details.</summary>
     public async Task ExportJson_PartialAsnFailure_Returns503WithoutSurvivingPrefixes()
     {
         var store = new PeerStore(new StaticOptionsFactory(new DbContextOptionsBuilder<BgpDbContext>().UseSqlite(_connection).Options));
@@ -334,6 +338,7 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
     }
 
     [Fact]
+    /// <summary>Verifies that sibling credentials use the deterministic shared-IP key rather than last-writer-wins.</summary>
     public async Task CreatePeer_SecondKeyOnSharedIp_ArmsTheDeterministicResolverKey()
     {
         // Pre-fix the create path armed the NEW row's key directly (last-writer-wins across
@@ -453,6 +458,7 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
     [InlineData(true, "customPrefixes", "[\"10.0.0.0/24\",\"10.0.0.0/24\"]", "10.0.0.0/24")]
     [InlineData(false, "customPrefixes", "[\"10.0.0.1/24\",\"10.0.0.0/24\"]", "10.0.0.0/24")]
     [InlineData(true, "customPrefixes", "[\"10.0.0.1/24\",\"10.0.0.0/24\"]", "10.0.0.0/24")]
+    /// <summary>Exercises duplicate lists, ASNs, and normalized CIDRs on create/update, requiring 400 and no DB mutation.</summary>
     public async Task DuplicatePeerValues_Return400WithFieldValueIndexes_AndDoNotMutateStore(
         bool update, string field, string values, string duplicate)
     {
@@ -591,6 +597,7 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
     }
 
     [Fact]
+    /// <summary>Verifies explicit partial-commit reporting and password removal when initial kernel arming fails.</summary>
     public async Task Md5Create_KernelFailure_RemovesStoredPassword_AndReportsCommittedPeer()
     {
         if (!OperatingSystem.IsLinux()) return;
@@ -615,6 +622,7 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
     }
 
     [Fact]
+    /// <summary>Verifies conditional restoration of an existing peer's previous password after failed replacement.</summary>
     public async Task Md5Create_ExistingPeerKernelFailure_RestoresPreviousStoredPassword()
     {
         if (!OperatingSystem.IsLinux()) return;
@@ -639,6 +647,7 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
     }
 
     [Fact]
+    /// <summary>Verifies that failed update rearming restores the old password without exposing either secret.</summary>
     public async Task Md5Update_KernelFailure_RestoresPreviousStoredPassword()
     {
         if (!OperatingSystem.IsLinux()) return;
@@ -665,6 +674,7 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
     }
 
     [Fact]
+    /// <summary>Overlaps replacement and clear through real HTTP/SQLite, requiring stored and armed state to finish cleared.</summary>
     public async Task Md5Updates_SharedIp_CannotApplyCredentialsReadBeforeNewerClear()
     {
         if (!OperatingSystem.IsLinux()) return;
