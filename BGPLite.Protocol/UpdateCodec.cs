@@ -257,7 +257,8 @@ public static class UpdateCodec
             var take = segment.Type == BgpConstants.AsPath.AsSet
                 ? 1
                 : Math.Min(remaining, segment.Asns.Length);
-            for (var i = 0; i < take; i++)
+            var retainedCount = segment.Type == BgpConstants.AsPath.AsSet ? segment.Asns.Length : take;
+            for (var i = 0; i < retainedCount; i++)
             {
                 if (segment.Asns[i] == BgpConstants.AsPath.AsTrans)
                     throw new BgpNotificationException(BgpConstants.Error.UpdateMessageError,
