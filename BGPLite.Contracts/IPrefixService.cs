@@ -13,11 +13,6 @@ namespace BGPLite.Contracts;
 /// dependency-free leaf.)
 /// </para>
 /// </summary>
-/// <summary>Ordered ASN prefix results together with the ASNs whose resolution failed.</summary>
-public sealed record AsnPrefixResolution(
-    List<(UInt128 Prefix, byte Length, bool IsIpv4, uint Asn)> Prefixes,
-    IReadOnlyList<uint> FailedAsns);
-
 public interface IPrefixService
 {
     Task<IReadOnlyList<(UInt128 Prefix, byte Length, bool IsIpv4)>> GetPrefixesAsync(uint asn, CancellationToken ct = default);
@@ -42,3 +37,9 @@ public interface IPrefixService
     Task<IReadOnlyList<(UInt128 Prefix, byte Length, bool IsIpv4)>> GetUserSourcePrefixesAsync(string name, string url, string? community, CancellationToken ct = default);
     Task WarmUpAsync(CancellationToken ct = default);
 }
+
+
+/// <summary>Ordered ASN prefix results together with the ASNs whose resolution failed.</summary>
+public sealed record AsnPrefixResolution(
+    List<(UInt128 Prefix, byte Length, bool IsIpv4, uint Asn)> Prefixes,
+    IReadOnlyList<uint> FailedAsns);
