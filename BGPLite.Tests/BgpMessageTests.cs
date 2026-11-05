@@ -771,12 +771,12 @@ public class BgpMessageTests
     }
 
     [Theory]
+    [InlineData(0)]
     [InlineData(5)]
     [InlineData(7)]
     public void Communities_NonMultipleOf4Length_Rejected(int length)
     {
-        // RFC 1997 §3: every community is exactly 4 octets — mirrors the % 12 rule of
-        // ReadLargeCommunities.
+        // RFC 7606 §7.8 requires a non-zero multiple of 4 and treat-as-withdraw handling.
         var attr = new PathAttribute
         {
             Flags = BgpConstants.Attribute.FlagOptional | BgpConstants.Attribute.FlagTransitive,
