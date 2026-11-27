@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Sockets;
+using System.Collections.Concurrent;
 using System.Text;
 using System.Threading.RateLimiting;
 using System.Text.Json;
@@ -72,6 +73,23 @@ public sealed class ManagementApi : IHostedService, IDisposable
     /// their PARTIAL result with a warning; shutdown still propagates. internal settable for tests.
     /// </summary>
     internal TimeSpan ExternalFetchBudget { get; set; } = TimeSpan.FromSeconds(30);
+
+    /// <summary>
+    /// Ceiling on waiting for ONE count of <c>GET /api/asn-lists</c> whose load is still outstanding
+    /// (a cold source, a load the seeding or a session build is performing). Long enough for a load
+    /// in flight to land, short enough that a hanging upstream cannot hold the response for the
+    /// whole <see cref="ExternalFetchBudget"/>. Distinct from the budget on purpose: the budget
+    /// bounds the request, this bounds each count inside it. internal settable for tests.
+    /// </summary>
+    internal TimeSpan PerCountWait { get; set; } = TimeSpan.FromSeconds(2);
+
+    /// <summary>
+    /// How long a source whose count missed <see cref="PerCountWait"/> is reported as unavailable
+    /// without another attempt. Without it every request would pay the slice again for as long as
+    /// the upstream hangs. Bounded by the configured source names. internal settable for tests.
+    /// </summary>
+    internal TimeSpan PerCountRetryAfter { get; set; } = TimeSpan.FromSeconds(30);
+    private readonly ConcurrentDictionary<string, long> _countRetryAt = new();   // Environment.TickCount64 (ms)
 
     /// <summary>
     /// Single creation point for the external-fetch budget: a wall-clock deadline
@@ -1567,8 +1585,8 @@ public sealed class ManagementApi : IHostedService, IDisposable
     private async Task<ApiResponse> HandleGetAsnListsAsync()
     {
         // Bound the whole handler — see ExternalFetchBudget. Shutdown still propagates;
-        // budget expiry degrades to the partial counts collected so far (each later fetch fails
-        // fast against the cancelled token) instead of pinning the request for minutes.
+        // a count that cannot be fetched degrades to an explicit marker on its entry instead of
+        // pinning the request for minutes.
         using var budget = CreateExternalFetchBudget();
         var ct = budget.Token;
         var lists = _config.RipeStat?.AsnLists ?? [];
@@ -1584,25 +1602,17 @@ public sealed class ManagementApi : IHostedService, IDisposable
                 foreach (var asn in l.Asns)
                 {
                     attempted++;
-                    try { prefixCount += await _prefixService.GetPrefixCountAsync(asn, ct); }
-                    catch (OperationCanceledException) when (_shutdownCts.IsCancellationRequested) { throw; }
-                    catch (Exception ex)
-                    {
-                        failed++;
-                        _logger.LogWarning(ex, "Failed to get prefix count for AS{Asn}", asn);
-                    }
+                    var count = await CountWithinSliceAsync(ct, $"AS{asn}", token => _prefixService.GetPrefixCountAsync(asn, token));
+                    if (count is null) failed++;
+                    else prefixCount += count.Value;
                 }
             }
             else if (l.Country is not null)
             {
                 attempted = 1;
-                try { prefixCount = (await _prefixService.GetRuPrefixesAsync(ct)).Count; }
-                catch (OperationCanceledException) when (_shutdownCts.IsCancellationRequested) { throw; }
-                catch (Exception ex)
-                {
-                    failed = 1;
-                    _logger.LogWarning(ex, "Failed to get RU prefix count");
-                }
+                var count = await CountWithinSliceAsync(ct, "RU", async token => (await _prefixService.GetRuPrefixesAsync(token)).Count);
+                if (count is null) failed = 1;
+                else prefixCount = count.Value;
             }
 
             var allFailed = attempted > 0 && failed == attempted;
@@ -1623,33 +1633,44 @@ public sealed class ManagementApi : IHostedService, IDisposable
             });
         }
 
-        // Append configured PrefixSources (file/http) alongside the legacy RipeStat ASN-lists,
-        // reusing the same response shape. "Kind" is intentionally not exposed.
-        // The budget token firing mid-LoadAllAsync surfaces as a foreign-token OCE (live
-        // shutdown token) — without this catch it escaped the handler and closed the connection
-        // without a body, discarding the partial result assembled above. Degrade like the
-        // per-source loops above; the tail warning below reports the budget expiry (both paths).
+        // Append the configured PrefixSources alongside the legacy RipeStat ASN-lists, reusing the
+        // same response shape. "Kind" is intentionally not exposed. One entry per source whatever
+        // its load state: the list is configuration, only the count needs a load, and a slow or
+        // hanging source must neither shrink the list nor hold the response for the whole budget.
         var seen = lists.Select(l => l.Name).ToHashSet();
-        try
+        foreach (var source in _config.PrefixSources ?? [])
         {
-            foreach (var (source, prefixes) in await _prefixSources.LoadAllAsync(ct))
+            if (!seen.Add(source.Name)) continue; // skip names already present (e.g. shared "ru")
+
+            // A cached copy answers at once — no network and no TTL reload on the request path;
+            // loads and reloads belong to the seeding, session builds and the auto-refresh timer.
+            // A source never loaded gets the same short wait as the lists above, once per
+            // PerCountRetryAfter: a hanging upstream must not tax every request with the slice.
+            var cached = _prefixSources.TryGetCached(source.Name, out var prefixes);
+            int? count;
+            if (cached)
+                count = prefixes!.Count;
+            else if (_countRetryAt.TryGetValue(source.Name, out var retryAt) && Environment.TickCount64 < retryAt)
+                count = null;
+            else
             {
-                if (!seen.Add(source.Name)) continue; // skip names already present (e.g. shared "ru")
-                result.Add(new
-                {
-                    id = source.Name,
-                    Name = source.Name,
-                    Description = source.Description,
-                    Country = (string?)null,
-                    Community = source.Community,
-                    prefixCount = prefixes.Count,
-                    type = source.Kind == "asn" ? "asn" : "list"
-                });
+                count = await CountWithinSliceAsync(ct, $"source '{SanitizeForLog(source.Name)}'",
+                    async token => (await _prefixSources.GetAsync(source.Name, token)).Count);
+                if (count is null)
+                    _countRetryAt[source.Name] = Environment.TickCount64 + (long)PerCountRetryAfter.TotalMilliseconds;
             }
-        }
-        catch (OperationCanceledException) when (!_shutdownCts.IsCancellationRequested)
-        {
-            // Budget expiry, not shutdown — serve the partial result (see above).
+
+            result.Add(new
+            {
+                id = source.Name,
+                Name = source.Name,
+                Description = source.Description,
+                Country = (string?)null,
+                Community = source.Community,
+                prefixCount = count ?? 0,
+                countError = count is null ? "Prefix count is unavailable: the source is not loaded yet." : null,
+                type = source.Kind == "asn" ? "asn" : "list"
+            });
         }
 
         if (ct.IsCancellationRequested && !_shutdownCts.IsCancellationRequested)
@@ -1658,6 +1679,38 @@ public sealed class ManagementApi : IHostedService, IDisposable
                 ExternalFetchBudget.TotalSeconds);
 
         return ApiResponse.Ok(result);
+    }
+
+    /// <summary>
+    /// One count fetch under the request budget with the <see cref="PerCountWait"/> ceiling. An
+    /// attempt that overruns its slice, or fails, ends as "unavailable" (<c>null</c>) instead of
+    /// holding the response; shutdown still propagates. The slice token is the fetch's caller
+    /// token, so an overrunning load is abandoned by its caller rather than left running, and no
+    /// negative-cache entry is written for it. Linked to the budget token only — that token is
+    /// already linked to shutdown, and <c>ExternalFetchBudgetTests</c> pins the single place the
+    /// budget deadline is armed.
+    /// </summary>
+    private async Task<int?> CountWithinSliceAsync(CancellationToken ct, string what, Func<CancellationToken, Task<int>> fetch)
+    {
+        using var slice = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        slice.CancelAfter(PerCountWait);
+        try
+        {
+            return await fetch(slice.Token);
+        }
+        catch (OperationCanceledException) when (_shutdownCts.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (OperationCanceledException)
+        {
+            return null;   // the slice or the budget fired — reported as unavailable by the caller
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to get prefix count for {What}", what);
+            return null;
+        }
     }
 
     #endregion

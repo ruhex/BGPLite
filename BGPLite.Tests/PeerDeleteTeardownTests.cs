@@ -380,5 +380,10 @@ public sealed class PeerDeleteTeardownTests
         public Task WarmUpAsync(CancellationToken ct = default) => Task.CompletedTask;
         public Task<bool> RefreshAsync(string sourceName, CancellationToken ct = default) => Task.FromResult(false);
         public bool SourceSupportsConditional(string sourceName) => false;
+        public bool TryGetCached(string name, out IReadOnlyList<IpPrefix>? prefixes)
+        {
+            prefixes = null;
+            return false;
+        }
     }
 }

@@ -68,5 +68,11 @@ public sealed class FakePrefixSourceService : IPrefixSourceService
     }
 
     public bool SourceSupportsConditional(string sourceName) => true;
+
+    public bool TryGetCached(string name, out IReadOnlyList<BGPLite.Protocol.IpPrefix>? prefixes)
+    {
+        prefixes = null;
+        return false;
+    }
 }
 

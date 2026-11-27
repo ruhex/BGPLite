@@ -38,6 +38,11 @@ public class PrefixAutoRefreshServiceTests
 
         public bool SourceSupportsConditional(string sourceName)
             => Conditional.TryGetValue(sourceName, out var v) ? v : true;
+        public bool TryGetCached(string name, out IReadOnlyList<IpPrefix>? prefixes)
+        {
+            prefixes = null;
+            return false;
+        }
 
         // Unused by the auto-refresh service (it reads source names from AppConfig), but required by the interface.
         public Task<IReadOnlyList<(PrefixSourceConfig Source, IReadOnlyList<IpPrefix> Prefixes)>> LoadAllAsync(CancellationToken ct = default)
