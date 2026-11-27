@@ -7,6 +7,7 @@ using BGPLite.Providers;
 using BGPLite.Routing;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using BGPLite.Protocol;
 
@@ -302,6 +303,57 @@ public sealed class ManagementApiShutdownTests : IDisposable
         Assert.Equal(0, _api.InflightRequestCount);
     }
 
+    /// <summary>
+    /// StopAsync closes the listener while the accept loop is parked in GetContextAsync. The
+    /// disposed listener is the loop's normal end — it must not land in the generic catch as a
+    /// `fail: Management API error` with a stack trace on every stop.
+    /// </summary>
+    [Fact]
+    public async Task StopAsync_WithTheAcceptLoopParked_LogsNoError()
+    {
+        var logger = new RecordingLogger();
+        for (var cycle = 0; cycle < 5; cycle++)
+        {
+            // FreeTcpPort has an inherent TOCTOU window — retry on a fresh port if something races
+            // us to the bind (bounded; each failed attempt disposes its listener).
+            for (var attempt = 0; ; attempt++)
+            {
+                var config = new AppConfig
+                {
+                    ApiListen = "127.0.0.1",
+                    ApiPort = FreeTcpPort(),
+                    Bgp = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1" }
+                };
+                _api = new ManagementApi(
+                    new PeerStore(new StaticOptionsFactory(new DbContextOptionsBuilder<BgpDbContext>().UseSqlite(_connection).Options)),
+                    new RouteTable(),
+                    config,
+                    new BgpMetrics(),
+                    logger,
+                    new BlockingRuPrefixService(),
+                    new InertPrefixSourceService(),
+                    new InertSessionManager(),
+                    Exporter(config, new BlockingRuPrefixService()));
+                try
+                {
+                    await _api.StartAsync(CancellationToken.None);
+                    break;
+                }
+                catch (HttpListenerException) when (attempt < 2)
+                {
+                    _api.Dispose();
+                    _api = null;
+                }
+            }
+            // No request is sent: the loop has nothing to accept and stays parked until the stop.
+            await _api.StopAsync(CancellationToken.None);
+            _api.Dispose();
+            _api = null;
+        }
+
+        Assert.Empty(logger.Errors);
+    }
+
     private IPrefixExportService Exporter(AppConfig config, IPrefixService prefixes) =>
         TestRouteAssembly.CreateExporter(
             new PeerStore(new StaticOptionsFactory(new DbContextOptionsBuilder<BgpDbContext>().UseSqlite(_connection).Options)),
@@ -358,6 +410,11 @@ public sealed class ManagementApiShutdownTests : IDisposable
         public Task WarmUpAsync(CancellationToken ct = default) => Task.CompletedTask;
         public Task<bool> RefreshAsync(string sourceName, CancellationToken ct = default) => Task.FromResult(false);
         public bool SourceSupportsConditional(string sourceName) => false;
+        public bool TryGetCached(string name, out IReadOnlyList<IpPrefix>? prefixes)
+        {
+            prefixes = null;
+            return false;
+        }
     }
 
     /// <summary>Holds no sessions; the shutdown path never calls it.</summary>
@@ -377,5 +434,17 @@ public sealed class ManagementApiShutdownTests : IDisposable
     private sealed class StaticOptionsFactory(DbContextOptions<BgpDbContext> options) : IDbContextFactory<BgpDbContext>
     {
         public BgpDbContext CreateDbContext() => new(options);
+    }
+
+    /// <summary>Records every entry logged at Error or above.</summary>
+    private sealed class RecordingLogger : ILogger<ManagementApi>
+    {
+        public List<string> Errors { get; } = [];
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+        public bool IsEnabled(LogLevel logLevel) => logLevel >= LogLevel.Error;
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
+        {
+            if (logLevel >= LogLevel.Error) Errors.Add($"{formatter(state, exception)} | {exception}");
+        }
     }
 }

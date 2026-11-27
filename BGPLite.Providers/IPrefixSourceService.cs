@@ -56,6 +56,13 @@ public interface IPrefixSourceService
     bool SourceSupportsConditional(string sourceName);
 
     /// <summary>
+    /// Non-blocking cache read for callers that must answer at once (the management API): the
+    /// list loaded for <paramref name="name"/> — fresh or stale — or <c>false</c> when the source
+    /// has never loaded. Never waits on a load in progress and never touches the network.
+    /// </summary>
+    bool TryGetCached(string name, out IReadOnlyList<IpPrefix>? prefixes);
+
+    /// <summary>
     /// Fired AFTER a source's freshly loaded content is committed to the cache and the load
     /// detected an actual change — on EVERY change-detecting entry point, including
     /// <see cref="RefreshAsync"/> (which deliberately never fires the <c>onSourceChanged</c>

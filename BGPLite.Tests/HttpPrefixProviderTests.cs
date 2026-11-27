@@ -1,8 +1,10 @@
 using System.Collections.Concurrent;
 using System.Net;
+using System.Net.Http.Headers;
 using BGPLite.Configuration;
 using BGPLite.Providers;
 using Microsoft.Extensions.Http;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace BGPLite.Tests;
@@ -73,8 +75,8 @@ public class HttpPrefixProviderTests
     private static HttpPrefixProvider Provider(StubHandler handler) =>
         new(new StubFactory(handler), NullLogger<HttpPrefixProvider>.Instance);
 
-    private static PrefixSourceConfig HttpSource(string url) =>
-        new() { Name = "t", Kind = "http", Url = url };
+    private static PrefixSourceConfig HttpSource(string url, string name = "t") =>
+        new() { Name = name, Kind = "http", Url = url };
 
     [Fact]
     public async Task ParsesBody()
@@ -312,21 +314,245 @@ public class HttpPrefixProviderTests
             provider.LoadAsync(HttpSource("https://raw.githubusercontent.com/o/r/main/x.txt")));
     }
 
+    /// <summary>Answers through a callback and records what each request carried when it arrived.</summary>
+    private sealed class ScriptedHandler(Func<HttpRequestMessage, HttpResponseMessage> respond) : HttpMessageHandler
+    {
+        public List<(string Uri, string? ApiKey, string? IfNoneMatch, string? IfModifiedSince)> Seen { get; } = [];
+
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
+        {
+            Seen.Add((
+                request.RequestUri!.ToString(),
+                request.Headers.TryGetValues("X-API-Key", out var key) ? key.Single() : null,
+                request.Headers.IfNoneMatch.Count > 0 ? request.Headers.IfNoneMatch.ToString() : null,
+                request.Headers.IfModifiedSince?.ToString()));
+            return Task.FromResult(respond(request));
+        }
+    }
+
+    private static HttpResponseMessage Ok(string body, string? etag = null, DateTimeOffset? lastModified = null)
+    {
+        var response = new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(body) };
+        if (etag is not null) response.Headers.ETag = new EntityTagHeaderValue(etag);
+        if (lastModified is not null) response.Content.Headers.LastModified = lastModified;
+        return response;
+    }
+
+    private static HttpResponseMessage Redirect(HttpStatusCode status, Uri? location)
+    {
+        var response = new HttpResponseMessage(status) { Content = new StringContent("") };
+        response.Headers.Location = location;
+        return response;
+    }
+
+    private static HttpPrefixProvider Provider(HttpMessageHandler handler) =>
+        new(new StubFactory(handler), NullLogger<HttpPrefixProvider>.Instance);
+
+    private static readonly Uri MovedTo = new("https://cdn.example.com/lists/x.txt");
+
     [Theory]
     [InlineData(HttpStatusCode.Found)]             // 302 — the classic redirect
     [InlineData(HttpStatusCode.MultipleChoices)]   // 300 — the boundary of the 3xx class
-    public async Task Redirect_IsRejected_WithClearError(HttpStatusCode status)
+    public async Task Redirect_WithoutLocation_IsRejected_WithClearError(HttpStatusCode status)
     {
-        // Redirects are not followed (AllowAutoRedirect=false on the named client) — the
-        // handler would re-send per-source headers except Authorization to the target host. The
-        // provider must surface a 3xx as an operator-fixable error naming the actual behavior.
         var provider = Provider(new StubHandler(status, ""));
 
         var ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
-            provider.LoadAsync(HttpSource("https://example.com/moved.txt")));
+            provider.LoadAsync(HttpSource("https://example.com/moved.txt", "moved-list")));
 
-        Assert.Contains("redirects are not followed", ex.Message);
-        Assert.Contains("final URL", ex.Message);
+        Assert.Contains("without a Location header", ex.Message);
+        Assert.Contains("'moved-list'", ex.Message);      // names the source…
+        Assert.DoesNotContain("example.com", ex.Message);  // …never its URL
+    }
+
+    [Fact]
+    public async Task Redirect_IsFollowed_ToTheLocationTarget()
+    {
+        // GitHub release assets and moved lists answer 302 to the final URL (v1.5.0 followed them).
+        var handler = new ScriptedHandler(r => r.RequestUri!.Host == "example.com"
+            ? Redirect(HttpStatusCode.Found, MovedTo)
+            : Ok("1.2.3.0/24\n"));
+
+        var result = await Provider(handler).LoadAsync(HttpSource("https://example.com/moved.txt"));
+
+        Assert.Single(result.Prefixes);
+        Assert.Equal(
+            ["https://example.com/moved.txt", "https://cdn.example.com/lists/x.txt"],
+            handler.Seen.Select(s => s.Uri).ToArray());
+    }
+
+    /// <summary>
+    /// A validator describes the representation of the URL that sent it. Stored for the configured
+    /// URL and presented there on the next load, a redirect target's validator could draw a 304
+    /// that keeps the target's prefixes while the configured URL serves something else.
+    /// </summary>
+    [Fact]
+    public async Task Redirect_TargetsValidatorsAreNotStoredForTheConfiguredUrl()
+    {
+        var lastModified = new DateTimeOffset(2026, 11, 27, 12, 0, 0, TimeSpan.Zero);
+        var handler = new ScriptedHandler(r => r.RequestUri!.Host == "example.com"
+            ? Redirect(HttpStatusCode.Found, MovedTo)
+            : Ok("1.2.3.0/24\n", etag: "\"target-etag\"", lastModified: lastModified));
+
+        var redirected = await Provider(handler).LoadAsync(HttpSource("https://example.com/moved.txt"));
+
+        Assert.Single(redirected.Prefixes);
+        Assert.Null(redirected.ETag);
+        Assert.Null(redirected.LastModified);
+
+        // The configured URL's own 200 still yields its validators.
+        var direct = await Provider(new ScriptedHandler(_ => Ok("1.2.3.0/24\n", etag: "\"direct-etag\"", lastModified: lastModified)))
+            .LoadAsync(HttpSource("https://example.com/direct.txt"));
+        Assert.Equal("\"direct-etag\"", direct.ETag);
+        Assert.Equal(lastModified, direct.LastModified);
+    }
+
+    [Fact]
+    public async Task Redirect_NextHopCarriesNoPerSourceHeadersAndNoValidators()
+    {
+        // The handler would re-send X-API-Key to the redirect target, and the conditional
+        // validators belong to the configured URL's representation. Each hop is a plain GET.
+        var handler = new ScriptedHandler(r => r.RequestUri!.Host == "example.com"
+            ? Redirect(HttpStatusCode.Found, MovedTo)
+            : Ok("1.2.3.0/24\n"));
+        var source = new PrefixSourceConfig
+        {
+            Name = "t",
+            Kind = "http",
+            Url = "https://example.com/moved.txt",
+            Headers = new Dictionary<string, string> { ["X-API-Key"] = "secret-1" }
+        };
+
+        await Provider(handler).LoadAsync(source, etag: "\"abc\"", lastModified: DateTimeOffset.UnixEpoch);
+
+        Assert.Equal("secret-1", handler.Seen[0].ApiKey);
+        Assert.NotNull(handler.Seen[0].IfNoneMatch);
+        Assert.NotNull(handler.Seen[0].IfModifiedSince);
+        Assert.Null(handler.Seen[1].ApiKey);
+        Assert.Null(handler.Seen[1].IfNoneMatch);
+        Assert.Null(handler.Seen[1].IfModifiedSince);
+    }
+
+    [Fact]
+    public async Task Redirect_RelativeLocation_IsResolvedAgainstTheCurrentUri()
+    {
+        var handler = new ScriptedHandler(r => r.RequestUri!.AbsolutePath == "/a/b.txt"
+            ? Redirect(HttpStatusCode.MovedPermanently, new Uri("/lists/x.txt", UriKind.Relative))
+            : Ok("1.2.3.0/24\n"));
+
+        await Provider(handler).LoadAsync(HttpSource("https://example.com/a/b.txt"));
+
+        Assert.Equal("https://example.com/lists/x.txt", handler.Seen[1].Uri);
+    }
+
+    [Fact]
+    public async Task Redirect_LoopStopsAfterMaxRedirects()
+    {
+        var handler = new ScriptedHandler(_ => Redirect(HttpStatusCode.Found, MovedTo));
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            Provider(handler).LoadAsync(HttpSource("https://example.com/moved.txt")));
+
+        Assert.Contains($"more than {HttpPrefixProvider.MaxRedirects} redirects", ex.Message);
+        Assert.Equal(HttpPrefixProvider.MaxRedirects + 1, handler.Seen.Count);   // the original request + MaxRedirects hops
+    }
+
+    [Theory]
+    [InlineData("https://example.com/x", "file:///etc/passwd", "unsupported scheme")]
+    [InlineData("https://example.com/x", "ftp://cdn.example.com/x", "unsupported scheme")]
+    [InlineData("https://example.com/x", "http://cdn.example.com/x", "from https to http")]
+    [InlineData("https://example.com/x", "https://user:pass@cdn.example.com/x", "embedded credentials")]
+    [InlineData("https://example.com/x", "https://cdn.example.com:9000/x", null)]   // the port is the connect-time gate's call
+    [InlineData("https://example.com/x", "https://user@cdn.example.com/x", "embedded credentials")]
+    [InlineData("https://user:pass@example.com/x", "https://user:pass@cdn.example.com/y", "embedded credentials")]  // the configured credentials on another host
+    [InlineData("https://user:pass@example.com/x", "https://other:pass@example.com/y", "embedded credentials")]    // other credentials on the same host
+    public void RedirectTarget_RefusesWhatMustNotBeRequested(string current, string location, string? error)
+    {
+        var source = HttpSource(current);
+        if (error is null)
+        {
+            // Not this method's decision: a non-standard port passes here and is blocked by
+            // PrefixSourceUrlValidator at connect time (IsAllowedPort).
+            Assert.Equal(new Uri(location), HttpPrefixProvider.RedirectTarget(source, new Uri(current), HttpStatusCode.Found, new Uri(location)));
+            return;
+        }
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+            HttpPrefixProvider.RedirectTarget(source, new Uri(current), HttpStatusCode.Found, new Uri(location)));
+        Assert.Contains(error, ex.Message);
+    }
+
+    [Fact]
+    public void RedirectTarget_HttpToHttps_IsFollowed()
+    {
+        // An upgrade is fine; only the downgrade (https → http) is refused.
+        var source = HttpSource("http://example.com/x");
+
+        var upgraded = HttpPrefixProvider.RedirectTarget(source, new Uri("http://example.com/x"), HttpStatusCode.Found, new Uri("https://example.com/x"));
+
+        Assert.Equal("https://example.com/x", upgraded.ToString());
+    }
+
+    /// <summary>
+    /// The credentials of a configured URL are sent to its host on every request; a relative
+    /// redirect stays on that host, so refusing the target's userinfo there would fail a source
+    /// that v1.5.0 (auto-redirect) loaded.
+    /// </summary>
+    [Theory]
+    [InlineData("https://user:pass@example.com/x", "/y", "https://user:pass@example.com/y")]
+    [InlineData("https://user:pass@example.com/x", "https://example.com/y", "https://example.com/y")]  // target without credentials
+    public void RedirectTarget_ConfiguredCredentials_ContinueOnTheirOwnHost(string current, string location, string expected)
+    {
+        var target = HttpPrefixProvider.RedirectTarget(HttpSource(current), new Uri(current), HttpStatusCode.Found, new Uri(location, UriKind.RelativeOrAbsolute));
+
+        Assert.Equal(new Uri(expected), target);
+    }
+
+    [Fact]
+    public async Task Redirect_FromAUrlWithCredentials_IsFollowed()
+    {
+        var handler = new ScriptedHandler(r => r.RequestUri!.AbsolutePath == "/x"
+            ? Redirect(HttpStatusCode.Found, new Uri("/y", UriKind.Relative))
+            : Ok("1.2.3.0/24\n"));
+
+        var result = await Provider(handler).LoadAsync(HttpSource("https://user:pass@example.com/x"));
+
+        Assert.Single(result.Prefixes);
+        Assert.Equal(["https://user:pass@example.com/x", "https://user:pass@example.com/y"], handler.Seen.Select(s => s.Uri).ToArray());
+    }
+
+    /// <summary>
+    /// A user-source name is peer-supplied and only length-validated at save time, and it reaches
+    /// this provider's log lines and error texts — which the user-source cache logs with the
+    /// exception. A line break in the name forged log lines.
+    /// </summary>
+    [Fact]
+    public async Task SourceName_WithControlCharacters_IsSanitizedInLogsAndErrors()
+    {
+        var logger = new RecordingLogger();
+        var source = HttpSource("https://example.com/x", "feed\nfail: BGPLite[0]\r\nforged");
+        const string clean = "feed fail: BGPLite[0]  forged";   // every control character becomes a space
+
+        await new HttpPrefixProvider(new StubFactory(new StubHandler(HttpStatusCode.OK, "1.2.3.0/24\n")), logger)
+            .LoadAsync(source);
+        var line = Assert.Single(logger.Messages);
+        Assert.Contains(clean, line);
+        Assert.DoesNotContain("\n", line);
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            new HttpPrefixProvider(new StubFactory(new StubHandler(HttpStatusCode.Found, "")), logger)
+                .LoadAsync(source));
+        Assert.Contains(clean, ex.Message);
+        Assert.DoesNotContain("\n", ex.Message);
+    }
+
+    /// <summary>Records every formatted log message.</summary>
+    private sealed class RecordingLogger : ILogger<HttpPrefixProvider>
+    {
+        public List<string> Messages { get; } = [];
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+        public bool IsEnabled(LogLevel logLevel) => true;
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
+            => Messages.Add(formatter(state, exception));
     }
 
     [Fact]

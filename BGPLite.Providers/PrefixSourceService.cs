@@ -204,6 +204,18 @@ public sealed class PrefixSourceService : IPrefixSourceService
         catch { return true; } // unknown Kind — conservative default
     }
 
+    /// <inheritdoc />
+    public bool TryGetCached(string name, out IReadOnlyList<IpPrefix>? prefixes)
+    {
+        if (_cache.TryGetValue(name, out var entry) && !entry.Negative)
+        {
+            prefixes = entry.List;
+            return true;
+        }
+        prefixes = null;
+        return false;
+    }
+
     /// <summary>
     /// Loads <paramref name="source"/> through the cache, returning the prefix list plus whether the
     /// content actually changed on this load. <paramref name="forceRefresh"/> bypasses the TTL

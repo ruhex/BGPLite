@@ -60,10 +60,13 @@ public sealed class PeerStore : IPeerStore
                 closeAfter = true;
             }
             using var cmd = connection.CreateCommand();
+            // On an existing row a NULL MaxPrefix keeps what is stored — the omit-means-keep rule
+            // UpdatePeerConfigurationAsync already follows. Writing excluded.MaxPrefix reset the
+            // operator's limit on every create-shaped re-save that did not carry it.
             cmd.CommandText =
                 "INSERT INTO Peers (Id, Ip, Asn, Description, Status, CreatedAt, LastSessionAt, MaxPrefix) " +
                 "VALUES (@id, @ip, @asn, @desc, 'inactive', @now, NULL, @maxprefix) " +
-                "ON CONFLICT(Ip, Asn) DO UPDATE SET Description = excluded.Description, MaxPrefix = excluded.MaxPrefix " +
+                "ON CONFLICT(Ip, Asn) DO UPDATE SET Description = excluded.Description, MaxPrefix = COALESCE(excluded.MaxPrefix, Peers.MaxPrefix) " +
                 "RETURNING Id, Status, CreatedAt, MaxPrefix";
             AddParam(cmd, "@id", id);
             AddParam(cmd, "@ip", ip);
@@ -234,10 +237,15 @@ public sealed class PeerStore : IPeerStore
         // The read is wrapped in a transaction because splitting gives up the single-statement
         // consistency the old Include-based load relied on: the four SELECTs would otherwise each see
         // their own snapshot, and a UI edit landing between them would advertise a mixed
-        // configuration. SQLite runs in WAL here, so a read transaction takes no write lock and does
-        // not block writers.
+        // configuration. ReadUncommitted is the one level Microsoft.Data.Sqlite turns into a
+        // deferred transaction — a plain BEGIN: one WAL read snapshot for all four SELECTs and no
+        // write lock. It is chosen for that alone: with the private cache the connection string
+        // uses, the level is normalised away and no dirty read is possible (with Cache=Shared it
+        // would be kept and enable them — do not add that here). The default level is BEGIN
+        // IMMEDIATE, which takes the database write lock and serialises this read against every
+        // writer.
         Peer? peer;
-        using (var read = await db.Database.BeginTransactionAsync(ct))
+        using (var read = await db.Database.BeginTransactionAsync(System.Data.IsolationLevel.ReadUncommitted, ct))
         {
             peer = await db.Peers.AsNoTracking()
                 .Include(p => p.Subscriptions)
@@ -285,8 +293,9 @@ public sealed class PeerStore : IPeerStore
         using var db = _dbFactory.CreateDbContext();
         // AsSplitQuery is what makes each collection its own SELECT — a projection alone does not
         // split. Read transaction for the same reason as LoadPeerRoutingViewAsync: the six
-        // statements must see one snapshot, and in WAL a read transaction blocks nobody.
-        using var read = await db.Database.BeginTransactionAsync(ct);
+        // statements must see one snapshot. ReadUncommitted — a plain BEGIN, no write lock — for
+        // the reason given there.
+        using var read = await db.Database.BeginTransactionAsync(System.Data.IsolationLevel.ReadUncommitted, ct);
         var detail = await db.Peers.AsNoTracking()
             .Where(p => p.Id == peerId)
             .Select(p => new PeerDetailDto(
@@ -378,7 +387,7 @@ public sealed class PeerStore : IPeerStore
                 .ExecuteUpdateAsync(s => s.SetProperty(p => p.Description, description), ct);
         }
         // maxPrefix follows the PATCH pattern — null means "leave it alone"; an explicit
-        // value (including 0 = unlimited for this peer) is set. The create path always sets it.
+        // value (including 0 = unlimited for this peer) is set. The create path does the same.
         if (maxPrefix is not null)
         {
             await db.Peers.Where(p => p.Id == peerId)

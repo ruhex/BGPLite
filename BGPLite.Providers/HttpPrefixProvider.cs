@@ -10,14 +10,20 @@ namespace BGPLite.Providers;
 /// <summary>
 /// Loads prefixes from a remote CIDR list over HTTP/HTTPS (Kind = <c>"http"</c>). Any direct
 /// raw-file URL works — raw.githubusercontent.com, a gist, a pastebin, a self-hosted list, etc.
-/// The URL is fetched as-is. Uses <see cref="IHttpClientFactory"/> so the handler pool is recycled
+/// Redirects are followed by the provider itself, hop by hop (see <see cref="RedirectTarget"/>).
+/// Uses <see cref="IHttpClientFactory"/> so the handler pool is recycled
 /// by the factory (the provider is stateless and safe to hold as a singleton).
 /// <para>SSRF defense: the named-client's <c>SocketsHttpHandler.ConnectCallback</c> validates
-/// every connection's DNS resolution at the socket level — no TOCTOU race, no redirect bypass.
+/// every connection's DNS resolution at the socket level — no TOCTOU race, and a redirect cannot
+/// bypass it: a hop to another origin needs a new connection, which re-enters the callback (a
+/// same-origin hop reuses the pooled connection that already passed it).
 /// Response body is capped at <see cref="MaxResponseBytes"/> to prevent OOM.</para>
 /// <para>Conditional requests: when <paramref name="etag"/> / <paramref name="lastModified"/>
-/// are provided from a prior load, sends <c>If-None-Match</c> / <c>If-Modified-Since</c>. A 304
-/// response skips the body download entirely (~1 KB headers-only round-trip).</para>
+/// are provided from a prior load, sends <c>If-None-Match</c> / <c>If-Modified-Since</c> — on the
+/// first hop only. A 304 response skips the body download entirely (~1 KB headers-only
+/// round-trip). Validators are taken from a 200 of the configured URL alone: a redirect target's
+/// describe another representation, so a redirected load caches no validators and is downloaded in
+/// full each time.</para>
 /// </summary>
 public sealed class HttpPrefixProvider(
     IHttpClientFactory httpFactory,
@@ -59,8 +65,11 @@ public sealed class HttpPrefixProvider(
         DateTimeOffset? lastModified = null,
         CancellationToken ct = default)
     {
+        // User-source names are peer-supplied and only length-validated at save time — sanitize
+        // once, for every log line and error text below.
+        var sourceName = LogSanitizer.SanitizeForLog(source.Name);
         if (string.IsNullOrWhiteSpace(source.Url))
-            throw new InvalidOperationException($"Prefix source '{source.Name}': Kind=http requires a Url.");
+            throw new InvalidOperationException($"Prefix source '{sourceName}': Kind=http requires a Url.");
 
         var http = httpFactory.CreateClient(clientName ?? ClientName);
 
@@ -88,11 +97,11 @@ public sealed class HttpPrefixProvider(
         // the named client is pooled and shared, so mutating its default headers leaks source A's
         // Authorization / X-API-Key onto source B's next request. Per-message headers merge with the
         // client's configured defaults (User-Agent: BGPLite/1.0) and override per-source.
-        using var request = new HttpRequestMessage(HttpMethod.Get, source.Url);
+        var request = new HttpRequestMessage(HttpMethod.Get, source.Url);
         if (source.Headers is { Count: > 0 } headers)
             foreach (var (key, value) in headers)
                 if (!request.Headers.TryAddWithoutValidation(key, value))
-                    logger.LogWarning("Source '{Name}': could not add request header '{Header}'.", source.Name, key);
+                    logger.LogWarning("Source '{Name}': could not add request header '{Header}'.", sourceName, key);
 
         // Conditional request — send validators from the prior load. GitHub raw, CDNs, and
         // most HTTP servers support ETag / Last-Modified and reply 304 Not Modified (no body) when
@@ -107,58 +116,116 @@ public sealed class HttpPrefixProvider(
             // Stream-read with size cap: ResponseHeadersRead gets headers first (fast Content-Length
             // check), then stream the body with a hard cap to prevent OOM. SSRF validation is at the
             // handler level (SocketsHttpHandler.ConnectCallback in Program.cs) — no pre-resolve here.
-            using var response = await http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, linkedToken);
-
-            // 304 Not Modified — server confirms data unchanged. No body to parse. Extract any
-            // updated validators the server may have returned (some servers refresh ETag on 304).
-            if (response.StatusCode == HttpStatusCode.NotModified)
+            for (var hop = 0; ; hop++)
             {
-                logger.LogDebug("Source '{Name}' (http): 304 Not Modified", source.Name);
-                var updatedEtag = response.Headers.ETag?.Tag;
-                var updatedLm = response.Content.Headers.LastModified;
-                return SourceLoadResult.NotModifiedResult(updatedEtag ?? etag, updatedLm ?? lastModified);
-            }
+                using var response = await http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, linkedToken);
 
-            // Redirects are not followed (AllowAutoRedirect=false on the named client) — the
-            // handler would re-send every per-source header except Authorization to the target
-            // host, so a 3xx is an operator-fixable configuration error, not something to chase.
-            if (response.StatusCode is >= HttpStatusCode.MultipleChoices and < HttpStatusCode.BadRequest)
-                throw new InvalidOperationException(
-                    $"Prefix source '{source.Name}': the URL redirects ({(int)response.StatusCode}) — " +
-                    "redirects are not followed; configure the final URL.");
+                // 304 Not Modified — server confirms data unchanged. No body to parse. Extract any
+                // updated validators the server may have returned (some servers refresh ETag on 304).
+                if (response.StatusCode == HttpStatusCode.NotModified)
+                {
+                    logger.LogDebug("Source '{Name}' (http): 304 Not Modified", sourceName);
+                    var updatedEtag = response.Headers.ETag?.Tag;
+                    var updatedLm = response.Content.Headers.LastModified;
+                    return SourceLoadResult.NotModifiedResult(updatedEtag ?? etag, updatedLm ?? lastModified);
+                }
 
-            response.EnsureSuccessStatusCode();
+                if (response.StatusCode is >= HttpStatusCode.MultipleChoices and < HttpStatusCode.BadRequest)
+                {
+                    // Redirects are followed here, not by the handler — see RedirectTarget. The next
+                    // hop is a plain GET; the validators above belong to the configured URL and are
+                    // not repeated.
+                    if (hop == MaxRedirects)
+                        throw new InvalidOperationException(
+                            $"Prefix source '{sourceName}': more than {MaxRedirects} redirects — giving up.");
+                    var target = RedirectTarget(source, request.RequestUri!, response.StatusCode, response.Headers.Location);
+                    request.Dispose();
+                    request = new HttpRequestMessage(HttpMethod.Get, target);
+                    continue;
+                }
 
-            // Extract validators from the 200 response for next time.
-            var newEtag = response.Headers.ETag?.Tag;
-            var newLm = response.Content.Headers.LastModified;
+                response.EnsureSuccessStatusCode();
 
-            if (response.Content.Headers.ContentLength is long contentLength && contentLength > MaxResponseBytes)
-                throw new InvalidOperationException(
-                    $"Prefix source '{source.Name}': response too large ({contentLength} bytes, max {MaxResponseBytes}).");
+                // Validators describe the representation of the URL that answered. A redirect
+                // target's must not be stored for the configured URL: sent there on the next load
+                // they could draw a 304 for a different representation and keep the target's
+                // prefixes. Only the configured URL's own 200 yields validators.
+                var direct = hop == 0;
+                var newEtag = direct ? response.Headers.ETag?.Tag : null;
+                var newLm = direct ? response.Content.Headers.LastModified : null;
 
-            using var stream = await response.Content.ReadAsStreamAsync(linkedToken);
-            using var ms = new MemoryStream();
-            var buffer = new byte[8192];
-            int read;
-            while ((read = await stream.ReadAsync(buffer, linkedToken)) > 0)
-            {
-                ms.Write(buffer, 0, read);
-                if (ms.Length > MaxResponseBytes)
+                if (response.Content.Headers.ContentLength is long contentLength && contentLength > MaxResponseBytes)
                     throw new InvalidOperationException(
-                        $"Prefix source '{source.Name}': response exceeded {MaxResponseBytes} bytes during stream.");
-            }
+                        $"Prefix source '{sourceName}': response too large ({contentLength} bytes, max {MaxResponseBytes}).");
 
-            var text = Encoding.UTF8.GetString(ms.GetBuffer(), 0, (int)ms.Length);
-            var prefixes = PrefixListParser.Parse(text);
-            // Log only the source Name (the operator/peer-supplied identifier), never the URL — peer URLs
-            // may carry tokens in the query string that must not reach application logs.
-            logger.LogInformation("Source '{Name}' (http): loaded {Count} prefixes", source.Name, prefixes.Count);
-            return SourceLoadResult.Ok(prefixes, newEtag, newLm);
+                using var stream = await response.Content.ReadAsStreamAsync(linkedToken);
+                using var ms = new MemoryStream();
+                var buffer = new byte[8192];
+                int read;
+                while ((read = await stream.ReadAsync(buffer, linkedToken)) > 0)
+                {
+                    ms.Write(buffer, 0, read);
+                    if (ms.Length > MaxResponseBytes)
+                        throw new InvalidOperationException(
+                            $"Prefix source '{sourceName}': response exceeded {MaxResponseBytes} bytes during stream.");
+                }
+
+                var text = Encoding.UTF8.GetString(ms.GetBuffer(), 0, (int)ms.Length);
+                var prefixes = PrefixListParser.Parse(text);
+                // Log only the source Name (the operator/peer-supplied identifier), never the URL — peer URLs
+                // may carry tokens in the query string that must not reach application logs.
+                logger.LogInformation("Source '{Name}' (http): loaded {Count} prefixes", sourceName, prefixes.Count);
+                return SourceLoadResult.Ok(prefixes, newEtag, newLm);
+            }
         }
         finally
         {
+            request.Dispose();
             timeoutCts?.Dispose();
         }
+    }
+
+    /// <summary>Redirect hops followed per load. Release assets and moved lists need one or two.</summary>
+    public const int MaxRedirects = 5;
+
+    /// <summary>
+    /// The URI of the next hop for a redirect response. The handler never follows a redirect
+    /// itself (AllowAutoRedirect=false on the named clients): it would re-send every per-source
+    /// header except Authorization to each new host, and the conditional validators belong to the
+    /// original representation — so each hop is a plain GET without the source's headers or validators.
+    /// <para>
+    /// A hop to another origin opens a new connection and so re-enters the named client's
+    /// ConnectCallback, which validates the resolved IPs and the port (80/443) again — a redirect to
+    /// an internal address or a non-standard port is blocked there like any other URL; a same-origin
+    /// hop reuses the pooled connection that already passed it. This method only decides where the
+    /// next request goes: a relative Location is resolved against the current URI; other schemes
+    /// than http/https, a downgrade from https to http, and credentials other than the configured
+    /// URL's own on its own host are refused without a request — the list would travel in clear
+    /// text, or with credentials to a host nobody chose.
+    /// </para>
+    /// </summary>
+    internal static Uri RedirectTarget(PrefixSourceConfig source, Uri currentUri, HttpStatusCode status, Uri? location)
+    {
+        var name = LogSanitizer.SanitizeForLog(source.Name);
+        if (location is null)
+            throw new InvalidOperationException(
+                $"Prefix source '{name}': redirect ({(int)status}) without a Location header.");
+        var target = new Uri(currentUri, location);
+        if (target.Scheme is not ("http" or "https"))
+            throw new InvalidOperationException(
+                $"Prefix source '{name}': redirect ({(int)status}) to the unsupported scheme '{target.Scheme}' is not followed.");
+        // The configured URL's credentials may follow a relative redirect — same host, same
+        // credentials — as they would on any other request to that host.
+        var configured = Uri.TryCreate(source.Url, UriKind.Absolute, out var uri) ? uri : null;
+        var carriesOwnCredentials = configured is not null
+            && target.Authority.Equals(configured.Authority, StringComparison.OrdinalIgnoreCase)
+            && target.UserInfo == configured.UserInfo;
+        if (!string.IsNullOrEmpty(target.UserInfo) && !carriesOwnCredentials)
+            throw new InvalidOperationException(
+                $"Prefix source '{name}': redirect ({(int)status}) to a URL with embedded credentials is not followed.");
+        if (currentUri.Scheme == "https" && target.Scheme == "http")
+            throw new InvalidOperationException(
+                $"Prefix source '{name}': redirect ({(int)status}) from https to http is not followed.");
+        return target;
     }
 }

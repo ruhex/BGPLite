@@ -500,7 +500,8 @@ public class BgpSessionShutdownTests
 
     /// <summary>
     /// RFC 4724 §4 / §8.1: a Graceful-Restart-aware silent close (MarkSilentClose) must not emit a
-    /// NOTIFICATION — the TCP connection is dropped so the peer retains routes across the restart.
+    /// NOTIFICATION — the TCP connection is dropped instead. No route retention follows: the GR
+    /// capability is not advertised (D6).
     /// Regression for the bug where StopAsync with GR enabled skipped NotifyCeaseAsync but then
     /// cancelled sessions, and the RunAsync finally-block (reason still None) emitted a Cease anyway.
     /// </summary>

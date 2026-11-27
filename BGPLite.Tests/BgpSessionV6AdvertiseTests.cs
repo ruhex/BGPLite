@@ -3,6 +3,7 @@ using BGPLite.Contracts;
 using BGPLite.Protocol;
 using BGPLite.Routing;
 using BGPLite.Server;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace BGPLite.Tests;
@@ -36,7 +37,8 @@ public class BgpSessionV6AdvertiseTests
     };
 
     private static async Task<(BgpSession Session, Task Run, ScriptedConnection Conn)> EstablishAsync(
-        RouteTable routeTable, BgpConfig? config = null, bool negotiateMpV6 = true, bool routeRefresh = false)
+        RouteTable routeTable, BgpConfig? config = null, bool negotiateMpV6 = true, bool routeRefresh = false,
+        ILogger<BgpSession>? logger = null)
     {
         var conn = new ScriptedConnection();
         var session = new BgpSession(
@@ -46,7 +48,7 @@ public class BgpSessionV6AdvertiseTests
             routeTable,
             AllowAllFilter.Instance,
             new BgpMetrics(),
-            NullLogger<BgpSession>.Instance);
+            logger ?? NullLogger<BgpSession>.Instance);
 
         var run = session.RunAsync();
         var capabilities = new List<BgpCapabilityInfo> { BgpCapabilityInfo.FourOctetAsn(65002) };
@@ -67,6 +69,7 @@ public class BgpSessionV6AdvertiseTests
         for (var i = 0; i < 200 && !session.IsEstablished; i++)
             await Task.Delay(TimeSpan.FromMilliseconds(10));
         Assert.True(session.IsEstablished, "session must reach Established");
+        await session.InitialDumpCompleted.WaitAsync(TimeSpan.FromSeconds(5)); // a refresh issued now runs inline, not deferred behind the dump
         return (session, run, conn);
     }
 
@@ -243,6 +246,60 @@ public class BgpSessionV6AdvertiseTests
         Assert.DoesNotContain(await SentUpdatesAsync(conn, u => u.Nlri.Count == 0 && u.WithdrawnRoutes.Count == 0), u => u.MpReachV6 is not null);
 
         await TeardownAsync(session, run);
+    }
+
+    /// <summary>
+    /// Every route send meets the same suppressed IPv6 routes, so an un-latched warning fires on
+    /// each dump and each refresh of every session — thousands of lines at a cold start, pushing
+    /// real warnings out of the log. The cause is fixed for the session's lifetime: warn once.
+    /// </summary>
+    [Theory]
+    [InlineData(true, "Bgp.NextHopIpv6 is not configured")]   // MP negotiated, no next hop
+    [InlineData(false, "did not negotiate MP IPv6/Unicast")]  // no MP IPv6/Unicast negotiated
+    public async Task SuppressedV6Warning_IsLoggedOncePerSession(bool negotiateMpV6, string cause)
+    {
+        var routeTable = new RouteTable();
+        routeTable.AddOrUpdate(V6Route());
+        routeTable.AddOrUpdate(new Route { Prefix = 0x0A000000, PrefixLength = 8, NextHop = 1 });
+        var logger = new CapturingLogger();
+        // Exactly one of the two suppression causes applies per case: without MP the next hop is
+        // configured, and with MP it is not.
+        var (session, run, conn) = await EstablishAsync(routeTable,
+            config: Config(withV6NextHop: !negotiateMpV6), negotiateMpV6: negotiateMpV6, logger: logger);
+
+        // The initial dump is the first send; Established ≠ dump-complete, so wait for its UPDATEs.
+        var initial = 0;
+        for (var i = 0; i < 300 && (initial = CountUpdates(conn)) == 0; i++)
+            await Task.Delay(TimeSpan.FromMilliseconds(10));
+        Assert.True(initial > 0);
+
+        // Three API-shaped refreshes — each is a full route send that meets the same suppressed routes.
+        for (var round = 0; round < 3; round++)
+        {
+            var before = CountUpdates(conn);
+            await session.RefreshRoutesAsync();
+            for (var i = 0; i < 300 && CountUpdates(conn) <= before; i++)
+                await Task.Delay(TimeSpan.FromMilliseconds(10));
+            Assert.True(CountUpdates(conn) > before, $"refresh {round} must re-advertise");
+        }
+
+        var warnings = logger.Entries.Where(e => e.Level == LogLevel.Warning && e.Message.Contains("Suppressing", StringComparison.Ordinal)).ToList();
+        var warning = Assert.Single(warnings);
+        Assert.Contains(cause, warning.Message);
+
+        await TeardownAsync(session, run);
+    }
+
+    /// <summary>Records every entry (level and formatted message) for assertions.</summary>
+    private sealed class CapturingLogger : ILogger<BgpSession>
+    {
+        public List<(LogLevel Level, string Message)> Entries { get; } = [];
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+        public bool IsEnabled(LogLevel logLevel) => true;
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
+        {
+            lock (Entries) Entries.Add((logLevel, formatter(state, exception)));
+        }
     }
 
     [Fact]

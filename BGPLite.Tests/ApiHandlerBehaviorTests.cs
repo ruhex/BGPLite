@@ -283,6 +283,60 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
         }
     }
 
+    /// <summary>
+    /// POST /api/peers upserts, so an existing peer can be re-saved through it without
+    /// <c>maxPrefix</c>. That re-save used to write the omitted field over the stored limit and
+    /// reset it to null (the global default).
+    /// </summary>
+    [Fact]
+    public async Task MaxPrefix_CreateShapedResave_WithoutTheField_KeepsTheStoredLimit()
+    {
+        var config = new AppConfig { Bgp = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1" } };
+        _port = await StartAsync(config);
+        _client = new HttpClient();
+        const string peer = """{"ip":"198.51.100.19","asn":65019}""";
+        var url = $"http://127.0.0.1:{_port}/api/peers";
+
+        string peerId;
+        using (var created = await _client.PostAsync(url, new StringContent(peer, Encoding.UTF8, "application/json")))
+        {
+            Assert.True(created.IsSuccessStatusCode, await created.Content.ReadAsStringAsync());
+            using var doc = JsonDocument.Parse(await created.Content.ReadAsStringAsync());
+            peerId = doc.RootElement.GetProperty("id").GetString()!;
+        }
+        using (var limited = new HttpRequestMessage(HttpMethod.Put, $"{url}/{peerId}")
+        {
+            Content = new StringContent("""{"maxPrefix":100}""", Encoding.UTF8, "application/json")
+        })
+        using (var put = await _client.SendAsync(limited))
+            Assert.True(put.IsSuccessStatusCode, $"put: {(int)put.StatusCode}");
+        Assert.Equal("100", await StoredMaxPrefix());
+
+        // Omitted on a re-save: the stored limit stays.
+        using (var resaved = await _client.PostAsync(url, new StringContent(peer, Encoding.UTF8, "application/json")))
+        {
+            Assert.True(resaved.IsSuccessStatusCode, await resaved.Content.ReadAsStringAsync());
+            using var doc = JsonDocument.Parse(await resaved.Content.ReadAsStringAsync());
+            Assert.Equal("100", doc.RootElement.GetProperty("maxPrefix").GetRawText());
+        }
+        Assert.Equal("100", await StoredMaxPrefix());
+
+        // An explicit value still wins — a new limit, and 0 (unlimited for this peer).
+        foreach (var (field, expected) in new[] { (",\"maxPrefix\":200}", "200"), (",\"maxPrefix\":0}", "0") })
+        {
+            using var resaved = await _client.PostAsync(url, new StringContent(peer[..^1] + field, Encoding.UTF8, "application/json"));
+            Assert.True(resaved.IsSuccessStatusCode, await resaved.Content.ReadAsStringAsync());
+            Assert.Equal(expected, await StoredMaxPrefix());
+        }
+
+        async Task<string> StoredMaxPrefix()
+        {
+            using var detail = await _client.GetAsync($"{url}/{peerId}");
+            using var doc = JsonDocument.Parse(await detail.Content.ReadAsStringAsync());
+            return doc.RootElement.GetProperty("maxPrefix").GetRawText();
+        }
+    }
+
     [Fact]
     public async Task Md5Password_CreateEnabled_SecretNeverEchoed_UpdateClears()
     {
@@ -571,7 +625,8 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
         var country = entries.Single(e => e.GetProperty("id").GetString() == "country-failed");
 
         Assert.True(response.IsSuccessStatusCode, body);
-        Assert.Equal(JsonValueKind.Null, allFailed.GetProperty("prefixCount").ValueKind);
+        // An unavailable count is 0 with countError set; a real zero carries no error.
+        Assert.Equal(0, allFailed.GetProperty("prefixCount").GetInt32());
         Assert.False(allFailed.GetProperty("partial").GetBoolean());
         Assert.Contains("unavailable", allFailed.GetProperty("countError").GetString());
         Assert.Equal(5, partial.GetProperty("prefixCount").GetInt32());
@@ -580,7 +635,7 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
         Assert.Equal(0, zero.GetProperty("prefixCount").GetInt32());
         Assert.False(zero.GetProperty("partial").GetBoolean());
         Assert.Equal(JsonValueKind.Null, zero.GetProperty("countError").ValueKind);
-        Assert.Equal(JsonValueKind.Null, country.GetProperty("prefixCount").ValueKind);
+        Assert.Equal(0, country.GetProperty("prefixCount").GetInt32());
         Assert.Contains("unavailable", country.GetProperty("countError").GetString());
     }
 
@@ -884,6 +939,11 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
         public Task WarmUpAsync(CancellationToken ct = default) => Task.CompletedTask;
         public Task<bool> RefreshAsync(string sourceName, CancellationToken ct = default) => Task.FromResult(false);
         public bool SourceSupportsConditional(string sourceName) => false;
+        public bool TryGetCached(string name, out IReadOnlyList<IpPrefix>? prefixes)
+        {
+            prefixes = null;
+            return false;
+        }
     }
 
     /// <summary>
@@ -1010,16 +1070,240 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
 
     /// <summary>LoadAllAsync throws a foreign-token OCE — the deterministic stand-in for the
     /// external-fetch budget firing mid-load (live shutdown token, cancelled budget token).</summary>
-    private sealed class BudgetExhaustedSources : IPrefixSourceService
+    /// <summary>
+    /// Prefix sources on demand: cached lists by name, sources whose load never completes,
+    /// sources that answer after a delay, and sources whose load is cancelled — the shapes
+    /// <c>GET /api/asn-lists</c> meets behind a cold or degraded upstream.
+    /// </summary>
+    private sealed class ScriptedSources : IPrefixSourceService
     {
+        public Dictionary<string, int> Cached { get; } = new(StringComparer.Ordinal);
+        public HashSet<string> Hanging { get; } = new(StringComparer.Ordinal);
+        public HashSet<string> Cancelled { get; } = new(StringComparer.Ordinal);
+        public Dictionary<string, int> Delayed { get; } = new(StringComparer.Ordinal);
+        public TimeSpan LoadDelay { get; set; } = TimeSpan.FromMilliseconds(50);
+        public int LoadCalls { get; private set; }
+
         public event Action<string>? ContentCommitted;
-        public Task<IReadOnlyList<(PrefixSourceConfig Source, IReadOnlyList<IpPrefix> Prefixes)>> LoadAllAsync(CancellationToken ct = default)
-            => throw new OperationCanceledException();
-        public Task<IReadOnlyList<IpPrefix>> GetAsync(string name, CancellationToken ct = default) => Task.FromResult<IReadOnlyList<IpPrefix>>([]);
+
+        /// <summary>Never completes while the token lives — the old handler's whole-response wait.</summary>
+        public async Task<IReadOnlyList<(PrefixSourceConfig Source, IReadOnlyList<IpPrefix> Prefixes)>> LoadAllAsync(CancellationToken ct = default)
+        {
+            await Task.Delay(Timeout.Infinite, ct);
+            return [];
+        }
+
+        public async Task<IReadOnlyList<IpPrefix>> GetAsync(string name, CancellationToken ct = default)
+        {
+            LoadCalls++;
+            if (Cancelled.Contains(name))
+                throw new OperationCanceledException(ct);
+            if (Hanging.Contains(name))
+                await Task.Delay(Timeout.Infinite, ct);
+            else if (Delayed.TryGetValue(name, out var count))
+            {
+                await Task.Delay(LoadDelay, ct);
+                return List(count);
+            }
+            return [];
+        }
+
         public Task<(IReadOnlyList<IpPrefix> Prefixes, bool Changed)> LoadDefaultAsync(CancellationToken ct = default) => Task.FromResult<(IReadOnlyList<IpPrefix>, bool)>(([], false));
         public Task WarmUpAsync(CancellationToken ct = default) => Task.CompletedTask;
         public Task<bool> RefreshAsync(string sourceName, CancellationToken ct = default) => Task.FromResult(false);
         public bool SourceSupportsConditional(string sourceName) => false;
+
+        public bool TryGetCached(string name, out IReadOnlyList<IpPrefix>? prefixes)
+        {
+            if (Cached.TryGetValue(name, out var count))
+            {
+                prefixes = List(count);
+                return true;
+            }
+            prefixes = null;
+            return false;
+        }
+
+        private static IReadOnlyList<IpPrefix> List(int count) =>
+            Enumerable.Range(0, count).Select(i => new IpPrefix(0x0A000000u + (uint)i, 24)).ToList();
+    }
+
+    private static AppConfig WithSources(params string[] names) => new()
+    {
+        Bgp = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1" },
+        PrefixSources = names.Select(n => new PrefixSourceConfig { Name = n, Kind = "http", Url = $"https://example.com/{n}" }).ToList(),
+    };
+
+    private async Task<JsonDocument> GetAsnListsAsync(IPrefixSourceService sources, AppConfig config)
+    {
+        _port = await StartAsync(config, prefixSources: sources);
+        _api!.PerCountWait = TimeSpan.FromMilliseconds(150);   // the per-count slice under test; the default is 2 s
+        _client = new HttpClient();
+        using var response = await _client.GetAsync($"http://127.0.0.1:{_port}/api/asn-lists");
+        var body = await response.Content.ReadAsStringAsync();
+        Assert.True(response.IsSuccessStatusCode, body);
+        return JsonDocument.Parse(body);
+    }
+
+    [Fact]
+    public async Task AsnLists_HangingSources_ResponseKeepsEveryConfiguredSource()
+    {
+        // A cold source that never answers used to hold the whole external-fetch budget, and the
+        // response then came back as []: the list of sources is configuration and must not
+        // disappear because a fetch is slow.
+        var sources = new ScriptedSources();
+        sources.Hanging.UnionWith(["a", "b", "c"]);
+
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        using var json = await GetAsnListsAsync(sources, WithSources("a", "b", "c"));
+
+        Assert.True(clock.Elapsed < TimeSpan.FromSeconds(10),
+            $"the response must not wait for the 30 s budget (took {clock.ElapsedMilliseconds} ms)");
+        Assert.Equal(new[] { "a", "b", "c" }, json.RootElement.EnumerateArray().Select(e => e.GetProperty("id").GetString()).ToArray());
+        Assert.All(json.RootElement.EnumerateArray(), entry =>
+        {
+            Assert.Equal(0, entry.GetProperty("prefixCount").GetInt32());
+            Assert.Contains("not loaded", entry.GetProperty("countError").GetString());
+        });
+        Assert.Equal(3, sources.LoadCalls);   // every source got its one bounded attempt
+    }
+
+    [Fact]
+    public async Task AsnLists_CachedSource_IsServedWithoutWaiting()
+    {
+        var sources = new ScriptedSources();
+        sources.Cached["s"] = 7;
+        sources.Hanging.Add("s");   // a reload would never complete
+
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        using var json = await GetAsnListsAsync(sources, WithSources("s"));
+
+        var entry = Assert.Single(json.RootElement.EnumerateArray());
+        Assert.Equal("s", entry.GetProperty("id").GetString());
+        Assert.Equal(7, entry.GetProperty("prefixCount").GetInt32());
+        Assert.Equal(JsonValueKind.Null, entry.GetProperty("countError").ValueKind);
+        Assert.Equal(0, sources.LoadCalls);   // no load was attempted
+        Assert.True(clock.Elapsed < TimeSpan.FromSeconds(2), $"a cached count must not wait (took {clock.ElapsedMilliseconds} ms)");
+    }
+
+    [Fact]
+    public async Task AsnLists_SourceLoadedWithinTheWait_CountIsReported()
+    {
+        // A load in flight — the seeding's, or one this request started — lands inside the
+        // slice: its count is reported and nothing is flagged.
+        var sources = new ScriptedSources();
+        sources.Delayed["s"] = 5;
+
+        using var json = await GetAsnListsAsync(sources, WithSources("s"));
+
+        var entry = Assert.Single(json.RootElement.EnumerateArray());
+        Assert.Equal(5, entry.GetProperty("prefixCount").GetInt32());
+        Assert.Equal(JsonValueKind.Null, entry.GetProperty("countError").ValueKind);
+        Assert.Equal(1, sources.LoadCalls);
+    }
+
+    [Fact]
+    public async Task AsnLists_CancelledLoad_StillReturnsEveryEntry()
+    {
+        // A load cancelled under the caller's token — the stand-in for a budget or slice firing —
+        // ends as "unavailable" on its own entry; the response is still complete and still 200.
+        var sources = new ScriptedSources();
+        sources.Cancelled.Add("x");
+        var config = WithSources("x");
+        config = new AppConfig
+        {
+            Bgp = config.Bgp,
+            PrefixSources = config.PrefixSources,
+            RipeStat = new RipeStatConfig { AsnLists = [new AsnList { Name = "ru", Country = "RU", Community = "65000:100" }] }
+        };
+
+        using var json = await GetAsnListsAsync(sources, config);
+
+        Assert.Equal(new[] { "ru", "x" }, json.RootElement.EnumerateArray().Select(e => e.GetProperty("id").GetString()).ToArray());
+        var cancelled = json.RootElement.EnumerateArray().Single(e => e.GetProperty("id").GetString() == "x");
+        Assert.Equal(0, cancelled.GetProperty("prefixCount").GetInt32());
+        Assert.Contains("not loaded", cancelled.GetProperty("countError").GetString());
+    }
+
+    [Fact]
+    public async Task AsnLists_HangingSource_IsRetriedOnlyAfterTheBackoff()
+    {
+        // One missed slice per source per backoff window: while the upstream hangs, later
+        // requests report the count as unavailable at once instead of paying the slice again.
+        var sources = new ScriptedSources();
+        sources.Hanging.UnionWith(["a", "b"]);
+        _port = await StartAsync(WithSources("a", "b"), prefixSources: sources);
+        _api!.PerCountWait = TimeSpan.FromMilliseconds(150);
+        _api.PerCountRetryAfter = TimeSpan.FromMilliseconds(600);
+        _client = new HttpClient();
+
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        using var first = JsonDocument.Parse(await _client.GetStringAsync($"http://127.0.0.1:{_port}/api/asn-lists"));
+        var firstCall = clock.Elapsed;                       // both slices paid
+        Assert.Equal(2, sources.LoadCalls);
+
+        using var again = JsonDocument.Parse(await _client.GetStringAsync($"http://127.0.0.1:{_port}/api/asn-lists"));
+        var secondCall = clock.Elapsed - firstCall;          // inside the window
+        Assert.Equal(2, sources.LoadCalls);                  // no new attempt
+        Assert.Equal(2, again.RootElement.GetArrayLength());
+        Assert.All(again.RootElement.EnumerateArray(), entry => Assert.Contains("not loaded", entry.GetProperty("countError").GetString()));
+
+        await Task.Delay(700);                               // the window expired
+        clock.Restart();
+        using var third = JsonDocument.Parse(await _client.GetStringAsync($"http://127.0.0.1:{_port}/api/asn-lists"));
+        var thirdCall = clock.Elapsed;
+        Assert.Equal(4, sources.LoadCalls);                  // both attempted again
+        Assert.Equal(2, third.RootElement.GetArrayLength());
+        Assert.True(secondCall < firstCall && secondCall < thirdCall,
+            $"the call inside the backoff must be the fastest ({secondCall.TotalMilliseconds:F0} ms vs {firstCall.TotalMilliseconds:F0} / {thirdCall.TotalMilliseconds:F0} ms)");
+    }
+
+    [Fact]
+    public async Task AsnLists_LegacyList_HangingCount_DoesNotHoldTheResponse()
+    {
+        // The legacy RipeStat lists take the same per-count slice: a hanging ASN count ends as
+        // the list's "all failed" marker instead of consuming the whole budget.
+        _port = await StartAsync(
+            new AppConfig
+            {
+                Bgp = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1" },
+                RipeStat = new RipeStatConfig { AsnLists = [new AsnList { Name = "stuck", Asns = [65011, 65012] }] }
+            },
+            prefixService: new HangingCountPrefixService());
+        _api!.PerCountWait = TimeSpan.FromMilliseconds(150);
+        _client = new HttpClient();
+
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        using var response = await _client.GetAsync($"http://127.0.0.1:{_port}/api/asn-lists");
+        var body = await response.Content.ReadAsStringAsync();
+        using var json = JsonDocument.Parse(body);
+
+        Assert.True(response.IsSuccessStatusCode, body);
+        Assert.True(clock.Elapsed < TimeSpan.FromSeconds(10), $"took {clock.ElapsedMilliseconds} ms");
+        var entry = Assert.Single(json.RootElement.EnumerateArray());
+        Assert.Equal("stuck", entry.GetProperty("id").GetString());
+        Assert.Equal(0, entry.GetProperty("prefixCount").GetInt32());   // numeric — never null
+        Assert.Contains("unavailable", entry.GetProperty("countError").GetString());
+    }
+
+    /// <summary>Every count parks until cancelled — RIPEstat hanging on a cold cache.</summary>
+    private sealed class HangingCountPrefixService : IPrefixService
+    {
+        public async Task<int> GetPrefixCountAsync(uint asn, CancellationToken ct = default)
+        {
+            await Task.Delay(Timeout.Infinite, ct);
+            return 0;
+        }
+        public async Task<List<(UInt128 Prefix, byte Length, bool IsIpv4, uint Asn)>> GetRuPrefixesAsync(CancellationToken ct = default)
+        {
+            await Task.Delay(Timeout.Infinite, ct);
+            return [];
+        }
+        public Task<IReadOnlyList<(UInt128 Prefix, byte Length, bool IsIpv4)>> GetPrefixesAsync(uint asn, CancellationToken ct = default) => Task.FromResult<IReadOnlyList<(UInt128, byte, bool)>>([]);
+        public Task<List<(UInt128 Prefix, byte Length, bool IsIpv4, uint Asn)>> GetPrefixesForAsns(IEnumerable<uint> asns, CancellationToken ct = default) => Task.FromResult(new List<(UInt128, byte, bool, uint)>());
+        public Task<IReadOnlyList<(UInt128 Prefix, byte Length, bool IsIpv4)>> GetSourcePrefixesAsync(string name, CancellationToken ct = default) => Task.FromResult<IReadOnlyList<(UInt128, byte, bool)>>([]);
+        public Task<IReadOnlyList<(UInt128 Prefix, byte Length, bool IsIpv4)>> GetUserSourcePrefixesAsync(string name, string url, string? community, CancellationToken ct = default) => Task.FromResult<IReadOnlyList<(UInt128, byte, bool)>>([]);
+        public Task WarmUpAsync(CancellationToken ct = default) => Task.CompletedTask;
     }
 
     [Fact]
@@ -1048,28 +1332,6 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
         using var capped = await _client.PostAsync($"http://127.0.0.1:{_port}/api/peers/{id}/sources",
             new StringContent(JsonSerializer.Serialize(new { name = "one-too-many", url = "https://example.com/x" }), Encoding.UTF8, "application/json"));
         Assert.Equal(HttpStatusCode.BadRequest, capped.StatusCode);
-    }
-
-    [Fact]
-    public async Task AsnLists_BudgetExpiryMidSources_ServesPartialJson()
-    {
-        // The budget token firing during LoadAllAsync must degrade to the partial response
-        // (the ASN-list entries collected above), not escape the handler and abort the connection
-        // without a body.
-        _port = await StartAsync(
-            new AppConfig
-            {
-                Bgp = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1" },
-                RipeStat = new RipeStatConfig { AsnLists = [new AsnList { Name = "ru", Country = "RU", Community = "65000:100" }] }
-            },
-            prefixSources: new BudgetExhaustedSources());
-        _client = new HttpClient();
-
-        using var response = await _client.GetAsync($"http://127.0.0.1:{_port}/api/asn-lists");
-        var body = await response.Content.ReadAsStringAsync();
-
-        Assert.True(response.IsSuccessStatusCode, $"expected a partial response, got {(int)response.StatusCode}");   // pre-fix: the connection was aborted (HttpRequestException)
-        Assert.Contains("\"ru\"", body);   // the ASN-list half of the response survived
     }
 
     // ---------------------------------------------------------------- CSRF (#530)

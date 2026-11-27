@@ -323,7 +323,7 @@ public class TcpMd5Tests
             await applying.Task.WaitAsync(TimeSpan.FromSeconds(5));
             var read = Task.Run(() => server.IsPeerMd5Armed("192.0.2.10", "new"));
             await Task.Delay(100);
-            Assert.False(read.IsCompletedSuccessfully && read.Result,
+            Assert.False(read.IsCompletedSuccessfully && await read,
                 "the provisional key must not be reported as armed before kernel success");
             release.TrySetResult();
             await mutation.WaitAsync(TimeSpan.FromSeconds(5));

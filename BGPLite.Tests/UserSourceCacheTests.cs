@@ -1,4 +1,5 @@
 using BGPLite.Providers;
+using Microsoft.Extensions.Logging;
 using Xunit;
 using BGPLite.Protocol;
 
@@ -168,6 +169,45 @@ public class UserSourceCacheTests
         await Assert.ThrowsAsync<InvalidOperationException>(
             () => cache.GetOrLoadAsync("https://example.com/l", "src", f.Invoke, default));
         Assert.Equal(1, f.Calls);
+    }
+
+    /// <summary>
+    /// The source name is peer-supplied and only length-validated at save time. It reaches a
+    /// warning line and the backoff error raw — a name with line breaks forged log lines (and
+    /// the error text, which the caller logs with its exception).
+    /// </summary>
+    [Fact]
+    public async Task LogLabel_WithControlCharacters_IsSanitized()
+    {
+        var logger = new RecordingLogger();
+        var cache = new UserSourceCache(logger: logger);
+        var f = new Fetcher { Throw = new InvalidOperationException("boom") };
+        var label = "src\nfail: BGPLite[0]\nforged\r\tline";
+        const string clean = "src fail: BGPLite[0] forged  line";
+
+        // Cold failure: a warning names the source...
+        await Assert.ThrowsAsync<InvalidOperationException>(
+            () => cache.GetOrLoadAsync("https://example.com/l", label, f.Invoke, default));
+        var warning = Assert.Single(logger.Messages);
+        Assert.Contains(clean, warning);
+        Assert.DoesNotContain("\n", warning);
+        Assert.DoesNotContain("\r", warning);
+        Assert.DoesNotContain("\t", warning);
+
+        // ...and so does the backoff error a second caller gets inside the negative TTL.
+        var backoff = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => cache.GetOrLoadAsync("https://example.com/l", label, f.Invoke, default));
+        Assert.Equal($"User-source '{clean}' is in failure backoff; the last load failed.", backoff.Message);
+    }
+
+    /// <summary>Records every formatted log message.</summary>
+    private sealed class RecordingLogger : ILogger
+    {
+        public List<string> Messages { get; } = [];
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+        public bool IsEnabled(LogLevel logLevel) => true;
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
+            => Messages.Add(formatter(state, exception));
     }
 
     [Fact]
