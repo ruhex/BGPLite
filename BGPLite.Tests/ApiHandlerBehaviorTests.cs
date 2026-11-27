@@ -337,6 +337,49 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
         }
     }
 
+    /// <summary>
+    /// Every custom AS number is a RIPEstat lookup in each route build for the peer, through the
+    /// shared per-ASN cache and circuit breaker. The request body cap was the only bound on how
+    /// many a peer may carry.
+    /// </summary>
+    [Fact]
+    public async Task CustomAsns_CappedPerPeer_OnCreateAndUpdate()
+    {
+        var config = new AppConfig { Bgp = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1" } };
+        _port = await StartAsync(config);
+        _client = new HttpClient();
+        var store = new PeerStore(new StaticOptionsFactory(new DbContextOptionsBuilder<BgpDbContext>().UseSqlite(_connection).Options));
+        var url = $"http://127.0.0.1:{_port}/api/peers";
+        static StringContent Json(object body) => new(JsonSerializer.Serialize(body), Encoding.UTF8, "application/json");
+        // 64001 and up are all configurable; 64999 makes one more than the cap.
+        var atLimit = Enumerable.Range(1, ManagementApi.MaxCustomAsnsPerPeer).Select(i => 64000u + (uint)i).ToList();
+        var overLimit = atLimit.Append(64999u).ToList();
+
+        // The cap itself is accepted...
+        string peerId;
+        using (var created = await _client.PostAsync(url, Json(new { ip = "198.51.100.41", asn = 65041, customAsns = atLimit })))
+        {
+            var body = await created.Content.ReadAsStringAsync();
+            Assert.True(created.IsSuccessStatusCode, body);
+            peerId = JsonDocument.Parse(body).RootElement.GetProperty("id").GetString()!;
+        }
+        Assert.Equal(atLimit, (await store.GetPeerDetailAsync(peerId))!.CustomAsns);
+
+        // ...one more is refused on create, and nothing is stored.
+        using (var refused = await _client.PostAsync(url, Json(new { ip = "198.51.100.42", asn = 65042, customAsns = overLimit })))
+        {
+            Assert.Equal(HttpStatusCode.BadRequest, refused.StatusCode);
+            Assert.Contains($"at most {ManagementApi.MaxCustomAsnsPerPeer}", await refused.Content.ReadAsStringAsync());
+        }
+        Assert.Empty(await store.GetPeersByIpAsync("198.51.100.42"));
+
+        // ...and on update, with the stored list untouched.
+        using var put = new HttpRequestMessage(HttpMethod.Put, $"{url}/{peerId}") { Content = Json(new { customAsns = overLimit }) };
+        using var declined = await _client.SendAsync(put);
+        Assert.Equal(HttpStatusCode.BadRequest, declined.StatusCode);
+        Assert.Equal(atLimit, (await store.GetPeerDetailAsync(peerId))!.CustomAsns);
+    }
+
     [Fact]
     public async Task Md5Password_CreateEnabled_SecretNeverEchoed_UpdateClears()
     {
