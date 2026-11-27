@@ -1350,7 +1350,6 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
             onSourceChanged: _ => push.Task);
         _port = await StartAsync(config, prefixSources: sources);
         _client = new HttpClient();
-        _api!.ExternalFetchBudget = TimeSpan.FromSeconds(3);
 
         try
         {

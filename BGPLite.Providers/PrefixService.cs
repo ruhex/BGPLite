@@ -42,8 +42,8 @@ public sealed class PrefixService : IPrefixService
         // stall the route dump behind the per-URL gate.
         _userSourceTimeoutSeconds = userSourceTimeoutSeconds ?? DefaultUserSourceTimeoutSeconds;
         _userSourceCache = new UserSourceCache(logger: logger, timeProvider: _timeProvider);
-        // Convergence push for default-source changes detected on the RU path. Fired AFTER
-        // _ruGate.Release() in GetRuPrefixesAsync — never while the gate is held.
+        // Convergence push for default-source changes detected on the RU path. Handed to the
+        // thread pool AFTER _ruGate.Release() in GetRuPrefixesAsync — never while the gate is held.
         _onSourceChanged = onSourceChanged;
         // The peer-supplied user-source path uses its OWN http provider (the retry-only
         // pipeline) so peer-controlled failures cannot open the breaker gating operator sources;
@@ -290,6 +290,9 @@ public sealed class PrefixService : IPrefixService
     internal Action? RuInvalidationCriticalProbe { get; set; }
     internal object RuPublicationSync => _ruPublicationSync;
     private readonly Func<string, Task>? _onSourceChanged;
+    // Pushes handed to the thread pool and not finished yet (test seam, as in PrefixSourceService).
+    private int _pendingPushes;
+    internal int PendingPushes => Volatile.Read(ref _pendingPushes);
 
     /// <summary>Loads and caches the default RU projection, rejecting stale publication after a concurrent source commit.</summary>
     public async Task<List<(UInt128 Prefix, byte Length, bool IsIpv4, uint Asn)>> GetRuPrefixesAsync(CancellationToken ct = default)
@@ -360,10 +363,10 @@ public sealed class PrefixService : IPrefixService
             _ruGate.Release();
         }
 
-        // The push runs AFTER the gate is released — a re-entrant GetRuPrefixesAsync (another
-        // session's build) takes the fast path against the just-written cache instead of blocking
-        // on this frame — and is not awaited: it refreshes every established session, which can
-        // take minutes, while this load is done.
+        // The push leaves only AFTER the gate is released, and on the thread pool: a re-entrant
+        // GetRuPrefixesAsync (another session's build) re-projects through the gate from the
+        // already-committed source instead of waiting on this frame. It refreshes every
+        // established session — minutes on a cold fleet — while this load is done.
         if (changed && _onSourceChanged is not null)
             StartPush(_config.DefaultPrefixSource ?? string.Empty);
 
@@ -371,30 +374,24 @@ public sealed class PrefixService : IPrefixService
     }
 
     /// <summary>
-    /// Starts the convergence push without waiting for it. The delegate runs on the caller's flow
-    /// up to its first await, so a re-entrant build still finds the just-written cache; only the
-    /// push's completion is left to the background. A failure is logged, never propagated into
-    /// the caller's route dump nor left unobserved.
+    /// Hands the convergence push to the thread pool and returns at once: nothing of it runs on
+    /// the caller's flow (see <c>PrefixSourceService.StartPush</c>). A failure is logged, never
+    /// propagated into the caller's route dump nor left unobserved.
     /// </summary>
     private void StartPush(string sourceName)
     {
-        Task push;
-        try { push = _onSourceChanged(sourceName); }
-        catch (Exception ex)
+        var push = _onSourceChanged;
+        if (push is null) return;
+        Interlocked.Increment(ref _pendingPushes);
+        _ = Task.Run(async () =>
         {
-            _logger?.LogWarning(ex, "OnSourceChanged callback failed for the default prefix source.");
-            return;
-        }
-        _ = AwaitPushAsync(push);
-
-        async Task AwaitPushAsync(Task task)
-        {
-            try { await task; }
+            try { await push(sourceName); }
             catch (Exception ex)
             {
                 _logger?.LogWarning(ex, "OnSourceChanged callback failed for the default prefix source.");
             }
-        }
+            finally { Interlocked.Decrement(ref _pendingPushes); }
+        });
     }
 
     /// <summary>Prefixes of a configured source by name (cache-through).</summary>

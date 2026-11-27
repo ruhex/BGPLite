@@ -25,8 +25,12 @@ public sealed class PrefixSourceService : IPrefixSourceService
     // a connect-path load that silently updated the cache would mask the change from a subsequent
     // RefreshAsync (which would see already-new data and report unchanged) — leaving established peers
     // on stale routes. The callback is wired in Program.cs to ISessionManager.RefreshAllEstablishedAsync
-    // and is never awaited by the load — see StartPush.
+    // and is handed to the thread pool, never awaited by the load — see StartPush.
     private readonly Func<string, Task>? _onSourceChanged;
+    // Pushes handed to the thread pool and not finished yet. The count rises on the caller's flow
+    // before the load returns, so a test can await zero before asserting on how many were started.
+    private int _pendingPushes;
+    internal int PendingPushes => Volatile.Read(ref _pendingPushes);
     // Fired on EVERY committed content change (including RefreshAsync, which never fires
     // _onSourceChanged). The RU projection's cache-layer consumer (PrefixService) subscribes to
     // invalidate its projection so the next rebuild re-projects from the committed content.
@@ -329,29 +333,25 @@ public sealed class PrefixSourceService : IPrefixSourceService
     }
 
     /// <summary>
-    /// Hands the convergence push to the background and returns at once. The push refreshes every
+    /// Hands the convergence push to the thread pool and returns at once. The push refreshes every
     /// established session and can take minutes on a cold fleet; a load that waits for it holds
     /// its caller that long — an API request past its budget, a session's route build past its
-    /// hold time — although the load itself is done. The delegate runs on the caller's flow up to
-    /// its first await, so the push has started when the load returns; only its completion is not
-    /// awaited. A failure is logged, never surfaced from the load nor left unobserved.
+    /// hold time — although the load itself is done. Nothing of it runs on the caller's flow:
+    /// on a warm cache a session's whole refresh cycle completes without a real await, so a push
+    /// started inline would make the caller carry every idle session's refresh. A failure is
+    /// logged, never surfaced from the load nor left unobserved.
     /// </summary>
     private void StartPush(string sourceName)
     {
-        Task push;
-        try { push = _onSourceChanged(sourceName); }
-        catch (Exception ex)
+        var push = _onSourceChanged;
+        if (push is null) return;
+        Interlocked.Increment(ref _pendingPushes);
+        _ = Task.Run(async () =>
         {
-            _logger.LogWarning(ex, "OnSourceChanged callback failed for '{Name}'.", sourceName);
-            return;
-        }
-        _ = AwaitPushAsync(push);
-
-        async Task AwaitPushAsync(Task task)
-        {
-            try { await task; }
+            try { await push(sourceName); }
             catch (Exception ex) { _logger.LogWarning(ex, "OnSourceChanged callback failed for '{Name}'.", sourceName); }
-        }
+            finally { Interlocked.Decrement(ref _pendingPushes); }
+        });
     }
 
     /// <summary>

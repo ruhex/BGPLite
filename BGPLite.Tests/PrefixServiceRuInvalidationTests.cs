@@ -82,6 +82,7 @@ public sealed class PrefixServiceRuInvalidationTests
         Assert.Single(first);
         Assert.Equal(InitialPrefix.Address, first[0].Prefix);
         Assert.Equal(InitialPrefix.Length, first[0].Length);
+        await PrefixPushWait.IdleAsync(() => service.PendingPushes);
         var baselinePushes = pushes();
 
         // 2. The source content changes and the auto-refresh timer force-refreshes the source
@@ -110,6 +111,7 @@ public sealed class PrefixServiceRuInvalidationTests
         // Warm the projection, then change the source. (The cold load fires its own push —
         // that is the baseline; the assertions below check for no ADDITIONAL push.)
         await service.GetRuPrefixesAsync();
+        await PrefixPushWait.IdleAsync(() => service.PendingPushes);
         var baselinePushes = pushes();
         provider.Content = [UpdatedPrefix];
 
@@ -132,6 +134,7 @@ public sealed class PrefixServiceRuInvalidationTests
     {
         var (service, sources, provider, pushes) = Build();
         await service.GetRuPrefixesAsync();
+        await PrefixPushWait.IdleAsync(() => service.PendingPushes);
         var baselinePushes = pushes();
 
         // A change to a DIFFERENT source (same PrefixSourceService instance) is invisible to the

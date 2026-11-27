@@ -382,6 +382,7 @@ public class PrefixSourceServiceTests
 
         Assert.False(changed, "the change was consumed by the winning GetAsync; nothing new for RefreshAsync");
         Assert.Equal(3, provider.Calls);
+        await PrefixPushWait.IdleAsync(() => svc.PendingPushes);
         lock (gate)
         {
             Assert.Equal(["ru", "ru"], pushed); // prime push + exactly ONE push for the real change
@@ -456,6 +457,7 @@ public class PrefixSourceServiceTests
         await svc.GetAsync("ru"); // v1 → cache empty → change → callback
         await svc.GetAsync("ru"); // v2 → differs from v1 → change → callback
         await svc.GetAsync("ru"); // v2 → identical → NO change → no callback
+        await PrefixPushWait.IdleAsync(() => svc.PendingPushes);
 
         Assert.Equal(2, changed.Count(n => n == "ru"));
     }
@@ -469,22 +471,52 @@ public class PrefixSourceServiceTests
     public async Task GetAsync_ChangedLoad_StartsThePush_ButDoesNotWaitForIt()
     {
         var push = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var pushes = new List<string>();
         var svc = new PrefixSourceService(
             ConfigWith("ru"),
             new PrefixSourceProviderFactory([new CountingProvider([new(1u, 24)])]),
             NullLogger<PrefixSourceService>.Instance,
-            onSourceChanged: name => { pushes.Add(name); return push.Task; });
+            onSourceChanged: name => { pushes.Add(name); started.TrySetResult(); return push.Task; });
 
-        var load = svc.GetAsync("ru");
-
-        // The load is complete while the push is still running, and the push has been started.
-        Assert.Single(await load.WaitAsync(TimeSpan.FromSeconds(5)));
+        // The load is complete, with the push still pending.
+        Assert.Single(await svc.GetAsync("ru").WaitAsync(TimeSpan.FromSeconds(5)));
+        Assert.Equal(1, svc.PendingPushes);
+        await started.Task.WaitAsync(TimeSpan.FromSeconds(5));
         Assert.Equal(["ru"], pushes);
         Assert.False(push.Task.IsCompleted, "the push is the callback's to finish");
 
-        push.SetResult();   // nothing left running for the next test
-        await push.Task;
+        push.SetResult();
+        await PrefixPushWait.IdleAsync(() => svc.PendingPushes);   // nothing left running for the next test
+    }
+
+    /// <summary>
+    /// Nothing of the push may run on the caller's flow. On a warm cache a session's whole refresh
+    /// cycle completes without a real await, so a push started inline would make an API request —
+    /// or the session whose build committed the change — carry every idle session's refresh.
+    /// </summary>
+    [Fact]
+    public async Task GetAsync_ChangedLoad_RunsThePushOffTheCallersFlow()
+    {
+        using var blocked = new ManualResetEventSlim();
+        var svc = new PrefixSourceService(
+            ConfigWith("ru"),
+            new PrefixSourceProviderFactory([new CountingProvider([new(1u, 24)])]),
+            NullLogger<PrefixSourceService>.Instance,
+            onSourceChanged: _ => { blocked.Wait(); return Task.CompletedTask; });   // blocks before it ever yields
+
+        var load = svc.GetAsync("ru");
+        try
+        {
+            // Returns although the push has not got past its first line.
+            Assert.Single(await load.WaitAsync(TimeSpan.FromSeconds(5)));
+            Assert.Equal(1, svc.PendingPushes);
+        }
+        finally
+        {
+            blocked.Set();
+        }
+        await PrefixPushWait.IdleAsync(() => svc.PendingPushes);
     }
 
     /// <summary>A push that fails is logged and observed — it must not surface from the load, nor
@@ -514,6 +546,7 @@ public class PrefixSourceServiceTests
             await Task.Delay(10);
         var warning = Assert.Single(logger.Messages, m => m.Contains("push failed", StringComparison.Ordinal));
         Assert.Contains("OnSourceChanged callback failed for 'ru'", warning);
+        await PrefixPushWait.IdleAsync(() => svc.PendingPushes);
     }
 
     /// <summary>Records every formatted log message with its exception.</summary>

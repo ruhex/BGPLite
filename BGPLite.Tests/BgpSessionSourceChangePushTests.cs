@@ -74,27 +74,40 @@ public sealed class BgpSessionSourceChangePushTests : IDisposable
         });
         conn.EnqueueMessage(BgpKeepaliveMessage.Instance);
 
-        // The initial dump advertised the source although the push it started never completed.
-        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(5);
-        while (session.AdvertisedPrefixCount < 1 && DateTime.UtcNow < deadline)
-            await Task.Delay(10);
-        Assert.Equal(1, session.AdvertisedPrefixCount);   // pre-fix: 0 — the dump waits for the push
-
-        // The lap the push asked of this session is served once the push is let go: a withdraw
-        // and a re-announcement of the same prefix.
-        push.TrySetResult();
-        deadline = DateTime.UtcNow + TimeSpan.FromSeconds(5);
-        List<BgpUpdateMessage> updates;
-        do
+        try
         {
-            await Task.Delay(10);
-            updates = conn.Sent.Select(f => BgpMessageReader.ReadMessage(f)).OfType<BgpUpdateMessage>().ToList();
-        } while (!updates.Any(u => u.WithdrawnRoutes.Count > 0) && DateTime.UtcNow < deadline);
-        Assert.Contains(updates, u => u.WithdrawnRoutes.Count > 0);
-        Assert.Equal(1, session.AdvertisedPrefixCount);
+            // The initial dump advertised the source although the push never completes.
+            Assert.True(await SettledAsync(() => session.AdvertisedPrefixCount == 1),
+                "the dump must advertise although the push never completes");   // pre-fix: the dump waits for the push
 
-        session.Dispose();
-        try { await run.WaitAsync(TimeSpan.FromSeconds(2)); } catch (TimeoutException) { }
+            // The lap the push asks of this session is not lost: deferred behind the dump, or
+            // started after it, it withdraws and re-announces the same prefix.
+            Assert.True(await SettledAsync(() => Updates().Any(u => u.WithdrawnRoutes.Count > 0)),
+                "the lap the push asks of the session must still run");
+            Assert.Equal(1, session.AdvertisedPrefixCount);
+        }
+        finally
+        {
+            push.TrySetResult();
+            session.Dispose();
+            try { await run.WaitAsync(TimeSpan.FromSeconds(2)); } catch (TimeoutException) { }
+        }
+
+        List<BgpUpdateMessage> Updates() =>
+            conn.Sent.Select(f => BgpMessageReader.ReadMessage(f)).OfType<BgpUpdateMessage>().ToList();
+
+        // Waits until the state holds and no dump or refresh is running on the session: the count
+        // reads 0 between a withdraw and its re-announcement.
+        async Task<bool> SettledAsync(Func<bool> state)
+        {
+            var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(5);
+            while (DateTime.UtcNow < deadline)
+            {
+                if (state() && !session.RefreshInProgress) return true;
+                await Task.Delay(10);
+            }
+            return false;
+        }
     }
 
     private sealed class FixedProvider(IReadOnlyList<IpPrefix> list) : IPrefixSourceProvider

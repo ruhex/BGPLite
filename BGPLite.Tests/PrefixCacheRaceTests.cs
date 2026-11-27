@@ -1,5 +1,6 @@
 using BGPLite.Configuration;
 using BGPLite.Providers;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using BGPLite.Protocol;
 
@@ -157,16 +158,88 @@ public class PrefixCacheRaceTests
     {
         var source = new CountingPrefixSource { ChangedOnNextLoad = true };
         var push = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var pushes = 0;
-        var service = Service(source, onSourceChanged: _ => { Interlocked.Increment(ref pushes); return push.Task; });
+        var service = Service(source, onSourceChanged: _ => { Interlocked.Increment(ref pushes); started.TrySetResult(); return push.Task; });
 
-        var load = service.GetRuPrefixesAsync();
-
-        await load.WaitAsync(TimeSpan.FromSeconds(5));   // pre-fix: TimeoutException — the load waits for the push
+        await service.GetRuPrefixesAsync().WaitAsync(TimeSpan.FromSeconds(5));   // pre-fix: TimeoutException — the load waits for the push
+        Assert.Equal(1, service.PendingPushes);
+        await started.Task.WaitAsync(TimeSpan.FromSeconds(5));
         Assert.Equal(1, pushes);
 
         push.SetResult();   // nothing left running for the next test
-        await push.Task;
+        await PrefixPushWait.IdleAsync(() => service.PendingPushes);
+    }
+
+    /// <summary>
+    /// Nothing of the push may run on the caller's flow (see the same test in
+    /// <c>PrefixSourceServiceTests</c>): a route build that committed a change must not carry
+    /// every idle session's refresh.
+    /// </summary>
+    [Fact]
+    public async Task GetRuPrefixesAsync_ChangedLoad_RunsThePushOffTheCallersFlow()
+    {
+        using var blocked = new ManualResetEventSlim();
+        var service = Service(
+            new CountingPrefixSource { ChangedOnNextLoad = true },
+            onSourceChanged: _ => { blocked.Wait(); return Task.CompletedTask; });   // blocks before it ever yields
+
+        var load = service.GetRuPrefixesAsync();
+        try
+        {
+            // Returns although the push has not got past its first line.
+            Assert.Equal(2, (await load.WaitAsync(TimeSpan.FromSeconds(5))).Count);
+            Assert.Equal(1, service.PendingPushes);
+        }
+        finally
+        {
+            blocked.Set();
+        }
+        await PrefixPushWait.IdleAsync(() => service.PendingPushes);
+    }
+
+    /// <summary>
+    /// A push that fails is logged and observed by this service's copy of the push hand-off too —
+    /// it must not surface from the load, nor go unobserved on the thread pool.
+    /// </summary>
+    [Fact]
+    public async Task GetRuPrefixesAsync_FailingPush_IsLogged_NotSurfacedFromTheLoad()
+    {
+        var logger = new RecordingLogger();
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var service = new PrefixService(
+            new AppConfig(),
+            null!,   // RipeStatPrefixCache — not on the GetRuPrefixesAsync path
+            new CountingPrefixSource { ChangedOnNextLoad = true },
+            null!,   // the HTTP provider is only on the per-peer user-source path
+            logger: logger,
+            onSourceChanged: async _ =>
+            {
+                await release.Task;
+                throw new InvalidOperationException("push failed");
+            });
+
+        Assert.Equal(2, (await service.GetRuPrefixesAsync().WaitAsync(TimeSpan.FromSeconds(5))).Count);
+        Assert.Empty(logger.Messages);
+        release.TrySetResult();
+
+        await PrefixPushWait.WaitForAsync(
+            () => logger.Messages.Any(m => m.Contains("push failed", StringComparison.Ordinal)),
+            "the failed push to be logged");
+        Assert.Contains("OnSourceChanged callback failed for the default prefix source", Assert.Single(logger.Messages));
+        await PrefixPushWait.IdleAsync(() => service.PendingPushes);
+    }
+
+    /// <summary>Records every formatted log message with its exception.</summary>
+    private sealed class RecordingLogger : ILogger<PrefixService>
+    {
+        public List<string> Messages { get; } = [];
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+        public bool IsEnabled(LogLevel logLevel) => true;
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
+        {
+            lock (Messages) Messages.Add($"{formatter(state, exception)} | {exception}");
+        }
     }
 
     /// <summary>
@@ -184,9 +257,10 @@ public class PrefixCacheRaceTests
             source, cacheTtl: TimeSpan.FromMilliseconds(100), timeProvider: fakeTime,
             onSourceChanged: name => { lock (pushes) pushes.Add(name); return Task.CompletedTask; });
 
-        // Cold load reporting changed → push #1.
+        // Cold load reporting changed → push #1 (on the thread pool: wait for it to finish).
         source.ChangedOnNextLoad = true;
         await service.GetRuPrefixesAsync();
+        await PrefixPushWait.IdleAsync(() => service.PendingPushes);
         Assert.Single(pushes);
         Assert.Equal(string.Empty, pushes[0]); // no DefaultPrefixSource configured in this fixture
 
@@ -203,6 +277,7 @@ public class PrefixCacheRaceTests
         fakeTime.Advance(TimeSpan.FromMilliseconds(150));
         source.ChangedOnNextLoad = true;
         await service.GetRuPrefixesAsync();
+        await PrefixPushWait.IdleAsync(() => service.PendingPushes);
         Assert.Equal(2, pushes.Count);
     }
 
