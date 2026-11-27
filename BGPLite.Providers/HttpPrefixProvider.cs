@@ -19,9 +19,11 @@ namespace BGPLite.Providers;
 /// same-origin hop reuses the pooled connection that already passed it).
 /// Response body is capped at <see cref="MaxResponseBytes"/> to prevent OOM.</para>
 /// <para>Conditional requests: when <paramref name="etag"/> / <paramref name="lastModified"/>
-/// are provided from a prior load, sends <c>If-None-Match</c> / <c>If-Modified-Since</c>. A 304
-/// response skips the body download entirely (~1 KB headers-only round-trip). Validators go on the
-/// first hop only, so a source that redirects on every load is downloaded in full each time.</para>
+/// are provided from a prior load, sends <c>If-None-Match</c> / <c>If-Modified-Since</c> — on the
+/// first hop only. A 304 response skips the body download entirely (~1 KB headers-only
+/// round-trip). Validators are taken from a 200 of the configured URL alone: a redirect target's
+/// describe another representation, so a redirected load caches no validators and is downloaded in
+/// full each time.</para>
 /// </summary>
 public sealed class HttpPrefixProvider(
     IHttpClientFactory httpFactory,
@@ -144,9 +146,13 @@ public sealed class HttpPrefixProvider(
 
                 response.EnsureSuccessStatusCode();
 
-                // Extract validators from the 200 response for next time.
-                var newEtag = response.Headers.ETag?.Tag;
-                var newLm = response.Content.Headers.LastModified;
+                // Validators describe the representation of the URL that answered. A redirect
+                // target's must not be stored for the configured URL: sent there on the next load
+                // they could draw a 304 for a different representation and keep the target's
+                // prefixes. Only the configured URL's own 200 yields validators.
+                var direct = hop == 0;
+                var newEtag = direct ? response.Headers.ETag?.Tag : null;
+                var newLm = direct ? response.Content.Headers.LastModified : null;
 
                 if (response.Content.Headers.ContentLength is long contentLength && contentLength > MaxResponseBytes)
                     throw new InvalidOperationException(
