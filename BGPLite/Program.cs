@@ -97,12 +97,12 @@ builder.Services.AddSingleton(new BgpMetrics());
 builder.Services.AddHttpClient(HttpPrefixProvider.ClientName, ConfigureHttpSourceClient)
 .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
 {
-    // SSRF defense: validate DNS resolution at the socket level — no TOCTOU race (every
-    // hop of any redirect re-enters ConnectCallback, so the target IP/port are re-checked).
-    // Redirects are NOT followed: SocketsHttpHandler's AllowAutoRedirect defaults to true
-    // and re-sends all per-source headers except Authorization to the redirect target — an
+    // SSRF defense: validate DNS resolution at the socket level — no TOCTOU race (a redirect
+    // hop to another origin re-enters ConnectCallback, so its IP and port are re-checked).
+    // The handler must NOT follow redirects itself: SocketsHttpHandler's AllowAutoRedirect
+    // re-sends all per-source headers except Authorization to the redirect target — an
     // X-API-Key on a source whose host has an open redirect would leak to the attacker's origin.
-    // A 3xx is surfaced to HttpPrefixProvider and rejected there; operators list the final URL.
+    // HttpPrefixProvider follows them instead, hop by hop, with plain GETs.
     ConnectCallback = PrefixSourceUrlValidator.CreateValidatedConnectionAsync,
     AllowAutoRedirect = false
 })

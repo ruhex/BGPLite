@@ -195,6 +195,29 @@ public sealed class ProvidersChainE2eTests
     }
 
     [Fact]
+    public async Task UserSource_RedirectToABlockedTarget_IsRefusedByTheGate()
+    {
+        // HttpPrefixProvider follows redirects itself; the target of a hop reaches the real
+        // SocketsHttpHandler, whose ConnectCallback is the authoritative gate. The first hop is
+        // answered by a stub — the gate blocks loopback, so no local server can stand in for a
+        // public origin — and points where a hostile or compromised origin would: cloud metadata,
+        // loopback (v4 and v6) and a non-standard port. (https→http is refused earlier, by
+        // RedirectTarget, so the targets stay https to reach the gate at all.)
+        foreach (var target in new[] { "https://169.254.169.254/latest/meta-data/", "https://127.0.0.1/x", "https://[::1]/x", "https://198.51.100.9:8080/x" })
+        {
+            var handler = new RedirectThenRealHandler(target);
+            var provider = new HttpPrefixProvider(
+                new StubFactory(handler), NullLogger<HttpPrefixProvider>.Instance, clientName: "e2e-user");
+
+            var failure = await Assert.ThrowsAnyAsync<Exception>(
+                () => provider.LoadAsync(new PrefixSourceConfig { Name = "feed", Kind = "http", Url = "https://198.51.100.1/list.txt" }));
+
+            Assert.Contains("SSRF", failure.Message, StringComparison.OrdinalIgnoreCase);
+            Assert.Equal(1, handler.Stubbed);   // one redirect answered; the target never got a request out
+        }
+    }
+
+    [Fact]
     public async Task Validator_SaveTimeGate_BlocksLoopbackAndOddPorts()
     {
         var (loopbackOk, _) = await PrefixSourceUrlValidator.ValidateUrlAsync("http://127.0.0.1/list.txt");
@@ -240,5 +263,27 @@ public sealed class ProvidersChainE2eTests
     private sealed class StubFactory(HttpMessageHandler handler) : IHttpClientFactory
     {
         public HttpClient CreateClient(string name) => new(handler, disposeHandler: false);
+    }
+
+    /// <summary>Answers the configured origin with a 302 to <paramref name="target"/>; every other
+    /// request — the redirect's target — goes to the real SSRF-gated handler underneath.</summary>
+    private sealed class RedirectThenRealHandler(string target) : DelegatingHandler(
+        new SocketsHttpHandler
+        {
+            ConnectCallback = PrefixSourceUrlValidator.CreateValidatedConnectionAsync,
+            AllowAutoRedirect = false
+        })
+    {
+        public int Stubbed { get; private set; }
+
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
+        {
+            if (request.RequestUri!.Host != "198.51.100.1")
+                return base.SendAsync(request, ct);
+            Stubbed++;
+            var response = new HttpResponseMessage(HttpStatusCode.Found) { Content = new StringContent("") };
+            response.Headers.Location = new Uri(target, UriKind.Absolute);
+            return Task.FromResult(response);
+        }
     }
 }

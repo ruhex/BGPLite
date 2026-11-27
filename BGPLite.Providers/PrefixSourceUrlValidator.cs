@@ -67,8 +67,9 @@ public static class PrefixSourceUrlValidator
     /// SocketsHttpHandler.ConnectCallback: resolves DNS, validates ALL resolved IPs are public,
     /// then connects with a matching-family socket per address (IPv4 preferred) until one succeeds.
     /// No TOCTOU — every address is validated above and the connected IP is one of them.
-    /// Redirects are not followed (AllowAutoRedirect=false in Program.cs); any connection a
-    /// redirect would have opened re-enters this callback anyway, so the gate holds per hop.
+    /// Redirects are followed by HttpPrefixProvider itself (the handler never auto-follows):
+    /// a hop to another origin needs a new connection and re-enters this callback; a same-origin
+    /// hop reuses a connection that already passed it.
     /// </summary>
     public static async ValueTask<Stream> CreateValidatedConnectionAsync(
         SocketsHttpConnectionContext context, CancellationToken ct)
