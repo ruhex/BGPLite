@@ -115,6 +115,9 @@ public sealed class ManagementApi : IHostedService, IDisposable
     internal const int MaxSourceNameLength = 200;
     internal const int MaxSourceUrlLength = 2048;
     internal const int MaxSourcesPerPeer = 64;
+    // Same purpose for a peer's custom AS numbers: each one is a RIPEstat lookup in every route
+    // build, through the shared per-ASN cache and circuit breaker.
+    internal const int MaxCustomAsnsPerPeer = 256;
     // In-flight tracking is a COUNT plus an idle Task (completed whenever the count is 0),
     // not a List<Task> — the earlier design appended every handler and never removed it, so each
     // completed request leaked its Task (and its exception, if faulted) for the process lifetime
@@ -1956,6 +1959,11 @@ public sealed class ManagementApi : IHostedService, IDisposable
     {
         if (description is { Length: > MaxDescriptionLength })
             return ApiResponse.Error($"Description exceeds {MaxDescriptionLength} characters", 400);
+
+        // Counted on the list as sent: duplicates are rejected separately, and the cap has to
+        // hold before anything is persisted.
+        if (customAsns is { Count: > MaxCustomAsnsPerPeer })
+            return ApiResponse.Error($"A peer can have at most {MaxCustomAsnsPerPeer} custom AS numbers", 400);
 
         if (customAsns is not null)
         {

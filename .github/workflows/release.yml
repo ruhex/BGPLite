@@ -7,6 +7,11 @@ name: Release
 #   chore:/docs:/ci: -> no release
 # It opens a "release PR" that accumulates the changelog; merging that PR tags
 # vX.Y.Z and publishes the Release (which triggers release-assets.yml).
+#
+# Manifest mode: the current version is read from .release-please-manifest.json.
+# Without it, release-please infers the last release from the recent history only
+# (about 250 commits deep) — past that depth it finds none and proposes 1.0.0
+# (#652). release-please-config.json also widens both search depths.
 on:
   push:
     branches: [main]
@@ -21,5 +26,5 @@ jobs:
     steps:
       - uses: googleapis/release-please-action@v4
         with:
-          release-type: simple
-          include-v-in-tag: true
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json

@@ -337,6 +337,49 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
         }
     }
 
+    /// <summary>
+    /// Every custom AS number is a RIPEstat lookup in each route build for the peer, through the
+    /// shared per-ASN cache and circuit breaker. The request body cap was the only bound on how
+    /// many a peer may carry.
+    /// </summary>
+    [Fact]
+    public async Task CustomAsns_CappedPerPeer_OnCreateAndUpdate()
+    {
+        var config = new AppConfig { Bgp = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1" } };
+        _port = await StartAsync(config);
+        _client = new HttpClient();
+        var store = new PeerStore(new StaticOptionsFactory(new DbContextOptionsBuilder<BgpDbContext>().UseSqlite(_connection).Options));
+        var url = $"http://127.0.0.1:{_port}/api/peers";
+        static StringContent Json(object body) => new(JsonSerializer.Serialize(body), Encoding.UTF8, "application/json");
+        // 64001 and up are all configurable; 64999 makes one more than the cap.
+        var atLimit = Enumerable.Range(1, ManagementApi.MaxCustomAsnsPerPeer).Select(i => 64000u + (uint)i).ToList();
+        var overLimit = atLimit.Append(64999u).ToList();
+
+        // The cap itself is accepted...
+        string peerId;
+        using (var created = await _client.PostAsync(url, Json(new { ip = "198.51.100.41", asn = 65041, customAsns = atLimit })))
+        {
+            var body = await created.Content.ReadAsStringAsync();
+            Assert.True(created.IsSuccessStatusCode, body);
+            peerId = JsonDocument.Parse(body).RootElement.GetProperty("id").GetString()!;
+        }
+        Assert.Equal(atLimit, (await store.GetPeerDetailAsync(peerId))!.CustomAsns);
+
+        // ...one more is refused on create, and nothing is stored.
+        using (var refused = await _client.PostAsync(url, Json(new { ip = "198.51.100.42", asn = 65042, customAsns = overLimit })))
+        {
+            Assert.Equal(HttpStatusCode.BadRequest, refused.StatusCode);
+            Assert.Contains($"at most {ManagementApi.MaxCustomAsnsPerPeer}", await refused.Content.ReadAsStringAsync());
+        }
+        Assert.Empty(await store.GetPeersByIpAsync("198.51.100.42"));
+
+        // ...and on update, with the stored list untouched.
+        using var put = new HttpRequestMessage(HttpMethod.Put, $"{url}/{peerId}") { Content = Json(new { customAsns = overLimit }) };
+        using var declined = await _client.SendAsync(put);
+        Assert.Equal(HttpStatusCode.BadRequest, declined.StatusCode);
+        Assert.Equal(atLimit, (await store.GetPeerDetailAsync(peerId))!.CustomAsns);
+    }
+
     [Fact]
     public async Task Md5Password_CreateEnabled_SecretNeverEchoed_UpdateClears()
     {
@@ -1284,6 +1327,101 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
         Assert.Equal("stuck", entry.GetProperty("id").GetString());
         Assert.Equal(0, entry.GetProperty("prefixCount").GetInt32());   // numeric — never null
         Assert.Contains("unavailable", entry.GetProperty("countError").GetString());
+    }
+
+    /// <summary>
+    /// An API GET must be bounded by its budget whatever it triggers. A source load that commits
+    /// a content change starts the fleet refresh; the request used to wait for that refresh — as
+    /// long as the slowest established session's cycle takes.
+    /// </summary>
+    [Fact]
+    public async Task AsnListsGet_ChangedSourceLoad_DoesNotWaitForTheFleetPush()
+    {
+        var config = new AppConfig
+        {
+            Bgp = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1" },
+            PrefixSources = [new PrefixSourceConfig { Name = "fresh", Kind = "stub" }]
+        };
+        var push = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        // The real source service: its first load of "fresh" is a content change, which starts the push.
+        var sources = new PrefixSourceService(
+            config, new PrefixSourceProviderFactory([new FixedPrefixProvider([new IpPrefix(0x0A000000u, 8)])]),
+            NullLogger<PrefixSourceService>.Instance,
+            onSourceChanged: _ => push.Task);
+        _port = await StartAsync(config, prefixSources: sources);
+        _client = new HttpClient();
+
+        try
+        {
+            using var response = await _client.GetAsync($"http://127.0.0.1:{_port}/api/asn-lists")
+                .WaitAsync(TimeSpan.FromSeconds(10));
+            var body = await response.Content.ReadAsStringAsync();
+            Assert.True(response.IsSuccessStatusCode, body);
+            using var json = JsonDocument.Parse(body);
+            var fresh = json.RootElement.EnumerateArray().Single(e => e.GetProperty("id").GetString() == "fresh");
+            Assert.Equal(1, fresh.GetProperty("prefixCount").GetInt32());
+            Assert.Equal(JsonValueKind.Null, fresh.GetProperty("countError").ValueKind);
+        }
+        finally
+        {
+            push.TrySetResult();   // let a request that did wait finish before the listener stops
+        }
+    }
+
+    /// <summary>
+    /// The export runs the production route assembler, which loads the peer's sources. A load
+    /// that commits a change must not hold the request for the fleet refresh either.
+    /// </summary>
+    [Fact]
+    public async Task PeerPrefixesGet_ChangedSourceLoad_DoesNotWaitForTheFleetPush()
+    {
+        var config = new AppConfig
+        {
+            Bgp = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1" },
+            PrefixSources = [new PrefixSourceConfig { Name = "apple", Kind = "stub" }]
+        };
+        var push = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var sources = new PrefixSourceService(
+            config, new PrefixSourceProviderFactory([new FixedPrefixProvider([new IpPrefix(0x0A0A0000u, 16)])]),
+            NullLogger<PrefixSourceService>.Instance,
+            onSourceChanged: _ => push.Task);
+        var prefixes = new PrefixService(
+            config,
+            new RipeStatPrefixCache(new RipeStatProvider(new ThrowingHttpClientFactory(), NullLogger<RipeStatProvider>.Instance), NullLogger<RipeStatPrefixCache>.Instance),
+            sources,
+            null!);   // the HTTP provider is only on the per-peer user-source path
+        var store = new PeerStore(new StaticOptionsFactory(new DbContextOptionsBuilder<BgpDbContext>().UseSqlite(_connection).Options));
+        var saved = await store.SavePeerConfigurationAsync("198.51.100.43", 65043, null, ["apple"], [], []);
+        _port = await StartAsync(config, prefixService: prefixes, prefixSources: sources);
+        _client = new HttpClient();
+
+        try
+        {
+            using var response = await _client.GetAsync($"http://127.0.0.1:{_port}/api/peers/{saved.Id}/prefixes?format=json")
+                .WaitAsync(TimeSpan.FromSeconds(10));
+            var body = await response.Content.ReadAsStringAsync();
+            Assert.True(response.IsSuccessStatusCode, body);
+            Assert.Equal(["10.10.0.0/16"], JsonSerializer.Deserialize<string[]>(body));
+        }
+        finally
+        {
+            push.TrySetResult();
+        }
+    }
+
+    /// <summary>Serves a fixed list — an in-memory source behind the real source service.</summary>
+    private sealed class FixedPrefixProvider(IReadOnlyList<IpPrefix> list) : IPrefixSourceProvider
+    {
+        public string Kind => "stub";
+        public bool SupportsConditionalRequests => false;
+        public Task<SourceLoadResult> LoadAsync(PrefixSourceConfig source, string? etag = null, DateTimeOffset? lastModified = null, CancellationToken ct = default) =>
+            Task.FromResult(SourceLoadResult.Ok(list));
+    }
+
+    /// <summary>RIPEstat is never reached in these tests; a request that tried would fail loudly.</summary>
+    private sealed class ThrowingHttpClientFactory : IHttpClientFactory
+    {
+        public HttpClient CreateClient(string name) => throw new NotSupportedException("RIPEstat is not on this path");
     }
 
     /// <summary>Every count parks until cancelled — RIPEstat hanging on a cold cache.</summary>

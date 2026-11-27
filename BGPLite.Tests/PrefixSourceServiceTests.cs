@@ -1,6 +1,7 @@
 using BGPLite.Configuration;
 using BGPLite.Providers;
 using BGPLite.Server;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using BGPLite.Protocol;
 
@@ -381,6 +382,7 @@ public class PrefixSourceServiceTests
 
         Assert.False(changed, "the change was consumed by the winning GetAsync; nothing new for RefreshAsync");
         Assert.Equal(3, provider.Calls);
+        await PrefixPushWait.IdleAsync(() => svc.PendingPushes);
         lock (gate)
         {
             Assert.Equal(["ru", "ru"], pushed); // prime push + exactly ONE push for the real change
@@ -444,18 +446,119 @@ public class PrefixSourceServiceTests
             [new IpPrefix(1u, 24)],                       // call 1: v1
             [new IpPrefix(1u, 24), new IpPrefix(2u, 16)],        // call 2: v2 (changed)
             [new IpPrefix(1u, 24), new IpPrefix(2u, 16)]);       // call 3: v2 (same — no change)
-        var changed = new List<string>();
+        // Thread-safe: the pushes run on the thread pool, and two of them may overlap.
+        var changed = new System.Collections.Concurrent.ConcurrentQueue<string>();
         var svc = new PrefixSourceService(
             ConfigWith("ru"),
             new PrefixSourceProviderFactory([provider]),
             NullLogger<PrefixSourceService>.Instance,
             cacheTtl: TimeSpan.Zero,
-            onSourceChanged: name => { changed.Add(name); return Task.CompletedTask; });
+            onSourceChanged: name => { changed.Enqueue(name); return Task.CompletedTask; });
 
         await svc.GetAsync("ru"); // v1 → cache empty → change → callback
         await svc.GetAsync("ru"); // v2 → differs from v1 → change → callback
         await svc.GetAsync("ru"); // v2 → identical → NO change → no callback
+        await PrefixPushWait.IdleAsync(() => svc.PendingPushes);
 
         Assert.Equal(2, changed.Count(n => n == "ru"));
+    }
+
+    /// <summary>
+    /// The convergence push refreshes every established session and can take minutes on a cold
+    /// fleet. A load that waits for it holds its caller that long — an API request past its
+    /// budget, a session build past its hold time — although the load itself is done.
+    /// </summary>
+    [Fact]
+    public async Task GetAsync_ChangedLoad_StartsThePush_ButDoesNotWaitForIt()
+    {
+        var push = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var pushes = new List<string>();
+        var svc = new PrefixSourceService(
+            ConfigWith("ru"),
+            new PrefixSourceProviderFactory([new CountingProvider([new(1u, 24)])]),
+            NullLogger<PrefixSourceService>.Instance,
+            onSourceChanged: name => { pushes.Add(name); started.TrySetResult(); return push.Task; });
+
+        // The load is complete, with the push still pending.
+        Assert.Single(await svc.GetAsync("ru").WaitAsync(TimeSpan.FromSeconds(5)));
+        Assert.Equal(1, svc.PendingPushes);
+        await started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Equal(["ru"], pushes);
+        Assert.False(push.Task.IsCompleted, "the push is the callback's to finish");
+
+        push.SetResult();
+        await PrefixPushWait.IdleAsync(() => svc.PendingPushes);   // nothing left running for the next test
+    }
+
+    /// <summary>
+    /// Nothing of the push may run on the caller's flow. On a warm cache a session's whole refresh
+    /// cycle completes without a real await, so a push started inline would make an API request —
+    /// or the session whose build committed the change — carry every idle session's refresh.
+    /// </summary>
+    [Fact]
+    public async Task GetAsync_ChangedLoad_RunsThePushOffTheCallersFlow()
+    {
+        using var blocked = new ManualResetEventSlim();
+        var svc = new PrefixSourceService(
+            ConfigWith("ru"),
+            new PrefixSourceProviderFactory([new CountingProvider([new(1u, 24)])]),
+            NullLogger<PrefixSourceService>.Instance,
+            onSourceChanged: _ => { blocked.Wait(); return Task.CompletedTask; });   // blocks before it ever yields
+
+        // On its own task: should the push ever run inline again, the bounded wait below fails
+        // the test instead of hanging the run on the test thread.
+        var load = Task.Run(() => svc.GetAsync("ru"));
+        try
+        {
+            // Returns although the push has not got past its first line.
+            Assert.Single(await load.WaitAsync(TimeSpan.FromSeconds(5)));
+            Assert.Equal(1, svc.PendingPushes);
+        }
+        finally
+        {
+            blocked.Set();
+        }
+        await PrefixPushWait.IdleAsync(() => svc.PendingPushes);
+    }
+
+    /// <summary>A push that fails is logged and observed — it must not surface from the load, nor
+    /// go unobserved on the thread pool.</summary>
+    [Fact]
+    public async Task GetAsync_FailingPush_IsLogged_NotSurfacedFromTheLoad()
+    {
+        var logger = new RecordingLogger();
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var svc = new PrefixSourceService(
+            ConfigWith("ru"),
+            new PrefixSourceProviderFactory([new CountingProvider([new(1u, 24)])]),
+            logger,
+            onSourceChanged: async _ =>
+            {
+                await release.Task;
+                throw new InvalidOperationException("push failed");
+            });
+
+        Assert.Single(await svc.GetAsync("ru").WaitAsync(TimeSpan.FromSeconds(5)));
+        Assert.Empty(logger.Messages);
+        release.TrySetResult();
+        // The push logs before it finishes: once none is pending, the log is complete to read.
+        await PrefixPushWait.IdleAsync(() => svc.PendingPushes);
+
+        var warning = Assert.Single(logger.Messages);
+        Assert.Contains("OnSourceChanged callback failed for 'ru'", warning);
+        Assert.Contains("push failed", warning);
+    }
+
+    /// <summary>Records every formatted log message with its exception.</summary>
+    private sealed class RecordingLogger : ILogger<PrefixSourceService>
+    {
+        public List<string> Messages { get; } = [];
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+        public bool IsEnabled(LogLevel logLevel) => true;
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
+        {
+            lock (Messages) Messages.Add($"{formatter(state, exception)} | {exception}");
+        }
     }
 }

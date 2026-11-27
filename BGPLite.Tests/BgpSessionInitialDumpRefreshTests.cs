@@ -10,10 +10,10 @@ namespace BGPLite.Tests;
 /// <summary>
 /// The initial route dump is the session's first advertisement build and owns
 /// <c>_advertisedPrefixesLock</c> for its whole duration. A refresh requested while that dump is
-/// running can come from the dump itself: a source load that changed content awaits
-/// <c>onSourceChanged</c>, which fans out to every established session — this one included. Such a
-/// request must not start a cycle, because the cycle would wait for the lock its own caller holds
-/// forever. It has to return promptly and be served once the dump has released the lock.
+/// running can come from the dump itself: a source load that commits a change fires the fleet
+/// push, which fans out to every established session — this one included. Such a request must not
+/// start a cycle, because the cycle would wait for the lock its own caller holds forever. It has
+/// to return promptly and be served once the dump has released the lock.
 /// </summary>
 public class BgpSessionInitialDumpRefreshTests
 {
