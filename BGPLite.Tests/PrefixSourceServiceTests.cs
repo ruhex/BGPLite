@@ -446,13 +446,14 @@ public class PrefixSourceServiceTests
             [new IpPrefix(1u, 24)],                       // call 1: v1
             [new IpPrefix(1u, 24), new IpPrefix(2u, 16)],        // call 2: v2 (changed)
             [new IpPrefix(1u, 24), new IpPrefix(2u, 16)]);       // call 3: v2 (same — no change)
-        var changed = new List<string>();
+        // Thread-safe: the pushes run on the thread pool, and two of them may overlap.
+        var changed = new System.Collections.Concurrent.ConcurrentQueue<string>();
         var svc = new PrefixSourceService(
             ConfigWith("ru"),
             new PrefixSourceProviderFactory([provider]),
             NullLogger<PrefixSourceService>.Instance,
             cacheTtl: TimeSpan.Zero,
-            onSourceChanged: name => { changed.Add(name); return Task.CompletedTask; });
+            onSourceChanged: name => { changed.Enqueue(name); return Task.CompletedTask; });
 
         await svc.GetAsync("ru"); // v1 → cache empty → change → callback
         await svc.GetAsync("ru"); // v2 → differs from v1 → change → callback
@@ -505,7 +506,9 @@ public class PrefixSourceServiceTests
             NullLogger<PrefixSourceService>.Instance,
             onSourceChanged: _ => { blocked.Wait(); return Task.CompletedTask; });   // blocks before it ever yields
 
-        var load = svc.GetAsync("ru");
+        // On its own task: should the push ever run inline again, the bounded wait below fails
+        // the test instead of hanging the run on the test thread.
+        var load = Task.Run(() => svc.GetAsync("ru"));
         try
         {
             // Returns although the push has not got past its first line.
@@ -539,14 +542,12 @@ public class PrefixSourceServiceTests
         Assert.Single(await svc.GetAsync("ru").WaitAsync(TimeSpan.FromSeconds(5)));
         Assert.Empty(logger.Messages);
         release.TrySetResult();
-
-        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(5);
-        while (!logger.Messages.Any(m => m.Contains("OnSourceChanged callback failed", StringComparison.Ordinal)) &&
-               DateTime.UtcNow < deadline)
-            await Task.Delay(10);
-        var warning = Assert.Single(logger.Messages, m => m.Contains("push failed", StringComparison.Ordinal));
-        Assert.Contains("OnSourceChanged callback failed for 'ru'", warning);
+        // The push logs before it finishes: once none is pending, the log is complete to read.
         await PrefixPushWait.IdleAsync(() => svc.PendingPushes);
+
+        var warning = Assert.Single(logger.Messages);
+        Assert.Contains("OnSourceChanged callback failed for 'ru'", warning);
+        Assert.Contains("push failed", warning);
     }
 
     /// <summary>Records every formatted log message with its exception.</summary>

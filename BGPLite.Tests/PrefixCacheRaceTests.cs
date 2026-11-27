@@ -130,10 +130,12 @@ public class PrefixCacheRaceTests
 
         service = Service(source, onSourceChanged: async _ =>
         {
-            pushStarted.TrySetResult();
             // The production push (RefreshAllEstablishedAsync) rebuilds every established session's
             // route set; a RU-consuming session's build re-enters GetRuPrefixesAsync right here.
             reentrant = service.GetRuPrefixesAsync();
+            // Signalled only once the re-entry is recorded: the push runs detached, so the test
+            // must never get past its wait while `reentrant` still holds its initial value.
+            pushStarted.TrySetResult();
             await reentrant;
         });
 
@@ -222,12 +224,12 @@ public class PrefixCacheRaceTests
         Assert.Equal(2, (await service.GetRuPrefixesAsync().WaitAsync(TimeSpan.FromSeconds(5))).Count);
         Assert.Empty(logger.Messages);
         release.TrySetResult();
-
-        await PrefixPushWait.WaitForAsync(
-            () => logger.Messages.Any(m => m.Contains("push failed", StringComparison.Ordinal)),
-            "the failed push to be logged");
-        Assert.Contains("OnSourceChanged callback failed for the default prefix source", Assert.Single(logger.Messages));
+        // The push logs before it finishes: once none is pending, the log is complete to read.
         await PrefixPushWait.IdleAsync(() => service.PendingPushes);
+
+        var warning = Assert.Single(logger.Messages);
+        Assert.Contains("OnSourceChanged callback failed for the default prefix source", warning);
+        Assert.Contains("push failed", warning);
     }
 
     /// <summary>Records every formatted log message with its exception.</summary>
