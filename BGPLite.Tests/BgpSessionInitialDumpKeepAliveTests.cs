@@ -457,4 +457,121 @@ public class BgpSessionInitialDumpKeepAliveTests
 
         await TeardownAsync(session, run);
     }
+
+    /// <summary>
+    /// The read loop enforces the per-peer prefix ceiling (RFC 4271 §6.7, RFC 4486 §2) on every
+    /// inbound UPDATE. The dump refreshes that ceiling too, but it runs beside the loops: an
+    /// UPDATE read before the lookup returned was checked against the global default instead.
+    /// </summary>
+    [Fact]
+    public async Task InboundUpdateDuringTheInitialDump_IsCheckedAgainstThePerPeerLimit()
+    {
+        // The per-peer limit is still being read from the store while the session comes up.
+        var perPeerLimit = new TaskCompletionSource<int?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var conn = new ScriptedConnection();
+        var routeTable = new RouteTable();
+        var assembler = new ParkedRouteAssembler();
+        var session = new BgpSession(
+            conn,
+            new PeerConfig { Address = "127.0.0.1" },
+            new BgpConfig { Asn = 65001, RouterId = "127.0.0.1", HoldTime = 0, KeepAlive = 0, MaxPrefixesPerPeer = 100 },
+            routeTable,
+            AllowAllFilter.Instance,
+            new BgpMetrics(),
+            NullLogger<BgpSession>.Instance,
+            peerStore: new LimitStore(perPeerLimit.Task),
+            routeAssembler: assembler);
+        var run = session.RunAsync();
+        conn.EnqueueMessage(PeerOpen(holdTime: 0));
+        conn.EnqueueMessage(BgpKeepaliveMessage.Instance);
+        EnqueueAnnouncement(conn, "10.1.0.0/24", "10.2.0.0/24");
+        await WaitForAsync(() => session.IsEstablished, "Established");
+
+        // A read loop that started before the limit is known takes the UPDATE under the global
+        // default of 100 and installs both prefixes. Give it every chance to, then answer: 1.
+        var settle = Environment.TickCount64 + 1000;
+        while (routeTable.Count < 2 && Environment.TickCount64 < settle)
+            await Task.Delay(10);
+        perPeerLimit.SetResult(1);
+
+        // The second prefix exceeds the limit: the session is reset with Cease/MaxPrefixesExceeded
+        // (RFC 4486 §2), exactly as it would be by an UPDATE after the dump.
+        await run.WaitAsync(TimeSpan.FromSeconds(5));
+        var reset = Assert.Single(conn.Sent.Select(f => BgpMessageReader.ReadMessage(f)).OfType<BgpNotificationMessage>());
+        Assert.Equal(BgpConstants.Error.Cease, reset.ErrorCode);
+        Assert.Equal(BgpConstants.SubError.CeaseMaxPrefixes, reset.SubErrorCode);
+        assembler.Release();
+        session.Dispose();
+    }
+
+    /// <summary>
+    /// RFC 4271 §4.5: a NOTIFICATION ends the session — no UPDATE may follow it on the wire. A
+    /// loop can decide to send one while the initial dump is still sending batches.
+    /// </summary>
+    [Fact]
+    public async Task LoopNotificationDuringTheInitialDump_NoUpdateFollowsIt()
+    {
+        // Writes 1-2 are the handshake (OPEN, KEEPALIVE); 3-5 are the dump's three UPDATEs.
+        var conn = new ScriptedGateConnection(3, 4, 5);
+        var session = NewSession(new FixedRouteAssembler(ManyRoutes()), conn, new FakeTimeProvider());
+        var run = session.RunAsync();
+        conn.EnqueueMessage(PeerOpen());
+        conn.EnqueueMessage(BgpKeepaliveMessage.Instance);
+        await WaitForAsync(() => session.IsEstablished, "Established");
+        await conn.Parked(3).WaitAsync(TimeSpan.FromSeconds(5));   // the dump is inside its first UPDATE
+        try
+        {
+            // An OPEN in Established is an FSM error: the read loop answers with NOTIFICATION 5/0
+            // while the dump still holds two batches.
+            conn.EnqueueMessage(PeerOpen());
+
+            // The loop cancels the dump before it queues its NOTIFICATION — the probe says so, and
+            // the parked batch is released right there. Nothing else releases it in time: a loop
+            // that skips the stop has to be kicked by hand, and its remaining UPDATEs then land
+            // after the NOTIFICATION on their own.
+            var stopRequested = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            session.InitialDumpStopRequestedProbe = () => { stopRequested.TrySetResult(); conn.Release(3); };
+            await Task.WhenAny(stopRequested.Task, Task.Delay(TimeSpan.FromSeconds(3)));
+            conn.Release(3);
+
+            var notification = WaitForAsync(() => Notifications(conn).Count == 1, "the NOTIFICATION");
+            await Task.WhenAny(notification, conn.Parked(4));   // a batch that slipped in before the cancel
+            conn.Release(4);
+            conn.Release(5);
+            await notification;
+            await run.WaitAsync(TimeSpan.FromSeconds(5));
+
+            // The NOTIFICATION is the last frame on the wire.
+            var last = Assert.IsType<BgpNotificationMessage>(BgpMessageReader.ReadMessage(conn.Sent[^1]));
+            Assert.Equal(BgpConstants.Error.FiniteStateMachineError, last.ErrorCode);
+        }
+        finally
+        {
+            await TeardownAsync(session, run);
+        }
+    }
+
+    private static List<BgpNotificationMessage> Notifications(IBgpConnection conn) =>
+        ((ScriptedGateConnection)conn).Sent.Select(f => BgpMessageReader.ReadMessage(f)).OfType<BgpNotificationMessage>().ToList();
+
+    /// <summary>Every member inert except the per-peer limit, which the test answers when it chooses.</summary>
+    private sealed class LimitStore(Task<int?> limit) : IPeerStore
+    {
+        public Task<string> CreatePeerAsync(string ip, uint asn, string? description, CancellationToken ct = default) => Task.FromResult(string.Empty);
+        public Task UpsertPeerAsync(string ip, uint asn, CancellationToken ct = default) => Task.CompletedTask;
+        public Task UpdateSessionStatusAsync(string ip, uint asn, bool active, CancellationToken ct = default) => Task.CompletedTask;
+        public Task<PeerRoutingView?> LoadPeerRoutingViewAsync(string ip, uint asn, CancellationToken ct = default) => Task.FromResult<PeerRoutingView?>(null);
+        public Task<int?> GetPeerMaxPrefixAsync(string ip, uint asn, CancellationToken ct = default) => limit;
+    }
+
+    /// <summary>A valid inbound IPv4 announcement — ORIGIN, AS_PATH and NEXT_HOP included.</summary>
+    private static void EnqueueAnnouncement(ScriptedConnection conn, params string[] cidrs)
+    {
+        var nlri = cidrs.Select(cidr => PrefixCidr.TryParse(cidr, out var prefix) ? prefix : throw new FormatException(cidr)).ToList();
+        conn.EnqueueMessage(new BgpUpdateMessage
+        {
+            Nlri = nlri,
+            PathAttributes = UpdateCodec.BuildUpdateAttributes(65002, localFourByteAsn: true, nextHop: 0x0A000001, [])
+        });
+    }
 }

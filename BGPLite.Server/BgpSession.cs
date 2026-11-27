@@ -568,6 +568,7 @@ public sealed class BgpSession : IDisposable
             // to its first real await, so a build that never yields is on the wire before the read
             // loop starts.
             var initialDump = SendInitialRoutesAsync(linkedCts.Token);
+            _initialDumpTask = initialDump;
             await RunEstablishedAsync(linkedCts.Token, initialDump);
         }
         catch (OperationCanceledException)
@@ -724,6 +725,10 @@ public sealed class BgpSession : IDisposable
         }
     }
 
+    // The initial dump's task, for StopInitialDumpAsync. RunAsync sets it before the established
+    // loops start, so a loop always finds it there.
+    private Task? _initialDumpTask;
+
     /// <summary>
     /// The initial route dump: one advertisement build under <see cref="_advertisedPrefixesLock"/>,
     /// then the End-of-RIB marker (RFC 4724 §4.1) when Graceful Restart is configured, then the
@@ -750,8 +755,10 @@ public sealed class BgpSession : IDisposable
         {
             await SendAllRoutesAsync();
             // End-of-RIB once the initial dump is complete (RFC 4724 §4.1): lets GR-capable
-            // peers finalize stale routes. Tied to session establishment, so NOT sent on refresh.
-            if (_bgpConfig.GracefulRestart)
+            // peers finalize stale routes. Tied to session establishment, so NOT sent on refresh —
+            // and not on a dump the session cancelled half-way: an UPDATE may not follow the
+            // NOTIFICATION that ended it.
+            if (_bgpConfig.GracefulRestart && !ct.IsCancellationRequested)
                 await SendEndOfRibAsync();
         }
         finally
@@ -782,9 +789,19 @@ public sealed class BgpSession : IDisposable
     /// </summary>
     private async Task RunEstablishedAsync(CancellationToken cancellationToken, Task initialDump)
     {
+        // The read loop enforces the per-peer prefix ceiling (RFC 4271 §6.7 / RFC 4486 §2) on
+        // every inbound UPDATE, and the dump refreshes that ceiling too — but it runs beside the
+        // loops now. Until its lookup returned, an UPDATE would be checked against the global
+        // default: too loose under a lower per-peer limit, a false MaxPrefixesExceeded reset under
+        // a higher one. Resolve it first, before the read loop can take an UPDATE. One quick store
+        // read; only the read loop waits for it — the KEEPALIVE loop must not fall silent behind a
+        // slow store, and the dump may still wait on cold sources as long as it likes.
+        var capReady = RefreshPerPeerCapAsync(cancellationToken);
+
         // Hold time 0 -> KEEPALIVE timer and Hold Timer are disabled (RFC 4271 §4.2/§6.5).
         if (_negotiatedHoldTime == 0)
         {
+            await capReady;
             var readTask = ReadLoopAsync(cancellationToken);
             if (await Task.WhenAny(readTask, initialDump) == initialDump)
             {
@@ -804,8 +821,9 @@ public sealed class BgpSession : IDisposable
         Interlocked.Exchange(ref _lastReceivedTicks, _timeProvider.GetUtcNow().Ticks);
 
         using var keepaliveTimer = new PeriodicTimer(_keepAliveInterval, _timeProvider);
-        var readLoop = ReadLoopAsync(cancellationToken);
         var keepaliveLoop = HoldTimerLoopAsync(keepaliveTimer, cancellationToken);
+        await capReady;
+        var readLoop = ReadLoopAsync(cancellationToken);
 
         if (await Task.WhenAny(readLoop, keepaliveLoop, initialDump) == initialDump)
         {
@@ -865,6 +883,30 @@ public sealed class BgpSession : IDisposable
         try { await _cts.CancelAsync(); }
         catch (ObjectDisposedException) { /* session disposed mid-unwind — nothing left to cancel */ }
     }
+
+    /// <summary>
+    /// The established loops call this before they write their NOTIFICATION. It cancels the session
+    /// — the dump checks that between batches — and waits out the batch in flight, so that no
+    /// route UPDATE follows the NOTIFICATION on the wire (RFC 4271 §4.5). Bounded: a dump stuck in
+    /// a route build that does not observe cancellation must not hold the NOTIFICATION hostage.
+    /// A no-op once the dump is over.
+    /// </summary>
+    private async Task StopInitialDumpAsync()
+    {
+        await CancelSessionCtsAsync();
+        // Test seam: the session is cancelled and the loop is about to wait for the dump. Null in
+        // production; BgpSessionInitialDumpKeepAliveTests releases a parked write there.
+        _dumpStopRequestedProbe?.Invoke();
+        var dump = Volatile.Read(ref _initialDumpTask);
+        if (dump is null || dump.IsCompleted) return;
+        await Task.WhenAny(dump, Task.Delay(StopInitialDumpBudget));
+    }
+
+    private Action? _dumpStopRequestedProbe;
+    internal Action? InitialDumpStopRequestedProbe { get => _dumpStopRequestedProbe; set => _dumpStopRequestedProbe = value; }
+
+    /// <summary>How long a loop waits for a cancelled dump before writing its NOTIFICATION.</summary>
+    private static readonly TimeSpan StopInitialDumpBudget = TimeSpan.FromSeconds(2);
 
     private async Task AwaitLoopTaskAsync(Task task, string label)
     {
@@ -943,6 +985,7 @@ public sealed class BgpSession : IDisposable
                 _logger.LogWarning("OPEN received from {Peer} in Established — FSM error (RFC 4271 §8.2.2)", _peer);
                 if (Interlocked.CompareExchange(ref _teardownReason, (int)TeardownReason.LocalCease, (int)TeardownReason.None) == (int)TeardownReason.None)
                 {
+                    await StopInitialDumpAsync();
                     try { await SendNotificationAsync(BgpConstants.Error.FiniteStateMachineError, BgpConstants.SubError.Unspecific); }
                     catch { /* best-effort — partial write counts, see RFC 4271 §8.1 */ }
                 }
@@ -973,6 +1016,7 @@ public sealed class BgpSession : IDisposable
                     _peer, ex.ErrorCode, ex.SubErrorCode ?? BgpConstants.SubError.Unspecific, ex.Message);
                 if (Interlocked.CompareExchange(ref _teardownReason, (int)TeardownReason.LocalCease, (int)TeardownReason.None) == (int)TeardownReason.None)
                 {
+                    await StopInitialDumpAsync();
                     try { await SendNotificationAsync(BgpConstants.Error.UpdateMessageError, BgpConstants.SubError.MalformedAttributeList); }
                     catch { /* best-effort — partial write counts, see RFC 4271 §8.1 */ }
                 }
@@ -990,6 +1034,7 @@ public sealed class BgpSession : IDisposable
                     _peer, ex.ErrorCode, ex.SubErrorCode ?? BgpConstants.SubError.Unspecific, ex.Message);
                 if (Interlocked.CompareExchange(ref _teardownReason, (int)TeardownReason.LocalCease, (int)TeardownReason.None) == (int)TeardownReason.None)
                 {
+                    await StopInitialDumpAsync();
                     try { await SendNotificationAsync(ex.ErrorCode!.Value, ex.SubErrorCode ?? BgpConstants.SubError.Unspecific); }
                     catch { /* best-effort — partial write counts, see RFC 4271 §8.1 */ }
                 }
@@ -1124,6 +1169,7 @@ public sealed class BgpSession : IDisposable
                         message.Type, _peer);
                     if (Interlocked.CompareExchange(ref _teardownReason, (int)TeardownReason.LocalCease, (int)TeardownReason.None) == (int)TeardownReason.None)
                     {
+                        await StopInitialDumpAsync();
                         try { await SendNotificationAsync(BgpConstants.Error.FiniteStateMachineError, BgpConstants.SubError.Unspecific); }
                         catch { /* best-effort — partial write counts, see RFC 4271 §8.1 */ }
                     }
@@ -1167,6 +1213,7 @@ public sealed class BgpSession : IDisposable
                     _peer, _negotiatedHoldTime);
                 if (Interlocked.CompareExchange(ref _teardownReason, (int)TeardownReason.HoldTimerExpired, (int)TeardownReason.None) == (int)TeardownReason.None)
                 {
+                    await StopInitialDumpAsync();
                     try { await SendNotificationAsync(BgpConstants.Error.HoldTimerExpired, BgpConstants.SubError.Unspecific); }
                     catch { /* best-effort — partial write counts, see RFC 4271 §8.1 */ }
                 }
@@ -1594,6 +1641,34 @@ public sealed class BgpSession : IDisposable
     /// having changed anything the peer can see. Returns <c>null</c> when the session is already
     /// disposed.
     /// </summary>
+    /// <summary>
+    /// Refreshes the effective per-peer prefix ceiling: the peer row's MaxPrefix override when
+    /// configured, else the global default. Unknown peers (auto-register path) get null and keep
+    /// the global cap until their row exists. Resolved before the read loop starts — it enforces
+    /// the ceiling on every inbound UPDATE — and once more per refresh cycle.
+    /// Best-effort: a transient store failure (e.g. "database is locked") concerns a value we
+    /// already hold, so keep the last known cap rather than failing the caller over it. Since the
+    /// refresh path resolves BEFORE it withdraws, a throw here would no longer strand the peer
+    /// withdrawn — but a refresh that re-advertises under the previous cap is still strictly
+    /// better than one that does not run at all.
+    /// </summary>
+    private async Task RefreshPerPeerCapAsync(CancellationToken sessionToken)
+    {
+        if (_peerStore is null) return;
+        try
+        {
+            var overrideCap = await _peerStore.GetPeerMaxPrefixAsync(_peerConfig.Address, _remoteAsn, sessionToken);
+            Volatile.Write(ref _effectiveMaxPrefix, overrideCap ?? _bgpConfig.MaxPrefixesPerPeer);
+        }
+        catch (OperationCanceledException) when (_cts.IsCancellationRequested) { throw; }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "Could not resolve the per-peer MaxPrefix override for {Peer} — enforcing the last known cap {Cap}",
+                _peer, Volatile.Read(ref _effectiveMaxPrefix));
+        }
+    }
+
     private async Task<List<Route>?> ResolveOutboundRoutesAsync()
     {
         // _cts.Token throws ObjectDisposedException once Dispose has run, so a send cycle that
@@ -1603,30 +1678,8 @@ public sealed class BgpSession : IDisposable
         try { sessionToken = _cts.Token; }
         catch (ObjectDisposedException) { return null; }
 
-        // Refresh the effective per-peer prefix ceiling once per cycle: the peer row's MaxPrefix
-        // override when configured (operator edits apply on the next refresh), else the global
-        // default. Unknown peers (auto-register path) get null and keep the global cap until
-        // their row exists.
-        if (_peerStore is not null)
-        {
-            // Best-effort: a transient store failure here (e.g. "database is locked") concerns a
-            // value we already hold, so keep the last known cap rather than failing the whole
-            // cycle over it. Since the refresh path now resolves BEFORE it withdraws, a throw here
-            // would no longer strand the peer withdrawn — but a refresh that re-advertises under
-            // the previous cap is still strictly better than one that does not run at all.
-            try
-            {
-                var overrideCap = await _peerStore.GetPeerMaxPrefixAsync(_peerConfig.Address, _remoteAsn, sessionToken);
-                Volatile.Write(ref _effectiveMaxPrefix, overrideCap ?? _bgpConfig.MaxPrefixesPerPeer);
-            }
-            catch (OperationCanceledException) when (_cts.IsCancellationRequested) { throw; }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex,
-                    "Could not resolve the per-peer MaxPrefix override for {Peer} — enforcing the last known cap {Cap}",
-                    _peer, Volatile.Read(ref _effectiveMaxPrefix));
-            }
-        }
+        // Once per cycle: an operator's edit of the per-peer limit applies on the next refresh.
+        await RefreshPerPeerCapAsync(sessionToken);
 
         return await _routeAssembler.BuildOutboundRoutesAsync(
             _peerConfig.Address, _remoteAsn, GetFilterPeerConfig(), _peer, sessionToken);
@@ -1726,8 +1779,11 @@ public sealed class BgpSession : IDisposable
         // group); a group that throws — e.g. a composed UPDATE over the 4096-byte maximum — must
         // neither take earlier groups' mirror entries down with it nor record its own. The healthy
         // /8 withdraw+re-announce contract is pinned by tests.
+        // Between batches, a torn-down session stops sending: the loop about to write its
+        // NOTIFICATION has cancelled the session and waits for the batch in flight.
         foreach (var route in v4Routes)
         {
+            if (_cts.IsCancellationRequested) break;
             batch.Add(route);
             if (batch.Count < maxNlriPerUpdate) continue;
             // Count what actually reached the wire: a community group dropped by the oversize
@@ -1745,6 +1801,7 @@ public sealed class BgpSession : IDisposable
         batch.Clear();
         foreach (var route in v6Routes)
         {
+            if (_cts.IsCancellationRequested) break;
             batch.Add(route);
             if (batch.Count < maxNlriPerUpdate) continue;
             sent += await SendV6RouteBatchAsync(v6NextHop, batch, v6AttrCache);
