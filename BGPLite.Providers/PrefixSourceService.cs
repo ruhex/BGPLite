@@ -20,11 +20,12 @@ public sealed class PrefixSourceService : IPrefixSourceService
     private readonly TimeSpan _cacheTtl;
     private readonly TimeSpan _negativeTtl;
     private readonly TimeProvider _timeProvider;
-    // Convergence: invoked whenever a load detects an actual content change, regardless of which
+    // Convergence: started whenever a load detects an actual content change, regardless of which
     // entry point triggered the load (connect-path GetAsync vs. auto-refresh RefreshAsync). Without this,
     // a connect-path load that silently updated the cache would mask the change from a subsequent
     // RefreshAsync (which would see already-new data and report unchanged) — leaving established peers
-    // on stale routes. The callback is wired in Program.cs to ISessionManager.RefreshAllEstablishedAsync.
+    // on stale routes. The callback is wired in Program.cs to ISessionManager.RefreshAllEstablishedAsync
+    // and is never awaited by the load — see StartPush.
     private readonly Func<string, Task>? _onSourceChanged;
     // Fired on EVERY committed content change (including RefreshAsync, which never fires
     // _onSourceChanged). The RU projection's cache-layer consumer (PrefixService) subscribes to
@@ -222,8 +223,8 @@ public sealed class PrefixSourceService : IPrefixSourceService
     /// (used by the auto-refresh timer). <c>Changed</c> is computed INSIDE the per-source gate —
     /// atomically with the cache write — so a concurrent <c>GetAsync</c> cannot insert a newer list
     /// between the before/after snapshots (the prior TOCTOU that masked real changes). When a change
-    /// is detected (by any entry point), <c>_onSourceChanged</c> is invoked AFTER releasing the gate
-    /// so the callback (peer refresh) can't deadlock on the per-source lock.
+    /// is detected (by any entry point), the push is started AFTER releasing the gate, so the callback
+    /// (peer refresh) can't deadlock on the per-source lock — and the load does not wait for it.
     /// </summary>
     private async Task<(IReadOnlyList<IpPrefix> Prefixes, bool Changed)> LoadCachedAsync(
         PrefixSourceConfig source, CancellationToken ct, bool forceRefresh = false, bool triggerCallback = true)
@@ -321,13 +322,36 @@ public sealed class PrefixSourceService : IPrefixSourceService
             catch (Exception ex) { _logger.LogWarning(ex, "ContentCommitted handler failed for '{Name}'.", source.Name); }
 
             if (triggerCallback && _onSourceChanged is not null)
-            {
-                try { await _onSourceChanged(source.Name); }
-                catch (Exception ex) { _logger.LogWarning(ex, "OnSourceChanged callback failed for '{Name}'.", source.Name); }
-            }
+                StartPush(source.Name);
         }
 
         return (loaded, changed);
+    }
+
+    /// <summary>
+    /// Hands the convergence push to the background and returns at once. The push refreshes every
+    /// established session and can take minutes on a cold fleet; a load that waits for it holds
+    /// its caller that long — an API request past its budget, a session's route build past its
+    /// hold time — although the load itself is done. The delegate runs on the caller's flow up to
+    /// its first await, so the push has started when the load returns; only its completion is not
+    /// awaited. A failure is logged, never surfaced from the load nor left unobserved.
+    /// </summary>
+    private void StartPush(string sourceName)
+    {
+        Task push;
+        try { push = _onSourceChanged(sourceName); }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "OnSourceChanged callback failed for '{Name}'.", sourceName);
+            return;
+        }
+        _ = AwaitPushAsync(push);
+
+        async Task AwaitPushAsync(Task task)
+        {
+            try { await task; }
+            catch (Exception ex) { _logger.LogWarning(ex, "OnSourceChanged callback failed for '{Name}'.", sourceName); }
+        }
     }
 
     /// <summary>

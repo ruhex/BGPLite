@@ -148,6 +148,28 @@ public class PrefixCacheRaceTests
     }
 
     /// <summary>
+    /// A changed default-source load starts the push but does not wait for it: the push refreshes
+    /// every established session and can take minutes, while the load is already complete. The
+    /// caller — an API request under its budget, or a session's route build — is not held by it.
+    /// </summary>
+    [Fact]
+    public async Task GetRuPrefixesAsync_ChangedLoad_StartsThePush_ButDoesNotWaitForIt()
+    {
+        var source = new CountingPrefixSource { ChangedOnNextLoad = true };
+        var push = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var pushes = 0;
+        var service = Service(source, onSourceChanged: _ => { Interlocked.Increment(ref pushes); return push.Task; });
+
+        var load = service.GetRuPrefixesAsync();
+
+        await load.WaitAsync(TimeSpan.FromSeconds(5));   // pre-fix: TimeoutException — the load waits for the push
+        Assert.Equal(1, pushes);
+
+        push.SetResult();   // nothing left running for the next test
+        await push.Task;
+    }
+
+    /// <summary>
     /// The RU push fires exactly when the load reports a content change — not on the fresh
     /// fast path, not on an unchanged reload. The name passed through is the configured default
     /// source name (empty string when none is configured).

@@ -1,6 +1,7 @@
 using BGPLite.Configuration;
 using BGPLite.Providers;
 using BGPLite.Server;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using BGPLite.Protocol;
 
@@ -457,5 +458,73 @@ public class PrefixSourceServiceTests
         await svc.GetAsync("ru"); // v2 → identical → NO change → no callback
 
         Assert.Equal(2, changed.Count(n => n == "ru"));
+    }
+
+    /// <summary>
+    /// The convergence push refreshes every established session and can take minutes on a cold
+    /// fleet. A load that waits for it holds its caller that long — an API request past its
+    /// budget, a session build past its hold time — although the load itself is done.
+    /// </summary>
+    [Fact]
+    public async Task GetAsync_ChangedLoad_StartsThePush_ButDoesNotWaitForIt()
+    {
+        var push = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var pushes = new List<string>();
+        var svc = new PrefixSourceService(
+            ConfigWith("ru"),
+            new PrefixSourceProviderFactory([new CountingProvider([new(1u, 24)])]),
+            NullLogger<PrefixSourceService>.Instance,
+            onSourceChanged: name => { pushes.Add(name); return push.Task; });
+
+        var load = svc.GetAsync("ru");
+
+        // The load is complete while the push is still running, and the push has been started.
+        Assert.Single(await load.WaitAsync(TimeSpan.FromSeconds(5)));
+        Assert.Equal(["ru"], pushes);
+        Assert.False(push.Task.IsCompleted, "the push is the callback's to finish");
+
+        push.SetResult();   // nothing left running for the next test
+        await push.Task;
+    }
+
+    /// <summary>A push that fails is logged and observed — it must not surface from the load, nor
+    /// go unobserved on the thread pool.</summary>
+    [Fact]
+    public async Task GetAsync_FailingPush_IsLogged_NotSurfacedFromTheLoad()
+    {
+        var logger = new RecordingLogger();
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var svc = new PrefixSourceService(
+            ConfigWith("ru"),
+            new PrefixSourceProviderFactory([new CountingProvider([new(1u, 24)])]),
+            logger,
+            onSourceChanged: async _ =>
+            {
+                await release.Task;
+                throw new InvalidOperationException("push failed");
+            });
+
+        Assert.Single(await svc.GetAsync("ru").WaitAsync(TimeSpan.FromSeconds(5)));
+        Assert.Empty(logger.Messages);
+        release.TrySetResult();
+
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(5);
+        while (!logger.Messages.Any(m => m.Contains("OnSourceChanged callback failed", StringComparison.Ordinal)) &&
+               DateTime.UtcNow < deadline)
+            await Task.Delay(10);
+        var warning = Assert.Single(logger.Messages, m => m.Contains("push failed", StringComparison.Ordinal));
+        Assert.Contains("OnSourceChanged callback failed for 'ru'", warning);
+    }
+
+    /// <summary>Records every formatted log message with its exception.</summary>
+    private sealed class RecordingLogger : ILogger<PrefixSourceService>
+    {
+        public List<string> Messages { get; } = [];
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+        public bool IsEnabled(LogLevel logLevel) => true;
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
+        {
+            lock (Messages) Messages.Add($"{formatter(state, exception)} | {exception}");
+        }
     }
 }

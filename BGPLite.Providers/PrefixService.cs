@@ -362,17 +362,39 @@ public sealed class PrefixService : IPrefixService
 
         // The push runs AFTER the gate is released — a re-entrant GetRuPrefixesAsync (another
         // session's build) takes the fast path against the just-written cache instead of blocking
-        // on this frame. A failure is logged, never propagated into the caller's route dump.
+        // on this frame — and is not awaited: it refreshes every established session, which can
+        // take minutes, while this load is done.
         if (changed && _onSourceChanged is not null)
+            StartPush(_config.DefaultPrefixSource ?? string.Empty);
+
+        return projected;
+    }
+
+    /// <summary>
+    /// Starts the convergence push without waiting for it. The delegate runs on the caller's flow
+    /// up to its first await, so a re-entrant build still finds the just-written cache; only the
+    /// push's completion is left to the background. A failure is logged, never propagated into
+    /// the caller's route dump nor left unobserved.
+    /// </summary>
+    private void StartPush(string sourceName)
+    {
+        Task push;
+        try { push = _onSourceChanged(sourceName); }
+        catch (Exception ex)
         {
-            try { await _onSourceChanged(_config.DefaultPrefixSource ?? string.Empty); }
+            _logger?.LogWarning(ex, "OnSourceChanged callback failed for the default prefix source.");
+            return;
+        }
+        _ = AwaitPushAsync(push);
+
+        async Task AwaitPushAsync(Task task)
+        {
+            try { await task; }
             catch (Exception ex)
             {
                 _logger?.LogWarning(ex, "OnSourceChanged callback failed for the default prefix source.");
             }
         }
-
-        return projected;
     }
 
     /// <summary>Prefixes of a configured source by name (cache-through).</summary>
