@@ -9,7 +9,7 @@ internal static class PrefixPushWait
     public static Task IdleAsync(Func<int> pending, string what = "the fleet pushes to finish") =>
         WaitForAsync(() => pending() == 0, what);
 
-    public static async Task WaitForAsync(Func<bool> condition, string what, int timeoutMilliseconds = 5000)
+    private static async Task WaitForAsync(Func<bool> condition, string what, int timeoutMilliseconds = 5000)
     {
         var deadline = Environment.TickCount64 + timeoutMilliseconds;
         while (!condition())
