@@ -200,13 +200,9 @@ public sealed class BgpTestClient : IDisposable
             var message = await ReadMessageAsync(quietWindow);
             if (message is null)
                 return null;
-            // NOTIFICATION and OPEN are recorded by the read path itself; keepalives are ignored.
-            if (message is BgpUpdateMessage update)
-            {
-                var decoded = Decode(update);
-                Updates.Add(decoded);
-                return decoded;
-            }
+            // Recorded by the read path itself; keepalives are ignored.
+            if (message is BgpUpdateMessage)
+                return Updates[^1];
         }
     }
 
@@ -341,12 +337,13 @@ public sealed class BgpTestClient : IDisposable
                 return null;
             }
             var message = BgpMessageReader.ReadMessage(full);
-            // Recorded here, the one place every read goes through: a NOTIFICATION that arrives
-            // while a test only waits for the close must still reach the history it asserts on.
+            // Recorded here, the one place every read goes through — UPDATEs included: a test that
+            // only waits for the close, or observes for a window, asserts on these histories.
             switch (message)
             {
                 case BgpNotificationMessage n: Notifications.Add((n.ErrorCode, n.SubErrorCode)); break;
                 case BgpOpenMessage o: ServerOpen = o; break;
+                case BgpUpdateMessage update: Updates.Add(Decode(update)); break;
             }
             return message;
         }
