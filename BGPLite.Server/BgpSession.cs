@@ -540,10 +540,10 @@ public sealed class BgpSession : IDisposable
 
             // The initial dump below is the session's first advertisement build: hold the refresh
             // slot for its whole duration, taken BEFORE Established makes the session visible to
-            // RefreshRoutesAsync. A request arriving meanwhile — API, fleet refresh, including one
-            // awaited by the dump itself when its source load fires onSourceChanged — takes the
-            // pending-lap branch instead of starting a cycle that would wait on
-            // _advertisedPrefixesLock held by its own caller.
+            // RefreshRoutesAsync. A request arriving meanwhile — API, fleet refresh, including the
+            // one the fleet push asks of the dump's own session after its source load commits a
+            // change — takes the pending-lap branch instead of starting a cycle that would wait
+            // on _advertisedPrefixesLock held by its own caller.
             Interlocked.Exchange(ref _refreshRunning, 1);
             TransitionTo(BgpFsmState.Established);
             _metrics.SessionEstablished();
