@@ -41,7 +41,11 @@ public class RefreshDebounceTests
         }
     }
 
-    /// <summary>Drives OPEN negotiation and waits for Established without assuming the initial route dump has finished.</summary>
+    /// <summary>
+    /// Drives OPEN negotiation, then waits for Established and for the initial dump to release the
+    /// refresh slot — so a probe issued afterwards runs its own cycle inline instead of being
+    /// deferred to a lap after the dump.
+    /// </summary>
     private static async Task<Task> EstablishAsync(BgpSession session, Socket client, BgpConfig cfg)
     {
         var runTask = Task.Run(() => session.RunAsync(CancellationToken.None));
@@ -75,6 +79,7 @@ public class RefreshDebounceTests
         while (!session.IsEstablished && !estCts.IsCancellationRequested)
             await Task.Delay(20, estCts.Token);
         Assert.True(session.IsEstablished);
+        await session.InitialDumpCompleted.WaitAsync(TimeSpan.FromSeconds(5));
         return runTask;
     }
 
@@ -148,18 +153,16 @@ public class RefreshDebounceTests
         using var serverSock = server;
         using var sessionH = session;
 
-        // EstablishAsync waits for the Established STATE, not for the initial dump to
-        // finish — and the dump (RouteAssembler → LoadPeerRoutingViewAsync) can still be in
-        // flight here. Under runner load its Load then lands INSIDE the armed gate below,
-        // masquerading as the refresh cycle's load: the "4 callers returned" condition was
-        // satisfied with the winner parked on _advertisedPrefixesLock (held by the dump), and
-        // the final total came out 3 (dump + cycle + lap). Drain the dump deterministically:
-        // a probe refresh can only acquire the dump's lock after the dump released it, so a
-        // completed probe proves the dump is done and `baseline` is stable.
+        // EstablishAsync returns only once the initial dump has released the refresh slot, so
+        // this probe always runs its own cycle inline: by the time it completes nothing else is
+        // in flight and `baseline` is stable. Established alone proves neither — under runner
+        // load the dump was still running here, its Load landed INSIDE the armed gate below and
+        // masqueraded as the refresh cycle's (the "4 callers returned" condition was satisfied
+        // with the winner parked on the dump's lock; the final total came out 3).
         var probe = session.RefreshRoutesAsync();
         await WaitForAsync(
-            () => Volatile.Read(ref store.LoadCalls) >= 1,
-            () => $"probe load={Volatile.Read(ref store.LoadCalls)} (want 1)");
+            () => Volatile.Read(ref store.LoadCalls) >= 2,
+            () => $"loads after the dump and the probe={Volatile.Read(ref store.LoadCalls)} (want 2)");
         await probe.WaitAsync(TimeSpan.FromSeconds(10));
 
         var baseline = store.LoadCalls; // initial dump AND probe drained — nothing else calls Load
@@ -232,11 +235,12 @@ public class RefreshDebounceTests
         using var serverSock = server;
         using var sessionH = session;
 
-        // Drain the initial dump (same reason as the coalesce test) — baseline must be stable.
+        // Drain the initial dump AND the probe's cycle (same reasoning as the coalesce test) —
+        // baseline must be stable before the exit window is armed.
         var probe = session.RefreshRoutesAsync();
         await WaitForAsync(
-            () => Volatile.Read(ref store.LoadCalls) >= 1,
-            () => $"probe load={Volatile.Read(ref store.LoadCalls)} (want 1)");
+            () => Volatile.Read(ref store.LoadCalls) >= 2,
+            () => $"loads after the dump and the probe={Volatile.Read(ref store.LoadCalls)} (want 2)");
         await probe.WaitAsync(TimeSpan.FromSeconds(10));
         var baseline = store.LoadCalls;
 

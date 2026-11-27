@@ -735,13 +735,15 @@ public class BgpSessionHoldTimerTests
         Assert.True(session.IsEstablished, "session must reach Established");
 
         // Wait for the initial route dump to finish (OPEN, KEEPALIVE, UPDATE) so the refresh below
-        // is what grabs the lock, not the dump.
+        // is what grabs the lock, not the dump — and has released the refresh slot, so it runs
+        // inline instead of being deferred behind the dump.
         for (var i = 0; i < 200 && conn.Sent.Count < 3; i++)
         {
             time.Advance(TimeSpan.FromMilliseconds(50));
             await Task.Delay(2);
         }
         Assert.True(conn.Sent.Count >= 3, "initial route dump must have been sent");
+        await session.InitialDumpCompleted.WaitAsync(TimeSpan.FromSeconds(5));
 
         // Freeze writes, then start a refresh — its withdraw UPDATE acquires _sendLock and parks
         // inside WriteAsync: the slow-peer holder.

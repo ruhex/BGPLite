@@ -142,6 +142,7 @@ public class SendTimeoutTests
         for (var i = 0; i < 200 && !session.IsEstablished; i++)
             await Task.Delay(TimeSpan.FromMilliseconds(10));
         Assert.True(session.IsEstablished, "session must reach Established before the refresh");
+        await session.InitialDumpCompleted.WaitAsync(TimeSpan.FromSeconds(5)); // the refresh below must run inline, not be deferred behind the dump
 
         routeTable.AddOrUpdate(new Route { Prefix = 0x0A000000, PrefixLength = 8, NextHop = 0x7F000001 });
         connection.FailNextWrites = true;
