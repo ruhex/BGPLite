@@ -1627,7 +1627,9 @@ public sealed class ManagementApi : IHostedService, IDisposable
                 l.Description,
                 l.Country,
                 Community = l.Community,
-                prefixCount = allFailed ? (int?)null : prefixCount,
+                // Never null: a client that formats the count should not have to special-case its
+                // type. An unavailable count is 0 — countError is what tells it from an empty list.
+                prefixCount,
                 partial,
                 countError = allFailed
                     ? "All configured sources failed; prefix count is unavailable."
