@@ -358,6 +358,11 @@ public sealed class ManagementApiShutdownTests : IDisposable
         public Task WarmUpAsync(CancellationToken ct = default) => Task.CompletedTask;
         public Task<bool> RefreshAsync(string sourceName, CancellationToken ct = default) => Task.FromResult(false);
         public bool SourceSupportsConditional(string sourceName) => false;
+        public bool TryGetCached(string name, out IReadOnlyList<IpPrefix>? prefixes)
+        {
+            prefixes = null;
+            return false;
+        }
     }
 
     /// <summary>Holds no sessions; the shutdown path never calls it.</summary>

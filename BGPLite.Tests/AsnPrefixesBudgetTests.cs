@@ -107,6 +107,11 @@ public sealed class AsnPrefixesBudgetTests : IDisposable
         public Task WarmUpAsync(CancellationToken ct = default) => Task.CompletedTask;
         public Task<bool> RefreshAsync(string sourceName, CancellationToken ct = default) => Task.FromResult(false);
         public bool SourceSupportsConditional(string sourceName) => true;
+        public bool TryGetCached(string name, out IReadOnlyList<IpPrefix>? prefixes)
+        {
+            prefixes = null;
+            return false;
+        }
         public event Action<string>? ContentCommitted;
     }
 
