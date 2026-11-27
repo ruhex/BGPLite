@@ -81,7 +81,6 @@ public sealed class BgpTestClient : IDisposable
         var received = await ReadMessageAsync(ct);
         var serverOpen = received as BgpOpenMessage
             ?? throw new InvalidOperationException($"Expected the server OPEN, got {Describe(received)}.");
-        ServerOpen = serverOpen;
 
         var keepalive = await ReadMessageAsync(ct);
         if (keepalive is not BgpKeepaliveMessage)
@@ -156,8 +155,8 @@ public sealed class BgpTestClient : IDisposable
             var message = await ReadMessageAsync(TimeSpan.FromSeconds(2));
             if (message is BgpNotificationMessage n)
                 return (n.ErrorCode, n.SubErrorCode);
-            if (message is null)
-                break;
+            if (SocketClosed)
+                break;   // a quiet read is not the end of the budget — only a closed socket is
         }
         throw new TimeoutException($"No NOTIFICATION within the budget; notifications so far: {FormatNotifications()}.");
     }
@@ -201,17 +200,31 @@ public sealed class BgpTestClient : IDisposable
             var message = await ReadMessageAsync(quietWindow);
             if (message is null)
                 return null;
+            // NOTIFICATION and OPEN are recorded by the read path itself; keepalives are ignored.
             if (message is BgpUpdateMessage update)
             {
                 var decoded = Decode(update);
                 Updates.Add(decoded);
                 return decoded;
             }
-            // OPEN/NOTIFICATION during collection are surfaced via properties; keepalives ignored.
-            if (message is BgpNotificationMessage n)
-                Notifications.Add((n.ErrorCode, n.SubErrorCode));
-            if (message is BgpOpenMessage o)
-                ServerOpen = o;
+        }
+    }
+
+    /// <summary>
+    /// Reads for <paramref name="window"/>, whatever arrives: UPDATEs land in <see cref="Updates"/>,
+    /// NOTIFICATIONs in <see cref="Notifications"/>. Returns early once the socket closes. A test
+    /// that asserts nothing was sent has to read the socket meanwhile — this client has no
+    /// background receiver, so an unread socket shows nothing either way.
+    /// </summary>
+    public async Task ObserveForAsync(TimeSpan window)
+    {
+        var deadline = DateTime.UtcNow + window;
+        while (!SocketClosed)
+        {
+            var remaining = deadline - DateTime.UtcNow;
+            if (remaining <= TimeSpan.Zero)
+                return;
+            await ReadMessageAsync(remaining > TimeSpan.FromMilliseconds(500) ? TimeSpan.FromMilliseconds(500) : remaining);
         }
     }
 
@@ -281,16 +294,40 @@ public sealed class BgpTestClient : IDisposable
 
     private void Send(BgpMessage message) => SendMessage(message);
 
-    /// <summary>Reads one full BGP message; null when the quiet window elapsed or the socket closed.</summary>
+    /// <summary>Time a frame may take to complete once its first byte has arrived.</summary>
+    private static readonly TimeSpan FrameBudget = TimeSpan.FromSeconds(10);
+
+    /// <summary>
+    /// Reads one full BGP message. Null when the quiet window elapsed before the first byte of a
+    /// frame, or when the socket closed — <see cref="SocketClosed"/> says which. A frame that has
+    /// started is read to its end under <see cref="FrameBudget"/>: dropping the bytes already
+    /// received would make the next call parse the leftover payload as a header.
+    /// </summary>
     private async Task<BgpMessage?> ReadMessageAsync(TimeSpan wait, CancellationToken? outer = null)
     {
         try
         {
-            using var cts = CancellationTokenSource.CreateLinkedTokenSource(outer ?? CancellationToken.None);
-            cts.CancelAfter(wait);
+            using var frame = CancellationTokenSource.CreateLinkedTokenSource(outer ?? CancellationToken.None);
+            frame.CancelAfter(FrameBudget);
 
             var header = new byte[BgpConstants.MessageHeaderSize];
-            if (!await TryReadExactAsync(header, cts.Token))
+            using (var quiet = CancellationTokenSource.CreateLinkedTokenSource(frame.Token))
+            {
+                quiet.CancelAfter(wait);
+                try
+                {
+                    if (!await TryReadExactAsync(header.AsMemory(0, 1), quiet.Token))
+                    {
+                        SocketClosed = true;
+                        return null;
+                    }
+                }
+                catch (OperationCanceledException) when (quiet.IsCancellationRequested)
+                {
+                    return null;   // nothing started within the quiet window
+                }
+            }
+            if (!await TryReadExactAsync(header.AsMemory(1), frame.Token))
             {
                 SocketClosed = true;
                 return null;
@@ -298,12 +335,19 @@ public sealed class BgpTestClient : IDisposable
             var length = BgpMessageReader.GetMessageLength(header);
             var full = new byte[length];
             header.CopyTo(full, 0);
-            if (!await TryReadExactAsync(full.AsMemory(BgpConstants.MessageHeaderSize), cts.Token))
+            if (!await TryReadExactAsync(full.AsMemory(BgpConstants.MessageHeaderSize), frame.Token))
             {
                 SocketClosed = true;
                 return null;
             }
             var message = BgpMessageReader.ReadMessage(full);
+            // Recorded here, the one place every read goes through: a NOTIFICATION that arrives
+            // while a test only waits for the close must still reach the history it asserts on.
+            switch (message)
+            {
+                case BgpNotificationMessage n: Notifications.Add((n.ErrorCode, n.SubErrorCode)); break;
+                case BgpOpenMessage o: ServerOpen = o; break;
+            }
             return message;
         }
         catch (OperationCanceledException)

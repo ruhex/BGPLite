@@ -93,7 +93,9 @@ public sealed class RouteServerFixture : IAsyncDisposable
         return StartCoreAsync(fixture, () =>
         {
             File.WriteAllText(yamlPath, yamlFactory(fixture.ApiPort));
-            return ConfigLoader.Load(yamlPath);   // strict parse + Validate — the production pipeline
+            var config = ConfigLoader.Load(yamlPath);   // strict parse
+            config.Validate();                          // the production startup gate (Program.cs)
+            return config;
         });
     }
 

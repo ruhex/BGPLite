@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Microsoft.EntityFrameworkCore;
 
 namespace BGPLite.Tests.Integration;
 
@@ -127,9 +128,10 @@ public sealed class PeerManagementApiE2eTests
             Assert.Contains(expected, text, StringComparison.OrdinalIgnoreCase);
         }
 
-        // None of the rejected requests left a row behind.
-        var list = await server.GetJsonAsync("/api/me");
-        Assert.Empty(list.GetProperty("peers").EnumerateArray());
+        // None of the rejected requests left a row behind — checked in the store itself: /api/me
+        // only lists peers at the caller's own address, and these used another one.
+        await using (var db = server.CreateDbContext())
+            Assert.False(await db.Peers.AnyAsync());
     }
 
     [Fact]

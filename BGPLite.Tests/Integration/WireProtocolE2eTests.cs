@@ -270,10 +270,14 @@ public sealed class WireProtocolE2eTests
         await client.CollectDumpAsync();
         var updatesBefore = client.Updates.Count;
 
+        // Longer than MinRouteRefreshInterval, with the socket read for the whole window: a second
+        // dump or a NOTIFICATION sent in answer would be collected here, not sit unread.
         client.SendRouteRefresh();
-        await Task.Delay(2500); // > MinRouteRefreshInterval; no second dump may arrive
+        await client.ObserveForAsync(TimeSpan.FromMilliseconds(2500));
 
+        Assert.False(client.SocketClosed, "an ignored ROUTE_REFRESH must not end the session");
         Assert.Equal(updatesBefore, client.Updates.Count);
+        Assert.Empty(client.Notifications);
     }
 
     [Fact]

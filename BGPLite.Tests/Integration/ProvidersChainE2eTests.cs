@@ -176,6 +176,7 @@ public sealed class ProvidersChainE2eTests
         {
             ConnectCallback = PrefixSourceUrlValidator.CreateValidatedConnectionAsync,
             AllowAutoRedirect = false,
+            UseProxy = false,   // an ambient proxy would be the endpoint validated, not the target
         };
         var userProvider = new HttpPrefixProvider(
             new StubFactory(realHandler), NullLogger<HttpPrefixProvider>.Instance, clientName: "e2e-user");
@@ -271,7 +272,8 @@ public sealed class ProvidersChainE2eTests
         new SocketsHttpHandler
         {
             ConnectCallback = PrefixSourceUrlValidator.CreateValidatedConnectionAsync,
-            AllowAutoRedirect = false
+            AllowAutoRedirect = false,
+            UseProxy = false   // an ambient proxy would be the endpoint validated, not the target
         })
     {
         public int Stubbed { get; private set; }

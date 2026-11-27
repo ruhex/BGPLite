@@ -76,8 +76,11 @@ public class BgpSessionInitialDumpRefreshTests
         }
     }
 
-    /// <summary>Starts the handshake on a scripted connection; returns before the initial dump is awaited by anyone.</summary>
-    private static (BgpSession Session, Task Run, ScriptedConnection Conn) StartSession(IRouteAssembler assembler)
+    /// <summary>Starts the handshake on a scripted connection; returns before the initial dump is awaited by anyone.
+    /// <paramref name="beforeRun"/> runs after the session exists and before the first word of the
+    /// handshake — a worker can enter the first build the moment RunAsync starts.</summary>
+    private static (BgpSession Session, Task Run, ScriptedConnection Conn) StartSession(
+        IRouteAssembler assembler, Action<BgpSession>? beforeRun = null)
     {
         var conn = new ScriptedConnection();
         var session = new BgpSession(
@@ -89,6 +92,7 @@ public class BgpSessionInitialDumpRefreshTests
             new BgpMetrics(),
             NullLogger<BgpSession>.Instance,
             routeAssembler: assembler);
+        beforeRun?.Invoke(session);
 
         var run = session.RunAsync();
         conn.EnqueueMessage(new BgpOpenMessage
@@ -128,9 +132,10 @@ public class BgpSessionInitialDumpRefreshTests
     [Fact]
     public async Task RefreshRequestedFromInsideTheInitialDump_ReturnsPromptly_AndIsServedAfterTheDump()
     {
-        var assembler = new SelfRefreshingRouteAssembler(requests: 1) { Session = null! };
-        var (session, run, conn) = StartSession(assembler);
-        assembler.Session = session;
+        // The assembler learns the session before the handshake starts: the first build must not
+        // be able to begin while Session is still unset.
+        var assembler = new SelfRefreshingRouteAssembler(requests: 1);
+        var (session, run, conn) = StartSession(assembler, s => assembler.Session = s);
         try
         {
             await WaitForAsync(() => session.AdvertisedPrefixCount == 1, "the initial dump's routes on the wire");
@@ -145,7 +150,9 @@ public class BgpSessionInitialDumpRefreshTests
                 () => Updates(conn).Count(u => u.Nlri.Count > 0) == 2 && Updates(conn).Count(u => u.WithdrawnRoutes.Count > 0) == 1,
                 "the deferred lap's withdraw + re-announce");
             await WaitForAsync(() => assembler.Calls == 2, "the deferred lap's build");
-            await Task.Delay(100);   // let a second, unwanted lap show up if the request is double-served
+            // Nothing more is served: once the lap has left the refresh slot idle, no later lap
+            // can start on its own.
+            await WaitForAsync(() => !session.RefreshInProgress, "the deferred lap to finish");
             Assert.Equal(2, assembler.Calls);
             Assert.Equal(1, session.AdvertisedPrefixCount);
             Assert.True(session.IsEstablished, "a deferred refresh must not tear the session down");
@@ -166,14 +173,13 @@ public class BgpSessionInitialDumpRefreshTests
     [Fact]
     public async Task RefreshesRequestedDuringTheInitialDump_CoalesceIntoOneDeferredLap()
     {
-        var assembler = new SelfRefreshingRouteAssembler(requests: 3) { Session = null! };
-        var (session, run, conn) = StartSession(assembler);
-        assembler.Session = session;
+        var assembler = new SelfRefreshingRouteAssembler(requests: 3);
+        var (session, run, conn) = StartSession(assembler, s => assembler.Session = s);
         try
         {
             await WaitForAsync(() => assembler.Calls >= 2 && Updates(conn).Count(u => u.Nlri.Count > 0) == 2,
                 "the dump and its deferred lap");
-            await Task.Delay(100);
+            await WaitForAsync(() => !session.RefreshInProgress, "the deferred lap to finish");
 
             Assert.Equal(3, assembler.ReturnedRequests);
             Assert.Equal(2, assembler.Calls);   // the dump + ONE lap for all three requests

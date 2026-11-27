@@ -705,6 +705,14 @@ public sealed class BgpSession : IDisposable
     private Action? _refreshExitWindowProbe;
     internal Action? RefreshExitWindowProbe { get => _refreshExitWindowProbe; set => _refreshExitWindowProbe = value; }
 
+    // Test seam: ticks the KEEPALIVE loop has taken, and whether a refresh cycle is executing.
+    // BgpSessionInitialDumpKeepAliveTests advances a fake clock one tick at a time and waits for
+    // each to be observed before the next; BgpSessionInitialDumpRefreshTests waits for the
+    // deferred lap to end before asserting on exact counts.
+    private int _keepAliveLoopTicks;
+    internal int KeepAliveLoopTicks => Volatile.Read(ref _keepAliveLoopTicks);
+    internal bool RefreshInProgress => Volatile.Read(ref _refreshRunning) == 1;
+
     // Test seam: completes once the initial dump has released the refresh slot. Established and a
     // non-zero AdvertisedPrefixCount both precede that moment, and a refresh issued in between is
     // deferred instead of run inline — "the dump is done" is this, not AdvertisedPrefixCount.
@@ -1201,6 +1209,7 @@ public sealed class BgpSession : IDisposable
         var holdTime = TimeSpan.FromSeconds(_negotiatedHoldTime);
         while (await timer.WaitForNextTickAsync(cancellationToken))
         {
+            Interlocked.Increment(ref _keepAliveLoopTicks);
             // Hold timer: tear down if no message was received within the negotiated hold time
             // (RFC 4271 §6.6). Atomically claim the teardown as HoldTimerExpired BEFORE sending; if a
             // concurrent MarkSilentClose / peer NOTIFICATION already claimed it, send nothing. The
