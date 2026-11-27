@@ -556,46 +556,15 @@ public sealed class BgpSession : IDisposable
                 }
             }
 
-            // Send initial routes. _sendLock is acquired inside SendMessageAsync for byte-level
-            // ordering; _advertisedPrefixesLock guards the list against a RefreshRoutesAsync fired
-            // from the API the instant IsEstablished became true. The acquire/release are
-            // OCE/ODE-guarded exactly like RefreshCycleAsync's — an external Dispose during the
-            // dump would otherwise surface as an ERROR-logged "Session error" (WaitAsync on a
-            // disposed semaphore / Release after dispose) instead of a clean unwind.
-            try
-            {
-                await _advertisedPrefixesLock.WaitAsync(linkedCts.Token);
-            }
-            catch (ObjectDisposedException) { return; } // session disposed mid-dump — nothing to send
-            try
-            {
-                await SendAllRoutesAsync();
-                // End-of-RIB once the initial dump is complete (RFC 4724 §4.1): lets GR-capable
-                // peers finalize stale routes. Tied to session establishment, so NOT sent on refresh.
-                if (_bgpConfig.GracefulRestart)
-                    await SendEndOfRibAsync();
-            }
-            finally
-            {
-                try { _advertisedPrefixesLock.Release(); }
-                catch (ObjectDisposedException) { /* session disposed — fine */ }
-                catch (SemaphoreFullException) { /* double-release guard, shouldn't happen */ }
-                // Slot back with the lock. On a failing dump the request dies with the session.
-                Interlocked.Exchange(ref _refreshRunning, 0);
-                _initialDumpSlotReleased = true;
-                Volatile.Read(ref _initialDumpCompletion)?.TrySetResult();
-            }
-
-            // Serve the lap deferred during the dump. A request that set _refreshPending after the
-            // read below has taken the slot itself, so this kick only loses the CAS and marks one
-            // more pending lap — the same one-in-flight-plus-one-pending bound as any stacked
-            // trigger. Off the session's flow, like every other cycle: the read loop and KEEPALIVEs
-            // start now and must not wait for it.
-            var refreshToken = linkedCts.Token;
-            if (_refreshPending && !linkedCts.IsCancellationRequested)
-                _ = Task.Run(() => RefreshInBackgroundAsync(refreshToken), CancellationToken.None);
-
-            await RunEstablishedAsync(linkedCts.Token);
+            // The initial dump runs beside the established loops, not ahead of them. RFC 4271 §4.4:
+            // KEEPALIVEs must keep flowing often enough not to let the peer's Hold Timer expire, and
+            // the dump can wait on cold sources for longer than the whole hold time. Awaited inline
+            // it also left the peer's KEEPALIVEs unread — our own false Hold Timer Expired — and a
+            // NOTIFICATION or a close unnoticed until it finished. The method runs synchronously up
+            // to its first real await, so a build that never yields is on the wire before the read
+            // loop starts.
+            var initialDump = SendInitialRoutesAsync(linkedCts.Token);
+            await RunEstablishedAsync(linkedCts.Token, initialDump);
         }
         catch (OperationCanceledException)
         {
@@ -636,9 +605,9 @@ public sealed class BgpSession : IDisposable
             // connects and drops the socket before sending OPEN otherwise surfaces as a generic Error
             // with a stack trace, hiding the (peer-side) root cause. Warning, not Error: a network
             // close is a normal event, not a server fault. Stack trace demoted to Debug. _state is
-            // volatile, safe to read here. The Established case covers the window between
-            // TransitionTo(Established) and RunEstablishedAsync (initial route dump / End-of-RIB);
-            // once the read loop is running, Established-phase closes are logged inside ReadLoopAsync.
+            // volatile, safe to read here. The Established case covers the initial route dump, which
+            // writes beside the read loop: a write can fail before the read loop observes the close
+            // (closes the read loop sees first are logged inside ReadLoopAsync).
             var phase = _state switch
             {
                 BgpFsmState.Connect => "before sending OPEN",
@@ -751,12 +720,79 @@ public sealed class BgpSession : IDisposable
         }
     }
 
-    private async Task RunEstablishedAsync(CancellationToken cancellationToken)
+    /// <summary>
+    /// The initial route dump: one advertisement build under <see cref="_advertisedPrefixesLock"/>,
+    /// then the End-of-RIB marker (RFC 4724 §4.1) when Graceful Restart is configured, then the
+    /// refresh slot back and the lap deferred meanwhile. Runs beside the established loops — see
+    /// <see cref="RunEstablishedAsync"/>; a fault surfaces there and takes the usual teardown.
+    /// </summary>
+    private async Task SendInitialRoutesAsync(CancellationToken ct)
+    {
+        // _sendLock is acquired inside SendMessageAsync for byte-level ordering;
+        // _advertisedPrefixesLock guards the list against a RefreshRoutesAsync fired from the API the
+        // instant IsEstablished became true. A disposed semaphore unwinds the dump quietly instead of
+        // surfacing as an ERROR-logged "Session error" (WaitAsync on a disposed semaphore / Release
+        // after dispose); a cancelled one is the session's own teardown and unwinds it like any
+        // other cancelled await.
+        try
+        {
+            await _advertisedPrefixesLock.WaitAsync(ct);
+        }
+        catch (ObjectDisposedException)
+        {
+            return; // session disposed mid-dump — nothing to send
+        }
+        try
+        {
+            await SendAllRoutesAsync();
+            // End-of-RIB once the initial dump is complete (RFC 4724 §4.1): lets GR-capable
+            // peers finalize stale routes. Tied to session establishment, so NOT sent on refresh.
+            if (_bgpConfig.GracefulRestart)
+                await SendEndOfRibAsync();
+        }
+        finally
+        {
+            try { _advertisedPrefixesLock.Release(); }
+            catch (ObjectDisposedException) { /* session disposed — fine */ }
+            catch (SemaphoreFullException) { /* double-release guard, shouldn't happen */ }
+            // Slot back with the lock. On a failing dump the request dies with the session.
+            Interlocked.Exchange(ref _refreshRunning, 0);
+            _initialDumpSlotReleased = true;
+            Volatile.Read(ref _initialDumpCompletion)?.TrySetResult();
+        }
+
+        // Serve the lap deferred during the dump. A request that set _refreshPending after the read
+        // below has taken the slot itself, so this kick only loses the CAS and marks one more
+        // pending lap — the same one-in-flight-plus-one-pending bound as any stacked trigger. Off
+        // the session's own flow, like every other cycle.
+        if (_refreshPending && !ct.IsCancellationRequested)
+            _ = Task.Run(() => RefreshInBackgroundAsync(ct), CancellationToken.None);
+    }
+
+    /// <summary>
+    /// Runs the established loops — reading and KEEPALIVEs — beside <paramref name="initialDump"/>.
+    /// Whichever ends first decides: a loop ends the session and cancels the dump, a finished dump
+    /// hands over to the loops alone. A dump that fails while the loops run stops them first, then
+    /// its fault reaches <see cref="RunAsync"/>'s catch blocks. In every case the dump is waited
+    /// out before a loop's outcome propagates, so nothing is still sending when the teardown begins.
+    /// </summary>
+    private async Task RunEstablishedAsync(CancellationToken cancellationToken, Task initialDump)
     {
         // Hold time 0 -> KEEPALIVE timer and Hold Timer are disabled (RFC 4271 §4.2/§6.5).
         if (_negotiatedHoldTime == 0)
         {
-            await ReadLoopAsync(cancellationToken);
+            var readTask = ReadLoopAsync(cancellationToken);
+            if (await Task.WhenAny(readTask, initialDump) == initialDump)
+            {
+                if (!initialDump.IsCompletedSuccessfully)
+                    await PropagateDumpFaultAsync(initialDump, readTask, null);
+            }
+            else
+            {
+                await CancelSessionCtsAsync();
+                await AwaitInitialDumpAsync(initialDump);
+            }
+            await readTask;
             await CancelSessionCtsAsync();
             return;
         }
@@ -764,14 +800,52 @@ public sealed class BgpSession : IDisposable
         Interlocked.Exchange(ref _lastReceivedTicks, _timeProvider.GetUtcNow().Ticks);
 
         using var keepaliveTimer = new PeriodicTimer(_keepAliveInterval, _timeProvider);
-        var readTask = ReadLoopAsync(cancellationToken);
-        var keepaliveTask = HoldTimerLoopAsync(keepaliveTimer, cancellationToken);
+        var readLoop = ReadLoopAsync(cancellationToken);
+        var keepaliveLoop = HoldTimerLoopAsync(keepaliveTimer, cancellationToken);
 
-        await Task.WhenAny(readTask, keepaliveTask);
+        if (await Task.WhenAny(readLoop, keepaliveLoop, initialDump) == initialDump)
+        {
+            if (!initialDump.IsCompletedSuccessfully)
+                await PropagateDumpFaultAsync(initialDump, readLoop, keepaliveLoop);
+            await Task.WhenAny(readLoop, keepaliveLoop);
+        }
         await CancelSessionCtsAsync();
 
-        await AwaitLoopTaskAsync(readTask, "read");
-        await AwaitLoopTaskAsync(keepaliveTask, "keepalive");
+        // The dump is stopped before any loop outcome propagates: RunAsync's catch blocks send
+        // their NOTIFICATION there, and no UPDATE may follow it on the wire (RFC 4271 §6.4).
+        await AwaitInitialDumpAsync(initialDump);
+        await AwaitLoopTaskAsync(readLoop, "read");
+        await AwaitLoopTaskAsync(keepaliveLoop, "keepalive");
+    }
+
+    /// <summary>
+    /// A dump that failed while its loops were already running: stop the loops, then let the fault
+    /// propagate — the teardown it triggers in <see cref="RunAsync"/> must not leave them behind.
+    /// A loop that faulted with its own protocol exception in the meantime takes precedence: both
+    /// end the session the same way.
+    /// </summary>
+    private async Task PropagateDumpFaultAsync(Task initialDump, Task readLoop, Task? keepaliveLoop)
+    {
+        await CancelSessionCtsAsync();
+        await AwaitLoopTaskAsync(readLoop, "read");
+        if (keepaliveLoop is not null)
+            await AwaitLoopTaskAsync(keepaliveLoop, "keepalive");
+        await initialDump;   // rethrow the dump's own fault
+    }
+
+    /// <summary>
+    /// Waits out the initial dump once a loop ended the session: cancellation is the normal unwind
+    /// (the dump runs on the session token), anything else is logged and dropped — the loop's own
+    /// outcome is the teardown reason and owns the one permitted NOTIFICATION (RFC 4271 §8.1).
+    /// </summary>
+    private async Task AwaitInitialDumpAsync(Task initialDump)
+    {
+        try { await initialDump; }
+        catch (OperationCanceledException) { }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Initial route dump for {Peer} ended with the session", _peer);
+        }
     }
 
     /// <summary>
