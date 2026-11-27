@@ -802,9 +802,9 @@ public sealed class BgpSession : IDisposable
         // loops now. Until its lookup returned, an UPDATE would be checked against the global
         // default: too loose under a lower per-peer limit, a false MaxPrefixesExceeded reset under
         // a higher one. Resolve it first, before the read loop can take an UPDATE. One quick store
-        // read; only the read loop waits for it — the KEEPALIVE loop must not fall silent behind a
-        // slow store, and the dump may still wait on cold sources as long as it likes.
-        var capReady = RefreshPerPeerCapAsync(cancellationToken);
+        // read, bounded: only the read loop waits for it — the KEEPALIVE loop must not fall silent
+        // behind a slow store, and the dump may still wait on cold sources as long as it likes.
+        var capReady = RefreshPerPeerCapAtStartupAsync(cancellationToken);
 
         // Hold time 0 -> KEEPALIVE timer and Hold Timer are disabled (RFC 4271 §4.2/§6.5).
         if (_negotiatedHoldTime == 0)
@@ -1645,12 +1645,6 @@ public sealed class BgpSession : IDisposable
     }
 
     /// <summary>
-    /// Resolves this peer's outbound route set — the per-peer MaxPrefix refresh plus the
-    /// assembler's decision tree — WITHOUT touching the wire, so a caller can fail here without
-    /// having changed anything the peer can see. Returns <c>null</c> when the session is already
-    /// disposed.
-    /// </summary>
-    /// <summary>
     /// Refreshes the effective per-peer prefix ceiling: the peer row's MaxPrefix override when
     /// configured, else the global default. Unknown peers (auto-register path) get null and keep
     /// the global cap until their row exists. Resolved before the read loop starts — it enforces
@@ -1678,6 +1672,49 @@ public sealed class BgpSession : IDisposable
         }
     }
 
+    /// <summary>
+    /// Upper bound on the startup lookup of the per-peer prefix ceiling, shortened to half the
+    /// negotiated hold time when that is less — see <see cref="RefreshPerPeerCapAtStartupAsync"/>.
+    /// </summary>
+    internal TimeSpan StartupCapLookupBudget { get; set; } = TimeSpan.FromSeconds(5);
+
+    /// <summary>
+    /// The startup lookup of the per-peer prefix ceiling, bounded to <see cref="StartupCapLookupBudget"/>
+    /// or half the negotiated hold time, whichever is shorter: the read loop waits for it, and a
+    /// store that does not answer must not keep the peer's KEEPALIVEs unread for a real part of
+    /// its hold time. At the bound the lookup is cancelled and the read loop starts regardless —
+    /// the ceiling stays what it was, <see cref="RefreshPerPeerCapAsync"/>'s policy for any store
+    /// failure, and the dump and every refresh cycle resolve it again.
+    /// </summary>
+    private async Task RefreshPerPeerCapAtStartupAsync(CancellationToken cancellationToken)
+    {
+        var budget = StartupCapLookupBudget;
+        if (_negotiatedHoldTime != 0)
+        {
+            var halfHold = TimeSpan.FromSeconds(_negotiatedHoldTime) / 2;
+            if (halfHold < budget) budget = halfHold;
+        }
+        using var bound = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        bound.CancelAfter(budget);
+        var lookup = RefreshPerPeerCapAsync(bound.Token);
+        // A store that ignores its token must not hold the read loop either: past the bound the
+        // lookup is left to itself, its outcome observed and dropped.
+        if (await Task.WhenAny(lookup, Task.Delay(budget, cancellationToken)) != lookup)
+            _ = ObserveAsync(lookup);
+
+        static async Task ObserveAsync(Task task)
+        {
+            try { await task; }
+            catch (OperationCanceledException) { }
+        }
+    }
+
+    /// <summary>
+    /// Resolves this peer's outbound route set — the per-peer MaxPrefix refresh plus the
+    /// assembler's decision tree — WITHOUT touching the wire, so a caller can fail here without
+    /// having changed anything the peer can see. Returns <c>null</c> when the session is already
+    /// disposed.
+    /// </summary>
     private async Task<List<Route>?> ResolveOutboundRoutesAsync()
     {
         // _cts.Token throws ObjectDisposedException once Dispose has run, so a send cycle that
