@@ -67,6 +67,7 @@ public class BgpSessionV6AdvertiseTests
         for (var i = 0; i < 200 && !session.IsEstablished; i++)
             await Task.Delay(TimeSpan.FromMilliseconds(10));
         Assert.True(session.IsEstablished, "session must reach Established");
+        await session.InitialDumpCompleted.WaitAsync(TimeSpan.FromSeconds(5)); // a refresh issued now runs inline, not deferred behind the dump
         return (session, run, conn);
     }
 

@@ -62,6 +62,7 @@ public class BgpSessionRefreshFailureTests
         for (var i = 0; i < 300 && session.AdvertisedPrefixCount == 0; i++)
             await Task.Delay(TimeSpan.FromMilliseconds(10));
         Assert.True(session.IsEstablished, "session must reach Established");
+        await session.InitialDumpCompleted.WaitAsync(TimeSpan.FromSeconds(5)); // the refresh below must run inline, not be deferred behind the dump
         Assert.Equal(1, session.AdvertisedPrefixCount);
         return (session, run, conn);
     }

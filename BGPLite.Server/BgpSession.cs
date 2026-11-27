@@ -534,6 +534,13 @@ public sealed class BgpSession : IDisposable
 
             _logger.LogDebug("KeepAliveReceived from {Peer}", _peer);
 
+            // The initial dump below is the session's first advertisement build: hold the refresh
+            // slot for its whole duration, taken BEFORE Established makes the session visible to
+            // RefreshRoutesAsync. A request arriving meanwhile — API, fleet refresh, including one
+            // awaited by the dump itself when its source load fires onSourceChanged — takes the
+            // pending-lap branch instead of starting a cycle that would wait on
+            // _advertisedPrefixesLock held by its own caller.
+            Interlocked.Exchange(ref _refreshRunning, 1);
             TransitionTo(BgpFsmState.Established);
             _metrics.SessionEstablished();
             _logger.LogInformation("SessionEstablished with {Peer} ASN={Asn}", _peer, _remoteAsn);
@@ -573,7 +580,20 @@ public sealed class BgpSession : IDisposable
                 try { _advertisedPrefixesLock.Release(); }
                 catch (ObjectDisposedException) { /* session disposed — fine */ }
                 catch (SemaphoreFullException) { /* double-release guard, shouldn't happen */ }
+                // Slot back with the lock. On a failing dump the request dies with the session.
+                Interlocked.Exchange(ref _refreshRunning, 0);
+                _initialDumpSlotReleased = true;
+                Volatile.Read(ref _initialDumpCompletion)?.TrySetResult();
             }
+
+            // Serve the lap deferred during the dump. A request that set _refreshPending after the
+            // read below has taken the slot itself, so this kick only loses the CAS and marks one
+            // more pending lap — the same one-in-flight-plus-one-pending bound as any stacked
+            // trigger. Off the session's flow, like every other cycle: the read loop and KEEPALIVEs
+            // start now and must not wait for it.
+            var refreshToken = linkedCts.Token;
+            if (_refreshPending && !linkedCts.IsCancellationRequested)
+                _ = Task.Run(() => RefreshInBackgroundAsync(refreshToken), CancellationToken.None);
 
             await RunEstablishedAsync(linkedCts.Token);
         }
@@ -710,6 +730,26 @@ public sealed class BgpSession : IDisposable
     // Null in production; the property mirrors the other session test seams.
     private Action? _refreshExitWindowProbe;
     internal Action? RefreshExitWindowProbe { get => _refreshExitWindowProbe; set => _refreshExitWindowProbe = value; }
+
+    // Test seam: completes once the initial dump has released the refresh slot. Established and a
+    // non-zero AdvertisedPrefixCount both precede that moment, and a refresh issued in between is
+    // deferred instead of run inline — "the dump is done" is this, not AdvertisedPrefixCount.
+    // Created on first read: nothing is allocated unless a test asks.
+    private volatile bool _initialDumpSlotReleased;
+    private TaskCompletionSource? _initialDumpCompletion;
+    internal Task InitialDumpCompleted
+    {
+        get
+        {
+            if (Volatile.Read(ref _initialDumpCompletion) is null)
+                Interlocked.CompareExchange(ref _initialDumpCompletion,
+                    new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously), null);
+            // Source first, flag second: a dump completing in between finds the source and completes
+            // it; one that completed before the source existed reads as released.
+            var completion = Volatile.Read(ref _initialDumpCompletion)!.Task;
+            return _initialDumpSlotReleased ? Task.CompletedTask : completion;
+        }
+    }
 
     private async Task RunEstablishedAsync(CancellationToken cancellationToken)
     {
