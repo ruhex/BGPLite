@@ -625,7 +625,8 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
         var country = entries.Single(e => e.GetProperty("id").GetString() == "country-failed");
 
         Assert.True(response.IsSuccessStatusCode, body);
-        Assert.Equal(JsonValueKind.Null, allFailed.GetProperty("prefixCount").ValueKind);
+        // An unavailable count is 0 with countError set; a real zero carries no error.
+        Assert.Equal(0, allFailed.GetProperty("prefixCount").GetInt32());
         Assert.False(allFailed.GetProperty("partial").GetBoolean());
         Assert.Contains("unavailable", allFailed.GetProperty("countError").GetString());
         Assert.Equal(5, partial.GetProperty("prefixCount").GetInt32());
@@ -634,7 +635,7 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
         Assert.Equal(0, zero.GetProperty("prefixCount").GetInt32());
         Assert.False(zero.GetProperty("partial").GetBoolean());
         Assert.Equal(JsonValueKind.Null, zero.GetProperty("countError").ValueKind);
-        Assert.Equal(JsonValueKind.Null, country.GetProperty("prefixCount").ValueKind);
+        Assert.Equal(0, country.GetProperty("prefixCount").GetInt32());
         Assert.Contains("unavailable", country.GetProperty("countError").GetString());
     }
 
@@ -1281,7 +1282,7 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
         Assert.True(clock.Elapsed < TimeSpan.FromSeconds(10), $"took {clock.ElapsedMilliseconds} ms");
         var entry = Assert.Single(json.RootElement.EnumerateArray());
         Assert.Equal("stuck", entry.GetProperty("id").GetString());
-        Assert.Equal(JsonValueKind.Null, entry.GetProperty("prefixCount").ValueKind);
+        Assert.Equal(0, entry.GetProperty("prefixCount").GetInt32());   // numeric — never null
         Assert.Contains("unavailable", entry.GetProperty("countError").GetString());
     }
 
