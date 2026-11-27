@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Net;
+using System.Net.Http.Headers;
 using BGPLite.Configuration;
 using BGPLite.Providers;
 using Microsoft.Extensions.Http;
@@ -329,7 +330,13 @@ public class HttpPrefixProviderTests
         }
     }
 
-    private static HttpResponseMessage Ok(string body) => new(HttpStatusCode.OK) { Content = new StringContent(body) };
+    private static HttpResponseMessage Ok(string body, string? etag = null, DateTimeOffset? lastModified = null)
+    {
+        var response = new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(body) };
+        if (etag is not null) response.Headers.ETag = new EntityTagHeaderValue(etag);
+        if (lastModified is not null) response.Content.Headers.LastModified = lastModified;
+        return response;
+    }
 
     private static HttpResponseMessage Redirect(HttpStatusCode status, Uri? location)
     {
@@ -372,6 +379,32 @@ public class HttpPrefixProviderTests
         Assert.Equal(
             ["https://example.com/moved.txt", "https://cdn.example.com/lists/x.txt"],
             handler.Seen.Select(s => s.Uri).ToArray());
+    }
+
+    /// <summary>
+    /// A validator describes the representation of the URL that sent it. Stored for the configured
+    /// URL and presented there on the next load, a redirect target's validator could draw a 304
+    /// that keeps the target's prefixes while the configured URL serves something else.
+    /// </summary>
+    [Fact]
+    public async Task Redirect_TargetsValidatorsAreNotStoredForTheConfiguredUrl()
+    {
+        var lastModified = new DateTimeOffset(2026, 11, 27, 12, 0, 0, TimeSpan.Zero);
+        var handler = new ScriptedHandler(r => r.RequestUri!.Host == "example.com"
+            ? Redirect(HttpStatusCode.Found, MovedTo)
+            : Ok("1.2.3.0/24\n", etag: "\"target-etag\"", lastModified: lastModified));
+
+        var redirected = await Provider(handler).LoadAsync(HttpSource("https://example.com/moved.txt"));
+
+        Assert.Single(redirected.Prefixes);
+        Assert.Null(redirected.ETag);
+        Assert.Null(redirected.LastModified);
+
+        // The configured URL's own 200 still yields its validators.
+        var direct = await Provider(new ScriptedHandler(_ => Ok("1.2.3.0/24\n", etag: "\"direct-etag\"", lastModified: lastModified)))
+            .LoadAsync(HttpSource("https://example.com/direct.txt"));
+        Assert.Equal("\"direct-etag\"", direct.ETag);
+        Assert.Equal(lastModified, direct.LastModified);
     }
 
     [Fact]
