@@ -135,8 +135,9 @@ public sealed class WireProtocolE2eTests
     [Fact]
     public async Task GracefulRestartShutdown_SilentClose_NoNotification()
     {
-        // RFC 4724 §4: GR-aware shutdown drops the TCP connection so peers retain routes —
-        // deliberately NOT a Cease (the default fixture policy, GracefulRestart=true).
+        // RFC 4724 §4: GR-aware shutdown drops the TCP connection — deliberately NOT a Cease
+        // (the default fixture policy, GracefulRestart=true). No route retention follows: the GR
+        // capability is not advertised (D6).
         await using var stand = await StartPeerAsync(
             p => p.AsnPrefixes[714] = ["17.253.14.0/24"],
             65010, lists: ["apple"]);

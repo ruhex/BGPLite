@@ -250,10 +250,11 @@ public sealed class PeerManagementApiE2eTests
         var ok = await server.GetJsonAsync("/api/as/714/prefixes?count=true");
         Assert.Equal(1, ok.GetProperty("prefixCount").GetInt32());
 
-        // Upstream resolution failure maps to the generic non-revealing 500 (503 is budget expiry only).
+        // Upstream resolution failure answers 503 — a degraded dependency, as budget expiry does —
+        // with nothing from the provider internals.
         var (failedStatus, failedBody) = await server.SendJsonAsync("/api/as/64512/prefixes?count=true", "GET", new { });
-        Assert.Equal(500, failedStatus);
-        Assert.Contains("Internal server error", failedBody);
+        Assert.Equal(503, failedStatus);
+        Assert.Contains("The upstream prefix source failed", failedBody);
     }
 
     [Fact]

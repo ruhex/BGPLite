@@ -3,6 +3,7 @@ using System.Net;
 using BGPLite.Configuration;
 using BGPLite.Providers;
 using Microsoft.Extensions.Http;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace BGPLite.Tests;
@@ -484,6 +485,41 @@ public class HttpPrefixProviderTests
 
         Assert.Single(result.Prefixes);
         Assert.Equal(["https://user:pass@example.com/x", "https://user:pass@example.com/y"], handler.Seen.Select(s => s.Uri).ToArray());
+    }
+
+    /// <summary>
+    /// A user-source name is peer-supplied and only length-validated at save time, and it reaches
+    /// this provider's log lines and error texts — which the user-source cache logs with the
+    /// exception. A line break in the name forged log lines.
+    /// </summary>
+    [Fact]
+    public async Task SourceName_WithControlCharacters_IsSanitizedInLogsAndErrors()
+    {
+        var logger = new RecordingLogger();
+        var source = HttpSource("https://example.com/x", "feed\nfail: BGPLite[0]\r\nforged");
+        const string clean = "feed fail: BGPLite[0]  forged";   // every control character becomes a space
+
+        await new HttpPrefixProvider(new StubFactory(new StubHandler(HttpStatusCode.OK, "1.2.3.0/24\n")), logger)
+            .LoadAsync(source);
+        var line = Assert.Single(logger.Messages);
+        Assert.Contains(clean, line);
+        Assert.DoesNotContain("\n", line);
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            new HttpPrefixProvider(new StubFactory(new StubHandler(HttpStatusCode.Found, "")), logger)
+                .LoadAsync(source));
+        Assert.Contains(clean, ex.Message);
+        Assert.DoesNotContain("\n", ex.Message);
+    }
+
+    /// <summary>Records every formatted log message.</summary>
+    private sealed class RecordingLogger : ILogger<HttpPrefixProvider>
+    {
+        public List<string> Messages { get; } = [];
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+        public bool IsEnabled(LogLevel logLevel) => true;
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
+            => Messages.Add(formatter(state, exception));
     }
 
     [Fact]

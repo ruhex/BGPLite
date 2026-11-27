@@ -63,8 +63,11 @@ public sealed class HttpPrefixProvider(
         DateTimeOffset? lastModified = null,
         CancellationToken ct = default)
     {
+        // User-source names are peer-supplied and only length-validated at save time — sanitize
+        // once, for every log line and error text below.
+        var sourceName = LogSanitizer.SanitizeForLog(source.Name);
         if (string.IsNullOrWhiteSpace(source.Url))
-            throw new InvalidOperationException($"Prefix source '{source.Name}': Kind=http requires a Url.");
+            throw new InvalidOperationException($"Prefix source '{sourceName}': Kind=http requires a Url.");
 
         var http = httpFactory.CreateClient(clientName ?? ClientName);
 
@@ -96,7 +99,7 @@ public sealed class HttpPrefixProvider(
         if (source.Headers is { Count: > 0 } headers)
             foreach (var (key, value) in headers)
                 if (!request.Headers.TryAddWithoutValidation(key, value))
-                    logger.LogWarning("Source '{Name}': could not add request header '{Header}'.", source.Name, key);
+                    logger.LogWarning("Source '{Name}': could not add request header '{Header}'.", sourceName, key);
 
         // Conditional request — send validators from the prior load. GitHub raw, CDNs, and
         // most HTTP servers support ETag / Last-Modified and reply 304 Not Modified (no body) when
@@ -119,7 +122,7 @@ public sealed class HttpPrefixProvider(
                 // updated validators the server may have returned (some servers refresh ETag on 304).
                 if (response.StatusCode == HttpStatusCode.NotModified)
                 {
-                    logger.LogDebug("Source '{Name}' (http): 304 Not Modified", source.Name);
+                    logger.LogDebug("Source '{Name}' (http): 304 Not Modified", sourceName);
                     var updatedEtag = response.Headers.ETag?.Tag;
                     var updatedLm = response.Content.Headers.LastModified;
                     return SourceLoadResult.NotModifiedResult(updatedEtag ?? etag, updatedLm ?? lastModified);
@@ -132,7 +135,7 @@ public sealed class HttpPrefixProvider(
                     // not repeated.
                     if (hop == MaxRedirects)
                         throw new InvalidOperationException(
-                            $"Prefix source '{source.Name}': more than {MaxRedirects} redirects — giving up.");
+                            $"Prefix source '{sourceName}': more than {MaxRedirects} redirects — giving up.");
                     var target = RedirectTarget(source, request.RequestUri!, response.StatusCode, response.Headers.Location);
                     request.Dispose();
                     request = new HttpRequestMessage(HttpMethod.Get, target);
@@ -147,7 +150,7 @@ public sealed class HttpPrefixProvider(
 
                 if (response.Content.Headers.ContentLength is long contentLength && contentLength > MaxResponseBytes)
                     throw new InvalidOperationException(
-                        $"Prefix source '{source.Name}': response too large ({contentLength} bytes, max {MaxResponseBytes}).");
+                        $"Prefix source '{sourceName}': response too large ({contentLength} bytes, max {MaxResponseBytes}).");
 
                 using var stream = await response.Content.ReadAsStreamAsync(linkedToken);
                 using var ms = new MemoryStream();
@@ -158,14 +161,14 @@ public sealed class HttpPrefixProvider(
                     ms.Write(buffer, 0, read);
                     if (ms.Length > MaxResponseBytes)
                         throw new InvalidOperationException(
-                            $"Prefix source '{source.Name}': response exceeded {MaxResponseBytes} bytes during stream.");
+                            $"Prefix source '{sourceName}': response exceeded {MaxResponseBytes} bytes during stream.");
                 }
 
                 var text = Encoding.UTF8.GetString(ms.GetBuffer(), 0, (int)ms.Length);
                 var prefixes = PrefixListParser.Parse(text);
                 // Log only the source Name (the operator/peer-supplied identifier), never the URL — peer URLs
                 // may carry tokens in the query string that must not reach application logs.
-                logger.LogInformation("Source '{Name}' (http): loaded {Count} prefixes", source.Name, prefixes.Count);
+                logger.LogInformation("Source '{Name}' (http): loaded {Count} prefixes", sourceName, prefixes.Count);
                 return SourceLoadResult.Ok(prefixes, newEtag, newLm);
             }
         }
@@ -197,13 +200,14 @@ public sealed class HttpPrefixProvider(
     /// </summary>
     internal static Uri RedirectTarget(PrefixSourceConfig source, Uri currentUri, HttpStatusCode status, Uri? location)
     {
+        var name = LogSanitizer.SanitizeForLog(source.Name);
         if (location is null)
             throw new InvalidOperationException(
-                $"Prefix source '{source.Name}': redirect ({(int)status}) without a Location header.");
+                $"Prefix source '{name}': redirect ({(int)status}) without a Location header.");
         var target = new Uri(currentUri, location);
         if (target.Scheme is not ("http" or "https"))
             throw new InvalidOperationException(
-                $"Prefix source '{source.Name}': redirect ({(int)status}) to the unsupported scheme '{target.Scheme}' is not followed.");
+                $"Prefix source '{name}': redirect ({(int)status}) to the unsupported scheme '{target.Scheme}' is not followed.");
         // The configured URL's credentials may follow a relative redirect — same host, same
         // credentials — as they would on any other request to that host.
         var configured = Uri.TryCreate(source.Url, UriKind.Absolute, out var uri) ? uri : null;
@@ -212,10 +216,10 @@ public sealed class HttpPrefixProvider(
             && target.UserInfo == configured.UserInfo;
         if (!string.IsNullOrEmpty(target.UserInfo) && !carriesOwnCredentials)
             throw new InvalidOperationException(
-                $"Prefix source '{source.Name}': redirect ({(int)status}) to a URL with embedded credentials is not followed.");
+                $"Prefix source '{name}': redirect ({(int)status}) to a URL with embedded credentials is not followed.");
         if (currentUri.Scheme == "https" && target.Scheme == "http")
             throw new InvalidOperationException(
-                $"Prefix source '{source.Name}': redirect ({(int)status}) from https to http is not followed.");
+                $"Prefix source '{name}': redirect ({(int)status}) from https to http is not followed.");
         return target;
     }
 }

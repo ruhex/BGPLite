@@ -87,8 +87,9 @@ internal sealed class UserSourceCache
     internal int TrackedGateCount => _locks.Count;
 
     /// <param name="url">Cache key (the source URL — dedupes across peers).</param>
-    /// <param name="logLabel">Safe identifier (the source <c>Name</c>) for log lines — the URL itself is
-    /// never logged, since peer URLs may carry query-string tokens.</param>
+    /// <param name="logLabel">Identifier (the source <c>Name</c>) for log lines — the URL itself is
+    /// never logged, since peer URLs may carry query-string tokens. The name is peer-supplied and
+    /// only length-validated at save time, so it is sanitized once on entry.</param>
     /// <param name="loadAsync">The fetcher ( HttpPrefixProvider.LoadAsync closed over the source config).</param>
     public async Task<IReadOnlyList<IpPrefix>> GetOrLoadAsync(
         string url,
@@ -96,6 +97,10 @@ internal sealed class UserSourceCache
         Func<CancellationToken, Task<IReadOnlyList<IpPrefix>>> loadAsync,
         CancellationToken ct)
     {
+        // The label reaches warning lines and the backoff exception message — sanitize it once,
+        // at the boundary, for every path below.
+        logLabel = LogSanitizer.SanitizeForLog(logLabel);
+
         // Amortized expired-entry + prefix-budget sweep — expired entries would otherwise stay pinned
         // until the entry cap was hit. Cheap (every Nth call), idempotent under concurrency.
         SweepIfNeeded();

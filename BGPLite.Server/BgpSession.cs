@@ -63,7 +63,7 @@ public sealed class BgpSession : IDisposable
     //   - RemoteNotification: peer sent NOTIFICATION → release resources/Idle, do NOT reply
     //   - HoldTimerExpired:   we sent Hold Timer Expired → no reply
     //   - SilentClose:        GR-aware shutdown / session replacement drops the TCP connection
-    //                         silently so peers retain routes (RFC 4724 §4) → no reply
+    //                         without a NOTIFICATION (RFC 4724 §4) → no reply
     // Written by RunAsync AND by external callers (BgpServer StopAsync/replace path), read by the
     // RunAsync finally-block on a different thread — hence int + Interlocked.
     private int _teardownReason = (int)TeardownReason.None;
@@ -84,6 +84,10 @@ public sealed class BgpSession : IDisposable
     // this session's read loop.
     private readonly System.Collections.Concurrent.ConcurrentDictionary<IpPrefix, byte> _installedPrefixes = new();
     private bool _maxPrefixesWarned;
+    // One IPv6-suppression warning per session per cause (see SendRoutesAsync). Volatile: the
+    // sends are serialised by _advertisedPrefixesLock, the flag is only read by the log path.
+    private volatile bool _v6SuppressedNoMpWarned;
+    private volatile bool _v6SuppressedNoNextHopWarned;
     // Actual count sent on the wire (after aggregation + dedup), updated at the end of
     // SendRoutesAsync. Read via AdvertisedPrefixCount for the management API/UI so operators see
     // the real number their peer's router receives, not the raw pre-aggregation count.
@@ -1668,7 +1672,7 @@ public sealed class BgpSession : IDisposable
         // ONLY when both halves agree — the peer negotiated MP IPv6/Unicast in OPEN and
         // Bgp.NextHopIpv6 is configured (RFC 2545 §3: the MP_REACH next hop must be a global
         // address; the IPv4 router-id cannot serve the IPv6 family). Otherwise IPv6 routes are
-        // suppressed for this send — loudly, never silently.
+        // suppressed — never silently: a warning on the first send that suppresses them.
         var v4Routes = new List<Route>(routes.Count);
         var v6Routes = new List<Route>();
         foreach (var route in routes)
@@ -1678,18 +1682,28 @@ public sealed class BgpSession : IDisposable
             else
                 v6Routes.Add(route);
         }
+        // Each warning fires once per session: the cause is fixed by the OPEN negotiation or by
+        // configuration, while this send path runs for every dump and refresh of every session.
         if (v6Routes.Count > 0 && !_peerMpIpv6Unicast)
         {
-            _logger.LogWarning(
-                "Suppressing {Count} IPv6 routes to {Peer}: the peer did not negotiate MP IPv6/Unicast — advertising them as classic IPv4 NLRI would corrupt the peer's table",
-                v6Routes.Count, _peer);
+            if (!_v6SuppressedNoMpWarned)
+            {
+                _v6SuppressedNoMpWarned = true;
+                _logger.LogWarning(
+                    "Suppressing {Count} IPv6 routes to {Peer}: the peer did not negotiate MP IPv6/Unicast — advertising them as classic IPv4 NLRI would corrupt the peer's table (logged once per session)",
+                    v6Routes.Count, _peer);
+            }
             v6Routes.Clear();
         }
         else if (v6Routes.Count > 0 && !NextHopIpv6.HasValue)
         {
-            _logger.LogWarning(
-                "Suppressing {Count} IPv6 routes to {Peer}: Bgp.NextHopIpv6 is not configured — set it to a global IPv6 address to advertise IPv6 routes",
-                v6Routes.Count, _peer);
+            if (!_v6SuppressedNoNextHopWarned)
+            {
+                _v6SuppressedNoNextHopWarned = true;
+                _logger.LogWarning(
+                    "Suppressing {Count} IPv6 routes to {Peer}: Bgp.NextHopIpv6 is not configured — set it to a global IPv6 address to advertise IPv6 routes (logged once per session)",
+                    v6Routes.Count, _peer);
+            }
             v6Routes.Clear();
         }
 
@@ -2129,14 +2143,14 @@ public sealed class BgpSession : IDisposable
     }
 
     /// <summary>
-    /// Best-effort Cease NOTIFICATION for graceful shutdown (RFC 4271 §6.2). Invoke it only on an
-    /// Established session and only when Graceful Restart is disabled — a NOTIFICATION termination
-    /// bypasses GR (RFC 4724 §4), so with GR on we drop the TCP connection instead to let peers
-    /// retain our routes. The one GR-on exception is peer deletion (recorded decision D16): a
-    /// deleted peer is a permanent removal, not a restart, so the Cease is what tells the peer to
-    /// flush our routes. Write/IO errors are swallowed (we are shutting down); the token bounds
-    /// how long a single Cease send blocks, so a slow/stuck peer cannot pin the send lock
-    /// indefinitely.
+    /// Best-effort Cease NOTIFICATION for graceful shutdown (RFC 4271 §6.7). Invoke it only on an
+    /// Established session and only when Graceful Restart is disabled — with GR on, shutdown drops
+    /// the TCP connection instead (MarkSilentClose). Neither buys route retention: the GR capability
+    /// is not advertised (D6), so peers flush our routes on any disconnect. The one GR-on exception
+    /// is peer deletion (recorded decision D16): a deleted peer is a permanent removal, not a
+    /// restart, so it gets the explicit Cease. Write/IO errors are swallowed (we are shutting down);
+    /// the token bounds how long a single Cease send blocks, so a slow/stuck peer cannot pin the send
+    /// lock indefinitely.
     /// </summary>
     public async Task NotifyCeaseAsync(CancellationToken ct = default)
     {
@@ -2172,11 +2186,12 @@ public sealed class BgpSession : IDisposable
 
     /// <summary>
     /// Marks this session for a silent teardown (no NOTIFICATION). Used by Graceful-Restart-aware
-    /// shutdown (RFC 4724 §4) and by session replacement: a NOTIFICATION termination would bypass GR,
-    /// so the TCP connection is dropped silently so peers retain routes across the restart. Also
-    /// cancels the session's own CTS so the read/keepalive loops stop promptly instead of lingering
-    /// until the peer closes the socket or the hold timer fires. Must be called BEFORE the session
-    /// is removed/replaced; the RunAsync finally-block observes the latched reason and emits nothing.
+    /// shutdown (RFC 4724 §4) and by session replacement: both end the session by dropping the TCP
+    /// connection. It does not buy route retention — the GR capability is not advertised (D6), so
+    /// peers flush our routes on any disconnect. Also cancels the session's own CTS so the
+    /// read/keepalive loops stop promptly instead of lingering until the peer closes the socket or
+    /// the hold timer fires. Must be called BEFORE the session is removed/replaced; the RunAsync
+    /// finally-block observes the latched reason and emits nothing.
     /// </summary>
     public void MarkSilentClose()
     {
@@ -2263,6 +2278,6 @@ internal enum TeardownReason
     /// <summary>We emitted Hold Timer Expired — do not double-send.</summary>
     HoldTimerExpired,
     /// <summary>Silent close: Graceful-Restart-aware shutdown or session replacement drops the TCP
-    /// connection so peers retain routes (RFC 4724 §4) — emit no NOTIFICATION.</summary>
+    /// connection without a NOTIFICATION (RFC 4724 §4) — emit none.</summary>
     SilentClose,
 }
