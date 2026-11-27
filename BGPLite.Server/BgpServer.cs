@@ -169,12 +169,13 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
             catch { }
         }
 
-        // Graceful Restart-aware shutdown (RFC 4724 §4): a NOTIFICATION termination bypasses GR, so
-        // send a Cease only when GR is disabled — peers then tear down cleanly instead of waiting on
-        // the hold timer. With GR enabled we deliberately just drop the TCP connection so peers
-        // engage GR and retain our routes across the restart. Must run BEFORE _cts.Cancel() tears
-        // the sessions down: the sessions' RunAsync finally-blocks would otherwise see no teardown
-        // reason (None) and emit a best-effort Cease — which would bypass GR exactly as a Cease would.
+        // Shutdown teardown, gated on the GracefulRestart config. With GR disabled every established
+        // session gets a Cease (RFC 4271 §6.7) — peers tear down cleanly instead of waiting on the
+        // hold timer. With GR enabled the TCP connection is dropped without a NOTIFICATION: the GR
+        // capability is not advertised (D6), so no peer retains our routes across the restart either
+        // way (RFC 4724 §5) — this is a teardown style, not route retention. Must run BEFORE
+        // _cts.Cancel() tears the sessions down: the sessions' RunAsync finally-blocks would
+        // otherwise see no teardown reason (None) and emit a best-effort Cease.
         // MarkSilentClose latches SilentClose and cancels each session's own CTS so the read/keepalive
         // loops stop promptly, then _cts.Cancel() handles the accept loop and anything still pending.
         if (_config.Bgp.GracefulRestart)
@@ -434,7 +435,7 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
                 // MarkSilentClose latches SilentClose (so the old RunAsync finally emits no
                 // NOTIFICATION — RFC 4724 §4 / §8.1) AND cancels the old CTS so the loops unwind
                 // promptly. No Cease is sent on replacement: a Cease to the old socket is noise
-                // (and, with GR enabled, would bypass GR). The peer sees a TCP close instead.
+                // to a peer that reconnects at once. The peer sees a TCP close instead.
                 //
                 // TryUpdate is an atomic CAS, so two concurrent accept threads for the same key
                 // cannot both install their session; a lost race retries from the top.
@@ -657,8 +658,7 @@ public sealed class BgpServer : IHostedService, ISessionManager, IDisposable
     /// and then every session is disposed. The dictionary is left alone: RunSessionAsync's
     /// compare-and-remove unwinds each entry, exactly like session replacement. Unlike StopAsync,
     /// the Cease is sent even when Graceful Restart is enabled: a deleted peer is a permanent
-    /// removal, not a restart we will return from, and a NOTIFICATION termination is what makes
-    /// the peer flush our routes instead of retaining them (RFC 4724 §4).
+    /// removal, not a restart we will return from, so the Cease states that explicitly (D16).
     /// </summary>
     internal static async Task TerminateSessionsAsync(IReadOnlyList<BgpSession> sessions, CancellationToken ct)
     {

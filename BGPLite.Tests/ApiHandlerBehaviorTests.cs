@@ -283,6 +283,60 @@ public sealed class ApiHandlerBehaviorTests : IDisposable
         }
     }
 
+    /// <summary>
+    /// POST /api/peers upserts, so an existing peer can be re-saved through it without
+    /// <c>maxPrefix</c>. That re-save used to write the omitted field over the stored limit and
+    /// reset it to null (the global default).
+    /// </summary>
+    [Fact]
+    public async Task MaxPrefix_CreateShapedResave_WithoutTheField_KeepsTheStoredLimit()
+    {
+        var config = new AppConfig { Bgp = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1" } };
+        _port = await StartAsync(config);
+        _client = new HttpClient();
+        const string peer = """{"ip":"198.51.100.19","asn":65019}""";
+        var url = $"http://127.0.0.1:{_port}/api/peers";
+
+        string peerId;
+        using (var created = await _client.PostAsync(url, new StringContent(peer, Encoding.UTF8, "application/json")))
+        {
+            Assert.True(created.IsSuccessStatusCode, await created.Content.ReadAsStringAsync());
+            using var doc = JsonDocument.Parse(await created.Content.ReadAsStringAsync());
+            peerId = doc.RootElement.GetProperty("id").GetString()!;
+        }
+        using (var limited = new HttpRequestMessage(HttpMethod.Put, $"{url}/{peerId}")
+        {
+            Content = new StringContent("""{"maxPrefix":100}""", Encoding.UTF8, "application/json")
+        })
+        using (var put = await _client.SendAsync(limited))
+            Assert.True(put.IsSuccessStatusCode, $"put: {(int)put.StatusCode}");
+        Assert.Equal("100", await StoredMaxPrefix());
+
+        // Omitted on a re-save: the stored limit stays.
+        using (var resaved = await _client.PostAsync(url, new StringContent(peer, Encoding.UTF8, "application/json")))
+        {
+            Assert.True(resaved.IsSuccessStatusCode, await resaved.Content.ReadAsStringAsync());
+            using var doc = JsonDocument.Parse(await resaved.Content.ReadAsStringAsync());
+            Assert.Equal("100", doc.RootElement.GetProperty("maxPrefix").GetRawText());
+        }
+        Assert.Equal("100", await StoredMaxPrefix());
+
+        // An explicit value still wins — a new limit, and 0 (unlimited for this peer).
+        foreach (var (field, expected) in new[] { (",\"maxPrefix\":200}", "200"), (",\"maxPrefix\":0}", "0") })
+        {
+            using var resaved = await _client.PostAsync(url, new StringContent(peer[..^1] + field, Encoding.UTF8, "application/json"));
+            Assert.True(resaved.IsSuccessStatusCode, await resaved.Content.ReadAsStringAsync());
+            Assert.Equal(expected, await StoredMaxPrefix());
+        }
+
+        async Task<string> StoredMaxPrefix()
+        {
+            using var detail = await _client.GetAsync($"{url}/{peerId}");
+            using var doc = JsonDocument.Parse(await detail.Content.ReadAsStringAsync());
+            return doc.RootElement.GetProperty("maxPrefix").GetRawText();
+        }
+    }
+
     [Fact]
     public async Task Md5Password_CreateEnabled_SecretNeverEchoed_UpdateClears()
     {

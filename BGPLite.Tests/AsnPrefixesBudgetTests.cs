@@ -7,6 +7,7 @@ using BGPLite.Protocol;
 using BGPLite.Routing;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Data.Sqlite;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace BGPLite.Tests;
@@ -72,6 +73,84 @@ public sealed class AsnPrefixesBudgetTests : IDisposable
         Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
         var body = await response.Content.ReadAsStringAsync();
         Assert.DoesNotContain("RIPEstat", body); // non-revealing error policy
+    }
+
+    /// <summary>
+    /// Verifies that an upstream failure answers the same 503 as budget expiry — a degraded
+    /// dependency — while a failure of another shape stays an internal error, logged as one.
+    /// </summary>
+    [Theory]
+    [InlineData(true)]  // the shape an outage produces: a refused connection, a 5xx, bad JSON, a backoff
+    [InlineData(false)] // a server bug
+    public async Task AsnPrefixesCount_Failure_AnswersByItsShape(bool upstreamShaped)
+    {
+        var port = FreeTcpPort();
+        var config = new AppConfig
+        {
+            Bgp = new BgpConfig { Asn = 65001, RouterId = "127.0.0.1" },
+            ApiListen = "127.0.0.1",
+            ApiPort = port,
+        };
+        var store = new PeerStore(new StaticOptionsFactory(new DbContextOptionsBuilder<BgpDbContext>().UseSqlite(_connection).Options));
+        IPrefixService prefixes = new ThrowingPrefixService(upstreamShaped
+            ? new InvalidOperationException("provider internals: connection refused")
+            : new NullReferenceException("provider internals: a bug"));
+        var logger = new RecordingLogger();
+        _api = new ManagementApi(
+            store,
+            new RouteTable(),
+            config,
+            new BgpMetrics(),
+            logger,
+            prefixes,
+            new InertSources(),
+            new InertSessions(),
+            TestRouteAssembly.CreateExporter(store, config, prefixes));
+        await _api.StartAsync(CancellationToken.None);
+
+        using var client = new HttpClient();
+        using var response = await client.GetAsync($"http://127.0.0.1:{port}/api/as/65001/prefixes?count=true");
+        // Either way nothing from the provider internals reaches the client.
+        using var doc = System.Text.Json.JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        var error = doc.RootElement.GetProperty("error").GetString();
+        Assert.DoesNotContain("provider internals", error);
+        if (upstreamShaped)
+        {
+            Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
+            Assert.Equal("The upstream prefix source failed", error);   // what budget expiry answers too
+            Assert.DoesNotContain(logger.Levels, level => level >= LogLevel.Error);
+        }
+        else
+        {
+            Assert.Equal(HttpStatusCode.InternalServerError, response.StatusCode);
+            Assert.Equal("Internal server error", error);
+            Assert.Contains(LogLevel.Error, logger.Levels);
+        }
+    }
+
+    /// <summary>Count fetches fail with the given exception; every other member is inert.</summary>
+    private sealed class ThrowingPrefixService(Exception failure) : IPrefixService
+    {
+        public Task<IReadOnlyList<(UInt128 Prefix, byte Length, bool IsIpv4)>> GetPrefixesAsync(uint asn, CancellationToken ct = default) =>
+            Task.FromResult<IReadOnlyList<(UInt128, byte, bool)>>([]);
+        public Task<List<(UInt128 Prefix, byte Length, bool IsIpv4, uint Asn)>> GetPrefixesForAsns(IEnumerable<uint> asns, CancellationToken ct = default) => Task.FromResult(new List<(UInt128, byte, bool, uint)>());
+        public Task<int> GetPrefixCountAsync(uint asn, CancellationToken ct = default) => throw failure;
+        public Task<List<(UInt128 Prefix, byte Length, bool IsIpv4, uint Asn)>> GetRuPrefixesAsync(CancellationToken ct = default) => Task.FromResult(new List<(UInt128, byte, bool, uint)>());
+        public Task<IReadOnlyList<(UInt128 Prefix, byte Length, bool IsIpv4)>> GetSourcePrefixesAsync(string name, CancellationToken ct = default) => Task.FromResult<IReadOnlyList<(UInt128, byte, bool)>>([]);
+        public Task<IReadOnlyList<(UInt128 Prefix, byte Length, bool IsIpv4)>> GetUserSourcePrefixesAsync(string name, string url, string? community, CancellationToken ct = default) => Task.FromResult<IReadOnlyList<(UInt128, byte, bool)>>([]);
+        public Task WarmUpAsync(CancellationToken ct = default) => Task.CompletedTask;
+    }
+
+    /// <summary>Records the level of every entry logged at Warning or above.</summary>
+    private sealed class RecordingLogger : ILogger<ManagementApi>
+    {
+        public List<LogLevel> Levels { get; } = [];
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+        public bool IsEnabled(LogLevel logLevel) => logLevel >= LogLevel.Warning;
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
+        {
+            if (logLevel >= LogLevel.Warning) Levels.Add(logLevel);
+        }
     }
 
     private static int FreeTcpPort()

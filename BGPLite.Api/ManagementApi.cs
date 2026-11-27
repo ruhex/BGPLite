@@ -418,6 +418,9 @@ public sealed class ManagementApi : IHostedService, IDisposable
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested) { break; }
             catch (HttpListenerException) when (ct.IsCancellationRequested) { break; }
+            // StopAsync closes the listener while this loop may be parked in GetContextAsync: the
+            // disposed listener is the accept loop's normal end, not a fault.
+            catch (ObjectDisposedException) when (ct.IsCancellationRequested) { break; }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Management API error");
@@ -1797,10 +1800,17 @@ public sealed class ManagementApi : IHostedService, IDisposable
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
-                // Log the real detail server-side; return a generic message so RIPEstat /
-                // provider internals do not reach the client. Cancellation (client disconnect /
-                // shutdown) is NOT an error — let it propagate instead of surfacing as a 500.
-                _logger.LogWarning(ex, "GetAsnPrefixes failed for AS{Asn}", asn);
+                // The shapes an upstream outage produces are a degraded dependency: a Warning and
+                // a generic 503, so RIPEstat / provider internals do not reach the client.
+                // Anything else is a server fault: an Error and the generic non-revealing mapping.
+                // Cancellation (client disconnect / shutdown) is NOT an error — it propagates.
+                if (ex is HttpRequestException or IOException or System.Net.Sockets.SocketException
+                    or TimeoutException or InvalidOperationException or JsonException)
+                {
+                    _logger.LogWarning(ex, "GetAsnPrefixes failed for AS{Asn}", asn);
+                    return ApiResponse.Error("The upstream prefix source failed", 503);
+                }
+                _logger.LogError(ex, "GetAsnPrefixes failed for AS{Asn}", asn);
                 var (message, status) = MapExceptionToResponse(ex);
                 return ApiResponse.Error(message, status);
             }

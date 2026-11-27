@@ -74,6 +74,10 @@ For section-by-section RFC conformance status, see `RFC_COMPLIANCE.md` (2026-07-
   `RestartTime` / `GracefulRestartForwardingState` are accepted for config compatibility but unused
   while the capability is not advertised. Re-advertise only together with receiving-speaker
   retention.
+  A peer that requires the capability does not establish at all: BIRD's `require graceful restart`
+  option refuses a neighbour that does not announce it (BIRD user guide, BGP protocol options; not
+  exercised against BIRD here). v1.5.0 still advertised the capability, so an upgrade from it
+  changes the OPEN such peers receive.
 - **Tracker:** #318 (open for direction 2 — implement the receiving half).
 
 ### D7. Hold time semantics
