@@ -552,6 +552,57 @@ public class BgpSessionInitialDumpKeepAliveTests
         }
     }
 
+    /// <summary>
+    /// The read loop waits for the startup lookup of the per-peer ceiling. A store that never
+    /// answers must not keep the peer's KEEPALIVEs unread until its hold timer expires: the wait is
+    /// bounded, and the ceiling stays the last known one until a refresh cycle resolves it.
+    /// </summary>
+    [Fact]
+    public async Task StartupLimitLookupThatNeverAnswers_KeepsThePeerAlive()
+    {
+        var time = new FakeTimeProvider();
+        var conn = new ScriptedConnection();
+        var never = new TaskCompletionSource<int?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var session = new BgpSession(
+            conn,
+            new PeerConfig { Address = "127.0.0.1" },
+            new BgpConfig { Asn = 65001, RouterId = "127.0.0.1", HoldTime = HoldTime, KeepAlive = KeepAlive },
+            new RouteTable(),
+            AllowAllFilter.Instance,
+            new BgpMetrics(),
+            NullLogger<BgpSession>.Instance,
+            peerStore: new LimitStore(never.Task),
+            routeAssembler: new FixedRouteAssembler([TestRoute()]),
+            timeProvider: time)
+        { StartupCapLookupBudget = TimeSpan.FromMilliseconds(200) };
+        var run = session.RunAsync();
+        conn.EnqueueMessage(PeerOpen());
+        conn.EnqueueMessage(BgpKeepaliveMessage.Instance);
+        await WaitForAsync(() => session.IsEstablished, "Established");
+        var handshake = conn.Sent.Count;
+        try
+        {
+            // The whole hold time and more passes with the store still silent and the peer still
+            // talking: past the bound the read loop runs, so the KEEPALIVEs are read.
+            for (var i = 0; i < 5; i++)
+            {
+                conn.EnqueueMessage(BgpKeepaliveMessage.Instance);
+                await WaitForAsync(() => conn.Drained, "the read loop to take the KEEPALIVE");
+                var ticks = session.KeepAliveLoopTicks;
+                time.Advance(TimeSpan.FromSeconds(KeepAlive));
+                await WaitForAsync(() => session.KeepAliveLoopTicks > ticks, "the KEEPALIVE loop to take the tick");
+            }
+
+            Assert.False(never.Task.IsCompleted, "the store never answered");
+            Assert.True(session.IsEstablished, "a store that does not answer must not cost the peer its session");
+            Assert.False(HasHoldTimerExpiredAfter(conn, handshake));
+        }
+        finally
+        {
+            await TeardownAsync(session, run);
+        }
+    }
+
     private static List<BgpNotificationMessage> Notifications(IBgpConnection conn) =>
         ((ScriptedGateConnection)conn).Sent.Select(f => BgpMessageReader.ReadMessage(f)).OfType<BgpNotificationMessage>().ToList();
 
