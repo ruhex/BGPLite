@@ -298,14 +298,16 @@ public class BgpSessionInitialDumpKeepAliveTests
         try
         {
             // Twice the hold time with the peer keeping the session alive: no false expiry from
-            // KEEPALIVEs sitting unread behind the dump.
+            // KEEPALIVEs sitting unread behind the dump. Each KEEPALIVE is taken by the read loop,
+            // and each tick observed by the KEEPALIVE loop, before the clock moves on.
             for (var i = 0; i < 6; i++)
             {
                 h.Conn.EnqueueMessage(BgpKeepaliveMessage.Instance);
+                await WaitForAsync(() => h.Conn.Drained, "the read loop to take the KEEPALIVE");
+                var ticks = h.Session.KeepAliveLoopTicks;
                 h.Time.Advance(TimeSpan.FromSeconds(KeepAlive));
-                await Task.Delay(20);
+                await WaitForAsync(() => h.Session.KeepAliveLoopTicks > ticks, "the KEEPALIVE loop to take the tick");
             }
-            await Task.Delay(50);   // let the last tick's hold check run before asserting on it
 
             Assert.False(HasHoldTimerExpiredAfter(h.Conn, handshake));
             Assert.True(h.Session.IsEstablished);
@@ -430,15 +432,14 @@ public class BgpSessionInitialDumpKeepAliveTests
         await WaitForAsync(() => session.IsEstablished, "Established");
         await conn.Parked(3).WaitAsync(TimeSpan.FromSeconds(5));   // the dump holds the send lock inside its first UPDATE
 
-        // A tick while the lock is held: the KEEPALIVE queues on the send lock behind the dump.
+        // A tick while the lock is held, observed before the batch is let go: the loop queues its
+        // KEEPALIVE on the send lock behind the dump. That KEEPALIVE is written before the dump's
+        // last batch whichever batch lets it through — it never waits for the whole dump.
+        var ticks = session.KeepAliveLoopTicks;
         time.Advance(TimeSpan.FromSeconds(KeepAlive));
-        await Task.Delay(50);
+        await WaitForAsync(() => session.KeepAliveLoopTicks > ticks, "the tick to be taken");
         conn.Release(3);
         await conn.Parked(4).WaitAsync(TimeSpan.FromSeconds(5));   // the dump is inside its second UPDATE
-        // A second tick: the loop is still parked on the first KEEPALIVE or queues another —
-        // either way a KEEPALIVE is waiting for the lock when the dump releases it.
-        time.Advance(TimeSpan.FromSeconds(KeepAlive));
-        await Task.Delay(50);
         conn.Release(4);
 
         await WaitForAsync(() => session.AdvertisedPrefixCount == 250, "the whole dump on the wire");

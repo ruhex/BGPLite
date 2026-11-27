@@ -76,7 +76,9 @@ public sealed class HostedServicesE2eTests
                 var second = await server.SendJsonAsync("/api/server", "GET", new { });
                 var first = await server.SendJsonAsync("/api/server", "GET", new { });
                 return first.Status == 429 || second.Status == 429 || third.Status == 429;
-            }, TimeSpan.FromSeconds(15));
+            }, TimeSpan.FromSeconds(15), maxAttempts: 60, interval: TimeSpan.FromMilliseconds(250));
+            // 60 probes are 180 requests — below the 200-token bucket the server started with.
+            // Unbounded, the probe drains that bucket itself and reads its own 429 as the reload.
             Assert.True(limited, "hot reload did not apply the shrunken rate limit within the budget");
 
             await reloader.StopAsync(CancellationToken.None);
@@ -165,13 +167,16 @@ public sealed class HostedServicesE2eTests
           PeriodSeconds: 60
         """;
 
-    private static async Task<bool> WaitUntilAsync(Func<Task<bool>> probe, TimeSpan budget)
+    private static async Task<bool> WaitUntilAsync(
+        Func<Task<bool>> probe, TimeSpan budget, int? maxAttempts = null, TimeSpan? interval = null)
     {
         var deadline = DateTime.UtcNow + budget;
-        while (DateTime.UtcNow < deadline)
+        // A probe with side effects on the system under test is bounded in attempts as well.
+        for (var attempt = 1; maxAttempts is null || attempt <= maxAttempts; attempt++)
         {
             if (await probe()) return true;
-            await Task.Delay(100);
+            if (DateTime.UtcNow >= deadline) return false;
+            await Task.Delay(interval ?? TimeSpan.FromMilliseconds(100));
         }
         return false;
     }
