@@ -18,6 +18,11 @@ jobs:
         with:
           dotnet-version: '10.0.x'
 
+      # Same restore source as ci.yml. Without it the workspace loads with no package references
+      # and no analyzers, so analyzer warnings cannot fail this job.
+      - name: Restore
+        run: dotnet restore BGPLite.sln --source https://api.nuget.org/v3/index.json
+
       # Fails the check if `dotnet format` would change anything.
       # Run `dotnet format BGPLite.sln` locally if this check fails.
       - name: Verify formatting
